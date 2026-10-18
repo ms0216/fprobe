@@ -1,0 +1,38 @@
+# fprobe のモニタ方式（止めずにデバッグする。U37）
+# 仕様: DebugProbe-with-FPGA/docs/superpowers/specs/2026-10-18-u37-monitor-mode-design.md
+
+config FPROBE_MONITOR
+	bool "fprobe monitor-mode debugging (DebugMon handler)"
+	depends on ARMV7_M_ARMV8_M_MAINLINE
+	select CORTEX_M_DEBUG_MONITOR_HOOK
+	help
+	  ベクタ 12（DebugMonitor）に fprobe のモニタ（host/firmware/monitor）を置き、
+	  起動時に fprobe_monitor_init を呼ぶ。ホストは target.debug_mode.set(mode="monitor") で
+	  モニタ方式に切り替える。
+
+if FPROBE_MONITOR
+
+config FPROBE_MONITOR_PRIORITY
+	hex "DebugMon priority (raw SHPR3 byte)"
+	range 0x00 0xff
+	default 0x60
+	help
+	  DebugMon の優先度（ハードの値。上位の実装ビットだけが効く。nRF52 は 3 ビット = 0x20 刻み）。
+	  これより数の小さい割り込みは止まっている間も動く。Zephyr の IRQ_CONNECT の優先度 p は
+	  ハードでは (p + 1) << (8 - 実装ビット数)（例外用に 1 段空けてある）。
+	  既定の 0x60 は Zephyr の優先度 2 の段: Zephyr の BLE のコントローラ（LLL = 0 → 0x20、
+	  ULL_HIGH / ULL_LOW = 1 → 0x40）より低く、irq_lock の BASEPRI（0x20）でも止まる
+	  （クリティカルセクションの中では止まらない）。
+
+config FPROBE_MONITOR_STACK_SIZE
+	int "Monitor stack size (bytes)"
+	default ISR_STACK_SIZE
+	help
+	  モニタのスタック。止まっている間に動く割り込み（BLE のコントローラ等）もこのスタックに
+	  積むので、割り込みのスタック（ISR_STACK_SIZE）と同じだけ取る。8 の倍数。
+
+config FPROBE_MONITOR_INIT_PRIORITY
+	int "fprobe_monitor_init SYS_INIT priority (PRE_KERNEL_1)"
+	default 0
+
+endif

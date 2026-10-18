@@ -1,0 +1,6 @@
+# fprobe のモニタ方式（U37）を Zephyr のファームに組み込むモジュール。
+# ビルドのときに -DZMK_EXTRA_MODULES（ZMK）/ -DEXTRA_ZEPHYR_MODULES（素の Zephyr）で足す。
+name: fprobe-monitor
+build:
+  cmake: .
+  kconfig: Kconfig

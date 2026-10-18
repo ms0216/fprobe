@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fprobe"
+version = "0.1.0"
+description = "fprobe（FPGA マルチファンクション・デバッグプローブ）のホストライブラリ"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-only（host/firmware と fprobe/testpoint/fprobe_tp.h は Apache-2.0。LICENSING.md）" }
+dependencies = ["pyusb>=1.2", "libusb-package>=1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+debug = ["pyocd>=0.45", "capstone>=5"]     # fprobe.session（pyOCD と同時利用）、fprobe.disasm
+serial = ["pyserial>=3.5"]                   # SerialLink（UART のホストリンク）
+mcp = ["fprobe[debug]", "mcp>=2.3", "pyserial>=3.5", "pyyaml>=6"]   # fprobe-mcp（pyyaml: 規則・台本の YAML）
+aux = ["mpremote>=1.25", "pyserial>=3.5"]    # 補助マイコン（Pico）へのプログラムの書き込み（fprobe.aux_flash）
+
+[project.scripts]
+fprobe = "fprobe.__main__:main"
+fprobe-mcp = "fprobe.mcp_server:main"
+fprobe-daemon = "fprobe.api.daemon:main"
+
+[tool.setuptools.packages.find]
+include = ["fprobe*"]
+
+[tool.setuptools.package-data]
+fprobe = ["data/svd/*", "data/connect_scripts/*.py", "testpoint/*.h"]     # 同梱の SVD（fprobe.svd。出典・ライセンスは data/svd/README.md）、内蔵の接続の手順（fprobe.connect_scripts）、テストポイントのヘッダ
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]
