@@ -1,0 +1,250 @@
+"""fprobe.heap: ヒープの走査（FreeRTOS heap_4 / heap_5・newlib-nano・newlib の dlmalloc）と壊れの検出、
+malloc / free の記録からのリークの候補。"""
+
+import pytest
+
+from fprobe.heap import AllocationTracker, HeapError, detect, scan
+from heap_fakes import ALLOCATED, RAM, DlHeap, FreeRTOSHeap, NanoHeap
+
+
+def kinds(result):
+    return sorted({i["kind"] for i in result.issues})
+
+
+# --- FreeRTOS heap_4 / heap_5 -------------------------------------------------------------------
+
+def test_heap_4_blocks_usage_and_fragmentation():
+    h = FreeRTOSHeap([(64, True), (128, False), (32, True), (256, False), (48, True)])
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert r.allocator == "freertos" and r.scheme == "heap_4" and not r.issues
+    used = [b for b in r.blocks if b.used]
+    assert [b.size for b in used] == [64, 32, 48] and used[0].pointer == h.start + 8
+    d = r.to_dict()
+    free_total = 128 + 256 + (h.end - h.start - 64 - 128 - 32 - 256 - 48)
+    assert d["free"] == free_total and d["used"] == 144 and d["used_blocks"] == 3
+    assert d["largest_free"] == max(256, h.end - h.start - 528)
+    assert d["fragmentation"] == pytest.approx(1 - d["largest_free"] / free_total)
+    assert d["counters"]["free_bytes"] == free_total and d["regions"] == [[h.start, h.end]]
+
+
+def test_heap_4_with_the_heap_protector():
+    h = FreeRTOSHeap([(64, True), (128, False), (32, True)], canary=0x5A5A_1234)
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert not r.issues and len([b for b in r.blocks if not b.used]) == 2
+
+
+def test_heap_4_overflow_breaks_the_next_header_and_is_blamed_on_the_previous_block():
+    h = FreeRTOSHeap([(64, True), (128, True), (32, False)])
+    h.mem.u32(h.addresses[1] + 4, 0x41414141)                   # 1 つ目の本体があふれて 2 つ目の頭を上書き
+    r = scan(h.mem.read, h.syms, "freertos")
+    bad = [i for i in r.issues if i["kind"] == "bad_size"]
+    assert bad and bad[0]["address"] == h.addresses[1] and bad[0]["suspect"] == h.start + 8
+
+
+def test_heap_4_detects_list_and_counter_inconsistencies():
+    h = FreeRTOSHeap([(64, False), (64, False), (64, True)])     # 隣り合う空き（heap_4 は必ず繋ぐ）
+    h.mem.u32(h.free_var, 12)
+    h.mem.u32(h.addresses[2], 0x2000_1234)                       # 使用中なのに次の空きを指す
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert {"unmerged_free", "counter_mismatch", "bad_link"} <= set(kinds(r))
+
+
+def test_heap_4_free_block_missing_from_the_list():
+    h = FreeRTOSHeap([(64, True), (64, False), (64, True), (64, False), (64, True)])
+    h.mem.u32(h.start_var, h.addresses[3])                       # 1 つ目の空きをリストから外す
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert "free_not_listed" in kinds(r)
+
+
+def test_heap_4_free_list_loop_is_stopped():
+    h = FreeRTOSHeap([(64, False), (64, True), (64, False), (64, True)])
+    h.mem.u32(h.addresses[2], h.addresses[0])                    # 後ろの空きが前を指す
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert {"free_list_unsorted"} <= set(kinds(r)) or {"free_list_loop"} <= set(kinds(r))
+
+
+def test_heap_4_before_the_first_allocation():
+    h = FreeRTOSHeap([])
+    h.mem.u32(h.end_var, 0)
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert not r.blocks and any("初期化" in n for n in r.notes)
+
+
+def test_heap_5_regions_are_walked_from_the_application_table():
+    h = FreeRTOSHeap([])
+    s, mem = h.syms, h.mem
+    del s.table["ucHeap"]
+    regions = [(RAM + 0x1000, 0x400), (RAM + 0x3000, 0x200)]
+    table = s.add("xHeapRegions", RAM + 0x180, 24)
+    ends, starts = [], []
+    for i, (start, size) in enumerate(regions):
+        mem.u32(table + 8 * i, start)
+        mem.u32(table + 8 * i + 4, size)
+        end = (start + size - 8) & ~7
+        starts.append(start)
+        ends.append(end)
+        mem.u32(start + 4, 0x40 | ALLOCATED)                     # 先頭 64 バイトを使用中に
+        mem.u32(start, 0)
+        mem.u32(start + 0x40 + 4, end - start - 0x40)
+        mem.u32(end + 4, 0)
+    mem.u32(table + 16, 0)
+    mem.u32(table + 20, 0)
+    # 空きのリスト: xStart → 領域 1 の空き → 領域 1 の終わり（大きさ 0）→ 領域 2 の空き → pxEnd
+    mem.u32(h.start_var, starts[0] + 0x40)
+    mem.u32(starts[0] + 0x40, ends[0])
+    mem.u32(ends[0], starts[1] + 0x40)
+    mem.u32(starts[1] + 0x40, ends[1])
+    mem.u32(ends[1], 0)
+    mem.u32(h.end_var, ends[1])
+    free = (ends[0] - starts[0] - 0x40) + (ends[1] - starts[1] - 0x40)
+    mem.u32(h.free_var, free)
+    mem.u32(h.allocs_var, 2)
+    mem.u32(h.frees_var, 0)
+    r = scan(mem.read, s, "freertos")
+    assert r.scheme == "heap_5" and r.regions == [(starts[0], ends[0]), (starts[1], ends[1])]
+    assert not r.issues and r.to_dict()["used_blocks"] == 2 and r.to_dict()["free"] == free
+
+
+def test_heap_5_without_a_region_table_reads_only_the_free_list():
+    h = FreeRTOSHeap([(64, True), (128, False)])
+    del h.syms.table["ucHeap"]
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert r.scheme == "heap_5" and not any(b.used for b in r.blocks)
+    assert any("regions" in n for n in r.notes)
+    r2 = scan(h.mem.read, h.syms, "freertos", regions=[(h.heap, 0x2000)])
+    assert r2.to_dict()["used_blocks"] == 1
+
+
+# --- newlib-nano --------------------------------------------------------------------------------
+
+def test_nano_chunks_and_free_list():
+    h = NanoHeap([(24, True, 4), (40, False, 0), (16, True, 4), (64, False, 0), (32, True, 4)])
+    r = scan(h.mem.read, h.syms, "newlib_nano")
+    assert r.allocator == "newlib_nano" and not r.issues
+    assert [b.pointer for b in r.blocks if b.used] == h.pointers
+    d = r.to_dict()
+    assert d["free"] == 104 and d["used"] == 72 and d["largest_free"] == 64
+
+
+def test_nano_unmerged_neighbours_and_bad_padding():
+    h = NanoHeap([(24, True, 4), (40, False, 0), (40, False, 0), (16, True, 4)])
+    h.mem.u32(h.base + 4, 0x1234)                                # 詰め物の印（ptr − 4 の負の位置）が壊れた
+    r = scan(h.mem.read, h.syms, "newlib_nano")
+    assert {"unmerged_free", "bad_padding"} <= set(kinds(r))
+
+
+def test_nano_without_the_break_symbol_stops_at_the_last_plausible_chunk():
+    h = NanoHeap([(24, True, 4), (40, False, 0)], end_symbol=None)
+    r = scan(h.mem.read, h.syms, "newlib_nano")
+    assert len(r.blocks) == 2 and any("終わり" in n for n in r.notes)
+    r2 = scan(h.mem.read, h.syms, "newlib_nano", end=h.top)
+    assert not r2.notes or not any("終わり" in n for n in r2.notes)
+
+
+# --- newlib dlmalloc ----------------------------------------------------------------------------
+
+def test_dlmalloc_chunks_top_and_links():
+    h = DlHeap([(32, True), (48, False), (24, True), (64, False), (16, True)])
+    r = scan(h.mem.read, h.syms, "newlib")
+    assert r.allocator == "newlib" and not r.issues, r.issues
+    used = [b for b in r.blocks if b.used]
+    assert [b.pointer for b in used] == [h.addresses[i] + 8 for i in (0, 2, 4)]
+    d = r.to_dict()
+    assert d["free"] == 48 + 64 + 0x200 and d["largest_free"] == 0x200
+
+
+def test_dlmalloc_broken_links_and_footer():
+    h = DlHeap([(32, True), (48, False), (32, True)])
+    h.mem.u32(h.addresses[1] + 8, RAM + 0x5000)                  # fd が壊れた
+    h.mem.u32(h.addresses[1] + 48, 99)                           # 足が合わない
+    r = scan(h.mem.read, h.syms, "newlib")
+    assert {"bad_links", "bad_footer"} <= set(kinds(r))
+
+
+# --- 種類の判定 --------------------------------------------------------------------------------
+
+def test_detect():
+    assert detect(FreeRTOSHeap([]).syms) == ["freertos"]
+    assert detect(NanoHeap([(24, True, 4)]).syms) == ["newlib_nano"]
+    assert detect(DlHeap([]).syms) == ["newlib"]
+    with pytest.raises(HeapError):
+        scan(FreeRTOSHeap([]).mem.read, NanoHeap([(24, True, 4)]).syms, "freertos")
+
+
+# --- malloc / free の記録 ---------------------------------------------------------------------
+
+def test_tracker_live_peak_and_issues():
+    t = AllocationTracker()
+    t.alloc(1.0, 0x100, 32, caller="a")
+    t.alloc(2.0, 0x200, 64, caller="b")
+    t.free(3.0, 0x100, caller="x")
+    t.free(4.0, 0x100, caller="x")                               # 二重の解放
+    t.free(5.0, 0x900, caller="x")                               # 記録を始める前の確保（誤りではない）
+    t.alloc(6.0, 0, 16, caller="c")                              # 失敗
+    t.alloc(7.0, 0x200, 8, caller="d")                           # 解放されていない番地をまた返した
+    r = t.report(now=10.0)
+    assert r["live"]["count"] == 1 and r["live"]["bytes"] == 8
+    assert r["peak_bytes"] == 96 and r["allocations"] == 4 and r["frees"] == 3
+    kinds_ = {i["kind"] for i in r["issues"]}
+    assert {"double_free", "failed_allocation", "reused_live_pointer"} <= kinds_
+    assert r["untracked_frees"] == 1
+
+
+def test_tracker_leak_candidates_grow_per_caller():
+    t = AllocationTracker()
+    now = 0.0
+    for i in range(40):                                          # leaky は確保だけ、steady は確保と解放
+        now += 1
+        t.alloc(now, 0x1000 + 16 * i, 16, caller="leaky")
+        t.alloc(now + 0.1, 0x8000, 32, caller="steady")
+        t.free(now + 0.5, 0x8000, caller="steady")
+    t.alloc(now, 0x9000, 100, caller="once")                     # 最後に 1 回（若い）
+    r = t.report(now=now + 1, min_age_s=5)
+    leaks = r["leak_candidates"]
+    assert leaks[0]["caller"] == "leaky" and leaks[0]["count"] >= 35 and leaks[0]["growing"]
+    assert all(c["caller"] != "steady" for c in leaks)
+    assert all(c["caller"] != "once" for c in leaks)
+    assert r["series"][-1][1] == r["live"]["bytes"]
+
+
+# --- 実際の ELF（freertos_demo、heap_4）: static の変数を ELF のシンボルで引き、U08 の要約と一致する ----------------
+
+def test_freertos_demo_heap_4_through_the_elf_symbols():
+    from rtos_kernel import FreeRTOSBuilder, shared
+
+    from fprobe.heap import SymbolTable
+    from fprobe.rtos.freertos import FreeRTOS
+
+    k = FreeRTOSBuilder()
+    heap = k.var("ucHeap")
+    start, end = (heap + 7) & ~7, (heap + 20 * 1024 - 8) & ~7
+    layout = [(64, True), (96, False), (128, True)]
+    a, free = start, []
+    for size, used in layout:
+        k.u32(a, 0)
+        k.u32(a + 4, size | (ALLOCATED if used else 0))
+        if not used:
+            free.append(a)
+        a += size
+    k.u32(a + 4, end - a)
+    free.append(a)
+    k.u32(end, 0)
+    k.u32(end + 4, 0)
+    previous = k.var("xStart")
+    for f in free:
+        k.u32(previous, f)
+        previous = f
+    k.u32(previous, end)
+    k.u32(k.var("pxEnd"), end)
+    total_free = 96 + end - a
+    k.heap_state(free=total_free, minimum=total_free - 100, allocations=2, frees=0)
+    k.u32(k.var("pxEnd"), end)                                     # heap_state は blocks 無しでは pxEnd に触れない
+    info, symbols = shared()
+    syms = SymbolTable(symbols)
+    assert detect(syms) == ["freertos"]
+    r = scan(k.memory.read_memory, syms, "freertos")
+    assert r.scheme == "heap_4" and not r.issues, r.issues
+    d = r.to_dict()
+    summary = FreeRTOS(info, k.memory, symbols).heap()
+    assert d["free_blocks"] == summary.free_blocks and d["largest_free"] == summary.largest_free_block
+    assert d["used_blocks"] == 2 and d["counters"]["free_bytes"] == summary.free

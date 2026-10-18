@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>fprobe timeline bench</title>
+<style>
+  body { margin: 0; }
+  #stage { position: relative; width: 1500px; margin: 8px 0 0 100px; }
+  #stage canvas { position: absolute; left: 0; top: 0; width: 1500px; }
+  #status { position: fixed; right: 8px; bottom: 4px; font: 12px sans-serif; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="plot"></canvas><canvas id="overlay"></canvas></div>
+<div id="status">loading</div>
+<script type="module" src="./main.ts"></script>
+</body>
+</html>

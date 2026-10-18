@@ -1,0 +1,12 @@
+stack_demo.c:16:leaf	32	static
+stack_demo.c:22:middle	80	static
+stack_demo.c:29:depth	24	static
+stack_demo.c:40:op_double	0	static
+stack_demo.c:41:op_inc	0	static
+stack_demo.c:46:apply	8	static
+stack_demo.c:51:dynamic_buf	16	dynamic
+stack_demo.c:58:tail	0	static
+stack_demo.c:62:SysTick_Handler	8	static
+stack_demo.c:66:Default_Handler	0	static
+stack_demo.c:71:main	0	static
+stack_demo.c:78:Reset_Handler	0	static

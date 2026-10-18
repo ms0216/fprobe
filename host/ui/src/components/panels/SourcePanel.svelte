@@ -1,0 +1,169 @@
+<script lang="ts">
+  // Source: 行の左の余白にブレークポイント、いまの行（▶）の強調、選んだ行（Run to Cursor・F9 の対象）、
+  // 逆アセンブルの混在表示（Mixed）。何も開いていなければ Open ELF / Load Demo / 最近使った項目。
+  import { tick } from "svelte";
+  import { command, type CommandState } from "../../lib/commands";
+  import { shared } from "../../lib/context";
+  import { frameLine, markedLines, type Instruction } from "../../lib/debugger";
+  import { allowed } from "../../lib/guard";
+  import { i18n } from "../../lib/i18n";
+  import { load, save } from "../../lib/prefs";
+  import { baseName, sourceHeat } from "../../lib/profile";
+
+  const ctx = shared();
+  const { app, dbg, ui, safety } = ctx;
+
+  let code = $state<HTMLElement>();
+  let mixed = $state(load("source.mixed", "0") === "1");
+  $effect(() => save("source.mixed", mixed ? "1" : "0"));
+
+  const online = $derived($app.link === "open");
+  const lines = $derived($dbg.source ? $dbg.source.text.replace(/\n$/, "").split("\n") : []);
+  const breakable = $derived(new Set($dbg.source?.lines ?? []));
+  const marked = $derived(markedLines($dbg));
+  const stopLine = $derived($dbg.stop?.file === $dbg.open ? $dbg.stop?.line : undefined);
+  // 呼び出し履歴で選んだ呼び出し元のフレームの行（VS Code の「フォーカスのあるフレーム」）
+  const framePlace = $derived($dbg.frame > 0 && $dbg.stop ? frameLine($dbg.backtrace[$dbg.frame]) : null);
+  const frameLineNo = $derived(framePlace?.file === $dbg.open ? framePlace?.line : undefined);
+  const framePc = $derived($dbg.frame > 0 ? $dbg.backtrace[$dbg.frame]?.pc : undefined);
+  const selected = $derived($ui.selection?.file === $dbg.open ? $ui.selection?.line : undefined);
+  // Code Profile の当たりの割合（行番号の色の濃さ）と当たらなかった行（灰色）。Code Profile が置く
+  const heat = $derived($sourceHeat.lines.get(baseName($dbg.open)));
+  const missed = $derived($sourceHeat.missed.get(baseName($dbg.open)));
+  // 混在表示: 止まった PC の前後の命令を、行ごとにまとめる
+  const byLine = $derived.by(() => {
+    const out = new Map<number, Instruction[]>();
+    if (!mixed) return out;
+    for (const ins of $dbg.disasm) {
+      if (ins.file !== $dbg.open || ins.line == null) continue;
+      out.set(ins.line, [...(out.get(ins.line) ?? []), ins]);
+    }
+    return out;
+  });
+  const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
+                                         selection: $ui.selection });
+
+  // 止まった行（呼び出し元のフレームを選んでいればその行）へ移す
+  $effect(() => {
+    const line = frameLineNo ?? stopLine;
+    if (line === undefined || !code) return;
+    const box = code;
+    tick().then(() => box.querySelector(`[data-line="${line}"]`)?.scrollIntoView({ block: "center" }));
+  });
+
+  // ほかのビュー・時間軸から頼まれた行（ui.revealLine）へ移す
+  $effect(() => {
+    if (!$ui.reveals || !code || selected === undefined || !$dbg.source) return;
+    const box = code, line = selected;
+    tick().then(() => box.querySelector(`[data-line="${line}"]`)?.scrollIntoView({ block: "center" }));
+  });
+
+  function run(id: string) {
+    const c = command(id);
+    if (!c.blocked(cs)) void c.run(ctx, cs);
+  }
+
+  async function openRecent(path: string) {
+    if ((await allowed(app)) && (await dbg.loadElf(path))) ui.remember(path);
+  }
+
+  const hex = (n: number) => n.toString(16).padStart(8, "0");
+</script>
+
+<div class="pane source">
+  {#if $dbg.files.length}
+    <div class="pane-bar">
+      <select aria-label={$i18n("panel.source")} value={$dbg.open ?? ""}
+              onchange={(e) => dbg.openFile((e.currentTarget as HTMLSelectElement).value)}>
+        {#if !$dbg.open}<option value="" disabled>{$i18n("source.pickFile")}</option>{/if}
+        {#each $dbg.files as f (f.name)}<option value={f.name} title={f.path}>{f.name}</option>{/each}
+      </select>
+      <span class="muted mono path" title={$dbg.source?.path ?? ""}>{$dbg.source?.path ?? ""}</span>
+      <span class="spacer"></span>
+      <label title={$i18n("source.mixedTip")}><input type="checkbox" bind:checked={mixed} /> {$i18n("source.mixed")}</label>
+    </div>
+    {#if $dbg.source}
+      <div class="lines mono" bind:this={code}>
+        {#each lines as text, i (i)}
+          {@const n = i + 1}
+          <div class="line" class:stop={n === stopLine} class:frame={n === frameLineNo} class:selected={n === selected}
+               data-line={n}>
+            <button class="gutter" disabled={!breakable.has(n) || !online}
+                    title={$i18n("source.breakpointTip", { line: n })} aria-label={$i18n("source.breakpointTip", { line: n })}
+                    onclick={async () => (await allowed(app))
+                                         && (marked.has(n) || await safety.confirmHalt("breakpoint", $i18n))
+                                         && dbg.toggleBreakpoint(n)}>
+              {#if marked.has(n)}<span class="dot"></span>{:else if breakable.has(n)}<span class="can"></span>{/if}
+            </button>
+            <span class="arrow" class:caller={n === frameLineNo && n !== stopLine}>
+              {n === stopLine ? "▶" : n === frameLineNo ? "▷" : ""}</span>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span class="no" class:missed={missed?.has(n)} onclick={() => ui.select($dbg.open!, n)}
+                  style:background={heat?.has(n) ? `color-mix(in srgb, var(--warn) ${Math.round(15 + 60 * heat.get(n)!.samples / heat.get(n)!.max)}%, transparent)` : null}
+                  title={heat?.has(n) ? $i18n("profile.heatLine", { p: `${(heat.get(n)!.fraction * 100).toFixed(1)}%`, n: heat.get(n)!.samples })
+                         : missed?.has(n) ? $i18n("profile.missedLine") : null}>{n}</span>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span class="text" onclick={() => ui.select($dbg.open!, n)}>{text || " "}</span>
+          </div>
+          {#each byLine.get(n) ?? [] as ins (ins.address)}
+            <div class="asm" class:pc={ins.address === $dbg.stop?.pc} class:frame={ins.address === framePc}>
+              <span></span><span class="arrow">{ins.address === $dbg.stop?.pc ? "▶" : ""}</span>
+              <span class="no">{hex(ins.address)}</span>
+              <span class="text">{ins.mnemonic} {ins.operands}</span>
+            </div>
+          {/each}
+        {/each}
+      </div>
+    {:else if $dbg.open}
+      <p class="empty">{$i18n("source.missing", { path: $dbg.files.find((f) => f.name === $dbg.open)?.path ?? $dbg.open })}</p>
+    {:else}
+      <p class="empty">{$i18n("source.pickFile")}</p>
+    {/if}
+  {:else}
+    <div class="empty start">
+      <strong class="title">{$i18n("source.noProgram")}</strong>
+      <span>{$i18n("source.noProgramHint")}</span>
+      <div class="actions">
+        <button class="primary" disabled={!online} onclick={() => run("openElf")}>{$i18n("cmd.openElf")}</button>
+        <button disabled={!online} title={$i18n("tip.loadDemo")} onclick={() => run("loadDemo")}>{$i18n("cmd.loadDemo")}</button>
+      </div>
+      {#if $ui.recent.length}
+        <span class="recent-title">{$i18n("source.recent")}</span>
+        <ul class="recent">
+          {#each $ui.recent as path (path)}
+            <li><button class="link mono" disabled={!online} onclick={() => openRecent(path)}>{path}</button></li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<style>
+  .source { display: flex; flex-direction: column; }
+  .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; font-size: 12px; }
+  .lines { flex: 1; overflow: auto; padding: 4px 0; }
+  .line, .asm { display: grid; grid-template-columns: 18px 14px 44px 1fr; align-items: center; min-height: 19px; }
+  .line.selected { background: var(--select); }
+  .line.stop { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+  .line.frame { background: color-mix(in srgb, var(--ok) 18%, transparent); }
+  .asm.frame { color: var(--text); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .arrow.caller { color: var(--ok); }
+  /* 命令の番地は 8 桁の 16 進で行番号（44px）より広い: 番地の列だけ広げる（重なって読めなかった） */
+  .asm { color: var(--muted); font-size: 12px; grid-template-columns: 18px 14px 76px 1fr; }
+  .asm.pc { color: var(--text); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .asm .no { font-size: 11px; }
+  .gutter { border: none; background: none; padding: 0; height: 19px; display: grid; place-items: center; cursor: pointer; }
+  .gutter:disabled { cursor: default; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  .can { width: 8px; height: 8px; border-radius: 50%; }
+  .gutter:not(:disabled):hover .can { background: color-mix(in srgb, var(--bad) 45%, transparent); }
+  .arrow { color: var(--warn); font-size: 11px; text-align: center; }
+  .no.missed { text-decoration: line-through; opacity: 0.6; }
+  .no { color: var(--muted); text-align: right; padding-right: 10px; user-select: none; cursor: pointer; }
+  .text { white-space: pre; cursor: text; }
+  .start { max-width: 640px; }
+  .title { font-size: 16px; }
+  .recent-title { margin-top: 8px; color: var(--text); }
+  .recent { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+</style>

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fprobe-gateware"
+version = "0.1.0"
+description = "fprobe: FPGA マルチファンクション・デバッグプローブのゲートウェア（VHDL）と開発ツール"
+requires-python = ">=3.12"   # shutil.rmtree(onexc=...) を使う
+license = { text = "GPL-3.0-only" }
+dependencies = [
+    "cocotb~=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyserial>=3.5", "pyusb>=1.2", "libusb-package>=1.0"]
+
+[tool.setuptools.packages.find]
+include = ["fprobe_gw*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# 依存ライブラリの将来の版で消える API を持ち込まないよう、非推奨警告はエラーとして扱う
+filterwarnings = ["error::DeprecationWarning"]
+markers = ["hil: 実機（Primer 20K 等）が必要なテスト。--hil で有効化"]

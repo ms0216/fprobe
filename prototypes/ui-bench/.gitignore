@@ -1,0 +1,5 @@
+data/
+**/target/
+node_modules/
+__pycache__/
+egui/web/pkg/

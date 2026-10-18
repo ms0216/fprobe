@@ -1,0 +1,85 @@
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6b6b70;
+  --line: #deded9;
+  --accent: #2563eb;
+  --ok: #15803d;
+  --warn: #b45309;
+  --bad: #b91c1c;
+  --select: #e8effd;
+  color-scheme: light;
+  font-family: system-ui, "Segoe UI", "Yu Gothic UI", "Hiragino Sans", sans-serif;
+  font-size: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171a;
+    --panel: #1f1f23;
+    --text: #e8e8ea;
+    --muted: #9a9aa2;
+    --line: #34343a;
+    --accent: #6b9bff;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --select: #26324d;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); }
+button {
+  font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+input, select {
+  font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px;
+}
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+.muted { color: var(--muted); }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+section.panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+
+/* パネル（dockview の中）の共通 */
+.pane { height: 100%; overflow: auto; background: var(--panel); font-size: 13px; }
+.pane-bar { display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line);
+            position: sticky; top: 0; background: var(--panel); z-index: 1; flex-wrap: wrap; }
+.pane-bar .spacer { flex: 1; }
+.empty { padding: 16px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.empty strong { color: var(--text); font-weight: 600; }
+.empty .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+table.grid { border-collapse: collapse; width: 100%; }
+table.grid th { white-space: nowrap; text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 3px 8px;
+                border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+table.grid td { padding: 2px 8px; border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent); }
+table.grid tr.changed td.v { color: var(--bad); }
+button.small { padding: 1px 6px; font-size: 12px; }
+button.link { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; text-align: left; }
+.stale { opacity: 0.6; }
+
+/* ドッキング（dockview）の色と寸法を画面の色に合わせる */
+:is(.fprobe-dock.dockview-theme-light, .fprobe-dock .dockview-theme-light,
+    .fprobe-dock.dockview-theme-dark, .fprobe-dock .dockview-theme-dark) {
+  --dv-group-view-background-color: var(--panel);
+  --dv-tabs-and-actions-container-background-color: var(--bg);
+  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-font-size: 12.5px;
+  --dv-activegroup-visiblepanel-tab-background-color: var(--panel);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg);
+  --dv-activegroup-visiblepanel-tab-color: var(--text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-tab-divider-color: var(--line);
+  --dv-separator-border: var(--line);
+  --dv-paneview-header-border-color: var(--line);
+  --dv-active-sash-color: var(--accent);
+}
