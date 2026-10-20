@@ -1,0 +1,14 @@
+# fprobe の PS の中継（UDP 63920 ⇄ PL の zynq_frame_link）。fprobe の回路の印が無ければ起動してすぐ終わる
+[Unit]
+Description=fprobe relay (UDP 63920 <-> PL zynq_frame_link)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/fprobe-relay
+Restart=on-failure
+RestartSec=2
+# 印が無い（終了コード 2）・回路が違う（3）は起動し直さない
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=multi-user.target

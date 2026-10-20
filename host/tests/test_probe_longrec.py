@@ -37,7 +37,7 @@ class StreamDevice(TimedStreamDevice):
 
     def read32(self, address):
         from fprobe import generated as g
-        if address in (g.LA_DEEP_RING_BEATS, g.LA_DEEP_STATUS, g.LA_DEEP_STREAM_BEATS):
+        if address in (g.LA_DEEP_RING_BEATS, g.LA_DEEP_STATUS, g.LA_DEEP_STREAM_BEATS, g.MEM_STATUS):
             return super().read32(address)
         return 0
 

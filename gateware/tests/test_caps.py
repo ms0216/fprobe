@@ -244,3 +244,11 @@ def test_the_la_design_declares_the_j14_inputs():
     assert "la_in" in DESIGNS["fprobe_la"].pin_groups
     for name in ("fprobe", "fprobe_jtag", "memtest", "fprobe_serial", "fprobe_eth", "fprobe_nano9k"):
         assert DESIGNS[name].capabilities.la_inputs == 0, name
+
+
+def test_package_declares_the_memory_address_bits_from_mem_bytes():
+    # 外部メモリの拍（16 バイト）の番号のビット数。トップが fprobe_core の MEM_ADDR_BITS に渡す（0 = 外部メモリ無し）
+    from fprobe_gw.caps import render_package
+    from fprobe_gw.designs import DESIGNS
+    assert "constant MEM_ADDR_BITS : natural := 23;" in render_package("p", DESIGNS["fprobe"].capabilities)   # 128 MB
+    assert "constant MEM_ADDR_BITS : natural := 0;" in render_package("p", DESIGNS["fprobe_pynq"].capabilities)

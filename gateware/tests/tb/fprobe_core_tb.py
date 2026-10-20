@@ -19,6 +19,7 @@ async def setup(dut):
     dut.la_inputs.value = 0
     dut.uart_in_valid.value = 0
     dut.uart_in_data.value = 0
+    dut.stream_out_ready.value = 1
     port = ControlPort(dut, request="ctrl_in", response="ctrl_out", rng=random.Random(3))
     await start_clock_and_reset(dut)
     return port
@@ -326,3 +327,42 @@ async def external_trigger_input_fires_the_cross_trigger_through_the_sequencer(d
     await port.write(g.LA_CONTROL, [0])
     await port.write(g.XTRIG_ROUTE, [0])
     await port.write(g.TRIGSEQ_CONTROL, [0])
+
+
+@cocotb.test()
+async def events_are_recorded_in_the_internal_ring_without_external_memory(dut):
+    """外部メモリの無い構成のイベント記録（BRAM のリング）: PC の EventLog と同じ手順（events.control → la_deep の読み出しの窓
+    → ストリーム）で読める。ホスト → ターゲットの UART のバイトがイベント（種類 4）になる。"""
+    from fprobe.events import decode_events
+    port = await setup(dut)
+    capacity = (await port.read(g.EVENTS_CAPACITY, 1))[2][0]
+    if capacity == 0:
+        return                                                          # この構成にはイベント記録が無い
+    assert capacity == 64
+    got = bytearray()
+
+    async def collect():
+        while True:
+            await RisingEdge(dut.clk)
+            if dut.stream_out_valid.value == 1 and dut.stream_out_ready.value == 1:
+                got.append(int(dut.stream_out_data.value))
+    cocotb.start_soon(collect())
+    await port.write(g.EVENTS_CONTROL, [1])
+    await stream_send(dut, "uart_in", [0x41, 0x42, 0x43])
+    for _ in range(100):                                               # UART の速さで 1 バイトずつ出ていく
+        await ClockCycles(dut.clk, 1000)
+        written = (await port.read(g.EVENTS_WRITTEN, 1))[2][0]
+        if written == 3:
+            break
+    assert written == 3
+    await port.write(g.LA_DEEP_READ_REGION, [1])
+    await port.write(g.LA_DEEP_READ_FIRST, [0, written])
+    await port.write(g.LA_DEEP_COMMAND, [1 << g.LA_DEEP_COMMAND_READ[0]])
+    for _ in range(2000):
+        if len(got) >= 16 * written:
+            break
+        await RisingEdge(dut.clk)
+    events = decode_events(bytes(got))
+    assert [e.kind for e in events] == [4, 4, 4]
+    assert [e.data & 0xFF for e in events] == [0x41, 0x42, 0x43]
+    assert events[0].time < events[1].time < events[2].time

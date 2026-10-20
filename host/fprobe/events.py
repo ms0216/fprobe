@@ -113,6 +113,7 @@ class EventLog:
         self.capacity = dev.read32(g.EVENTS_CAPACITY)
         if not self.capacity:
             raise RuntimeError("このデバイスにはイベント記録が無い")
+        self.overwritten = 0          # 直前の read で、読む間に書き手に上書きされて捨てた件数
 
     def start(self) -> None:
         """記録を始める（リングの先頭から）。"""
@@ -151,7 +152,13 @@ class EventLog:
         self.dev.write32(g.LA_DEEP_READ_REGION, 1)
         self.dev.write(g.LA_DEEP_READ_FIRST, [(written - n) % self.capacity, n])
         self.dev.write32(g.LA_DEEP_COMMAND, 1 << g.LA_DEEP_COMMAND_READ[0])
-        return decode_events(self.dev.read_stream(n * EVENT_BYTES, timeout_ms=5000))
+        events = decode_events(self.dev.read_stream(n * EVENT_BYTES, timeout_ms=5000))
+        # 読む間に書き手が読み手を追い越した分は、要求より新しいイベントにすり替わっている（リングが小さい構成・遅いリンクで
+        # 起きる）。読み終えた時点の総数から、まだ残っていたはずの番号より前の先頭を捨てて数える
+        after = self.counts()[0]
+        drop = n if after < written else min(n, max(0, after - self.capacity - (written - n)))
+        self.overwritten = drop
+        return events[drop:]
 
 
 class EventCursor:
@@ -172,4 +179,8 @@ class EventCursor:
         n = min(new, self.log.capacity, limit)
         self.lost += new - n
         self.seen = written
-        return self.log.read(n, end=written) if n else []
+        if not n:
+            return []
+        events = self.log.read(n, end=written)
+        self.lost += self.log.overwritten
+        return events

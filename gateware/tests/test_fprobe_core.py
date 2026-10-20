@@ -16,6 +16,7 @@ CONFIGURATIONS = {
     "no_outputs": dataclasses.replace(TEST_CAPS, outputs=()),           # 小さい FPGA: 出力の端子なし
     "no_la_front": dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=False),   # U21 の前段なし
     "no_la_inputs": dataclasses.replace(TEST_CAPS, la_inputs=0),       # U22 の専用の入力なし
+    "event_ring": dataclasses.replace(TEST_CAPS, event_ring_bits=6),   # 外部メモリ無しのイベント記録（64 件）
 }
 
 

@@ -6,7 +6,7 @@
 import struct
 from dataclasses import dataclass
 
-from .csr.fprobe_map import FPROBE_MAP, LA_WIDTH, UART_FLOW_PIN_CHOICES, XOUT_ACTIONS, XOUT_PIN_CHOICES
+from .csr.fprobe_map import MEM_BEAT_BYTES, FPROBE_MAP, LA_WIDTH, UART_FLOW_PIN_CHOICES, XOUT_ACTIONS, XOUT_PIN_CHOICES
 
 __all__ = ["Capabilities", "HOST_CONSTANTS", "encode", "la_layout", "render_package"]
 
@@ -96,6 +96,9 @@ class Capabilities:
     swo_manchester: bool = True  # SWO の Manchester 方式の受信（U51）
     # UART の RTS/CTS（U52）: 端子の候補 j のロジアナのチャンネル（flow.rts_pin・cts_pin の番号の順）。空なら回路が無い
     uart_flow: tuple[int, ...] = ()
+    # 外部メモリの無い構成のイベント記録の件数（2**event_ring_bits、0 = 無し）。ROM には入れない（PC は EVENTS_CAPACITY を
+    # 読む）。回路の generic（生成パッケージの EVENT_RING_BITS）だけに使う
+    event_ring_bits: int = 0
 
     def __post_init__(self):
         if self.la_channels and self.la_pins + LA_INTERNAL_PROBES + self.la_inputs > self.la_channels:
@@ -107,6 +110,8 @@ class Capabilities:
             raise ValueError("専用の入力（la_inputs）はロジアナのある構成だけ")
         if self.la_stream_events and not self.mem_bytes:
             raise ValueError("ストリームにイベントを流す（la_stream_events）のは外部メモリ（深いバッファ）のある構成だけ")
+        if self.event_ring_bits and self.mem_bytes:
+            raise ValueError("event_ring_bits は外部メモリの無い構成だけ（外部メモリのある構成は深いバッファに記録する）")
         if self.inject and not self.xtrig:
             raise ValueError("故障注入（inject）はクロストリガ（xtrig）の一部: xtrig=False なら inject=False")
         if len(self.outputs) > XOUT_PIN_CHOICES:
@@ -176,6 +181,16 @@ def _encode(caps: Capabilities, build: list[int] | None = None) -> tuple[bytes, 
     return MAGIC + struct.pack("<I", 8 + len(body)) + body, build_word
 
 
+def _mem_addr_bits(mem_bytes: int) -> int:
+    """外部メモリの拍（MEM_BEAT_BYTES バイト）の番号のビット数（0 = 外部メモリ無し）。大きさは 2 の累乗の拍。"""
+    if not mem_bytes:
+        return 0
+    beats = mem_bytes // MEM_BEAT_BYTES
+    if beats * MEM_BEAT_BYTES != mem_bytes or beats & (beats - 1):
+        raise ValueError(f"mem_bytes {mem_bytes} が 2 の累乗の拍（{MEM_BEAT_BYTES} バイト）でない")
+    return beats.bit_length() - 1
+
+
 def render_package(package: str, caps: Capabilities) -> str:
     """ROM の内容（32 ビットワード、リトルエンディアン）を定数 CAPS_ROM とする VHDL パッケージ。
     回路の有無を決める定数（MEM_TEST）も同じ定義から出す（申告と実装が食い違わない）。"""
@@ -215,6 +230,8 @@ def render_package(package: str, caps: Capabilities) -> str:
         f"  constant LA_INPUTS : natural := {caps.la_inputs};",
         f"  constant SWO_MANCHESTER : boolean := {str(caps.swo_manchester).lower()};",
         f"  constant UART_FLOW : boolean := {str(bool(caps.uart_flow)).lower()};",
+        f"  constant MEM_ADDR_BITS : natural := {_mem_addr_bits(caps.mem_bytes)};",
+        f"  constant EVENT_RING_BITS : natural := {caps.event_ring_bits};",
         "end package;",
         "",
     ])

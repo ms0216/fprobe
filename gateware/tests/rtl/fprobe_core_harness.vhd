@@ -29,6 +29,9 @@ entity fprobe_core_harness is
     uart_in_data   : in  std_logic_vector(7 downto 0);
     uart_tx        : out std_logic;
     uart_tx_oe     : out std_logic;
+    stream_out_valid : out std_logic;
+    stream_out_ready : in  std_logic;
+    stream_out_data  : out std_logic_vector(7 downto 0);
     aux_rx         : in  std_logic
   );
 end entity;
@@ -42,7 +45,8 @@ begin
                  HAS_SWO_MANCHESTER => work.test_caps_pkg.SWO_MANCHESTER, UART_FLOW => work.test_caps_pkg.UART_FLOW,
                  INJECTOR => work.test_caps_pkg.INJECTOR, XOUT_COUNT => work.test_caps_pkg.XOUT_COUNT,
                  LA_FILTER => work.test_caps_pkg.LA_FILTER, LA_PULSE => work.test_caps_pkg.LA_PULSE,
-                 LA_INPUT_COUNT => work.test_caps_pkg.LA_INPUTS)
+                 LA_INPUT_COUNT => work.test_caps_pkg.LA_INPUTS,
+                 EVENT_RING_BITS => work.test_caps_pkg.EVENT_RING_BITS)
     port map (clk => clk, rst => rst,
               ctrl_in_valid => ctrl_in_valid, ctrl_in_ready => ctrl_in_ready,
               ctrl_in_data => ctrl_in_data, ctrl_in_last => ctrl_in_last,
@@ -60,5 +64,7 @@ begin
               uart_rx => '1', uart_tx => uart_tx, uart_tx_oe => uart_tx_oe, la_pins => la_pins,
               la_inputs => la_inputs(maximum(work.test_caps_pkg.LA_INPUTS, 1) - 1 downto 0),
               xout_o => xout_o, xout_oe => xout_oe, xout_claim => xout_claim, xout_pin => xout_pin,
-              gpio_drive => gpio_drive, gpio_enable => gpio_enable, gpio_level => gpio_level, aux_rx => aux_rx);
+              gpio_drive => gpio_drive, gpio_enable => gpio_enable, gpio_level => gpio_level, aux_rx => aux_rx,
+              stream_out_valid => stream_out_valid, stream_out_ready => stream_out_ready,
+              stream_out_data => stream_out_data);
 end architecture;

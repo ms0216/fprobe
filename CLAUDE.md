@@ -67,9 +67,13 @@ PC 接続中デバイスの識別（ツールは必ずシリアル番号で対�
 | 補助マイコン: Raspberry Pi Pico WH（MicroPython、`host/firmware/aux_pico`） | 2E8A:0005 / `<Pico WH のシリアル>` | COM13 |
 | ADC 校正用: ESP32-WROOM-32（MicroPython、DAC1 = GPIO25 → Pico GP26） | 10C4:EA60 / `<ESP32 のシリアル>` | COM12 |
 | ~~Raspberry Pi Pico~~（ADC 故障。補助に使わない） | 2E8A:0005 / `<Pico のシリアル>` | — |
-| **PYNQ-Z2 — 本プロジェクト対象外。絶対に触らない（書き込み・接続・操作禁止）** | 0403:6010 / `1234-TUL` | COM6 |
+| PYNQ-Z2（Zynq-7020）— fprobe の移植先（2026-10-19 から fprobe 専用。仕様 docs/superpowers/specs/2026-10-19-pynq-z2-port-design.md） | 0403:6010 / `1234-TUL` | COM6 |
 
 Primer と PYNQ-Z2 はどちらも FT2232 互換 JTAG のため、openFPGALoader 等ではシリアル番号指定なしで実行しないこと。
+PYNQ-Z2 の PL は JTAG（Vivado の hw_server）で書く（2026-10-20 に利用者が承認。Linux 経由は Linux が固まった）。
+必ずシリアル `1234-TUL` で口を選び、IDCODE が Zynq-7020 であることを照合してから書く（Primer と取り違えない）。
+書く前に PYNQ の上の `fprobe-pl before` で中継を止め、PS と PL の間のレベルシフタを切る（`fprobe_gw build/program
+--board pynq_z2` がする。詳細は docs/boards/pynq-z2.md）。
 本プロジェクトの書き込みツール（`fprobe_gw program` / `build --program`）は、Primer の USB シリアル番号から OS 上の接続ポートを引き、
 そのポートの JTAG チャンネルだけを選んで IDCODE を照合してから書く（同じ「USB Debugger A」の Tang Nano 9K 等が接続されていても触れない）。
 

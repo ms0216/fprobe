@@ -555,6 +555,10 @@ class DeepAnalyzer:
         """止めて前段（la ブロック）を設定する。pretrigger: 開始からこのサンプル数まではトリガを受け付けない。
         グリッチフィルタ・パルス幅は指定が無ければ切る（前の捕捉の設定を持ち越さない）。"""
         check_trigger_channels(self.caps, mask=mask, rise=rise, fall=fall)
+        if not self.dev.read32(g.MEM_STATUS) >> g.MEM_STATUS_READY[0] & 1:
+            # 準備のできていない外部メモリで始めると、書き手が止まって捕捉が終わらない（理由が PC に見えない）
+            raise RuntimeError("外部メモリの準備ができていない（PYNQ-Z2 では PS の中継が DDR の領域 MEM_BASE を書くまで"
+                               "使えない: /etc/fprobe/mem と起動の mem= の予約を確かめる）")
         front = Front.of(self.caps, filter_channels, filter_ns, pulse)
         divider = 1 if rate_hz is None else max(1, min(1 << 16, round(self.clock_hz / rate_hz)))
         dev = self.dev

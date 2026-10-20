@@ -1,0 +1,19 @@
+#!/bin/sh
+# fprobe: PYNQ-Z2 の PL を書く前後の手順（fprobe_gw の PynqLoader が sudo -n で呼ぶ。/usr/local/bin/fprobe-pl）
+#   before        中継を止め、「fprobe の回路が載っている」印を消し、PS と PL の間のレベルシフタを無効にする
+#                 （書き直す間に PL を読まない。シフタが有効なまま書き直すと Linux が固まった。2026-10-20）
+#   after <id>    印を置き、中継を起動し直す（zynq_frame_link を持つ回路を書いたときだけ）
+set -e
+case "$1" in
+  before)
+    systemctl stop fprobe-relay 2>/dev/null || true
+    rm -f /run/fprobe/pl-design
+    /usr/local/bin/fprobe-relay --isolate ;;
+  after)
+    case "$2" in ""|*[!0-9a-f]*) echo "fprobe-pl: id は 16 進" >&2; exit 2 ;; esac
+    mkdir -p /run/fprobe
+    echo "$2" > /run/fprobe/pl-design
+    systemctl restart fprobe-relay ;;
+  *)
+    echo "usage: fprobe-pl before | after <id>" >&2; exit 2 ;;
+esac

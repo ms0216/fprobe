@@ -8,6 +8,7 @@ gateware/rtl/boards/<board>/ にあり、ここはツール側から見たボー
 from dataclasses import dataclass
 
 from ..toolchain.pll import PllSolution
+from ..toolchain.vivado import MmcmSolution
 from ..toolchain.programmer import JtagIdentity
 from ..toolchain.project import ClockConstraint, GowinIp, IoDelay, Pin
 
@@ -70,11 +71,11 @@ class Board:
     part: str
     family: str
     revision: int
-    jtag_identity: JtagIdentity
+    jtag_identity: JtagIdentity | None       # Gowin の書き込み器で書くボードだけ
     pin_groups: dict[str, tuple[Pin, ...]]   # 資源名 → ピン（デザインは使う資源名を選ぶ）
     input_clock_port: str
     input_clock_hz: int
-    sync_pll: PllSolution
+    sync_pll: PllSolution | MmcmSolution     # 入力クロック → sys（fout_hz を使う）
     ulpi_timing: UlpiTiming | None = None    # ULPI PHY を載せたボードのみ
     debug_connector: dict[str, int] | None = None   # デバッグコネクタの信号 → pmod の番号
     ddr3: Ddr3 | None = None
@@ -90,6 +91,9 @@ class Board:
     # UART の RTS/CTS（U52）の端子の候補 j に使うデバッグコネクタの信号（debug_connector の名前）。RTS・CTS のどちらにも
     # 使える。RTL の定数（<board>_pkg の UART_FLOW_PIN_CHOICES）と一致させる
     uart_flow_pins: tuple[str, ...] = ()
+    toolchain: str = "gowin"                 # ビルドの道具（"gowin" / "vivado"）
+    # sys の生成クロックの元の端子（Vivado: MMCM の CLKOUT0）。None なら SYS_CLK_NET の配線で制約する（Gowin）
+    sys_clock_pin: str | None = None
 
     def uart_flow(self) -> tuple[int, ...]:
         """RTS/CTS の端子の候補 j のロジアナのチャンネル（= pmod1 の番号）。ケイパビリティ UART_FLOW の中身。"""
@@ -121,6 +125,8 @@ class Board:
     def sys_clock(self) -> ClockConstraint:
         # 入力クロックから PLL で作るが、入力クロックのドメインとの間で値を直接受け渡す回路は持たない
         # （受け渡しは同期化回路を通す）ので、非同期のクロックとして扱う
+        if self.sys_clock_pin is not None:
+            return ClockConstraint(SYS_CLK_NET, self.sys_clock_pin, "pin", self.sync_pll.fout_hz)
         return ClockConstraint(SYS_CLK_NET, SYS_CLK_NET, "net", self.sync_pll.fout_hz)
 
     def ulpi_clock(self) -> ClockConstraint:

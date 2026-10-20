@@ -28,7 +28,7 @@ class Pin:
 class ClockConstraint:
     name: str
     target: str                      # ポート名またはネット名
-    kind: Literal["port", "net"]
+    kind: Literal["port", "net", "pin"]   # pin: Vivado の自動の生成クロック（MMCM の出力の端子）に名前を付ける
     frequency_hz: int
     source: str = ""                 # 発振源。異なる発振源のクロック間は非同期として解析しない
                                      # （空なら name 自身が発振源）
