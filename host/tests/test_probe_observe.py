@@ -343,6 +343,7 @@ def test_la_decode_annotations_are_put_on_the_common_timeline(probe):
 
 class FakeEventLog:
     """イベント記録の偽物（全インスタンスで 1 つのリング）。"""
+    overwritten = 0
     events: list = []
     capacity = 1 << 20
 

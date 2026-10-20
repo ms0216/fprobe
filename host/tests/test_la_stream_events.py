@@ -238,7 +238,7 @@ class ProbeMixedDevice(FakeMixedDevice):
 
     def read32(self, address):
         if address in (g.LA_DEEP_RING_BEATS, g.LA_DEEP_STATUS, g.LA_DEEP_STREAM_BEATS, g.EVENTS_CAPACITY,
-                       g.EVENTS_WRITTEN):
+                       g.EVENTS_WRITTEN, g.MEM_STATUS):
             return super().read32(address)
         return 0
 

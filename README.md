@@ -101,6 +101,21 @@ with Session.open_eth("192.168.77.2") as s:                  # ping 192.168.77.2
 MCP: `fprobe-mcp --eth 192.168.77.2`。UDP は落ちうるので、FPGA → PC のデータグラムに通し番号を付け、
 落ちた数を `s.link.lost_frames` に数える（バイト列のチャンネルの欠けを黙って見逃さない）。
 
+### PYNQ-Z2（Zynq-7020）
+
+PYNQ-Z2 では、同じ fprobe_core を PL に載せ、PS（ARM）の Linux の中継 `fprobe-relay` が UDP 63920 と PL の
+`zynq_frame_link`（AXI4-Lite）の間でフレームを受け渡す（線上の形式は Ethernet 版と同じなので、PC 側は `Session.open_eth`
+のまま）。Primer では構成に分けている機能（JTAG・サンプラ・故障注入・専用の入力・RTS/CTS）を 1 つの構成 `fprobe_pynq`
+に入れる。ビルドは Vivado（`C:\AMDDesignTools\2025.2\Vivado`、環境変数 `FPROBE_VIVADO_HOME`）。
+
+```sh
+FPROBE_PYNQ_SUDO_PASSWORD=... python -m fprobe_gw pynq install   # 中継と書き込みの補助を PYNQ に据え付ける（一度）
+python -m fprobe_gw build fprobe_pynq --program                  # Vivado でビルドし、JTAG（1234-TUL・IDCODE 照合）で書く
+python -m fprobe_gw pynq status
+```
+
+詳細（配線・基板の PMOD の抵抗・書き込みの手順・Linux が固まる条件）: [docs/boards/pynq-z2.md](docs/boards/pynq-z2.md)。
+
 ### 標準のデバッグツール（CMSIS-DAP v2）
 
 ドライバの追加なしに pyOCD・OpenOCD・probe-rs から CMSIS-DAP v2 として使える（SWCLK 〜25 MHz）。
@@ -236,6 +251,24 @@ with Session.open("0001") as s, s.debug(target_override="stm32f401xe") as dbg_s:
 ```
 
 試験用のファームウェア `host/firmware/sram_demo`（zig cc、SRAM で動く）で実機試験する（`test_debug_hw.py`）。
+
+### プラグイン（機器・用途に固有の処理）
+
+本体の汎用の API の上に載る、取り外せる層（`fprobe.plugins.<名前>`。本体からは import しない）。デーモンの
+`DaemonClient` でも、プロセス内の `ProbeCaller(probe)` でも同じように動く。
+
+| プラグイン | 内容 |
+|---|---|
+| `keymatrix` | キーボードの行列のキーを FPGA から押したことにする（クロストリガの出力） |
+| `spiflash` | SPI NOR Flash を直接読み書きする（J-Flash SPI に当たる） |
+| `rp2350_trace` | RP2350 のトレース FIFO と DMA で ETM の命令トレースを SRAM に溜めて解読する |
+| `zmk_health` | ZMK のキーボードを止めずに診断する（BLE の接続・チャタリング除け・電池・起動からの時間・スタック） |
+
+```python
+from fprobe.plugins import ProbeCaller
+from fprobe.plugins.zmk_health import ZmkHealth
+print(ZmkHealth(ProbeCaller(probe)).report()["findings"])   # target_connect（attach）と elf_load の後
+```
 
 ### CLI と MCP サーバ
 

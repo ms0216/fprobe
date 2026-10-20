@@ -68,7 +68,8 @@ begin
                  HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
                  UART_FLOW => work.design_caps_pkg.UART_FLOW,
                  LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
-                 LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS, LA_INTERNAL => true)
+                 LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS, LA_INTERNAL => true,
+                 EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS)
     port map (clk => sys_clk, rst => sys_rst,
               ctrl_in_valid => req_valid, ctrl_in_ready => req_ready, ctrl_in_data => req_data,
               ctrl_in_last => req_last,

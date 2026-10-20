@@ -155,6 +155,7 @@ def test_the_sampler_is_not_taken_from_another_tool(probe):
 
 class RingLog:
     """イベント記録の偽物（カーソルで続きを読める）。"""
+    overwritten = 0
     events: list = []
     capacity = 1 << 20
 

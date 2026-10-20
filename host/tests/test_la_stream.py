@@ -33,6 +33,7 @@ class FakeStreamDevice:
         self.running = self.overrun = False
         self.drain_polls = 0
         self.control_writes: list[int] = []
+        self.mem_ready = True                              # 外部メモリの準備（PYNQ では中継が MEM_BASE を書いた）
 
     # --- Device の API ----------------------------------------------------------------
 
@@ -67,6 +68,8 @@ class FakeStreamDevice:
             return int(self.overrun) << g.LA_DEEP_STATUS_OVERRUN[0] | int(reading) << g.LA_DEEP_STATUS_READING[0]
         if address == g.LA_DEEP_STREAM_BEATS:
             return self.written
+        if address == g.MEM_STATUS:
+            return int(self.mem_ready) << g.MEM_STATUS_READY[0]
         raise AssertionError(f"想定外の読み 0x{address:X}")
 
     def read_stream_some(self, size, timeout_ms=2000):
@@ -224,3 +227,12 @@ def test_stop_ends_the_stream_and_drains_the_rest():
             stream.stop()
     assert not dev.running and bytes(received) == source[:dev.written * 16]
     assert stream.stats().elapsed_s < 5.0
+
+
+def test_starting_without_a_ready_memory_is_an_error_with_the_reason():
+    # PYNQ の深いバッファは、中継が DDR の領域（MEM_BASE）を書くまで使えない。待ち続けずに理由を言って断る
+    dev = FakeStreamDevice(bytes(16), rng=random.Random(1))
+    dev.mem_ready = False
+    with pytest.raises(RuntimeError, match="外部メモリ"):
+        DeepAnalyzer(dev).start(rate_hz=1e6)
+    assert dev.control_writes == []

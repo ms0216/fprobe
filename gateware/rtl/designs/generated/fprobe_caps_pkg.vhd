@@ -73,4 +73,6 @@ package design_caps_pkg is
   constant LA_INPUTS : natural := 0;
   constant SWO_MANCHESTER : boolean := true;
   constant UART_FLOW : boolean := true;
+  constant MEM_ADDR_BITS : natural := 23;
+  constant EVENT_RING_BITS : natural := 0;
 end package;

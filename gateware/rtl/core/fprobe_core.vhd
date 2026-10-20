@@ -56,6 +56,8 @@ entity fprobe_core is
     LA_PULSE      : boolean := true;       -- パルス幅のトリガ（la_pulse）
     LA_STREAM_EVENTS : boolean := false;   -- 深いバッファのストリームにイベントも見出し付きで流す（R1。ケイパビリティ
                                            -- FEATURES の LA_STREAM_EVENTS と一致させる。外部メモリのある構成で）
+    -- 外部メモリの無い構成のイベント記録の件数（2 のべき。0 = 無し。外部メモリのある構成では使わない）
+    EVENT_RING_BITS : natural := 0;
     INJECTOR      : boolean := true        -- 故障注入 = 割り込み書き込み（swd_injector。XTRIG の一部。無ければ
                                            -- xtrig の inject_status.result = 3、route.to_inject は何もしない）
   );
@@ -1023,16 +1025,38 @@ begin
   no_memory : if MEM_ADDR_BITS = 0 generate
     mem_ready_s <= '0'; mem_busy <= '0'; mem_done <= '0'; mem_in_reset <= '0'; mem_tick <= '0';
     mem_errors <= (others => '0'); mem_first <= (others => '0'); mem_wc <= (others => '0'); mem_rc <= (others => '0');
-    deep_capturing <= '0'; deep_triggered <= '0'; deep_done <= '0'; deep_overrun <= '0'; deep_reading <= '0';
+    deep_capturing <= '0'; deep_triggered <= '0'; deep_done <= '0'; deep_overrun <= '0';
     deep_time <= (others => '0'); deep_beat <= (others => '0'); deep_slot <= (others => '0');
     deep_written <= (others => '0'); deep_ring_beats <= (others => '0'); deep_stream_beats <= (others => '0');
-    events_written <= (others => '0'); events_lost <= (others => '0'); events_capacity <= (others => '0');
     mem_cmd_valid <= '0';
     mem_cmd_write <= '0';
     mem_cmd_addr  <= (others => '0');
     mem_cmd_data  <= (others => '0');
-    stream_out_valid <= '0';
-    stream_out_data  <= (others => '0');
+
+    no_events : if EVENT_RING_BITS = 0 generate
+      deep_reading <= '0';
+      events_written <= (others => '0'); events_lost <= (others => '0'); events_capacity <= (others => '0');
+      stream_out_valid <= '0';
+      stream_out_data  <= (others => '0');
+    end generate;
+
+    -- イベント記録を内蔵 RAM のリングに（外部メモリの深いバッファと同じ CSR・読み出し・ストリーム。
+    -- docs/superpowers/specs/2026-10-20-bram-event-ring-design.md）
+    ring_events : if EVENT_RING_BITS > 0 generate
+      signal ev_written, ev_lost, ev_beats : unsigned(31 downto 0);
+    begin
+      ring_i : entity work.event_ring
+        generic map (DEPTH_BITS => EVENT_RING_BITS, ADDR_BITS => EVENT_RING_BITS)
+        port map (clk => clk, rst => rst, ev_enable => events_enable, ev_valid => event_valid, ev_data => event_data,
+                  ev_written => ev_written, ev_lost => ev_lost, ev_beats => ev_beats,
+                  read => deep_read, read_region => deep_region,
+                  read_first => unsigned(deep_first(EVENT_RING_BITS - 1 downto 0)),
+                  read_count => unsigned(deep_count(EVENT_RING_BITS downto 0)), reading => deep_reading,
+                  out_valid => stream_out_valid, out_ready => stream_out_ready, out_data => stream_out_data);
+      events_written  <= std_logic_vector(ev_written);
+      events_lost     <= std_logic_vector(ev_lost + byte_lost);
+      events_capacity <= std_logic_vector(ev_beats);
+    end generate;
   end generate;
 
   xtrig_csr_g : if XTRIG generate
