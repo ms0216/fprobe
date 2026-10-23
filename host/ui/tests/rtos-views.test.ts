@@ -5,7 +5,7 @@ import { deepestKeys, rootsOf, treeRows, type StackFunction } from "../src/lib/c
 import { activations, histogram, longestIn, recordedIsrs, statsFromProfile, statsOf } from "../src/lib/interrupts";
 import { SymbolAddresses, baseName, heatOf, selectedRange, sourceHeat } from "../src/lib/profile";
 import {
-  busyTasks, isIdle, subtract, loadFromTimeline, loadStack, loadWindows, nextRun, overlap, percent, recordedRuns, recordedTable, runningAt,
+  busyTasks, subtract, loadFromTimeline, loadStack, loadWindows, nextRun, overlap, percent, recordedRuns, recordedTable, runningAt,
   tableFromTimeline, union, windowAt,
 } from "../src/lib/rtos";
 import { FakeConn } from "./fake-conn";
@@ -29,8 +29,9 @@ describe("RTOS: 表と負荷の推移", () => {
   });
 
   it("窓ごとの負荷はデーモンと同じ定義（割り込みはタスクから除き負荷に入る、抜けは分母から除く）", () => {
-    const runs: [number, number, number, string][] = [[0, 30, 1, "main"], [30, 100, 5, "IDLE"], [100, 160, 1, "main"],
-                                                       [160, 200, 5, "IDLE"]];
+    // idle は記録の印（デーモンがカーネルの情報で付ける）で知る。名前では決めない
+    const runs: [number, number, number, string, boolean][] = [[0, 30, 1, "main", false], [30, 100, 5, "IDLE", true],
+                                                                [100, 160, 1, "main", false], [160, 200, 5, "IDLE", true]];
     const s = loadWindows({ runs, isrs: [[10, 20, 15, "SysTick"], [12, 14, 54, "USART2"]], gaps: [[180, 200]] }, 100);
     expect(s.windows).toHaveLength(2);
     const [a, b] = s.windows;
@@ -45,20 +46,22 @@ describe("RTOS: 表と負荷の推移", () => {
     expect(windowAt(s, 150)?.t0).toBe(100);
     expect(windowAt(s, 250)).toBeNull();
     expect(busyTasks(s)).toEqual(["main"]);
+    expect(s.idle).toEqual(["IDLE"]);
+    // 名前が IDLE でも印が無ければ idle ではない（「idler」等を idle にしない）
+    expect(loadWindows({ runs: [[0, 100, 5, "IDLE", false]], isrs: [], gaps: [] }, 100).windows[0].load).toBe(1);
     expect(loadWindows({ runs: [], isrs: [], gaps: [] }, 10).windows).toEqual([]);
     // 実行の区間の無い間（止まっていた）は情報が無い: 負荷は null（100% にしない）
-    const halted = loadWindows({ runs: [[0, 50, 5, "IDLE"], [150, 200, 5, "IDLE"]], isrs: [], gaps: [] }, 100);
+    const halted = loadWindows({ runs: [[0, 50, 5, "IDLE", true], [150, 200, 5, "IDLE", true]], isrs: [], gaps: [] }, 100);
     expect(halted.windows.map((w) => w.covered)).toEqual([50, 50]);
     expect(halted.windows.map((w) => w.load)).toEqual([0, 0]);
-    expect(loadWindows({ runs: [[0, 50, 5, "IDLE"], [250, 300, 1, "main"]], isrs: [], gaps: [] }, 100).windows[1].load)
+    expect(loadWindows({ runs: [[0, 50, 5, "IDLE", true], [250, 300, 1, "main", false]], isrs: [], gaps: [] }, 100).windows[1].load)
       .toBeNull();
-    expect(isIdle("IDLE") && isIdle("idle 00") && !isIdle("idler")).toBe(true);
     expect(percent(0.1234)).toBe("12.3%");
     expect(percent(null)).toBe("—");
   });
 
   it("CPU 負荷の積み上げ: タスク（多い順）・割り込み・その他で、上端が負荷。情報の無い窓は切る", () => {
-    const s = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, windows: [
+    const s = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: ["IDLE"], windows: [
       { t0: 0, t1: 100, covered: 100, load: 0.6, isr: 0.1, tasks: { main: 0.3, net: 0.1, IDLE: 0.4 } },
       { t0: 100, t1: 200, covered: 0, load: null, isr: null, tasks: {} },
       { t0: 200, t1: 300, covered: 100, load: 0.5, isr: 0, tasks: { main: 0.5, IDLE: 0.5 } },
@@ -72,6 +75,10 @@ describe("RTOS: 表と負荷の推移", () => {
     expect(Number.isNaN(tops[2][1])).toBe(true);
     expect(loadStack(s, (t) => t, { isr: "ISR", other: "Other" }, "main").map((x) => !!x.dim))
       .toEqual([false, true, true, true]);
+    // 小さい「その他」（0.01 %）も出す（0.05 % 以下を隠す経験則は使わない。計算の丸めの誤差だけは除く）
+    const tiny = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: ["IDLE"], windows: [
+      { t0: 0, t1: 100, covered: 100, load: 0.5001, isr: 0, tasks: { main: 0.5, IDLE: 0.4999 } }] });
+    expect(loadStack(tiny, (t) => t, { isr: "ISR", other: "Other" }).map((x) => x.name)).toEqual(["main", "Other"]);
   });
 
   it("記録から: 表は SQL の集計、区間は SQL の行、選んだ時刻のタスク・次の実行は find", async () => {
@@ -151,14 +158,15 @@ describe("Interrupts", () => {
     expect(rows[0]).toMatchObject({ number: 15, total: 0.3, self: 0.24, min: 0.05, max: 0.15, mean: 0.1, maxAt: 700 });
   });
 
-  it("分布図: 外れ値の棒に印、棒の中の最長の回", () => {
+  it("分布図: 長い順の上位の棒に印（外れ値の経験則は使わない）、棒の中の最長の回", () => {
     const acts = [...Array.from({ length: 20 }, (_, i) => ({ t: i * 10, tEnd: i * 10 + 5, inclusive: 5 + (i % 3), self: 5 })),
                   { t: 999, tEnd: 1049, inclusive: 50, self: 50 }];
     const h = histogram(acts, 10);
     expect(h.bars).toHaveLength(10);
     expect(h.bars[9].mark).toBe(true);
-    expect(h.bars[0].mark).toBe(false);
-    expect(h.outliers.map((a) => a.t)).toEqual([999]);
+    expect(h.bars[5].mark).toBe(false);                    // 長い順の上位の無い棒
+    expect(h.longest[0].t).toBe(999);
+    expect(h.longest.map((a) => a.inclusive)).toEqual([...h.longest.map((a) => a.inclusive)].sort((a, b) => b - a));
     expect(longestIn(h, 9)?.t).toBe(999);
     expect(longestIn(h, null)).toBeNull();
     expect(histogram([]).bars).toEqual([]);

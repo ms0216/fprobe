@@ -63,7 +63,7 @@ class LongRecordingTools:
                     self._collector.pause_events(True)
             stream = LaRecordingStream(device, self._recorder, rate_hz=rate_hz, rle=rle, chunk_s=chunk_s,
                                        lock=self._lock, on_end=self._la_record_ended, events_from=events_from,
-                                       carry=carry)
+                                       carry=carry, obs=self._collector.obs if self._collector is not None else None)
             try:
                 stream.start()
             except Exception:

@@ -20,11 +20,11 @@ def sequence(bits: int, *, tms: int, tdi: int = 0, capture: bool = False) -> byt
     return bytes([info]) + tdi.to_bytes((bits + 7) // 8, "little")
 
 
-async def setup(dut):
+async def setup(dut, **dp_args):
     dut.packet_size.value = 512
     dut.nreset_ext.value = "Z"
     dut.target_swdio.value = "Z"
-    dp = JtagDp()
+    dp = JtagDp(**dp_args)
     chain = JtagChain(dut, [dp, Bypass()], tck="swclk", tms="swdio", tdi="tdi", tdo="tdo")
     port = ControlPort(dut, request="in", response="out", rng=random.Random(5), gap=0.2, stall=0.2)
     await start_clock_and_reset(dut)
@@ -69,3 +69,20 @@ async def idcode_and_memory_access(dut):
     count, resp, data = await dap.transfer((AP_DRW_R, None), (AP_DRW_R, None), (DP_CTRL_R, None),
                                            (DP_RDBUFF_R, None))
     assert (count, resp) == (4, OK) and data[:2] == words[1:3] and data[2] & CDBGPWRUPACK
+
+
+@cocotb.test()
+async def block_read_with_wait_returns_every_word_in_order(dut):
+    """AP の転送の後に WAIT が続いても（Cortex-A7 の DCC の速い読み）、まとめ読み・まとめ書きの値がずれない"""
+    dap, dp = await setup(dut, wait_after_ap=2)
+    await dap.mem_setup()
+    words = [random.Random(11).getrandbits(32) for _ in range(24)]
+    await dap.transfer((AP_TAR_W, 0x20000000))
+    assert (await dap.block(AP_DRW_W, len(words), words))[:2] == (24, OK)
+    assert [dp.regs.memory[0x20000000 + 4 * i] for i in range(24)] == words
+    await dap.transfer((AP_TAR_W, 0x20000000))
+    assert await dap.block(AP_DRW_R, 24) == (24, OK, words)
+    await dap.transfer((AP_TAR_W, 0x20000004))
+    count, resp, data = await dap.transfer((AP_DRW_R, None), (AP_DRW_R, None), (DP_CTRL_R, None))
+    assert (count, resp) == (3, OK) and data[:2] == words[1:3]
+    assert dp.waits > 0

@@ -98,6 +98,9 @@ def test_export_gmon_callgrind_lcov_gcov_dot(probe, tmp_path):
     assert lcov["files"] == 1 and "SF:/src/" in (tmp_path / "pc.info").read_text(encoding="utf-8")
     gcov = probe.profile_export("gcov", str(tmp_path / "gcov"))
     assert [Path(f).name for f in gcov["written"]] == ["sram_demo.c.gcov"]
+    # 既定で関数を図から落とさない（「0.5 % 未満は省く」の暗黙の既定を持たない。省くのは min_fraction を渡したとき）
+    import inspect
+    assert inspect.signature(probe.profile_export).parameters["min_fraction"].default == 0.0
     probe.profile_export("dot", str(tmp_path / "pc.dot"))
     assert '"tick" -> "reached_milestone"' in (tmp_path / "pc.dot").read_text(encoding="utf-8")
     window = probe.profile_export("gmon", str(tmp_path / "late.out"), t0_s=0.010)

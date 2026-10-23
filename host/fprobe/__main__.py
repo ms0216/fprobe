@@ -45,6 +45,13 @@ def main(argv: list[str] | None = None) -> None:
     la.add_argument("--stream", type=float, metavar="SECONDS", help="トリガを使わず SECONDS 秒流し続けて VCD に書く")
     la.add_argument("--rle", action="store_true", help="--stream を変化点圧縮で")
     _add_run(commands)
+    merge = commands.add_parser("merge", help="2 つの記録を、子の記録の同期の組で親の時間軸 1 本に合成する")
+    merge.add_argument("parent", help="親のボードの記録")
+    merge.add_argument("child", help="子のボードの記録（同期の組 stream sync を含む）")
+    merge.add_argument("--child-name", required=True, help="子の出来事の stream に付ける名前（<名前>.<stream>）")
+    merge.add_argument("--out", required=True, help="合成した新しい記録")
+    merge.add_argument("--cable-delay-ns", type=float, help="配線の遅れ（測った値を明示して渡す。省略時は足さない）")
+    merge.add_argument("--gap-ms", type=float, help="組の間がこれを超えたら区間を分ける（省略時は分けない）")
     parser.add_argument("--port", help="UART のホストリンクの COM ポート（run のみ）")
     parser.add_argument("--eth", help="Ethernet のホストリンクの IP アドレス（run のみ）")
     args = parser.parse_args(argv)
@@ -55,6 +62,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "run":
         raise SystemExit(_run(args))
+    if args.command == "merge":
+        raise SystemExit(_merge(args))
     if args.command == "name" and args.action != "set":
         raise SystemExit(_names(args))
     if args.command == "name":
@@ -179,6 +188,26 @@ def _run(args) -> int:
     if summary:
         print(f"\n[fprobe run] {result.outcome}: {summary}（終了コード {result.exit_code}）", file=sys.stderr)
     return result.exit_code
+
+
+def _merge(args) -> int:
+    from .merge import merge
+    from .recording import Recording
+    def ticks(value: float | None, unit: float, recording: str) -> int | None:
+        """value × unit 秒を、その記録のタイムベースの刻みに（配線の遅れは親の時刻に足す、区間は子の時刻で比べる）。"""
+        if value is None:
+            return None
+        r = Recording.open(Path(recording))
+        try:
+            return round(value * unit * r.meta["timebase_hz"])
+        finally:
+            r.close()
+
+    result = merge(Path(args.parent), Path(args.child), Path(args.out), child_name=args.child_name,
+                   cable_delay_ticks=ticks(args.cable_delay_ns, 1e-9, args.parent),
+                   gap_ticks=ticks(args.gap_ms, 1e-3, args.child))
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
 
 
 if __name__ == "__main__":

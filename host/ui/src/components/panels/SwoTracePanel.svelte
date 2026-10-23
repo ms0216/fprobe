@@ -29,7 +29,7 @@
     }
   })();
   let settings = $state<TraceSettings>(loaded ?? { exceptions: true, timestamps: false, swoBaud: 2_000_000,
-                                                   coreClockHz: 84_000_000, variables: [{ expression: "", access: "write" }] });
+                                                   coreClockHz: null, variables: [{ expression: "", access: "write" }] });
   let result = $state<any>(null);
   let error = $state<string | null>(null);
   let picked = $state<number | null>(null);

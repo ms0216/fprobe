@@ -25,10 +25,18 @@ def test_fprobe_pynq_is_a_vivado_project_with_the_ps7_block_design():
 
 
 def test_fprobe_pynq_deep_uses_the_ps_ddr_as_the_deep_buffer():
-    # P3: PS の DDR の上端 32 MB（uEnv.txt の mem=480M で Linux から外す）を深いバッファに。内蔵ロジアナは持たない
+    # P3: PS の DDR の上端 32 MB（uEnv.txt の mem=479M で Linux から外す）を深いバッファに。内蔵ロジアナは持たない
     d = DESIGNS["fprobe_pynq_deep"]
     c = d.capabilities
     assert c.mem_bytes == 32 * 1024 * 1024 and c.la_depth == 0 and c.la_stream_events
     p = d.project()
     assert [b.name for b in p.block_designs] == ["ps7_hp_bd.tcl"]
     assert "axi_mem_port.vhd" in {s.name for s in p.sources}
+
+
+def test_only_the_pynq_designs_have_the_fpga_observation_port():
+    for name, d in DESIGNS.items():
+        assert getattr(d.capabilities, "fpga_obs", False) == name.startswith("fprobe_pynq"), name   # 申告の無い構成もある
+    for name in ("fprobe_pynq", "fprobe_pynq_deep"):
+        ports = {pin.port for pin in DESIGNS[name].project().pins}
+        assert {"obs_tck", "obs_tms", "obs_tdi", "obs_tdo"} <= ports

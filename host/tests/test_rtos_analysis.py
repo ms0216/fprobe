@@ -6,7 +6,7 @@ import pytest
 from fprobe.itm import ExceptionAction, ExceptionTrace, Overflow
 from fprobe.profile.exceptions import Activation
 from fprobe.rtos.analysis import (Intervals, KernelEvent, MemorySlot, MutexWatch, exception_activations,
-                                  execution_profile, find_jobs, inversion_episodes, isr_intervals, job_summary,
+                                  execution_profile, find_jobs, inversion_episodes, run_summary, isr_intervals, job_summary,
                                   load_series, memory_series, run_time_in)
 from fprobe.rtos.timeline import Gap, Run, Timeline
 
@@ -54,6 +54,7 @@ def test_load_series_per_window_without_idle():
     assert w1["load"] == pytest.approx(0.8)
     assert out["peak"]["t0"] == 100 and out["peak"]["load"] == pytest.approx(0.8)
     assert out["mean_load"] == pytest.approx(0.55)
+    assert out["idle_tasks"] == ["IDLE"]                                 # 負荷から除いたタスク（事実として添える）
 
 
 def test_load_series_excludes_gaps_and_counts_interrupts():
@@ -74,39 +75,35 @@ def test_load_series_needs_a_positive_window_and_says_nothing_without_runs():
 
 # --- ジョブ -----------------------------------------------------------------------------------------
 
-def test_jobs_from_priorities_split_preemption_from_blocking():
+def test_jobs_need_kernel_events_and_are_not_inferred_from_priorities():
+    # 「次に動いたタスクの優先度が高ければ横取り、低ければ待った」と推定しない（固定優先度・継承なしの仮定に頼る）。
+    # 出来事（ready / block）の無いタスクのジョブは作らない
     tl = timeline([(L, 0, 10), (H, 10, 20), (L, 20, 30), (IDLE, 30, 50), (H, 50, 60), (IDLE, 60, 100)])
-    jobs = find_jobs(tl, PRIORITIES, idle={IDLE}, isr=[(12, 14)])
-    by = {}
-    for j in jobs:
-        by.setdefault(j.task, []).append(j)
-    (low,) = by["low"]
-    assert (low.start, low.end, low.exec_time, low.preemptions, low.end_reason) == (0, 30, 20, 1, "blocked")
-    assert [(j.start, j.end, j.exec_time) for j in by["high"]] == [(10, 20, 8), (50, 60, 10)]   # 割り込みを除く
-    assert "IDLE" not in by
-    summary = job_summary(jobs, hz=1e6)
-    high = summary["high"]
-    assert high["jobs"] == 2 and high["exec"]["max"] == 10 and high["period"]["mean"] == 40
-    assert high["worst_exec"] == {"start": 50, "end": 60, "exec": 10, "wall": 10}
-    assert high["response"] is None and high["exec_us"]["max"] == pytest.approx(10)
-    assert summary["low"]["wall"]["max"] == 30 and summary["low"]["preemptions"] == 1
+    assert find_jobs(tl, idle={IDLE}, isr=[(12, 14)]) == []
 
 
-def test_jobs_with_equal_priorities_end_uncertain_and_gaps_truncate():
-    pri = {H: 1, M: 1, L: 1}
+def test_run_summary_is_the_facts_of_each_run():
+    tl = timeline([(L, 0, 10), (H, 10, 20), (L, 20, 30), (IDLE, 30, 50), (H, 50, 60), (IDLE, 60, 100)])
+    out = run_summary(tl, idle={IDLE}, isr=[(12, 14)], hz=1e6)
+    assert "IDLE" not in out
+    high, low = out["high"], out["low"]
+    assert high["runs"] == 2 and high["exec"]["max"] == 10 and high["exec"]["min"] == 8      # 割り込みを除く
+    assert high["period"]["mean"] == 40 and high["exec_us"]["max"] == pytest.approx(10)
+    assert high["worst_exec"] == {"start": 50, "end": 60, "exec": 10}
+    assert high["followed_by"] == {"low": 1, "IDLE": 1}                 # 次に動いたタスク（事実。理由は推定しない）
+    assert low["runs"] == 2 and low["followed_by"] == {"high": 1, "IDLE": 1}
+
+
+def test_run_summary_counts_runs_that_end_at_a_gap_or_the_edge():
     tl = timeline([(H, 0, 10), (M, 10, 20), (L, 20, 30), (L, 40, 50)], gaps=[(30, 40)])
-    jobs = {(j.task, j.start): j for j in find_jobs(tl, pri)}
-    assert jobs[("high", 0)].end_reason == "uncertain"
-    assert jobs[("low", 20)].end_reason == "truncated"                  # 抜けで終わりが分からない
-    summary = job_summary(list(jobs.values()))
-    assert summary["low"]["jobs"] == 0 and summary["low"]["truncated"] == 2
-    assert summary["high"]["uncertain"] == 1
+    out = run_summary(tl)
+    assert out["low"]["followed_by"] == {"(gap)": 1, "(end)": 1} and out["high"]["followed_by"] == {"mid": 1}
 
 
 def test_jobs_from_kernel_events_have_response_times():
     tl = timeline([(IDLE, 0, 10), (H, 10, 15), (M, 15, 18), (H, 18, 20), (IDLE, 20, 100)])
     events = [KernelEvent(5, "ready", H), KernelEvent(20, "block", H)]
-    (job,) = [j for j in find_jobs(tl, PRIORITIES, idle={IDLE}, events=events) if j.task == "high"]
+    (job,) = [j for j in find_jobs(tl, idle={IDLE}, events=events) if j.task == "high"]
     assert (job.release, job.start, job.end, job.exec_time, job.preemptions) == (5, 10, 20, 7, 1)
     assert job.response == 15 and job.end_reason == "blocked"
     assert job_summary([job])["high"]["response"]["max"] == 15

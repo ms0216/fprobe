@@ -24,10 +24,11 @@
   const MENUS: { label: Key; items: Item[] }[] = [
     { label: "menu.file", items: [{ cmd: "openElf" }, { recent: true }, { cmd: "loadDemo" }, "sep", { cmd: "programRam" },
                                   "sep", { label: "menu.settings", run: () => ui.open("settings") }] },
-    { label: "menu.view", items: [...viewItems(), "sep", { label: "menu.resetLayout", run: () => dock.reset() }] },
+    { label: "menu.view", items: [...viewItems(), "sep", { label: "menu.layoutSystem", run: () => dock.layout("system") },
+                                  { label: "menu.resetLayout", run: () => dock.reset() }] },
     { label: "menu.debug", items: [{ cmd: "continue" }, { cmd: "halt" }, "sep", { cmd: "stepOver" }, { cmd: "stepInto" },
                                    { cmd: "stepOut" }, { cmd: "stepInstruction" }, { cmd: "runToCursor" }, "sep", { cmd: "toggleBreakpoint" },
-                                   { cmd: "removeAllBreakpoints" }, "sep", { cmd: "reset" }] },
+                                   { cmd: "removeAllBreakpoints" }, "sep", { cmd: "reset" }, { cmd: "rescueReset" }] },
     { label: "menu.target", items: [{ cmd: "connect" }, { cmd: "disconnect" }, "sep", { cmd: "download" },
                                     { cmd: "loadSvd" }, "sep", { cmd: "capture" }] },
     { label: "menu.help", items: [{ label: "menu.shortcuts", run: () => ui.open("shortcuts") },

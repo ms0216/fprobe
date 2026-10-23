@@ -149,6 +149,10 @@ architecture rtl of la_deep_buffer is
   signal m_start, m_stop : std_logic := '0';
   signal f_valid, f_ready, f_trig : std_logic;
   signal f_data : std_logic_vector(132 downto 0);
+  -- FIFO（ブロック RAM の読み出し）と書き込みの間の受け渡しの段（mem の頭打ちの経路: ブロック RAM の出力から書き込みの
+  -- 選択を通って DDR3 の受け渡しまでを、レジスタで切る）
+  signal q_valid, q_ready : std_logic;
+  signal q_data : std_logic_vector(132 downto 0);
   signal w_running, w_triggered, w_done : std_logic;
   signal w_beat : unsigned(ADDR_BITS - 1 downto 0);
   signal w_slot : unsigned(2 downto 0);
@@ -273,6 +277,10 @@ begin
     generic map (WIDTH => 133, DEPTH => 512)
     port map (in_clk => clk, in_rst => rst, in_valid => m_in_valid, in_ready => m_in_ready, in_data => m_in,
               out_clk => mem_clk, out_rst => mem_rst, out_valid => f_valid, out_ready => f_ready, out_data => f_data);
+  to_mem_slice_i : entity work.stream_slice
+    generic map (WIDTH => 133)
+    port map (clk => mem_clk, rst => mem_rst, in_valid => f_valid, in_ready => f_ready, in_data => f_data,
+              out_valid => q_valid, out_ready => q_ready, out_data => q_data);
 
   ---------------------------------------------------------------------------------------------
   -- mem: リング書き込みと読み出し
@@ -290,8 +298,8 @@ begin
     port map (clk => mem_clk, rst => mem_rst, start => m_start, stop => m_stop or m_full_stop,
               post_beats => unsigned(ctl_dst(ADDR_BITS - 1 downto 0)), stream => ctl_dst(ADDR_BITS),
               ev_enable => ev_en_m,
-              in_valid => f_valid, in_ready => f_ready, in_data => f_data(127 downto 0), in_kind => f_data(132),
-              in_trig => f_data(131), in_slot => unsigned(f_data(130 downto 128)),
+              in_valid => q_valid, in_ready => q_ready, in_data => q_data(127 downto 0), in_kind => q_data(132),
+              in_trig => q_data(131), in_slot => unsigned(q_data(130 downto 128)),
               running => w_running, triggered => w_triggered, done => w_done, trigger_beat => w_beat,
               trigger_slot => w_slot, written => w_written, total => w_total, ev_written => m_ev_written,
               ev_pos => ev_wpos,

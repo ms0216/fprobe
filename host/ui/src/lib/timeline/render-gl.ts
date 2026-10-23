@@ -47,6 +47,8 @@ void main() {
   vec4 c = vec4(0.0);
   if (mode == ${MODE.logic}) {
     top = pad + 1.0;
+    // 波形の無い所（記録の前後・流し始める前）: 薄い斜線（値 0 の線と見分ける）
+    if (d.r == 3u && yy >= top && yy <= bottom && mod(x + yy, 6.0 * u_dpr) < u_dpr) c = c_grid * 0.7;
     if (yy >= top && yy <= bottom && d.r != 3u) {
       if (d.r == 2u) c = (yy < top + lw || yy > bottom - lw) ? c_line : c_fill;
       else {

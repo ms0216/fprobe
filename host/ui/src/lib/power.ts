@@ -108,23 +108,21 @@ export interface Dip {
   tEnd: number;                      // 戻ったところ
   at: number;                        // いちばん低い点の時刻
   min: number;                       // いちばん低い値
-  drop: number;                      // 基準（中央値）からの下がり
+  under: number;                     // 指定した電圧より下の深さ（指定 − いちばん低い値）
 }
 
-/** 電圧の低下: 中央値より drop 以上下がった区間（連続する点をまとめる）。低い順ではなく時刻の順 */
-export function findDips(xs: ArrayLike<number>, ys: ArrayLike<number>, drop: number): Dip[] {
-  const finite = Array.from(ys).filter(Number.isFinite).sort((a, b) => a - b);
-  if (!finite.length) return [];
-  const median = finite[Math.floor(finite.length / 2)];
+/** 電圧の低下: 使う人が指定した電圧 below 以下の区間（連続する点をまとめる）。基準の水準（中央値等）は推定しない。
+ *  低い順ではなく時刻の順 */
+export function findDips(xs: ArrayLike<number>, ys: ArrayLike<number>, below: number): Dip[] {
   const out: Dip[] = [];
   let cur: Dip | null = null;
   for (let i = 0; i < xs.length; i++) {
     const y = ys[i];
-    const low = Number.isFinite(y) && y <= median - drop;
+    const low = Number.isFinite(y) && y <= below;
     if (low) {
-      if (!cur) cur = { t: xs[i], tEnd: xs[i], at: xs[i], min: y, drop: median - y };
+      if (!cur) cur = { t: xs[i], tEnd: xs[i], at: xs[i], min: y, under: below - y };
       cur.tEnd = xs[i];
-      if (y < cur.min) Object.assign(cur, { min: y, at: xs[i], drop: median - y });
+      if (y < cur.min) Object.assign(cur, { min: y, at: xs[i], under: below - y });
     } else if (cur) {
       cur.tEnd = xs[i];
       out.push(cur);

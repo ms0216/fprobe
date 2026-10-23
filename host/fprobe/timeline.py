@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from array import array
 from collections.abc import Sequence
+from pathlib import Path
 
 from .api.binary import BinaryResult
 from .la import Waveform
 from .recording import Recording
+from . import timeline_fpga
 from .timeline_rows import carry_in, classify, summarize, summary_sql
 
 __all__ = ["DEFAULT_MAX_EDGES", "DEFAULT_MAX_EVENTS", "MAX_BINS", "STATES", "TILE_FORMAT", "capture_tile",
@@ -33,6 +35,7 @@ DEFAULT_MAX_EDGES = 2_000_000          # 生の変化点（全チャンネルの
 DEFAULT_MAX_EVENTS = 100_000           # 段（stream）ごとの生の出来事の上限
 MAX_BINS = 16_384                      # 要約の区間の数の上限（超えたら bin を広げる）
 MAX_RAW_CHUNKS = 256                   # 生で返す波形のかたまりの数の上限
+NO_DATA_ROW = "-"                      # 要約の 1 区間の「波形が無い」（recording.NO_DATA と同じ）
 STATES = {"0": 0, "1": 1, "x": 2, "-": 3}            # 要約の状態の符号（u8）
 _TRANSLATE = bytes.maketrans(b"01x-", bytes([0, 1, 2, 3]))
 
@@ -127,13 +130,18 @@ def recording_tile(rec: Recording, t0: int, t1: int, channels: Sequence[int] | N
         start, width, count = _bins(t0, t1, grid.width(grid.level_for(want)), 1 << 4)
     else:
         start, width, count = _bins(t0, t1, _power_of_two_at_most(want), 2)
-    available = rec.channel_count()
-    channels = list(range(available)) if channels is None else _checked(channels, available)
-    if channels:
-        out["wave"] = _recording_wave(rec, t0, t1, channels, (start, width, count), max_edges, sections)
-        titles = rec.meta.get("channel_names")                        # 記録の情報にチャンネルの名前があれば
-        if isinstance(titles, list):
-            out["wave"]["names"] = [str(titles[ch]) if ch < len(titles) else f"ch{ch}" for ch in channels]
+    sources = _wave_sources(rec)
+    try:
+        available = sum(n for _, _, n in sources)
+        channels = list(range(available)) if channels is None else _checked(channels, available)
+        if channels:
+            out["wave"] = _recording_wave(sources, t0, t1, channels, (start, width, count), max_edges, sections)
+            names = _channel_names(sources, channels)
+            if names is not None:
+                out["wave"]["names"] = names
+    finally:
+        for _, r, _ in sources[1:]:
+            r.close()
     names = rec.distinct("stream") if streams is None else list(streams)
     coverage = rec.coverage(t0, t1)
     if not coverage["complete"]:
@@ -164,10 +172,13 @@ def name_rows(result: dict, stream: str, namer) -> None:
 def _raw_lane(rec: Recording, stream: str, t0: int, t1: int, n: int, i: int, sections: dict) -> dict:
     """生の段: 出来事（t0 より前に始まって t0 以降に終わるものも。状態・値の段は t0 の前の最後の出来事も）と、段の規則で
     分けた段・ラベル・値・深さ・色の意味・飛び先の番地（fprobe.timeline_rows）。"""
-    items = list(rec.iter_events(t0, t1, [stream], overlapping=True))
-    carried = carry_in(rec, stream, t0, t1)
-    if carried:
-        items = sorted(carried + items, key=lambda e: e.t)
+    if stream == timeline_fpga.STREAM:                    # 組の値を記録の信号の定義で信号ごとに（後から付けた名前も効く）
+        items = timeline_fpga.raw_items(rec, t0, t1)
+    else:
+        items = list(rec.iter_events(t0, t1, [stream], overlapping=True))
+        carried = carry_in(rec, stream, t0, t1)
+        if carried:
+            items = sorted(carried + items, key=lambda e: e.t)
     kinds = sorted({e.kind for e in items})
     code = {k: j for j, k in enumerate(kinds)}
     c = classify(stream, items)
@@ -189,8 +200,12 @@ def _summary_lane(rec: Recording, stream: str, n: int, bins: tuple[int, int, int
     start, width, count = bins
     counts = rec.event_bins(start, width, count, [stream]).get(stream, array("I", [0]) * count)
     sections[f"lane.{i}.counts"] = counts
-    s = summarize(stream, rec.query_events(start, start + width * count, summary_sql(stream, start, width, count)),
-                  count)
+    end = start + width * count
+    if stream == timeline_fpga.STREAM:                    # 信号は出来事を 1 回だけ読んでまとめて数える（summary_rows）
+        rows = timeline_fpga.summary_rows(rec, start, width, count) +             rec.query_events(start, end, timeline_fpga.marker_sql(start, width, count))
+    else:
+        rows = rec.query_events(start, end, summary_sql(stream, start, width, count))
+    s = summarize(stream, rows, count)
     sections[f"lane.{i}.row_counts"] = array("I", s.counts)
     if s.low is not None:
         sections[f"lane.{i}.row_min"] = array("d", s.low)
@@ -199,28 +214,87 @@ def _summary_lane(rec: Recording, stream: str, n: int, bins: tuple[int, int, int
             "rows": [r.to_dict() for r in s.table.rows]}
 
 
-def _recording_wave(rec: Recording, t0: int, t1: int, channels: list[int], bins: tuple[int, int, int],
-                    max_edges: int, sections: dict) -> dict:
-    chunks = rec.wave_chunks(t0, t1)
-    if len(chunks) <= MAX_RAW_CHUNKS and all(kept for _, kept in chunks):
-        pieces, plan, edges = [], [], 0
+def _wave_sources(rec: Recording) -> list[tuple[str, Recording, int]]:
+    """波形の源: 記録そのものと、合成した記録（python -m fprobe merge）の下のボードごとの記録 boards/<名前>（R25）。
+    (名前、記録、チャンネルの数) の並び。ボードのチャンネルは、親のチャンネルの後ろに続く番号で並べる。"""
+    out = [("", rec, rec.channel_count())]
+    base = getattr(rec, "directory", None)
+    for child in (rec.meta.get("merged") or {}).get("children", []):
+        path = child.get("waveforms")
+        if base is None or not path or not (Path(base) / path / "meta.json").is_file():
+            continue
+        sub = Recording.open(Path(base) / path)
+        out.append((str(child.get("name", path)), sub, sub.channel_count()))
+    return out
+
+
+def _locate(sources: list[tuple[str, Recording, int]], channel: int) -> tuple[int, int]:
+    """番号 channel の源の番号と、その源の中のチャンネル"""
+    for k, (_, _, n) in enumerate(sources):
+        if channel < n:
+            return k, channel
+        channel -= n
+    raise ValueError(f"チャンネル {channel} は無い")
+
+
+def _channel_names(sources: list[tuple[str, Recording, int]], channels: list[int]) -> list[str] | None:
+    """チャンネルの名前: 記録の情報の channel_names、ボードのものは「ボード名.名前」。名前もボードも無ければ None。"""
+    titles = sources[0][1].meta.get("channel_names")
+    if len(sources) == 1 and not isinstance(titles, list):
+        return None
+    out = []
+    for ch in channels:
+        k, local = _locate(sources, ch)
+        name, r, _ = sources[k]
+        own = r.meta.get("channel_names")
+        title = str(own[local]) if isinstance(own, list) and local < len(own) else f"ch{local}"
+        out.append(f"{name}.{title}" if k else title)
+    return out
+
+
+def _recording_wave(sources: list[tuple[str, Recording, int]], t0: int, t1: int, channels: list[int],
+                    bins: tuple[int, int, int], max_edges: int, sections: dict) -> dict:
+    """波形（生の変化点か、そろえた区間の要約）。channels は源をまたいだ番号（親の後ろにボードのチャンネル）。"""
+    by_source: dict[int, list[tuple[int, int]]] = {}
+    for ch in channels:
+        k, local = _locate(sources, ch)
+        by_source.setdefault(k, []).append((ch, local))
+    plan, edges, raw = [], 0, True
+    for k, wanted in by_source.items():
+        rec = sources[k][1]
+        chunks = rec.wave_chunks(t0, t1)
+        if len(chunks) > MAX_RAW_CHUNKS or not all(kept for _, kept in chunks):
+            raw = False
+            break
         for c, _ in chunks:
             tps = c.ticks_per_sample
             s0 = max(0, int((t0 - c.t0) / tps))
             s1 = min(c.length, max(s0 + 1, int(-(-(t1 - c.t0) // tps))))
             wave = rec.waveform(c)
-            plan.append((c, wave, s0, s1))
-            edges += sum(wave.count_between(ch, s0, s1) for ch in channels if ch < c.channels)
+            present = [(ch, local) for ch, local in wanted if local < c.channels]
+            plan.append((c, wave, s0, s1, present))
+            edges += sum(wave.count_between(local, s0, s1) for _, local in present)
             if edges > max_edges:
+                raw = False
                 break
-        if edges <= max_edges:
-            for i, (c, wave, s0, s1) in enumerate(plan):
-                present = [ch for ch in channels if ch < c.channels]
-                levels = _raw_piece(wave, present, s0, s1, i, sections)
-                pieces.append({"t0": c.t0, "t1": c.t1, "tps": c.ticks_per_sample, "length": c.length, "s0": s0, "s1": s1,
-                               "channels": present, "levels": levels})
-            return {"mode": "raw", "channels": channels, "edges": edges, "pieces": pieces}
+        if not raw:
+            break
+    if raw:
+        pieces = []
+        for i, (c, wave, s0, s1, present) in enumerate(plan):
+            levels = []
+            for ch, local in present:                     # 区画の名前は源をまたいだ番号（wave.<かたまり>.<番号>）
+                levels.append(wave.level_at(local, s0))
+                sections[f"wave.{i}.{ch}"] = array("d", wave.edges_between(local, s0, s1))
+            pieces.append({"t0": c.t0, "t1": c.t1, "tps": c.ticks_per_sample, "length": c.length, "s0": s0, "s1": s1,
+                           "channels": [ch for ch, _ in present], "levels": levels})
+        return {"mode": "raw", "channels": channels, "edges": edges, "pieces": pieces}
     start, width, count = bins
-    rows = rec.waveform_view(start, start + width * count, count)
-    _states([rows[ch] for ch in channels], sections, "wave.states")
+    views = {k: sources[k][1].waveform_view(start, start + width * count, count) for k in by_source}
+    rows = []
+    for ch in channels:
+        k, local = _locate(sources, ch)
+        view = views[k]
+        rows.append(view[local] if local < len(view) else NO_DATA_ROW * count)
+    _states(rows, sections, "wave.states")
     return {"mode": "summary", "channels": channels, "start": start, "bin": width, "bins": count}

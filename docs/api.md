@@ -3,6 +3,8 @@
 
 JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 1。仕様: docs/superpowers/specs/2026-10-17-host-daemon-design.md
 
+Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=…)` → `c.call("メソッド", 引数=値, …)`（引数はキーワードで。戻り値は dict）。
+
 ## session.hello
 
 種類: `read`。名乗る（最初に必ず呼ぶ）。api_version が合わなければ断られる。
@@ -49,7 +51,7 @@ JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 1。仕�
 
 ## ui.state.set
 
-種類: `read`。画面の状態を変える（渡したものだけ。人の画面がその視点・カーソル・段・出来事・フレームに移る）。cursors は渡したカーソルだけ（null で消す）。sampling はデータ サンプリングの式の一覧と周期（{expressions: [{expr, plot, axis}], rate_hz}。人の画面の一覧がそれになる）。dashboard は操作パネルの部品の配置（{version: 1, widgets: [{id, kind = gauge / number / bar / chart / button / slider / toggle / lamp, expr, label, min, max, unit, digits, value, w, h}]}。64 個・64 KiB まで。人の画面・遠隔の画面の操作パネルがそれになる。足りない・範囲の外の値は画面が直す）。clear に挙げた項目（view / cursors / rows / event / frame / sampling / dashboard）は既定に戻す。origin は変えた窓の印（通知 ui.state にそのまま載る）。結果は状態と changed（変わった項目）。AI が人に場所を見せる（例: 異常の区間に view と cursors を置く）のに使う。 cursors.mouse を渡すと、その窓・利用者のマウスのカーソル（pointers。名前・役割はデーモンが付ける）も変わる（人の画面がほかの窓・AI の指す時刻を時間軸に描く。null で消える）。
+種類: `read`。画面の状態を変える（渡したものだけ。人の画面がその視点・カーソル・段・出来事・フレームに移る）。cursors は渡したカーソルだけ（null で消す）。sampling はデータ サンプリングの式の一覧と周期（{expressions: [{expr, plot, axis}], rate_hz}。人の画面の一覧がそれになる）。dashboard は操作パネルの部品の配置（{version: 1, widgets: [{id, kind = gauge / number / bar / chart / button / slider / toggle / lamp, expr, label, min, max, unit, digits, value, w, h}]}。64 個・64 KiB まで。人の画面・遠隔の画面の操作パネルがそれになる。足りない・範囲の外の値は画面が直す）。system はシステム解析の MCU のメモリの表と FPGA の条件（{watches: [{name, address}], conditions: [{name, expr}]}。名前は重ならない。人の画面・遠隔の画面の表がそれになる）。clear に挙げた項目（view / cursors / rows / event / frame / sampling / dashboard / system）は既定に戻す。origin は変えた窓の印（通知 ui.state にそのまま載る）。結果は状態と changed（変わった項目）。AI が人に場所を見せる（例: 異常の区間に view と cursors を置く）のに使う。 cursors.mouse を渡すと、その窓・利用者のマウスのカーソル（pointers。名前・役割はデーモンが付ける）も変わる（人の画面がほかの窓・AI の指す時刻を時間軸に描く。null で消える）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -58,10 +60,12 @@ JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 1。仕�
 | `rows` | `Array<string> | null` |  |
 | `event` | `Record<string, unknown> | null` |  |
 | `frame` | `number | null` |  |
-| `clear` | `Array<"view" | "cursors" | "rows" | "event" | "frame" | "sampling" | "dashboard"> | null` |  |
+| `clear` | `Array<"view" | "cursors" | "rows" | "event" | "frame" | "sampling" | "dashboard" | "system"> | null` |  |
 | `origin` | `string | null`（MCP の道具には出さない） |  |
 | `sampling` | `Record<string, unknown> | null` |  |
 | `dashboard` | `Record<string, unknown> | null` |  |
+| `fpga_signals` | `Record<string, unknown> | null` |  |
+| `system` | `Record<string, unknown> | null` |  |
 
 ## probe.info
 
@@ -154,7 +158,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.status
 
-種類: `read`。コアの状態（RUNNING / HALTED 等）と、停止中なら PC・場所（where、分かれば function・file・line）。つないでいる先（target・frequency_hz・wire = swd / jtag）も。走っているのに致命的エラーで回り続けていれば fatal = {kind（lockup = ロックアップ / fatal_halt = RTOS・ランタイムの止まって回る関数 / fault_loop = 故障の処理 / stuck = 狭いループでティックが止まった）, function, since（見つけ始めた時刻、UNIX 秒）, evidence（手がかり: clue = lockup / pc_in / pc_loop / tick_stopped）}。材料は止めずに読む DHCSR・DWT_PCSR・ティックの変数。複数ドロップの部品（RP2040）なら core（接続中のコア）と cores = [{core, selected, state, pc・where（止まっていれば）} または {core, selected, error}]。接続していないコアは TARGETSEL で DP を一時的に選び直して DHCSR を読む（DAP サンプラが動いている間は error）。RISC-V なら arch = "riscv"・hart・debug_module（版・プログラムバッファ・システムバス・ハート）。Cortex-A・ARM11 なら arch = "armv7-a" / "armv6"・core・cores・breakpoints・watchpoints・jtag_chain・tap（Cortex-A は debug_base・apb_ap・discovery = rom_table / part_table も）。
+種類: `read`。コアの状態（RUNNING / HALTED 等）と、停止中なら PC・場所（where、分かれば function・file・line）。つないでいる先（target・frequency_hz・wire = swd / jtag）も。走っているのに致命的エラーの事実（下記）があれば fatal = {kind（lockup = DHCSR.S_LOCKUP / fatal_halt = PC の見本がすべて RTOS・ランタイムの致命的エラーの処理の中 / fault_loop = 故障の処理の中 / tick_stopped = RTOS のティックが前の見張りから変わっていない）, function, since（最初に見た時刻、UNIX 秒）, evidence（手がかり: clue = lockup / pc_in / pc_range / tick_stopped）}。事実だけで、何秒続いたら等の経験則の判定はしない。材料は止めずに読む DHCSR・DWT_PCSR・ティックの変数。複数ドロップの部品（RP2040）なら core（接続中のコア）と cores = [{core, selected, state, pc・where（止まっていれば）} または {core, selected, error}]。接続していないコアは TARGETSEL で DP を一時的に選び直して DHCSR を読む（DAP サンプラが動いている間は error）。RISC-V なら arch = "riscv"・hart・debug_module（版・プログラムバッファ・システムバス・ハート）。Cortex-A・ARM11 なら arch = "armv7-a" / "armv6"・core・cores・breakpoints・watchpoints・jtag_chain・tap（Cortex-A は debug_base・apb_ap・discovery = rom_table / part_table も）。
 
 ## target.core.select
 
@@ -195,12 +199,12 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.reset
 
-種類: `control`。ターゲットをリセットする（halt=True ならリセット直後（リセットのベクタキャッチ）で停止）。kind: default（pyOCD の既定）/ system（AIRCR.SYSRESETREQ。周辺も）/ core（AIRCR.VECTRESET。コアだけ、ARMv7-M だけ）/ hardware（nRESET の線）/ emulated（デバッガがレジスタを初期値にする）。コアに無い種類は断る（黙って替えない）。
+種類: `control`。ターゲットをリセットする（halt=True ならリセット直後（リセットのベクタキャッチ）で停止）。kind: default（pyOCD の既定）/ system（AIRCR.SYSRESETREQ。周辺も）/ core（AIRCR.VECTRESET。コアだけ、ARMv7-M だけ）/ hardware（nRESET の線）/ emulated（デバッガがレジスタを初期値にする）/ rescue（RP2040 の救済の DP でチップ全体（USB 等の周辺も）をリセットし、同じ設定でつなぎ直して起動させる。ファームウェアが固まって普通のリセットで戻らないとき）。コアに無い種類は断る（黙って替えない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `halt` | `boolean` |  |
-| `kind` | `"default" | "system" | "core" | "hardware" | "emulated"` |  |
+| `kind` | `"default" | "system" | "core" | "hardware" | "emulated" | "rescue"` |  |
 
 ## target.vector_catch
 
@@ -358,7 +362,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## jtag.scan
 
-種類: `control`。JTAG のチェーンを走査する（未接続のときだけ）: 装置の数・IDCODE（設計者・名前）・IR 長（既知の表か Capture-IR から推定。ir_length_source = table / measured / guessed）。jtag_chain は target_connect にそのまま渡せる。TDO の張り付きも分かる。
+種類: `control`。JTAG のチェーンを走査する（未接続のときだけ）: 装置の数・IDCODE（設計者・名前）・IR 長（既知の表か Capture-IR から。ir_length_source = table / measured / ambiguous。ambiguous は境目が一つに決まらず推測しない: ir_candidates に候補）。jtag_chain は target_connect にそのまま渡せる（全部決まったときだけ）。TDO の張り付きも分かる。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -767,6 +771,7 @@ filter_channels（外の信号の ch = 拡張ヘッダのピンと専用の入�
 | `filter_channels` | `number` |  |
 | `filter_ns` | `number` |  |
 | `pulse` | `Record<string, unknown> | null` |  |
+| `external_only` | `boolean` |  |
 
 ## la.arm
 
@@ -784,6 +789,7 @@ filter_channels（外の信号の ch = 拡張ヘッダのピンと専用の入�
 | `filter_channels` | `number` |  |
 | `filter_ns` | `number` |  |
 | `pulse` | `Record<string, unknown> | null` |  |
+| `external_only` | `boolean` |  |
 
 ## la.collect
 
@@ -816,6 +822,7 @@ rle = True は変化点圧縮（遅い信号なら数秒〜数十秒分）、Fal
 | `filter_channels` | `number` |  |
 | `filter_ns` | `number` |  |
 | `pulse` | `Record<string, unknown> | null` |  |
+| `external_only` | `boolean` |  |
 
 ## la.deep.arm
 
@@ -833,6 +840,7 @@ rle = True は変化点圧縮（遅い信号なら数秒〜数十秒分）、Fal
 | `filter_channels` | `number` |  |
 | `filter_ns` | `number` |  |
 | `pulse` | `Record<string, unknown> | null` |  |
+| `external_only` | `boolean` |  |
 
 ## la.deep.collect
 
@@ -885,7 +893,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## la.decode
 
-種類: `read`。最後の捕捉の通信を解読する。protocol は解読器の名前（la.decoders で一覧。組み込み: uart / spi / i2c / swd / can（CAN FD 含む）/ onewire / jtag / i2s / parallel / manchester と、積み重ねる jtag_arm（jtag の上）/ spiflash（spi）/ eeprom24（i2c）/ modbus（uart）、la.decoder_load で読み込んだ利用者の解読器）。settings はその設定（uart: channel・baud（省略で推定）・data_bits・parity・stop_bits・invert、spi: sck・mosi・miso・cs・mode・word_bits、i2c: scl・sda、swd: swclk・swdio・drive、can: channel・bitrate・data_bitrate・sample_point、onewire: channel、jtag: tck・tms・tdi・tdo・trst・initial_state・ir_names、i2s: sck・ws・sd・format・word_bits、parallel: data（列）・clock・edge・enable、manchester: channel・bitrate・convention）。積み重ねる解読器は下の解読の設定を下の名前のキーに入れる（例 modbus: {"uart": {"channel": 5, "baud": 9600, "parity": "even"}}、何段でも）。start / end（サンプル）・kinds・errors_only で絞り、offset から limit 件。counts は種類ごとの件数、errors は誤りの数。kinds を省くと解読器の既定の種類（swd は transfer、jtag は ir・dr・reset 等）。記録中なら注釈を共通の時間軸にも入れる。結果の kinds は絞った種類（null = 全部）、total・counts は絞る前の件数。
+種類: `read`。最後の捕捉の通信を解読する。protocol は解読器の名前（la.decoders で一覧。組み込み: uart / spi / i2c / swd / can（CAN FD 含む）/ onewire / jtag / i2s / parallel / manchester と、積み重ねる jtag_arm（jtag の上）/ spiflash（spi）/ eeprom24（i2c）/ modbus（uart）、la.decoder_load で読み込んだ利用者の解読器）。settings はその設定（uart: channel・baud（必須。波形から推定しない）・data_bits・parity・stop_bits・invert、spi: sck・mosi・miso・cs・mode・word_bits、i2c: scl・sda、swd: swclk・swdio・drive、can: channel・bitrate・data_bitrate・sample_point、onewire: channel、jtag: tck・tms・tdi・tdo・trst・initial_state・ir_names、i2s: sck・ws・sd・format・word_bits、parallel: data（列）・clock・edge・enable、manchester: channel・bitrate・tolerance（必須。1 ビットに対する許容のずれ 0〜0.25。既定の値は持たない）・convention）。積み重ねる解読器は下の解読の設定を下の名前のキーに入れる（例 modbus: {"uart": {"channel": 5, "baud": 9600, "parity": "even"}}、何段でも）。start / end（サンプル）・kinds・errors_only で絞り、offset から limit 件。counts は種類ごとの件数、errors は誤りの数。kinds を省くと解読器の既定の種類（swd は transfer、jtag は ir・dr・reset 等）。記録中なら注釈を共通の時間軸にも入れる。結果の kinds は絞った種類（null = 全部）、total・counts は絞る前の件数。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -960,9 +968,112 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `raw` | `boolean` |  |
 | `since` | `number | null` |  |
 
+## fpga_obs.open
+
+種類: `control`。対象の FPGA の JTAG で観測の回路 v2（target_ip/fprobe_obs）を読み始め、申告（id・mode = stream（記録型）/ snapshot（標本型）・version・width・groups・fifo_depth・clock_hz・sync_delay・sample_delay・lost_bits）を返す。値を記録に残すには events.start も要る。auto_reopen = 観測の回路が答えなくなって止まったら（対象の FPGA を書き直した等）1 秒ごとに同じ設定で開き直す（記録中なら印。回数は status の reopened。利用者が選んだときだけ）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `chain` | `Record<string, unknown> | null` |  |
+| `user_ir` | `number` |  |
+| `half_period` | `number` |  |
+| `words` | `number` |  |
+| `sync_period` | `number` |  |
+| `auto_reopen` | `boolean` |  |
+
+## fpga_obs.close
+
+種類: `control`。観測をやめる（対象の TAP を Test-Logic-Reset に戻し、線を手放す。auto_reopen も止める）。
+
+## fpga_obs.status
+
+種類: `read`。観測の状態（running・id_ok・stuck・cmd_pending・overflow_seen・cmd_dropped・scans・id・mode）と、最後に開いた設定 config・申告 declared・auto_reopen・自動で開き直した回数 reopened。
+
+## fpga_obs.trigger_set
+
+種類: `control`。FPGA の条件（システム解析と同じ書き方。例 "restart changed and state=BUSY"・"state=BUSY"（入った瞬間）・"flag rose"。瞬間の項は 1 つまで）を fprobe の観測のエンジンで比べ、成り立ったらハードのクロストリガ（源 obs_match）: halt = 割り込み書き込み（既定は MCU の停止）、la = ロジアナのトリガ（クロストリガだけで捕捉するには la.arm / la.deep.arm の external_only = true。指定しないとパターンが空なので、すぐ捕捉する）。MCU を止める遅れは、観測のスキャン 1 回分（標本型・TCK 2.5 MHz で約 15 µs）+ SWD の書き込み（ホストの CSW・TAR の控えがあれば 4 転送 = 約 190 SWCLK、無ければ読んで戻す転送が足される。2026-10-22 の Shrike-Lite の実測（条件の値の立ち上がり → DHCSR の書き込み）: SWD 4 MHz で 101 µs、1 MHz で 206〜362 µs）。信号の名前は組 group の定義（fpga_obs.signals_get）から。ケイパビリティ obs_match が要る。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `condition` | `string` | ○ |
+| `halt` | `boolean` |  |
+| `la` | `boolean` |  |
+| `group` | `number` |  |
+
+## fpga_obs.trigger_status
+
+種類: `read`。ハードの FPGA の条件のトリガ（fpga_obs.trigger_set）: 条件・halt・la・成り立った回数 count（無ければ condition = null）。
+
+## fpga_obs.trigger_clear
+
+種類: `control`。ハードの FPGA の条件のトリガをやめる（クロストリガの経路の obs_match を外す。ほかの源の経路は触らない）。
+
+## fpga_obs.register_read
+
+種類: `control`。観測の回路のレジスタ（16 ビット）を読む（0・1 ID、2 VERSION、3 GROUPS、4 FIFO_DEPTH、5・6 CLOCK_HZ、7 SYNC_DELAY、8 SAMPLE_DELAY、9 LOST_BITS、14 CONTROL、15 SELECT）。標本型には無い。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `addr` | `number` | ○ |
+
+## fpga_obs.register_write
+
+種類: `control`。観測の回路のレジスタに書く（0x10 CONTROL の bit0 = 記録する、0x11 SELECT = 観測する組）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `addr` | `number` | ○ |
+| `value` | `number` | ○ |
+
+## fpga_obs.select
+
+種類: `control`。観測する 16 ビットの組を選ぶ（0〜groups − 1）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `group` | `number` | ○ |
+
+## fpga_obs.start
+
+種類: `control`。観測の回路が値の変化を記録し始める（始め直すと絶対の時刻と今の値から）。
+
+## fpga_obs.stop
+
+種類: `control`。観測の回路の記録を止める（読み出しは続く）。
+
+## fpga_obs.read
+
+種類: `control`。イベントの記録から観測した値を fprobe の時刻（time_us）で返す。窓は events.read と同じ（続けて読むなら since）。value = null は溢れの切れ目。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `last` | `number` |  |
+| `since` | `number | null` |  |
+
+## fpga_obs.signals_get
+
+種類: `read`。FPGA の観測の組に付ける信号の定義（signals = 画面の状態の既定、recording = 開いている記録の定義）。
+
+## fpga_obs.signals_set
+
+種類: `control`。信号の定義（組ごとの名前・ビット・書式・列挙）を置く。画面の状態と、記録中・開いている記録に（後から変えても過去の記録の段の名前が変わる）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `signals` | `Record<string, unknown>` | ○ |
+
+## system.status
+
+種類: `read`。MCU と FPGA の両方の今を 1 回で返す（mcu: コアの状態と addresses の 32 ビットの語を止めずに読んだ値・connect（最後に成功した target.connect の引数。対象のリセットで SWD がはずれたら同じ引数でつなぎ直す）、fpga: 観測の状態と各組の最新の値・信号）。システム解析の画面・AI の見回り用。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `addresses` | `Array<unknown> | null` |  |
+| `fpga_last` | `number` |  |
+
 ## watch.set
 
-種類: `control`。変数を止めずに周期的に読む。expressions: 変数名・C の式・番地（"0x20000000" か "0x20000000:バイト数"）。決まった番地の式は FPGA の DAP サンプラが rate_hz で読む（pyOCD 等のデバッグと同時に使える。合わせて 8 か所・各 16 語まで。値はイベント記録と、記録中なら stream "sample" に入る）。ポインタをたどる式（"head->pos.x"・"*p"）はホストが chase_rate_hz ごとに番地を引き直して読む（method = host）。誤った式（名前が無い・メモリ上に無い等）は rejected（[{expression, error}]）に外して残りを取る（全部が誤りなら始めずに誤り）。jitter（0〜15）: サンプラの周期のゆらぎ（周期的な処理との噛み合いを防ぐ）。
+種類: `control`。変数を止めずに周期的に読む。expressions: 変数名・C の式・番地（"0x20000000" か "0x20000000:バイト数"）。決まった番地の式は FPGA の DAP サンプラが rate_hz で読む（pyOCD 等のデバッグと同時に使える。合わせて 8 か所・各 16 語まで。値はイベント記録と、記録中なら stream "sample" に入る）。ポインタをたどる式（"head->pos.x"・"*p"）はホストが chase_rate_hz ごとに番地を引き直して読む（method = host）。誤った式（名前が無い・メモリ上に無い等）は rejected（[{expression, error}]）に外して残りを取る（全部が誤りなら始めずに誤り）。jitter（0〜15）: サンプラの周期のゆらぎ（周期的な処理との噛み合いを防ぐ）。names: 式ごとの名前（値・時間軸の段の名前。記録中なら記録にも残す）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -971,6 +1082,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `ap` | `number` |  |
 | `chase_rate_hz` | `number` |  |
 | `jitter` | `number` |  |
+| `names` | `Array<string>` |  |
 
 ## watch.stop
 
@@ -1077,7 +1189,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.jobs
 
-種類: `control`。タスクのジョブ（起きてから待つまでの 1 回の仕事）ごとの実行時間（横取り・割り込みを除く）・経過時間・周期の分布（最小・最大・平均・σ・p90・p99）と最悪の回（いつ）。方法 itm でカーネルの出来事があれば ready / block で区切り、応答時間（ready から待つまで）も出す。無ければ区間の終わりは次に動いたタスクの優先度で決める（高い方へ = 横取り、低い方へ = 待った、同じ = uncertain、抜け・端 = truncated で統計に入れない）。task を渡すとそのタスクのジョブの一覧（実行時間の長い順に limit 件）も。
+種類: `control`。tasks: カーネルの出来事（方法 itm のトレースフックの ready / block）で区切ったジョブ（起きてから待つまでの 1 回の仕事）ごとの実行時間（横取り・割り込みを除く）・経過時間・周期・応答時間の分布（最小・最大・平均・σ・p90・p99）と最悪の回（いつ）。出来事の無いタスクのジョブは作らない（次に動いたタスクの優先度から横取りか待ちかを推定しない）。runs: タスクごとの区間（続けて動いた間）の回数・自分の時間（割り込みを除く）・周期の分布、最長の回、次に動いたタスクの回数（followed_by。抜けは (gap)、観測の端は (end)）。task を渡すとそのタスクのジョブ（jobs）と区間（task_runs）の一覧（自分の時間の長い順に limit 件）も。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1133,7 +1245,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.blocking
 
-種類: `control`。ブロック時間（カーネルの出来事から）: 待ちの区間（block = オブジェクト・通知を待った / delay / suspend から ready まで）と outcome（起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = timeout）。タスクごと・オブジェクトごとの回数・合計・平均・最長（いつ）・時間切れの回数。task で区間の一覧を絞る。
+種類: `control`。ブロック時間（カーネルの出来事から）: 待ちの区間（block = オブジェクト・通知を待った / delay / suspend から ready まで）と outcome（起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = failed。失敗の理由は推定しない）。タスクごと・オブジェクトごとの回数・合計・平均・最長（いつ）・失敗の回数。task で区間の一覧を絞る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1150,7 +1262,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.overhead
 
-種類: `control`。トレースフックの負荷: 語の数（ポート 31・見出し 30・中身 29）・出来事の種類ごとの数・SWO のバイト数と帯域の使用率（swo_share。1 に近いと FIFO が待ち・あふれる）・CPU の負荷の見積もり（cpu_share。命令数と、記録の中身の語が FIFO の空きを待つ時間から。core_clock_hz が要る）。
+種類: `control`。トレースフックの負荷: 語の数（ポート 31・見出し 30・中身 29）・出来事の種類ごとの数・SWO のバイト数と帯域の使用率（swo_share = 送ったビット ÷ 帯域）。数えた事実だけで、CPU の負荷は推定しない（実測はトレースの有無でアイドルの回る数を比べる）。
 
 ## profile.start
 
@@ -1227,15 +1339,15 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## timing.measure
 
-種類: `read`。記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・中央値・p90・p99）・分布・外れ値（iqr: 四分位範囲の柵 / zscore）。start / end は `recording_find` と同じ条件。外れ値と min_at・max_at の時刻は `recording_events` で開ける。生の組と外れ値は limit 件まで。
+種類: `read`。記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・中央値・p90・p99）・分布・長い順の上位（iqr: 四分位範囲の柵 / zscore）。start / end は `recording_find` と同じ条件。長い順の上位と min_at・max_at の時刻は `recording_events` で開ける。生の組と長い順の上位は limit 件まで。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `start` | `Record<string, unknown>` | ○ |
 | `end` | `Record<string, unknown>` | ○ |
 | `bins` | `number` |  |
-| `outliers` | `"iqr" | "zscore"` |  |
 | `limit` | `number` |  |
+| `longest` | `number` |  |
 
 ## testpoint.instrument
 
@@ -1257,7 +1369,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## testpoint.start
 
-種類: `control`。テストポイントの受け取りを始める（すぐ戻る）。method: gpio_serial（2 線。clock_channel・data_channel）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから after_beats 拍。止めたときに読む）か stream（流し続ける捕捉を背景で解読・解析する。長時間向け。メモリは一定）。itm は SWO（port のスティミュラス・ポート。swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定。受信を始めてからポートを有効にし、止めると元に戻す。時刻は FPGA が SWO のバイトに付けた時刻）。rtt は RTT の上りの rtt_channel（core_clock_hz = CYCCNT の速さが要る。時刻はホストの時計で写すので不確かさ付き）。map_path を省くと最後の `testpoint_instrument` の対応表。duration_s を渡すと `testpoint_stop` はそこまで待つ（stream は自分で終わる）。silence_s（何も来ない）・open_s（出口が無い）・long_*（長すぎる呼び出し = 平均 + long_sigma·σ かつ平均の long_ratio 倍）は異常の印。記録中（`recording_start`）なら stream "testpoint"（call / hit / anomaly）に書く。
+種類: `control`。テストポイントの受け取りを始める（すぐ戻る）。method: gpio_serial（2 線。clock_channel・data_channel）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから after_beats 拍。止めたときに読む）か stream（流し続ける捕捉を背景で解読・解析する。長時間向け。メモリは一定）。itm は SWO（port のスティミュラス・ポート。swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定。受信を始めてからポートを有効にし、止めると元に戻す。時刻は FPGA が SWO のバイトに付けた時刻）。rtt は RTT の上りの rtt_channel（core_clock_hz = CYCCNT の速さが要る。時刻はホストの時計で写すので不確かさ付き）。map_path を省くと最後の `testpoint_instrument` の対応表。duration_s を渡すと `testpoint_stop` はそこまで待つ（stream は自分で終わる）。silence_s（これより長く何も来ない）・open_s（これより長く出口が無い）・long_s（これより長い呼び出し）は、明示したときだけ付ける印（経験則の「いつもより長い」は付けない。いちばん長い呼び出しは統計の max_s・max_at）。記録中（`recording_start`）なら stream "testpoint"（call / hit / anomaly）に書く。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1280,9 +1392,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `bucket_s` | `number` |  |
 | `silence_s` | `number | null` |  |
 | `open_s` | `number | null` |  |
-| `long_sigma` | `number` |  |
-| `long_min_calls` | `number` |  |
-| `long_ratio` | `number` |  |
+| `long_s` | `number | null` |  |
 
 ## testpoint.stop
 
@@ -1331,7 +1441,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## xtrig.route
 
-種類: `control`。源（"la_trigger" / "dap_match" / "host" / "sequence" = 多段トリガ）を動作につなぐ。to_la: ロジアナをトリガする源、
+種類: `control`。源（"la_trigger" / "dap_match" / "host" / "sequence" = 多段トリガ / "obs_match" = FPGA の観測の値の一致（fpga_obs.trigger_set） / "sampler_match" = サンプラの値の一致（sampler.trigger_set））を動作につなぐ。to_la: ロジアナをトリガする源、
 to_inject: 割り込み書き込み（既定はターゲット停止）をする源。指定しない動作は切る。
 
 | 引数 | 型 | 必須 |
@@ -1393,7 +1503,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## xtrig.output_set
 
-種類: `control`。クロストリガの動作「出力の端子を動かす」の設定（U41）。channel = 出力に使う端子のロジアナの ch（使える端子は xtrig.output_status。Primer: 4 予備・5 UART RX・6 SWO・7 UART TX）。条件 = pattern（端子の並び。ロジアナの ch 0〜7 のビット {"mask", "value", "any"}。any = true は見る ch のどれかが一致で成立。毎周期その場で照合）or sources（源 "la_trigger" / "dap_match" / "host" / "sequence"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈。刻みに丸めた実際の範囲を返す）/ "hold"（立ち上がりから無効にするまで）/ "while"（条件の間だけ。遅れ 40 ns 程度）。level: 動いている間に出す値（high / low）。動いていない間は駆動しない（高インピーダンス。プルアップのある端子は弱く Highなので notes を返す）。設定するとその端子の普段の機能（UART・SWO）を止めて出力に使う（戻すのは xtrig.output_release）。同時に動かせる数は xtrig.output_status の actions。enable = true で続けて有効にする（既定は無効のまま。xtrig.output_enable）。
+種類: `control`。クロストリガの動作「出力の端子を動かす」の設定（U41）。channel = 出力に使う端子のロジアナの ch（使える端子は xtrig.output_status。Primer: 4 予備・5 UART RX・6 SWO・7 UART TX）。条件 = pattern（端子の並び。ロジアナの ch 0〜7 のビット {"mask", "value", "any"}。any = true は見る ch のどれかが一致で成立。毎周期その場で照合）or sources（源 "la_trigger" / "dap_match" / "host" / "sequence" / "obs_match"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈。刻みに丸めた実際の範囲を返す）/ "hold"（立ち上がりから無効にするまで）/ "while"（条件の間だけ。遅れ 40 ns 程度）。level: 動いている間に出す値（high / low）。動いていない間は駆動しない（高インピーダンス。プルアップのある端子は弱く Highなので notes を返す）。設定するとその端子の普段の機能（UART・SWO）を止めて出力に使う（戻すのは xtrig.output_release）。同時に動かせる数は xtrig.output_status の actions。enable = true で続けて有効にする（既定は無効のまま。xtrig.output_enable）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1506,7 +1616,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## swo.decode
 
-種類: `control`。timeout_s の間に届いた SWO を ITM / DWT のパケットに解読する（`swo_start` の後。`swo_read` と同じ受信を使うのでどちらか一方で読む）。packets（例外トレースは name 付き・PC サンプル・スティミュラス等）は先頭 limit 件、text はポートごとの printf の行。記録中なら共通の時間軸にも入れる。
+種類: `control`。timeout_s の間に届いた SWO を ITM / DWT のパケットに解読する（`swo_start` の後。`swo_read` と同じ受信を使うのでどちらか一方で読む）。packets（例外トレースは name 付き・PC サンプル・スティミュラス等）は先頭 limit 件、text はポートごとの printf の行。記録中なら共通の時間軸にも入れる。 synced = ITM の解読が同期しているか、unsynced_bytes = 同期を失ってから捨てたバイトの数（同期パケットを待つ間。推定で再開しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1643,14 +1753,14 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## user.trace.stats
 
-種類: `control`。値とイベントの集計（Keil の Event Statistics・SystemView のユーザイベント相当）: 値は名前ごと（構造体は 名前.欄）の数・最小・最大・平均・最後、区間（start / stop を名前ごとに後入れ先出しで対に。入れ子・割り込みの中も正しい）は回数・最小・最大・平均・σ・分位・分布・外れ値（開始の時刻）、mark は回数。name で絞る。
+種類: `control`。値とイベントの集計（Keil の Event Statistics・SystemView のユーザイベント相当）: 値は名前ごと（構造体は 名前.欄）の数・最小・最大・平均・最後、区間（start / stop を名前ごとに後入れ先出しで対に。入れ子・割り込みの中も正しい）は回数・最小・最大・平均・σ・分位・分布・長い順の上位（開始の時刻）、mark は回数。name で絞る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `name` | `string | null` |  |
 | `bins` | `number` |  |
-| `outliers` | `"iqr" | "zscore"` |  |
 | `limit` | `number` |  |
+| `longest` | `number` |  |
 
 ## uart.write
 
@@ -1714,7 +1824,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## recording.status
 
-種類: `read`。記録中か、名前・件数・時刻の範囲（タイムベース）・ホストの出来事の時刻の不確かさ。
+種類: `read`。記録中か、名前・件数・時刻の範囲（タイムベース）・ホストの出来事の時刻の不確かさ。記録中は watch_running（MCU のメモリの読みが動いているか。false なら記録にメモリが入らず欠ける）・events_errors（取り込みの失敗）。
 
 ## recording.list
 
@@ -1731,7 +1841,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 ## recording.events
 
 種類: `read`。時刻（タイムベース、t1 は含まない）の範囲の出来事を時刻順に。streams: dap / uart / swo / rtt / aux / host / target /
-annotation / sample / clock。
+annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号ごとの値）/ clock。fpga の value_untimed・gap_untimed・group_untimed は、時刻合わせの印が来ないまま鎖が終わって時刻の決まらない記録（t は受けた時 = 起きた時刻の上限）。 dap のクロストリガの割り込み書き込みは kind inject（本体に転送数 transfers。2026-10-23 より前の記録・旧い回路では ap_write）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1740,6 +1850,69 @@ annotation / sample / clock。
 | `streams` | `Array<string> | null` |  |
 | `kinds` | `Array<string> | null` |  |
 | `limit` | `number` |  |
+
+## recording.correlate
+
+種類: `read`。結果の直前に多い出来事（原因の判定はしない）: 結果の条件 effect（例 "誤り changed"）の各時刻の直前（window_s 秒の中）に、causes の各条件（例 "restart changed and state=BUSY"・"in0 rose"）が来ていた割合 preceded・記録のうち候補の後 window_s 以内に当たる時間の割合 coverage・後に結果が来た候補の割合 followed・遅れ（秒）・例の時刻（タイムベース）。測った事実だけを返す（判定・経験則の順位づけをしない）。並びは preceded の大きい順、同じなら条件の文字の順。変数: MCU のメモリの名前（watch.set の names）か番地、FPGA の信号の名前、ピンの名前か ch<N>（同じ名前は mcu. / fpga. / pin. で区別）。項: <変数> changed / rose / fell、<変数>=<値>（列挙の名前も）を and でつなぐ（瞬間の項が 1 つ以上）。sampling = 変数の読みの間隔（秒。遅れの分解能）、fpga_hidden = 標本型の標本の間で見えなかった変化の数。causes を省くと記録の変数から候補を作って調べ（auto: 信号の変化・列挙の値に入った瞬間・変化 かつ 列挙 = 値の組・ピンの rose / fell・ほかのメモリの変化）、上位 limit 個。max_coverage を渡せば coverage がそれを超える自動の候補を除く。reads = MCU のメモリの読みの事実（回数・間隔の分位・いちばん長い空白）。gaps = 使った変数のデータの欠け（reason: reads_missing（gap_s を渡したときだけ）/ read_failed / pins_missing / fpga_lost / events_error / recording_dropped、t0・t1。その間の結果・候補は数えられていない）。judged = 先行率の分母（窓が候補の変数の欠けにかかる結果と、結果の変数の欠けの直後に見えた結果は除く）。fpga_hidden = 標本型の FPGA の観測で標本の間に見えなかった変化の数（信号を問わない合計）。sampling の null = 決まった読みの間隔が無い変数。effect.delta = 結果の MCU のメモリの範囲の最初と最後の値の差（count と違えば 1 回の読みで何回分も動いている）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `effect` | `string` | ○ |
+| `causes` | `Array<unknown> | null` |  |
+| `window_s` | `number` | ○ |
+| `t0` | `number | null` |  |
+| `t1` | `number | null` |  |
+| `examples` | `number` |  |
+| `limit` | `number` |  |
+| `gap_s` | `number | null` |  |
+| `max_coverage` | `number | null` |  |
+
+## recording.durations
+
+種類: `read`。変数（recording.correlate と同じ指し方: MCU のメモリの名前・番地、FPGA の信号、ピン）の値ごとの回数・続いた時間（両端の見えている区間だけ。秒の最小・中央値・90 % 点・最大）・範囲の中でその値だった時間の割合 share。続いた時間の合計の大きい順に limit 個。例: FPGA の state が BUSY のまま続く時間と、ファームウェアの待ち時間を比べる。データの欠けにかかる回は数えず excluded（欠けは gaps）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `variable` | `string` | ○ |
+| `t0` | `number | null` |  |
+| `t1` | `number | null` |  |
+| `limit` | `number` |  |
+| `gap_s` | `number | null` |  |
+
+## recording.transactions
+
+種類: `read`。記録を区間（リクエスト等の 1 回の取引）に切って数える: 区間 = start（瞬間の項のある条件）が成り立ってから次に成り立つまで。区間ごとに by（変数）の開始時の値・counts の各条件の回数・effect が起きたか。groups = by の値ごとの区間の数・effect の割合・counts の平均、rows = 最初の rows 区間。条件・変数は recording.correlate と同じ書き方。by_at = end なら by は区間の終わり（次の始めの直前）の値。データの欠けにかかる区間は groups・rows に入れず excluded（変数ごとの内訳 excluded_by、欠けは gaps）。length_s = 区間の長さ・effect_offset_s = 区間の始めから結果までの時間（秒の分位。始めの直後に集まるなら前の区間の結果かもしれない: effect_lag_s で前の区間に割り当てる）。warnings = 欠けで除いた区間の数と内訳。effect があれば by_effect = 結果が起きた区間（with）と起きなかった区間（without）の数・counts の平均。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `start` | `string` | ○ |
+| `by` | `string | null` |  |
+| `counts` | `Array<unknown> | null` |  |
+| `effect` | `string | null` |  |
+| `t0` | `number | null` |  |
+| `t1` | `number | null` |  |
+| `rows` | `number` |  |
+| `by_at` | `"start" | "end"` |  |
+| `effect_lag_s` | `number` |  |
+| `gap_s` | `number | null` |  |
+
+## recording.trigger_set
+
+種類: `control`。記録中に、条件（recording.correlate と同じ書き方。MCU のメモリ・FPGA の信号・ピンをまたげる。例 "誤り changed"・"restart changed and state=BUSY"）が成り立つたびに記録に印（stream annotation の mark）を付ける。action = stop なら、最初に成り立った時刻から post_s 秒が記録に入ったら記録を止める（めったに起きない不具合を前後つきで残す）。判定は PC で数秒遅れる（ハードのクロストリガとは別）。記録の始めから調べる。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `condition` | `string` | ○ |
+| `action` | `"mark" | "stop"` |  |
+| `post_s` | `number` |  |
+
+## recording.trigger_status
+
+種類: `read`。条件の見張り（recording.trigger_set）の様子: 条件・action・回数 hits・最初と最後に成り立った時刻 first_t / last_t（タイムベース）・調べ終えた時刻 checked・状態 state（off / armed / fired / stopped / error）。
+
+## recording.trigger_clear
+
+種類: `control`。条件の見張りをやめる。
 
 ## recording.find
 
@@ -1815,7 +1988,7 @@ annotation / sample / clock。
 
 ## recording.query
 
-種類: `read`。記録（記録中のもの、または開いたもの）に読み取り専用の SQL を 1 文（AI の集計・検索用）。表: events(t, t_end, stream, kind, a, b, body, unc)（時刻はタイムベース、body は JSON で json_extract(body, '$.text') の形で読む）、chunks(t0, t1, path, ticks_per_sample, channels, length)（波形のかたまり）。関数: timebase_hz()、seconds(t)。読み以外（書き・PRAGMA・ATTACH・一時表）は断る。params は ? か :名前 の値。limit 行・timeout_s 秒まで（超えたら truncated / 誤り）。結果は columns と rows（列の並び）。長期の記録は t0 / t1 に重なる分割（8 個まで。多ければ断る）をつないで読み、表 segments・summary も読める。t0 / t1 を省くと新しい 8 個（それより多ければ partial = true）。結果に segments（つないだ分割の番号）。
+種類: `read`。記録（記録中のもの、または開いたもの）に読み取り専用の SQL を 1 文（AI の集計・検索用）。表: events(t, t_end, stream, kind, a, b, body, unc)（時刻はタイムベース、body は JSON で json_extract(body, '$.text') の形で読む）、chunks(t0, t1, path, ticks_per_sample, channels, length)（波形のかたまり）。関数: timebase_hz()、seconds(t)。読み以外（書き・PRAGMA・ATTACH・一時表）は断る。params は ? か :名前 の値。limit 行（既定 1000、上限 100000。多い行は SQL の集計（COUNT・GROUP BY）か t の範囲で分ける）・timeout_s 秒まで（超えたら truncated / 誤り）。結果は columns と rows（列の並び）。長期の記録は t0 / t1 に重なる分割（8 個まで。多ければ断る）をつないで読み、表 segments・summary も読める。t0 / t1 を省くと新しい 8 個（それより多ければ partial = true）。結果に segments（つないだ分割の番号）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2089,7 +2262,7 @@ annotation / sample / clock。
 
 ## heap.scan
 
-種類: `control`。ヒープを辿る（ELF のシンボルから。DWARF 不要）: allocator = freertos（heap_4 / heap_5）/ newlib_nano / newlib（dlmalloc）。省略で ELF にあるもの全部。使用量・空き・最大の空き・断片化（1 − 最大の空き / 空きの合計）・大きさの分布・アロケータのカウンタと、壊れ（issues: bad_size = 大きさが不正。suspect は直前の使用中のブロック = あふれの疑い / bad_link / bad_end / free_list_loop・unsorted・outside / free_not_listed / listed_not_free / unmerged_free / bad_padding / bad_links・bad_footer（dlmalloc）/ counter_mismatch）。heap_5 の領域は xHeapRegions か regions（[[先頭, 大きさ]]）、newlib-nano のヒープの終わりは sbrk の変数か end。blocks でブロックの一覧（先頭から）、compare で前回の走査からの増減（増えた使用中のブロック = リークの手がかり）。`heap_trace_start` 中なら使用中のブロックを呼び出し元ごとに（callers）。止まっているときだけ（live=true で走行中にも: 一貫しない）。
+種類: `control`。ヒープを辿る（ELF のシンボルから。DWARF 不要）: allocator = freertos（heap_4 / heap_5）/ newlib_nano / newlib（dlmalloc）。省略で ELF にあるもの全部。使用量・空き・最大の空き・断片化（1 − 最大の空き / 空きの合計）・大きさの分布・アロケータのカウンタと、壊れ（issues: bad_size = 大きさが不正。previous_used は直前の使用中のブロック（事実。壊した者は推定しない） / bad_link / bad_end / free_list_loop・unsorted・outside / free_not_listed / listed_not_free / unmerged_free / bad_padding / bad_links・bad_footer（dlmalloc）/ counter_mismatch）。heap_5 の領域は xHeapRegions か regions（[[先頭, 大きさ]]）、newlib-nano のヒープの終わりは sbrk の変数か end。blocks でブロックの一覧（先頭から）、compare で前回の走査からの増減（増えた使用中のブロック）。`heap_trace_start` 中なら使用中のブロックを呼び出し元ごとに（callers）。止まっているときだけ（live=true で走行中にも: 一貫しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2114,7 +2287,7 @@ annotation / sample / clock。
 
 ## heap.trace.report
 
-種類: `read`。malloc / free の記録の要約: 確保・解放の回数、生きている確保（数・バイト）、最大の使用量、誤り（double_free・failed_allocation・reused_live_pointer）、リークの候補（leak_candidates: 呼び出し元ごとの、min_age_s 秒より古い生きている確保。growing = 記録の間に生きている数が増え続けた = 強い候補）、使用量の推移（series: 記録を始めてからの秒, バイト）。
+種類: `read`。malloc / free の記録の要約: 確保・解放の回数、生きている確保（数・バイト）、最大の使用量、誤り（double_free・failed_allocation・reused_live_pointer）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s 秒より古いもの。バイトの多い順。live_counts = 記録の最初と最後の間を 4 つに分けた 5 つの時点での生きている数。リークかは判定しない）、使用量の推移（series: 記録を始めてからの秒, バイト）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2173,7 +2346,7 @@ annotation / sample / clock。
 
 ## debug.halt_risk
 
-種類: `read`。コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）で壊れうるか（ELF のシンボルだけ。機器には触れない）: risky、reasons（重い順。kind = radio（無線の割り込み・BLE 等のスタック）/ usb（USB の機器）/ watchdog / rtos、count、symbols = 手がかりのシンボルの先頭、rtos = RTOS の名前）、monitor_in_elf（止めずにデバッグするモニタがファームにあるか。あれば target.debug_mode.set の mode="monitor"）。risky なら止める前に人に知らせ、止めずに調べる道具（watch.set・rtos.tasks の live・profile.start）かモニタ方式を先に考える。
+種類: `read`。コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の手がかり（ELF のシンボルだけ。機器には触れない。事実だけで判定はしない）: matched（どれかの名前が合った）、matches（決まった順。kind = radio（無線の割り込み・BLE 等のスタック）/ usb（USB の機器）/ watchdog / rtos、count、symbols = 合ったシンボルの先頭、rtos = RTOS の名前）、monitor_in_elf（止めずにデバッグするモニタがファームにあるか。あれば target.debug_mode.set の mode="monitor"）。matched なら止める前に人に知らせ、止めずに調べる道具（watch.set・rtos.tasks の live・profile.start）かモニタ方式を先に考える。
 
 ## watch.trigger
 
@@ -2546,11 +2719,11 @@ annotation / sample / clock。
 
 ## target.stack.usage
 
-種類: `control`。MSP のスタックの使用量の実測（`target_stack_paint` の後）: 底から塗りが残るバイト数（untouched）から使った最大の深さ（used）・割合（fraction。threshold 以上で warning）、底まで使っていれば overflow、止まっていれば いまの深さ（current = 上端 − MSP）。走行中でも読める（止めない）。範囲・塗りの値は塗ったときのもの（bottom・top・fill で上書き）。
+種類: `control`。MSP のスタックの使用量の実測（`target_stack_paint` の後）: 底から塗りが残るバイト数（untouched）から使った最大の深さ（used）・割合（fraction）、塗りが 1 バイトも残っていなければ reached_bottom、SP が下端より下なら overflow（事実だけ。warning は threshold を明示したときだけ）、止まっていれば いまの深さ（current = 上端 − MSP）。走行中でも読める（止めない）。範囲・塗りの値は塗ったときのもの（bottom・top・fill で上書き）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
-| `threshold` | `number` |  |
+| `threshold` | `number | null` |  |
 | `fill` | `number | null` |  |
 | `bottom` | `number | null` |  |
 | `top` | `number | null` |  |
@@ -2625,6 +2798,371 @@ annotation / sample / clock。
 | `source_root` | `string | null` |  |
 | `test_name` | `string` |  |
 | `min_fraction` | `number` |  |
+
+## linux.connect
+
+種類: `control`。Linux のターゲットに SSH（Windows の OpenSSH。利用者の ~/.ssh と ssh-agent、BatchMode）でつなぎ、能力の事実を返す: カーネルの版・機械・カーネルの設定（uprobes・ftrace・kprobes・BPF・BTF・perf・ハードのブレークポイント・devmem。読めなければ null = 不明）・tracefs（trace_clock のある場所）・uprobe_events と kprobe_events の有無・trace_clock・perf_event_paranoid・ptrace_scope・道具（gcc・gdbserver・gdb・perf・bpftrace）・uid・sudo。sudo=true ならターゲットの操作を sudo -n で行う（sudo_password_env を渡すと sudo -S -k で、その環境変数のパスワードを stdin の最初の行で渡す。パスワードの要る sudo のターゲットだけに使い、つなぐときに sudo -v で確かめる）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `host` | `string` | ○ |
+| `user` | `string` | ○ |
+| `port` | `number` |  |
+| `key` | `string | null` |  |
+| `sudo` | `boolean` |  |
+| `sudo_password_env` | `string | null` |  |
+
+## linux.disconnect
+
+種類: `control`。Linux のターゲットを切る（プローブを外し、エージェントを止める）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.capabilities
+
+種類: `read`。つないだときに採った能力の事実（`linux_connect` の結果と同じ）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.agent.deploy
+
+種類: `control`。エージェント（C）の源をターゲットの ~/.fprobe に置き、ターゲットの gcc で作る。使った gcc（--version の 1 行目）と源の sha256 を返す。gcc が無ければ失敗。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.agent.start
+
+種類: `control`。エージェントを SSH の中で起動する（sudo なら sudo -n）。新しいエージェントの通しの番号は 0 から始まるので、前の番号の表とリングの読みを捨てる（リングは開き直す）。 watchdog_s を渡すと、デーモンからの入力がその秒数途絶えたとき、linger のリングがあれば ptrace しているプロセスが終わるまで続けてから、無ければ bp を戻してすぐ、エージェントは終わる。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `watchdog_s` | `number | null` |  |
+
+## linux.agent.status
+
+種類: `read`。エージェントの状態: 動いているか・終了コード・stderr の最後・出来事の受け手の誤りの数 event_errors と最後の誤り・捨てた JSON でない行の数 bad_lines・導入の記録・時刻合わせを続ける処理の誤り。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.agent.stop
+
+種類: `control`。エージェントを止める（ptrace のブレークポイントは元に戻して外す）。ptrace のプローブは一覧から消え、消した名前を cleared_probes で返す。 リングの読み続け（linux.ring.watch）も止める。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.probe.add
+
+種類: `control`。アプリの関数（symbol）か番地（address。32 ビットの ARM は isa = arm / thumb を明示）にプローブを付ける。バイナリはターゲットから取り寄せて手元に置く（sysroot_file・sha256）。method=uprobe: tracefs の uprobe_events に書く（作った行 line を返す）。引数は fetchargs（例 "a=%r0:s32"）を明示する。32 ビットの ARM では ARM 命令の関数だけ（Thumb は断る）。カーネルに uprobe_events が無ければ失敗。method=ptrace: pid のプロセスの全スレッドに付ける。当たるたびに全スレッドを止め、regs のレジスタを読み、1 歩進めて置き直す（振る舞いが変わる。時刻はエージェントが止まりを知った時刻）。fork の子は元の命令に戻して外す（vfork の子は親とメモリを共有するので書き換えない）。最初の命令が PC を書く・Thumb の IT なら断る。32 ビットの ARM だけ。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `name` | `string` | ○ |
+| `binary` | `string` | ○ |
+| `method` | `"uprobe" | "ptrace"` | ○ |
+| `symbol` | `string | null` |  |
+| `address` | `number | null` |  |
+| `isa` | `"arm" | "thumb" | null` |  |
+| `fetchargs` | `Array<string> | null` |  |
+| `regs` | `Array<"r0" | "r1" | "r2" | "r3" | "r4" | "r5" | "r6" | "r7" | "r8" | "r9" | "r10" | "r11" | "r12" | "sp" | "lr" | "pc" | "cpsr"> | null` |  |
+| `ret` | `boolean` |  |
+| `pid` | `number | null` |  |
+
+## linux.probe.list
+
+種類: `read`。付けたプローブ（場所・作った行または計画・取り寄せたバイナリ）。ptrace していたプロセスが終わったものは ended（終了コード・シグナル）が付く（エージェントからは消えている。linux.probe.remove で一覧から外す）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.probe.remove
+
+種類: `control`。プローブを外す。終わったプロセスのものは一覧から外すだけ（ended を返す）。エージェントが先に終わっていたら agent_running=false を返す（ターゲットのアプリにブレークポイントの命令が残っている恐れ）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `name` | `string` | ○ |
+
+## linux.sync
+
+種類: `control`。ネットワークの時刻合わせ: エージェントの時計（CLOCK_MONOTONIC_RAW）を count 回問い、（ターゲットの時刻、PC の往復の中点、往復の半分）の組を足す。出来事の換算は隣り合う組の内挿。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `count` | `number` | ○ |
+
+## linux.trace.start
+
+種類: `control`。出来事の受け取りを始める: uprobe か ftrace のイベントがあれば trace_clock を mono_raw にして（無ければ今の時計のまま、その名前を返す）trace_pipe を読む。sync_interval_s ごとに 1 回時刻合わせをする。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `sync_interval_s` | `number` | ○ |
+
+## linux.trace.stop
+
+種類: `control`。出来事の受け取りと時刻合わせを止める（プローブは残す）。最後に 1 回時刻合わせをしてから、残りの出来事を記録に入れる（それでも組の外のものは outside=true で入る）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.events.read
+
+種類: `read`。受けた出来事（since の番号より後を limit 件）: 方式・プローブ・pid / tid・ターゲットの時刻 target_ns と時計の名前・引数 / レジスタ。読む時点の時刻合わせの組で換算した PC の時刻 host_s と sync（往復の半分 half_rtt_ns・最も近い組までの距離・組の範囲の外 outside）を付ける（組が 2 つ未満なら付けない）。最近の 100000 件だけ持つ（あふれた数 dropped）。記録中に受けた出来事だけを、その記録に、後ろに組ができたものから内挿で換算して stream "<target>.ptrace" / "<target>.uprobe" に入れる（sync に記録の時計の不確かさ clockmap_uncertainty_ticks を別に足す。記録を止める前に組を 1 つ置いて残りを入れる）。記録中に受けたのに入れられなかった数（組が 2 つ未満・記録の時計の点が無い・記録が替わった）は not_recorded。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `since` | `number` |  |
+| `limit` | `number` |  |
+
+## linux.ring.open
+
+種類: `control`。道 B: エージェントに、物理番地 phys から size バイトをリングとして開かせる（/dev/mem を mmap。cached=false なら O_SYNC。エージェントは sudo で起動しておく）。番地はカーネルが予約した所を明示する（Pi 2B は device tree の reserved-memory、PYNQ は mem=）。以後 ptrace の当たりは、道 A と同じ通しの番号 seq でリングにも書かれる。 道 A（SSH）への書き込みは待たない: 詰まって書けない行は捨てて数え、次に書けたときに出来事 a_dropped で知らせる（道 A が詰まっても ptrace と道 B は止まらない）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `phys` | `number` | ○ |
+| `size` | `number` | ○ |
+| `cached` | `boolean` | ○ |
+| `linger` | `boolean` | ○ |
+
+## linux.ring.read
+
+種類: `control`。道 B: リングの新しい記録を JTAG で読む（古い方から max_records 個まで）。access=halt: target.connect でつないだ Cortex-A のコアを止め、そのコアに読ませ、すぐ再開する（止めるので振る舞いが変わる。止めていた時間 halted_ms・読んだ語数 words・コア core を返す）。番号の合わない記録 torn・CRC の合わない記録 corrupt・追い越されて読めなかった範囲 lost を事実で返す。頭（CRC 付き）が読めなければ header_error に事実を入れて何も読まない（次の読みで続く）。records の agent_seq はエージェントの通しの番号（linux.events.read の seq とは別）。読んだ出来事は linux.events.read に path b で入り、道 A と同じ seq なら 1 つにする（paths に a・b）。access=halt は cached=false のリングを、access=memap は cached=true のリングを断る（キャッシュの見え方が合わず古い値を読みうる）。止める要求の後に失敗しても、必ず再開を試みる。access=memap は linux.memap.connect の口で止めずに読む（halted_ms は 0、read_ms は読みの時間）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `access` | `"halt" | "memap"` | ○ |
+| `max_records` | `number` | ○ |
+| `address` | `number` | ○ |
+
+## linux.ring.watch
+
+種類: `control`。道 B: interval_s ごとに linux.ring.read を続ける。止めた回数・時間の合計と最大・欠けの数・止まった理由は linux.agent.status の ring_stats。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `interval_s` | `number` | ○ |
+| `access` | `"halt" | "memap"` | ○ |
+| `max_records` | `number` | ○ |
+| `address` | `number` | ○ |
+
+## linux.ring.unwatch
+
+種類: `control`。道 B: linux.ring.watch を止める（ring_stats を返す）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.gdb.batch
+
+種類: `control`。止めて調べる（AI 向け）: ターゲットの gdb を -batch -nx で走らせ、commands（例 ["bt", "info registers"]）を順に実行した出力をそのまま返す（exit_code・stdout・stderr・走らせた command）。pid につける間はプロセスが止まる。core なら binary と core のファイルを読む。命令は 1 つずつ -ex の引数にし、シェルの単語として引用する。ターゲットの timeout -s TERM timeout_s で gdb を終わらせ（つけたプロセスから外れる）、時間切れなら timed_out=true と途中までの出力を返す。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `commands` | `Array<string>` | ○ |
+| `timeout_s` | `number` | ○ |
+| `pid` | `number | null` |  |
+| `core` | `string | null` |  |
+| `binary` | `string | null` |  |
+
+## linux.gdb.serve
+
+種類: `control`。止めて調べる（人・手元の gdb 向け）: ターゲットの gdbserver（標準入出力、--once --attach）を pid につけ、PC の 127.0.0.1:port でgdb の接続を 1 つ待って中継する（gdb で target remote 127.0.0.1:port。gdbserver はつないだときに起動）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `pid` | `number` | ○ |
+| `port` | `number` | ○ |
+
+## linux.gdb.status
+
+種類: `read`。gdb の中継の状態: つながっているか・gdbserver が動いているか・終了コード・送受したバイト数・閉じた側・stderr の最後。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.gdb.stop
+
+種類: `control`。gdb の中継を止める（gdbserver も終わり、プロセスは gdbserver が外れて続く）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## linux.ftrace.enable
+
+種類: `control`。カーネルの出来事: tracefs のイベント（例 "sched/sched_switch"・"irq/irq_handler_entry"）を有効にする。出来事は linux.trace.start で開く trace_pipe から受け、method "ftrace"（comm・pid・cpu・行の k=v のままの args・trace_clock の時刻、行の文字のままの text）で linux.events.read と記録の stream "<target>.ftrace" に入る。 syscalls の sys_enter_X・sys_exit_X は行に sys_X と出る。カーネルのバッファがあふれた「LOST n EVENTS」は probe "trace_lost" の出来事として残し、形の分からない行・有効にしていないイベントの行の数は linux.agent.status の trace_unparsed・trace_unrouted。切断すると有効にしたイベントを無効にする。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `events` | `Array<string>` | ○ |
+
+## linux.ftrace.disable
+
+種類: `control`。tracefs のイベントを無効にする。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `events` | `Array<string>` | ○ |
+
+## linux.log.read
+
+種類: `read`。journal を読む（journalctl -o json。since_cursor が無ければ新しい方から lines 行、あれば since_cursor の後の古い方から lines 行。unit で絞る）。各行は JSON のまま（MESSAGE・__CURSOR・__MONOTONIC_TIMESTAMP 等）。次の since_cursor は next_cursor。時刻は起動ごと（_BOOT_ID）の CLOCK_MONOTONIC（µs。前の起動の行は前の起動の時計）で、出来事の CLOCK_MONOTONIC_RAW とは別の時計（換算しない）。JSON でない行の数は bad_lines。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `lines` | `number` | ○ |
+| `unit` | `string | null` |  |
+| `since_cursor` | `string | null` |  |
+
+## linux.memap.connect
+
+種類: `control`。道 B の止めずに読む口を開く: Vivado の xsdb（hw_server）で、ボードの USB の JTAG から DAP の AHB-AP で物理メモリを読む（CPU は止めない。Zynq-7000 の PYNQ-Z2 で使う）。xsdb の場所・JTAG のケーブルのシリアル・チェーンにあるはずの装置の IDCODE（例 Zynq-7020 の PL 0x23727093）を明示する（違うボードを読まない）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `xsdb` | `string` | ○ |
+| `cable_serial` | `string` | ○ |
+| `chain_idcode` | `number` | ○ |
+| `timeout_s` | `number` | ○ |
+
+## linux.memap.disconnect
+
+種類: `control`。止めずに読む口を閉じる（xsdb を終える）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+
+## sampler.trigger_set
+
+種類: `control`。DAP サンプラが読んだ address の語が (値 xor value) and mask = 0 に入った瞬間（前の標本が不一致・今の標本が一致）にハードのクロストリガ（源 sampler_match）: halt = 割り込み書き込み（既定は MCU の停止）、la = ロジアナのトリガ。例: MCU が止まった = address 0xE000EDF0（DHCSR）・mask = value = 0x20000（S_HALT）。サンプラに address を読ませるのは別の道具（watch 等。この API はサンプラの持ち主にならない）。読んでいなければ sampler.trigger_status の seen が 0 のまま。有効にした後の最初の標本では発火しない。ケイパビリティ sampler_match が要る。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `address` | `number` | ○ |
+| `mask` | `number` | ○ |
+| `value` | `number` | ○ |
+| `halt` | `boolean` | ○ |
+| `la` | `boolean` | ○ |
+
+## sampler.trigger_status
+
+種類: `read`。サンプラの値の一致のトリガのレジスタの事実: enabled・address・mask・value・halt・la・matched（最後の標本が一致）・seen_any・seen（有効にした後に比べた標本の数）・count（発火の回数）・time（最後に発火した標本を受けた時刻。タイムベースの下位 48 ビット = イベントの時刻と同じ幅）・prev_time（その直前の不一致の標本の時刻。条件に入ったのは prev_time と time の間のどこか）。
+
+## sampler.trigger_clear
+
+種類: `control`。サンプラの値の一致のトリガをやめる（比べるのを止め、経路の sampler_match を外す。ほかの源の経路は触らない）。
+
+## jtag.sample_delay_set
+
+種類: `control`。JTAG の TDO の取り込みを、次の TCK の立ち下がりの直前から cycles 周期（sys、0〜7）遅らせる。TDO が立ち下がりから 2 × half_period 周期（sys）より遅れて届くとき（Pi 2B の 14.3 MHz 以上で見た。1 ビットずれて読める）に使う。どの値がよいかは jtag.sample_delay_scan の事実で決める。readback = 読み返した値（古い回路は欄が無く 0）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `cycles` | `number` | ○ |
+
+## jtag.sample_delay_scan
+
+種類: `control`。TCK frequency_hz で、取り込みの遅れ 0〜7 のそれぞれについて、チェーンの IDCODE を reads 回読み、expected_idcodes（TDO 側から。呼び手が明示）と一致した回数 matches と、見えた値 observed（値の組と回数）を返す。applied = 遅れの欄を書いて読み返せた。どれを使うかは決めない（終わったら元の遅れに戻す。使うには jtag.sample_delay_set）。未接続のときだけ。 実際の TCK: half_period（SWJ_Clock と同じ整数の計算）と tck_hz = sys / (2 × half_period + 1)。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `frequency_hz` | `number` | ○ |
+| `expected_idcodes` | `Array<number>` | ○ |
+| `reads` | `number` | ○ |
+
+## linux.core.status
+
+種類: `read`。core dump の設定の事実: pattern（/proc/sys/kernel/core_pattern。pipe = "|" で始まる = 別のプログラムに渡す）・uses_pid・suid_dumpable、pid を渡せばそのプロセスの上限（limit_soft・limit_hard、バイト。null = unlimited）・cwd・exe（pattern が相対なら core は cwd に置かれる）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `pid` | `number | null` |  |
+
+## linux.core.pattern_set
+
+種類: `control`。/proc/sys/kernel/core_pattern を pattern にする（システム全体の設定。sudo が要る。戻すには previous を渡し直す）。例 "/tmp/core.%e.%p"。previous = 前の値、pattern = 書いた後に読み返した値。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `pattern` | `string` | ○ |
+
+## linux.core.limit_set
+
+種類: `control`。プロセス pid の core の大きさの上限（RLIMIT_CORE）を変える（prlimit。soft・hard はバイトか "unlimited"）。そのプロセスの後の落ち方で core が書かれる。戻り値は変えた後の linux.core.status。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `pid` | `number` | ○ |
+| `soft` | `number | "unlimited"` | ○ |
+| `hard` | `number | "unlimited"` | ○ |
+
+## linux.core.fetch
+
+種類: `control`。ターゲットのファイル path（core 等）を PC の local_path に写す（sudo なら sudo で読む）。bytes・sha256 を返す。中身の解析はターゲットの gdb で（linux.gdb.batch の core・binary）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `path` | `string` | ○ |
+| `local_path` | `string` | ○ |
+
+## linux.perf.stat
+
+種類: `control`。perf stat で events（例 "cycles"・"instructions"・"task-clock"）を duration_s 秒数える（pid か、無ければ全体）。rows = 行ごとの値（--no-scale: 数えた生の値。引き延ばさない）・単位・走った時間と割合（数えられなければ value = null と counted）。perf_metric は perf が計算した比。ターゲットに perf が要る（tools.perf）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `events` | `Array<string>` | ○ |
+| `duration_s` | `number` | ○ |
+| `pid` | `number | null` |  |
+
+## linux.perf.record
+
+種類: `control`。perf record で duration_s 秒、frequency_hz で標本を取り（pid か、無ければ全体。時計は CLOCK_MONOTONIC_RAW、CPU の番号つき）、標本を出来事（method "perf"、probe = 関数の名前、ip・dso・pid・tid・cpu・period・event。時刻は µs の精度 = resolution_ns 1000）にして、ほかの出来事と同じ時間軸に入れる。PC に持ってくるのは perf script の頭から max_samples 行まで（script_lines = 全行数）。record_exit_code・script_exit_code・samples・perf_reported_samples・unparsed と unparsed_examples・evicted（押し出したほかの出来事の数）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `target` | `string` | ○ |
+| `duration_s` | `number` | ○ |
+| `frequency_hz` | `number` | ○ |
+| `pid` | `number | null` |  |
+| `max_samples` | `number` | ○ |
 
 ## 通知
 

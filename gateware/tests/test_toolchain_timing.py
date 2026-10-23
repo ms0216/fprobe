@@ -45,3 +45,26 @@ def test_extra_tns_only_clock_is_checked():
 def test_unrecognised_report_is_an_error():
     with pytest.raises(TimingReportError):
         parse_timing_report("<html>nothing</html>")
+
+
+# 経路の表（Setup / Hold Paths Table）。set_max_delay の経路は TNS の要約に現れない（R24、2026-10-22）
+PATHS = (Path(__file__).parent / "data" / "gowin_path_slacks.html").read_text(encoding="utf-8")
+
+
+def test_a_negative_path_slack_fails_even_when_the_tns_summary_is_zero():
+    s = parse_timing_report(REAL + PATHS)
+    assert all(c.met for c in s.clocks)                       # 要約の TNS はどれも 0
+    assert not s.met
+    (path,) = s.failing_paths
+    assert (path.kind, path.slack, path.start, path.end) == (
+        "Setup", -0.312, "device_i/cdc_requests_i/brk_ms_0_s1/Q", "core_i/host_break_sync_i/stage_0_s0/D")
+    assert "-0.312" in s.describe() and "host_break_sync_i" in s.describe()
+
+
+def test_non_negative_path_slacks_pass():
+    s = parse_timing_report(REAL + PATHS.replace("<td>-0.312</td>", "<td>0.012</td>"))
+    assert s.met and s.failing_paths == ()
+
+
+def test_reports_without_path_tables_are_judged_by_the_summary():
+    assert parse_timing_report(REAL).failing_paths == ()

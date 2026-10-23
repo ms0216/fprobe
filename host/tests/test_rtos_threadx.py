@@ -126,7 +126,7 @@ def test_stacks(image):
     assert (s.base, s.end, s.size, s.pointer) == (base, base + STACK, STACK, base + STACK - 128)
     assert s.fill == "intact" and s.untouched == STACK - 128 and s.peak_used == 128 and not s.overflow
     gone = tasks["gone"]
-    assert gone.stack.overflow and gone.stack.fill == "none" and gone.notes
+    assert not gone.stack.overflow and gone.stack.fill == "none" and gone.stack.fill_above and gone.notes == []
     assert tasks["main"].stack.pointer is None               # 実行中: レジスタが読めない
 
 

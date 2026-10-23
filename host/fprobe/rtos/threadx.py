@@ -225,7 +225,7 @@ class ThreadX(KernelAwareness):
             notes.append("待ちが終わると止まる（tx_thread_suspend を待ちの間に受けた）")
         stack = self._stack(handle, running)
         if stack.overflow:
-            notes.append(f"スタックの底（tx_thread_stack_start）が塗り（0x{FILL_BYTE:02X}）のままでないか、SP が底より下")
+            notes.append("SP がスタックの底（tx_thread_stack_start）より下")
         return Task(handle, self.thread_name(handle), self._field(handle, "tx_thread_priority"), state, stack, wait,
                     self._field(handle, "tx_thread_user_priority"), notes=notes)
 

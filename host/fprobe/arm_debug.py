@@ -36,6 +36,7 @@ DSCR_SDABORT, DSCR_ADABORT, DSCR_UND = 1 << 6, 1 << 7, 1 << 8
 DSCR_STICKY = DSCR_SDABORT | DSCR_ADABORT | DSCR_UND
 DSCR_INTDIS, DSCR_UDCCDIS, DSCR_ITREN, DSCR_HDBGEN, DSCR_MDBGEN = 1 << 11, 1 << 12, 1 << 13, 1 << 14, 1 << 15
 DSCR_EXTDCC = 3 << 20
+DSCR_EXTDCC_FAST = 2 << 20                                # 速いモード: DTRTX を読むたびに ITR の命令を実行し直す
 DSCR_INSTRCOMPL = 1 << 24
 DSCR_TXFULL, DSCR_RXFULL = 1 << 29, 1 << 30
 _DSCR_KEEP = DSCR_UDCCDIS | DSCR_MDBGEN                  # 止めても再開しても、ターゲットの設定のまま残すビット
@@ -76,6 +77,7 @@ def _from_dtr(rt: int) -> int:                            # MRC p14, 0, Rt, c0, 
 MOV_R0_PC, MOV_PC_R0, MRS_R0_CPSR, MSR_CPSR_R0 = 0xE1A0000F, 0xE1A0F000, 0xE10F0000, 0xE12FF000
 # 大きさ（バイト）→ (LDR r1, [r0], #n, STR r1, [r0], #n)
 LOAD_STORE = {4: (0xE4901004, 0xE4801004), 2: (0xE0D010B2, 0xE0C010B2), 1: (0xE4D01001, 0xE4C01001)}
+LDC_DTRTX = 0xECB05E01                                     # LDC p14, c5, [r0], #4（メモリの語を DTRTX へ。速い読み）
 DSB, ISB = 0xF57FF04F, 0xF57FF06F                        # ARMv7 の命令（ARMv6 は CP15 の操作で代わりにする）
 CP15 = {
     "ctr": arm_mrc(15, 0, 0, 0, 0, 1), "mpidr": arm_mrc(15, 0, 0, 0, 0, 5),
@@ -355,6 +357,35 @@ class ArmDebugCore:
                 self._check_abort(self.port.dscr(), here, "読み")
                 raise
         self._check_abort(self.port.dscr(), address, "読み")
+        return out
+
+    def read_memory_fast(self, address: int, count: int) -> list[int]:
+        """32 ビットの語を count 個、ARMv7 の DCC の速いモードで読む（OpenOCD の cortex_a_read_cpu_memory_fast と同じ手順）。
+        LDC を ITR に書き、DTRTX を count 回まとめて読む（読むたびにコアが次の語を読む。1 語ごとの往復が無い）。
+        最後の 1 語は非ブロックのモードに戻してから読む。ポートがまとめて読めなければ read_memory と同じ。"""
+        block = getattr(self.port, "read_dtrtx_fast", None)
+        if not self.v7 or block is None or count < 2:
+            return self.read_memory(address, count)
+        self._require_halted()
+        self._dirty |= {"r0"}
+        self._set_r0(address)
+        dscr = self.port.dscr()
+        normal = dscr & ~DSCR_EXTDCC & ~(DSCR_HALTED | DSCR_RESTARTED | DSCR_STICKY | DSCR_INSTRCOMPL
+                                          | DSCR_TXFULL | DSCR_RXFULL | (0xF << DSCR_MOE_SHIFT))
+        self.port.write_dscr(normal | DSCR_EXTDCC_FAST)
+        failed = True
+        try:
+            # 速いモードでは ITR に書いても実行されず、DTRTX を読むと「今の値を返してから」命令を実行する（実機の Cortex-A7、
+            # 2026-10-23）。よって最初の読みは前の値（捨てる）で、count 回の読みで count−1 語、最後の 1 語は下で読む
+            out = block(LDC_DTRTX, count)[1:]
+            failed = False
+        finally:
+            self.port.write_dscr(normal)                    # どの道でも非ブロックのモードに戻す
+            if failed:
+                self.port.clear_sticky()                    # アボートの印を残したまま、再開の手順の命令を流さない
+        dscr = self._wait(DSCR_INSTRCOMPL, "速い読みの最後の命令が終わらない")
+        self._check_abort(dscr, address, f"{count} 語の速い読み")
+        out.append(self.port.from_core())
         return out
 
     def write_memory(self, address: int, values: list[int], size: int = 4) -> None:

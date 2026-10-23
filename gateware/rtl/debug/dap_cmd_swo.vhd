@@ -53,6 +53,9 @@ architecture rtl of dap_cmd_swo is
   signal run_r     : std_logic := '0';
   signal man_r     : std_logic := '0';
   signal mode_ok   : boolean;                                -- 引数の方式を受けられる（0・1、Manchester なら 2 も）
+  -- 引数の 32 ビットが 0（SWO_Baudrate）。応答の値の書き込みの判定に 32 ビットの比べを直列にしないよう、
+  -- 引数を受け取った周期（get_ack）にレジスタへ（S_BAUD はその次の周期）
+  signal arg_zero  : boolean := false;
   signal div_r     : unsigned(15 downto 0) := to_unsigned(CLK_HZ / 115_200, 16);
   signal status    : std_logic_vector(7 downto 0);           -- bit0 受信中, bit6 異常, bit7 取りこぼし
 begin
@@ -101,6 +104,7 @@ begin
       put_req_r <= '0';
       done_r    <= '0';
       div_start <= '0';
+      arg_zero  <= unsigned(arg(31 downto 0)) = 0;
 
       if rst = '1' then
         state <= S_IDLE;
@@ -150,7 +154,7 @@ begin
 
           -- SWO_Baudrate: divisor = round(CLK_HZ / baud)（4〜65535）、応答は実際のボーレート CLK_HZ / divisor
           when S_BAUD =>
-            if run_r = '1' or unsigned(arg(31 downto 0)) = 0 then
+            if run_r = '1' or arg_zero then
               put(4, (others => '0'), S_DONE);                       -- 設定できない: 0
             else
               div_num   <= to_unsigned(CLK_HZ, 32) + shift_right(unsigned(arg(31 downto 0)), 1);

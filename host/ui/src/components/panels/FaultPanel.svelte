@@ -8,6 +8,8 @@
   import { shared } from "../../lib/context";
   import { STACKED, VALID_BITS, causeRegister, headline, isFault, reportText, type FaultReport } from "../../lib/fault";
   import { allowed } from "../../lib/guard";
+  import { decodeParams, markersAt, parseCount, readHistory, trailingMarkers, type EtmHistory, type EtmSourceForm } from "../../lib/etm";
+  import { load, save } from "../../lib/prefs";
   import { i18n } from "../../lib/i18n";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
@@ -17,6 +19,14 @@
   let failed = $state<string | null>(null);
   let vc = $state<VectorCatchState | null>(null);
   let copied = $state(false);
+  let savedTo = $state<string | null>(null);             // 「状態を保存」の保存先（Recordings に一覧）
+  // 直前の命令（ETM）: トレースのバイトの置き場所はその人のブラウザに覚える（ボード・ファームウェアで決まる）
+  let etmForm = $state<EtmSourceForm>(restoreEtm());
+  let etmCount = $state(load("fault.etmCount", "32"));
+  let etmHistory = $state<EtmHistory | null>(null);
+  let etmError = $state<string | null>(null);
+  let etmDecode = $state<{ errors: string[]; note?: string } | null>(null);   // 解読の誤り・注記（decode の結果）
+  let etmBusy = $state(false);
 
   const online = $derived($app.link === "open");
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
@@ -69,6 +79,43 @@
     copied = true;
     setTimeout(() => (copied = false), 1500);
   }
+
+  /** いまの状態（レジスタ・RAM・故障の解析）をファイルに保存する（snapshot.save。一覧と開くは Recordings） */
+  async function saveState() {
+    if (!(await allowed(app))) return;
+    const out = await app.act("snapshot.save", {});
+    savedTo = out?.path ?? null;
+  }
+
+  function restoreEtm(): EtmSourceForm {
+    try {
+      const v = JSON.parse(load("fault.etmSource", ""));
+      if (v?.kind === "file" || v?.kind === "memory") return v;
+    } catch { /* 既定 */ }
+    return { kind: "memory", address: "", length: "", oldest: "" };
+  }
+
+  async function decodeEtm() {
+    const built = decodeParams(etmForm);
+    if ("error" in built) {
+      etmError = $i18n("fault.etmBadField", { field: built.error });
+      return;
+    }
+    const count = parseCount(etmCount);
+    if (count === null) {
+      etmError = $i18n("fault.etmBadField", { field: "count" });
+      return;
+    }
+    if (!(await allowed(app))) return;
+    save("fault.etmSource", JSON.stringify(etmForm));
+    save("fault.etmCount", etmCount);
+    etmBusy = true;
+    const r = await readHistory(conn, built.params, count);
+    etmBusy = false;
+    etmHistory = r.history;
+    etmError = r.error;
+    etmDecode = r.history ? { errors: r.decodeErrors ?? [], note: r.decodeNote } : null;
+  }
 </script>
 
 <div class="pane" class:stale={!halted && report}>
@@ -76,6 +123,8 @@
     <div class="pane-bar">
       <strong class:bad={faulted}>{title ?? $i18n("fault.none")}</strong>
       <span class="spacer"></span>
+      {#if savedTo}<span class="muted small mono" title={savedTo}>{$i18n("snapshots.saved")}</span>{/if}
+      <button class="small" disabled={!halted} title={$i18n("snapshots.saveTip")} onclick={() => void saveState()}>{$i18n("snapshots.save")}</button>
       <button class="small" title={$i18n("fault.copyTip")} onclick={copy}>{copied ? $i18n("fault.copied") : $i18n("fault.copy")}</button>
       <button class="small" disabled={!halted} onclick={read}>{$i18n("common.refresh")}</button>
     </div>
@@ -144,6 +193,7 @@
               <li>
                 <button class="link" onclick={() => showAddress(f.pc)}>{f.where}</button>
                 {#if f.note === "exception"}<span class="note">{$i18n("callStack.exception")}</span>{/if}
+                {#if f.note === "lr_without_cfi"}<span class="note">{$i18n("callStack.lrWithoutCfi")}</span>{/if}
                 <span class="muted">{hex32(f.pc)}</span>
               </li>
             {/each}
@@ -162,6 +212,53 @@
         </div>
       </div>
     {/if}
+    <details class="etm">
+      <summary>{$i18n("fault.etm")}</summary>
+      <form class="etm-form" onsubmit={(e) => { e.preventDefault(); void decodeEtm(); }} title={$i18n("fault.etmTip")}>
+        <select value={etmForm.kind} aria-label={$i18n("fault.etmSource")}
+                onchange={(e) => (etmForm = e.currentTarget.value === "file" ? { kind: "file", path: "" }
+                                  : { kind: "memory", address: "", length: "", oldest: "" })}>
+          <option value="memory">{$i18n("fault.etmMemory")}</option>
+          <option value="file">{$i18n("fault.etmFile")}</option>
+        </select>
+        {#if etmForm.kind === "memory"}
+          <input class="mono" bind:value={etmForm.address} placeholder={$i18n("fault.etmAddress")} aria-label={$i18n("fault.etmAddress")} />
+          <input class="mono num" bind:value={etmForm.length} placeholder={$i18n("fault.etmLength")} aria-label={$i18n("fault.etmLength")} />
+          <input class="mono num" bind:value={etmForm.oldest} placeholder={$i18n("fault.etmOldest")} aria-label={$i18n("fault.etmOldest")} />
+        {:else}
+          <input class="mono" bind:value={etmForm.path} placeholder={$i18n("fault.etmPath")} aria-label={$i18n("fault.etmPath")} />
+        {/if}
+        <input class="mono num" bind:value={etmCount} aria-label={$i18n("fault.etmCount")} title={$i18n("fault.etmCount")} />
+        <button class="small" disabled={etmBusy}>{$i18n("fault.etmDecode")}</button>
+      </form>
+      {#if etmError}<div class="bad small-text">{etmError}</div>{/if}
+      {#if etmHistory}
+        <div class="muted small-text">{$i18n("fault.etmTotal", { shown: etmHistory.instructions.length, total: etmHistory.total })}
+          {#if etmHistory.next_address != null} · {$i18n("fault.etmNext")} <span class="mono">{hex32(etmHistory.next_address)}</span>{/if}</div>
+        <table class="etm-rows mono">
+          <tbody>
+            {#each etmHistory.instructions as row (row.index)}
+              {#each markersAt(etmHistory.markers, row.index) as m, k (k)}
+                <tr class="marker"><td colspan="5">{m.kind}</td></tr>
+              {/each}
+              <tr>
+                <td><button class="link" onclick={() => showAddress(row.address)}>{hex32(row.address)}</button></td>
+                <td>{row.mnemonic} {row.operands ?? ""}</td>
+                <td>{row.function ?? ""}{row.offset != null && row.function ? `+${row.offset}` : ""}</td>
+                <td class="muted">{row.file ? `${row.file}:${row.line ?? ""}` : ""}</td>
+                <td class="muted">{(row as any).branch ?? ""}</td>
+              </tr>
+            {/each}
+            {#each trailingMarkers(etmHistory) as m, k (k)}
+              <tr class="marker"><td colspan="5">{m.kind}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+        {#each etmHistory.errors as err, k (k)}<div class="bad small-text">{err}</div>{/each}
+        {#each etmDecode?.errors ?? [] as err, k (k)}<div class="bad small-text">{err}</div>{/each}
+        {#if etmDecode?.note}<div class="muted small-text">{etmDecode.note}</div>{/if}
+      {/if}
+    </details>
     {#if report.registers || report.halt_reasons?.length}
       <section>
         <h3>{$i18n("fault.registers")}</h3>
@@ -190,6 +287,13 @@
 </div>
 
 <style>
+  .etm { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); }
+  .etm summary { font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .etm-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  .etm-form .num { width: 6em; }
+  .etm-rows { border-collapse: collapse; font-size: 12px; }
+  .etm-rows td { padding: 1px 10px 1px 0; white-space: nowrap; }
+  .etm-rows tr.marker td { color: var(--warn); font-weight: 600; }
   section { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); }
   h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 4px; }
   .bad { color: var(--bad); }

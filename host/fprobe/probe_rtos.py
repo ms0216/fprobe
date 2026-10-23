@@ -401,7 +401,7 @@ class RtosTools:
                 warnings += swo.warnings
                 baud = round(swo.baud)
             target = self.target
-            write_registers(target, writes)
+            original = write_registers(target, writes)                 # 止めるとき DWT_CTRL（同期パケット等）を戻す
             if baud is not None:
                 self.swo_start(baud)
             baud = baud or self._swo_baud
@@ -409,10 +409,9 @@ class RtosTools:
                 warnings.append("SWO の速度が分からない（swo_start か swo_baud）: 時刻の分解能を 0 にした")
             window = self._open_window()
             target.write_memory(flag, 1)
-            restore: dict[int, int] = {}
+            restore: dict[int, int] = {DWT_CTRL: original[DWT_CTRL]}
             if exceptions:                                            # 受信と窓を先に、例外トレースは最後に
-                before = write_registers(target, exception_trace_writes())
-                restore[DWT_CTRL] = before[DWT_CTRL]
+                write_registers(target, exception_trace_writes())
             if extra:
                 sampler = Sampler(self.session.device)
                 sampler.configure(extra, 1.0 / memory_rate_hz, ap)
@@ -449,7 +448,7 @@ class RtosTools:
         self._rtos_last = result
         rec = self._recorder
         if rec is not None:
-            write_timeline(rec, result.timeline)
+            write_timeline(rec, result.timeline, result.run.idle)
             if result.events is not None:
                 write_task_events(rec, result.events, run.names)
             if result.activations:
@@ -529,13 +528,7 @@ class RtosTools:
             samples = [(t, v) for t, a, v in sampled if a == run.address]
             self._learn_names(run, {v for _, v in samples} | mutex_tasks)
             period = run.timebase_hz / run.rate_hz
-            tl = timeline_from_samples(samples, run.names, period=period)
-            if tl.resolution > 1.5 * period:
-                achieved_us = tl.resolution * 1e6 / run.timebase_hz
-                note = (f"実際のサンプルの間隔は {achieved_us:.0f} µs（設定 {period * 1e6 / run.timebase_hz:.0f} µs）: "
-                        "SWD の速さで 1 巡回が間に合わない。rate_hz を下げるか SWD を速くする")
-                if note not in run.warnings:
-                    run.warnings.append(note)
+            tl = timeline_from_samples(samples, run.names, period=period)      # 実際の間隔は分解能（resolution）
             return _TimelineResult(tl, None, run, extra)
         data = [(t, b) for t, _, b in self._window_events(run.window, "swo")]
         packets = itm_packets(data)

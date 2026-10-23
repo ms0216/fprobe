@@ -21,6 +21,14 @@ entity pynq_z2_fprobe_top is
     sys_clk_in : in    std_logic;
     pmod1      : inout std_logic_vector(7 downto 0);   -- PMOD JA
     la_in      : in    std_logic_vector(LA_INPUT_PINS - 1 downto 0);   -- PMOD JB
+    -- 対象の FPGA の観測の JTAG（Raspberry Pi のヘッダ。手放している間は Z）
+    obs_tck    : out   std_logic;
+    obs_tms    : out   std_logic;
+    obs_tdi    : out   std_logic;
+    obs_tdo    : in    std_logic;
+    -- ボードの間の時刻の同期（Raspberry Pi のヘッダの GPIO16 = 36 番が親から、GPIO20 = 38 番が子へ。同期の無い構成では Z）
+    sync_in    : in    std_logic;
+    sync_out   : out   std_logic;
     led        : out   std_logic_vector(3 downto 0)
   );
 end entity;
@@ -121,6 +129,8 @@ architecture rtl of pynq_z2_fprobe_top is
   constant RAM_BITS : positive := 10;
 
   signal sys_clk, sys_rst, mmcm_lock, aresetn : std_logic;
+  signal obs_tck_o, obs_tms_o, obs_tdi_o, obs_oe : std_logic;      -- 対象の FPGA の観測の JTAG
+  signal sync_o : std_logic;                                         -- ボードの間の時刻の同期（コアの出力）
   -- AXI4-Lite（PS → zynq_frame_link）
   signal araddr, awaddr, rdata, wdata : std_logic_vector(31 downto 0);
   signal arprot, awprot : std_logic_vector(2 downto 0);
@@ -269,7 +279,7 @@ begin
     generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => MEM_BITS,
                  MEM_TEST => work.design_caps_pkg.MEM_TEST,
                  XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
                  HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
                  UART_FLOW => work.design_caps_pkg.UART_FLOW,
@@ -277,7 +287,8 @@ begin
                  LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
                  AUX => work.design_caps_pkg.AUX, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
                  LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS,
-                 LA_INTERNAL => not DEEP, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS)
+                 LA_INTERNAL => not DEEP, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
+                 OBS_PORT => work.design_caps_pkg.OBS_PORT, SYNC => work.design_caps_pkg.SYNC)
     port map (clk => sys_clk, rst => sys_rst,
               ctrl_in_valid => req_valid, ctrl_in_ready => req_ready, ctrl_in_data => req_data,
               ctrl_in_last => req_last,
@@ -307,7 +318,13 @@ begin
               mem_cmd_valid => mem_cmd_valid, mem_cmd_ready => mem_cmd_ready, mem_cmd_write => mem_cmd_write,
               mem_cmd_addr => mem_cmd_addr, mem_cmd_data => mem_cmd_data, mem_rd_valid => mem_rd_valid,
               mem_rd_data => mem_rd_data,
-              stream_out_valid => st_valid, stream_out_ready => st_ready, stream_out_data => st_data);
+              stream_out_valid => st_valid, stream_out_ready => st_ready, stream_out_data => st_data,
+              obs_tck => obs_tck_o, obs_tms => obs_tms_o, obs_tdi => obs_tdi_o, obs_tdo => obs_tdo,
+              obs_oe => obs_oe, sync_in => sync_in, sync_out => sync_o);
+  sync_out <= sync_o when work.design_caps_pkg.SYNC else 'Z';
+  obs_tck <= obs_tck_o when obs_oe = '1' else 'Z';
+  obs_tms <= obs_tms_o when obs_oe = '1' else 'Z';
+  obs_tdi <= obs_tdi_o when obs_oe = '1' else 'Z';
 
   -- デバッグの線の機能（Primer の USB 版と同じ）
   process (all)

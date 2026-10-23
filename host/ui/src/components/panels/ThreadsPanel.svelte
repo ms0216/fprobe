@@ -9,6 +9,10 @@
   import { isRunning } from "../../lib/commands";
   import { nextRun, runningAt, taskStateText, waitText } from "../../lib/rtos";
   import { onTimeline } from "../../lib/timeline/events";
+  import { confirmer } from "../../lib/confirm";
+  import { allowed } from "../../lib/guard";
+  import { boundsParams, readUsage, usagePercent, type StackUsage } from "../../lib/stack";
+  import { load, save } from "../../lib/prefs";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
 
@@ -19,6 +23,12 @@
   let frames = $state<Record<number, { frames?: any[]; error?: string }>>({});
   let atSelection = $state<number | null>(null);         // 時間軸で選んだ時刻に動いていたタスク（TCB）
   let note = $state("");
+  // 主スタック（MSP）: 塗りの残りから使用量（ベアメタルでも。RTOS のスレッドの表とは別）
+  let msp = $state<StackUsage | null>(null);
+  let mspError = $state<string | null>(null);
+  // 範囲（ELF に _estack 等が無いときは人が明示する。その人のブラウザに覚える）
+  let mspBottom = $state(load("stack.bottom", ""));
+  let mspTop = $state(load("stack.top", ""));
 
   const halted = $derived($app.target?.state === "HALTED");
   const running = $derived(isRunning($app.target?.state));
@@ -93,6 +103,34 @@
   }
 
   const pct = (s: any) => (s?.size ? Math.round((100 * (s.peak_used ?? s.used ?? 0)) / s.size) : 0);
+
+  function mspBounds(): Record<string, number> | null {
+    const b = boundsParams(mspBottom, mspTop);
+    if ("error" in b) {
+      mspError = $i18n("stack.badBound", { field: b.error });
+      return null;
+    }
+    save("stack.bottom", mspBottom);
+    save("stack.top", mspTop);
+    return b.params;
+  }
+
+  async function readMsp() {
+    const bounds = mspBounds();
+    if (!bounds) return;
+    const r = await readUsage(conn, bounds);
+    msp = r.usage;
+    mspError = r.error;
+  }
+
+  /** 使っていない領域（SP より下）をパターンで埋める。RAM を書くので確かめる */
+  async function paintMsp() {
+    if (!(await allowed(app))) return;
+    const bounds = mspBounds();
+    if (!bounds) return;
+    if (!(await confirmer.ask($i18n("stack.confirmPaint"), { ok: $i18n("stack.paint") }))) return;
+    if ((await app.act("target.stack.paint", bounds)) !== undefined) await readMsp();
+  }
 </script>
 
 <div class="pane">
@@ -134,6 +172,7 @@
                       <button class="link" title={$i18n("threads.frameTip")} onclick={() => showAddress(f.pc)}>
                         {f.where ?? f.function ?? hex32(f.pc)}</button>
                       {#if f.note === "exception"}<span class="muted">{$i18n("callStack.exception")}</span>{/if}
+                      {#if f.note === "lr_without_cfi"}<span class="muted">{$i18n("callStack.lrWithoutCfi")}</span>{/if}
                       <span class="muted">{hex32(f.pc)}</span>
                     </li>
                   {/each}
@@ -151,6 +190,30 @@
   {:else}
     <Empty need="halted" />
   {/if}
+  <details class="msp">
+    <summary>{$i18n("stack.msp")}</summary>
+    <div class="msp-bar">
+      <button class="small" disabled={!halted} title={$i18n("stack.paintTip")} onclick={() => void paintMsp()}>{$i18n("stack.paint")}</button>
+      <button class="small" onclick={() => void readMsp()}>{$i18n("stack.read")}</button>
+      <input class="mono bound" bind:value={mspBottom} placeholder={$i18n("stack.bottom")} aria-label={$i18n("stack.bottom")}
+             title={$i18n("stack.boundTip")} />
+      <input class="mono bound" bind:value={mspTop} placeholder={$i18n("stack.top")} aria-label={$i18n("stack.top")}
+             title={$i18n("stack.boundTip")} />
+    </div>
+    {#if mspError}<div class="bad note">{mspError}</div>{/if}
+    {#if msp}
+      {@const p = usagePercent(msp)}
+      <div class="mono stack">
+        <span class="bar wide"><span style:width="{p ?? 0}%" class:over={msp.overflow}></span></span>
+        {msp.used ?? "?"} / {msp.size ?? "?"}{#if p !== null}{" "}({p}%){/if}
+        {#if msp.overflow}<span class="bad">{$i18n("threads.overflow")}</span>{/if}
+        {#if msp.reached_bottom}<span class="bad">{$i18n("stack.reachedBottom")}</span>{/if}
+      </div>
+      <div class="muted mono note">{hex32(msp.bottom ?? 0)}–{hex32(msp.top ?? 0)}{#if msp.sp != null}{" · SP "}{hex32(msp.sp)}{/if}{#if msp.current != null}{" · "}{$i18n("stack.current", { n: String(msp.current) })}{/if}</div>
+      {#if msp.warning}<div class="bad note">{msp.warning}</div>{/if}
+      {#each msp.notes ?? [] as n, k (k)}<div class="muted note">{n}</div>{/each}
+    {/if}
+  </details>
 </div>
 
 <style>
@@ -170,4 +233,9 @@
   .note { font-size: 12px; }
   .frames ol { margin: 0; padding: 2px 0 4px 28px; }
   .frames li { display: flex; gap: 8px; }
+  .msp { padding: 6px 8px; border-top: 1px solid var(--line); }
+  .msp summary { font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .msp-bar { display: flex; gap: 6px; margin: 6px 0; }
+  .bar.wide { width: 160px; }
+  .bound { width: 9em; }
 </style>

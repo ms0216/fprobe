@@ -42,9 +42,12 @@ def test_sampled_stats():
     assert s["tasks"]["sensor"]["short_runs"] == 1                     # 1 サンプルだけ: 周期より短いかもしれない
 
 
-def test_sampled_gap_splits_runs_and_is_excluded():
+def test_sampled_long_intervals_are_not_gaps_unless_the_caller_gives_a_factor():
+    # 「分解能の 2.5 倍を超えたら抜け」と既定で決めない（経験則。CLAUDE.md）。長い間隔はそのまま（同じ値なら 1 つの区間）
     samples = sampled([IDLE] * 3 + [A] * 2) + sampled([A] * 3 + [IDLE] * 2, t0=10_000)
-    tl = timeline_from_samples(samples, NAMES)
+    plain = timeline_from_samples(samples, NAMES)
+    assert plain.gaps == [] and [r.task for r in plain.runs] == ["IDLE", "ctrl", "IDLE"]
+    tl = timeline_from_samples(samples, NAMES, gap_factor=2.5)          # 使う側が明示したときだけ抜けにする
     assert [(g.t0, g.t1) for g in tl.gaps] == [(1400, 10_000)]
     assert [(r.task, r.t0, r.t1) for r in tl.runs] == [
         ("IDLE", 1000, 1250), ("ctrl", 1250, 1400), ("ctrl", 10_000, 10_250), ("IDLE", 10_250, 10_400)]
@@ -139,10 +142,11 @@ def test_itm_end_to_end_from_bytes():
 def test_write_timeline_and_read_back(tmp_path):
     rec = Recorder(tmp_path / "r", timebase_hz=1e6)
     tl = timeline_from_samples(sampled([IDLE] * 3 + [A] * 2), NAMES)
-    write_timeline(rec, tl)
+    write_timeline(rec, tl, idle={IDLE})
     rec.close()
     r = Recording(tmp_path / "r")
     runs = r.events(streams=["rtos"], kinds=["run"])
+    assert [e.body.get("idle", False) for e in runs] == [True, False]       # 画面は名前でなくこの印で idle を知る
     assert [(e.t, e.t_end, e.a, e.body["task"]) for e in runs] == [(1000, 1250, IDLE, "IDLE"), (1250, 1400, A, "ctrl")]
     assert runs[0].body["method"] == "sampled" and runs[0].body["resolution"] == P and runs[0].body["samples"] == 3
     switch = r.events(streams=["rtos"], kinds=["switch"])

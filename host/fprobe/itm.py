@@ -177,7 +177,7 @@ Packet = (Sync | Overflow | Instrumentation | EventCounter | ExceptionTrace | Pc
 _SIZES = {1: 1, 2: 2, 3: 4}           # ソースのパケットのヘッダの下位 2 ビット → ペイロードの長さ
 _SYNC_ZEROS = 5                       # 同期パケットの 0 のバイト数の下限（47 ビット = 5 バイト + 7 ビット）
 _INCOMPLETE = None                    # 「まだバイトが足りない」の印
-RESYNC_PACKETS = 6                    # 同期を失ったとき、この数のパケットが続けて解ける位置から再開する
+RESYNC_PACKETS = 6                    # resync=True のとき: この数のパケットが続けて解ける位置から再開する
 
 
 class _Invalid(Exception):
@@ -187,10 +187,10 @@ class _Invalid(Exception):
 class ItmDecoder:
     """SWO のバイト列を増分で解読する。feed() に何回に分けて与えても、まとめて与えたのと同じ結果になる。"""
 
-    def __init__(self, synced: bool = True, resync: bool = True):
-        """resync: 同期を失ったら、同期パケット（DWT の SYNCTAP。遅いと十数秒に 1 回）を待たずに、続くパケットが
-        規定どおりに解ける位置から再開する（落ちたバイト・古いバイトとの継ぎ目から復帰する）。False なら同期パケットを
-        待つ（厳密）。"""
+    def __init__(self, synced: bool = True, resync: bool = False):
+        """同期を失ったら、既定は同期パケット（DWT の SYNCTAP）を待つ（規定どおり。捨てたバイトは Sync.skipped）。
+        resync=True を明示したときだけ、続く RESYNC_PACKETS 個のパケットが規定どおりに解ける位置から再開する
+        （位置の推定。偶然解ける位置を選ぶことがある。再開したことは Resync で知らせる）。"""
         self.resync = resync
         self._buf = bytearray()
         self._base = 0               # _buf[0] の通し番号
@@ -200,6 +200,11 @@ class ItmDecoder:
     @property
     def synced(self) -> bool:
         return self._synced
+
+    @property
+    def unsynced_bytes(self) -> int:
+        """同期を失ってから捨てたバイトの数（同期パケットが来る前から読める。同期している間は 0）。"""
+        return 0 if self._synced else self._skipped
 
     @property
     def consumed(self) -> int:

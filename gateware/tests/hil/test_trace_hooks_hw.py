@@ -101,25 +101,22 @@ def test_kernel_events_flow_blocking_queues_and_exact_inversions(running):
     assert 0.9 * span_ms <= profile["interrupts"]["SysTick"]["count"] <= 1.1 * span_ms + 2, profile["interrupts"]
 
     cost = probe.rtos_timeline_overhead()
-    print("trace overhead:", {k: cost[k] for k in ("words_per_s", "swo_share", "cpu_share", "by_kind")})
-    assert cost["swo_share"] < 0.8 and cost["cpu_share"] < 0.1, cost
+    print("trace overhead:", {k: cost[k] for k in ("words_per_s", "swo_share", "by_kind")})
+    assert 0 < cost["swo_share"] and "cpu_share" not in cost, cost             # CPU の負荷は推定しない（実測は下の試験）
     probe.recording_stop()
 
 
 def test_hook_overhead_measured_by_idle_spins(running):
     """フックの負荷の実測: トレースの無いときと有るときの、アイドルのフックの回る速さの差（= フックに使った CPU）。
-    rtos.timeline.overhead の見積もり（cpu_share）と比べて記録する。"""
+    本体は CPU の負荷を見積もらない（命令数の見積もりは実機で 4 倍外れた）。ここで測った値を記録する。"""
     probe = running
     without = idle_rate(probe)
     probe.rtos_timeline_start(method="itm", swo_baud=SWO_BAUD, core_clock_hz=CORE_HZ)
     with_trace = idle_rate(probe)
     probe.rtos_timeline_stop()
-    estimate = probe.rtos_timeline_overhead()["cpu_share"]
     measured = 1 - with_trace / without
-    print(f"idle spins/s: without {without:.0f}, with {with_trace:.0f}; measured overhead {measured:.4f}, "
-          f"estimate {estimate:.4f}")
+    print(f"idle spins/s: without {without:.0f}, with {with_trace:.0f}; measured overhead {measured:.4f}")
     assert without > 0 and 0 <= measured < 0.15, (without, with_trace)
-    assert measured / 4 <= max(estimate, 1e-4) <= max(measured, 1e-3) * 4, (measured, estimate)   # 見積もりの桁が合う
 
 
 def test_user_values_and_named_event_intervals(running):

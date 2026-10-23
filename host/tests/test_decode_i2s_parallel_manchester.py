@@ -90,13 +90,14 @@ def test_parallel_without_clock_skips_skewed_intermediate_values():
 @pytest.mark.parametrize("idle", [0, 1])
 def test_manchester_round_trip(convention, idle):
     rng = random.Random(7)
-    frames = [[rng.randrange(2) for _ in range(24)], [1] * 8 + [0] * 8, [0, 1] * 8]
+    frames = [[rng.randrange(2) for _ in range(24)], [1] * 8 + [0] * 8, [0, 1] * 8]   # どれも長い間を含む
     w = Wave(channels=2, sample_rate_hz=1e6 * 16, idle={0: idle}, jitter=0.03e-6)
     t = 2e-6
     for bits in frames:
         t = manchester(w, 0, bits, t, bitrate=1e6, convention=convention, idle=idle) + 5e-6
-    d = decode_manchester(w.build(end_s=t), 0, bitrate=1e6, convention=convention)
+    d = decode_manchester(w.build(end_s=t), 0, bitrate=1e6, convention=convention, tolerance=0.25)
     got = [a.text for a in d.of("frame")]
+    assert all(0 <= a.fields["max_deviation"] < 0.1 for a in d.of("frame"))      # 揺らぎ 0.03 µs = 0.03 ビット + 量子化
     assert got[0] == "".join(map(str, frames[0])) and d.errors() == []
     assert got[1:] == ["".join(map(str, f)) for f in frames[1:]]
     words = [a.value for a in d.of("word")][:3]
@@ -109,7 +110,42 @@ def test_manchester_timing_error_and_bad_params():
     w.set(0, 1, t + 0.1e-6)                                    # 半ビットより短い間
     w.set(0, 0, t + 0.2e-6)
     tr = w.build(end_s=t + 3e-6)
-    d = decode_manchester(tr, 0, bitrate=1e6)
+    d = decode_manchester(tr, 0, bitrate=1e6, tolerance=0.2)
     assert d.errors() and d.of("frame")[0].error == "timing"
     with pytest.raises(ValueError):
-        decode_manchester(tr, 0, bitrate=1e6, convention="nrz")
+        decode_manchester(tr, 0, bitrate=1e6, convention="nrz", tolerance=0.2)
+    with pytest.raises(ValueError):                                # 許容幅は使う側が明示する（既定の経験則を持たない）
+        decode_manchester(tr, 0, bitrate=1e6)
+    with pytest.raises(ValueError):                                # 短と長の窓が重なる幅は受けない
+        decode_manchester(tr, 0, bitrate=1e6, tolerance=0.3)
+
+
+def test_manchester_frame_without_a_long_interval_has_unknown_phase():
+    # 同じビットだけのフレームは短い間しか無く、最初の変化が中央か境目か分からない。中央とみなして解読しない
+    w = Wave(channels=1, sample_rate_hz=16e6)
+    t = manchester(w, 0, [1] * 8, 2e-6, bitrate=1e6)
+    d = decode_manchester(w.build(end_s=t + 3e-6), 0, bitrate=1e6, tolerance=0.25)
+    (frame,) = d.of("frame")
+    assert frame.error == "phase_unknown" and d.of("bit") == [] and d.of("word") == []
+
+
+
+def test_manchester_after_a_timing_error_waits_for_a_long_interval_instead_of_assuming_the_phase():
+    # 誤りの後に「次の変化を中央」とみなして合わせ直さない。次の長い間（両端が中央）で位相を決め直すまで解読しない。
+    # 出したビットはすべて正しい（推測したビットを出さない）
+    bits = [1, 1, 1, 1, 0, 1, 0, 1, 1, 0]
+    t0, T = 2e-6, 1e-6
+    w = Wave(channels=1, sample_rate_hz=64e6)
+    end = manchester(w, 0, bits, t0, bitrate=1e6)
+    level_at_glitch = 0                                   # ieee の 1 = 前半 0: 1 ビット目の前半の中に短い山を入れる
+    w.set(0, 1 - level_at_glitch, t0 + 1 * T + 0.10e-6)
+    w.set(0, level_at_glitch, t0 + 1 * T + 0.15e-6)
+    d = decode_manchester(w.build(end_s=end + 3e-6), 0, bitrate=1e6, tolerance=0.2)
+    sp = d.sample_period_s
+    out = [(int(((a.start + a.end) / 2 * sp - t0) // T), a.value) for a in d.of("bit")]
+    assert d.of("frame")[0].error == "timing" and out
+    assert all(bits[i] == v for i, v in out), out
+    # 語は抜けをまたいでつながない: どの語も、続いた番号のビットだけから
+    for word in d.of("word"):
+        inside = [i for i, _ in out if word.start * sp <= t0 + (i + 0.5) * T <= word.end * sp]
+        assert inside == list(range(inside[0], inside[0] + len(inside))), (word, inside)

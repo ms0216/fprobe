@@ -11,15 +11,18 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `gpio` | `0x00000200` | `0x40` | 拡張ヘッダ（Primer 20K は J12）の 8 本の汎用入出力。配線確認・ビットバング用 |
 | `uart` | `0x00000300` | `0x40` | UART ブリッジ（CDC-ACM ⇄ ターゲット）の状態 |
 | `la` | `0x00000400` | `0x40` | ロジックアナライザの設定と状態（docs/superpowers/specs/2026-10-16-m7-logic-analyzer-design.md） |
-| `xtrig` | `0x00000500` | `0x40` | クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq） |
+| `xtrig` | `0x00000500` | `0x40` | クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）、bit4 = FPGA の観測の値の一致（obs.match）、bit5 = サンプラの値の一致（sampler_match。構成によって無い） |
 | `mem` | `0x00000600` | `0x40` | 外部メモリ（DDR3 等）の状態とメモリ試験（docs/superpowers/specs/2026-10-16-m8-ddr3-design.md）。番地・数は拍（MEM_BEAT_BYTES バイト）単位 |
 | `la_deep` | `0x00000700` | `0x40` | ロジアナの深いバッファ（外部メモリ。docs/superpowers/specs/2026-10-16-m8-ddr3-design.md §5）。前段の設定（rate・trig_*）は la ブロックと共通。番地・数は拍（MEM_BEAT_BYTES バイト）単位 |
 | `events` | `0x00000800` | `0x40` | DAP トランザクションのイベント記録（docs/superpowers/specs/2026-10-16-m9b-dap-events-design.md）。1 件 = 1 拍。読み出しは la_deep の read_region = 1 |
 | `debug` | `0x00000900` | `0x40` | SWD / JTAG の物理層の調整 |
 | `trigseq` | `0x00000A00` | `0x40` | 多段トリガ（docs/superpowers/specs/2026-10-16-m9c-trigger-sequencer-design.md）。事象: bit0 = パターン A、bit1 = パターン B、bit2 = DAP の番地一致、bit3 = ホストの指令。発火は xtrig の源 bit3 |
 | `aux` | `0x00000B00` | `0x40` | 補助マイコン（Raspberry Pi Pico）の計測値（docs/superpowers/specs/2026-10-17-m11-aux-pico-design.md）。最新のターゲット電圧（補助マイコンの ch 0）。全チャンネルの値はイベント（種類 6）に時刻付きで残る |
-| `sampler` | `0x00000C00` | `0x80` | DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする |
-| `xtrig_out` | `0x00000D00` | `0x40` | クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ） |
+| `sampler` | `0x00000C00` | `0x40` | DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする |
+| `sampler_match` | `0x00000C40` | `0x40` | サンプラの値の一致（R21。docs/superpowers/specs/2026-10-23-sampler-match-trigger-design.md）。サンプラの標本（ACK OK・番地が addr）が (値 xor value) and mask = 0 に入った瞬間（前の標本が不一致）にクロストリガの源 bit5。構成によって無い（FEATURES bit10。無ければ読むとエラー） |
+| `xtrig_out` | `0x00000D00` | `0x40` | クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ、bit4 FPGA の観測の値の一致、bit5 サンプラの値の一致） |
+| `obs` | `0x00000E00` | `0x40` | 対象の FPGA の観測（docs/superpowers/specs/2026-10-20-fpga-observation-v2-design.md）。対象の JTAG のユーザーの DR の観測の回路（target_ip/fprobe_obs）をスキャンし続け、記録をイベント 8、時刻合わせをイベント 9 にする |
+| `sync` | `0x00000F00` | `0x40` | ボードの間の時刻の同期（docs/superpowers/specs/2026-10-22-modular-design.md §3.2）。親は period ごとにパルスと自分の時刻を sync_out に出し、子は sync_in で受けた組（自分の時刻・親の時刻）をイベント 10 にする |
 | `caps` | `0x00001000` | `0x1000` | ケイパビリティ ROM（TLV。範囲外は 0） |
 | `la_mem` | `0x00010000` | `0x8000` | ロジアナのバッファ（1 サンプル = 1 ワード。start_index から時間順に読む） |
 
@@ -94,8 +97,8 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 
 | アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
 |---|---|---|---|---|---|---|
-| `0x00000500` | `route` | 3:0 | `to_la` | RW | `0x0` | ロジアナをトリガする源 |
-| `0x00000500` | `route` | 11:8 | `to_inject` | RW | `0x0` | 割り込み書き込み（既定は停止）をする源 |
+| `0x00000500` | `route` | 5:0 | `to_la` | RW | `0x0` | ロジアナをトリガする源 |
+| `0x00000500` | `route` | 13:8 | `to_inject` | RW | `0x0` | 割り込み書き込み（既定は停止）をする源 |
 | `0x00000504` | `command` | 0 | `fire` | PULSE | `0x0` | ホストの指令（源 bit2） |
 | `0x00000508` | `inject_ap` | 7:0 | `inject_ap` | RW | `0x0` | 割り込み書き込みの MEM-AP 番号 |
 | `0x0000050C` | `inject_addr` | 31:0 | `inject_addr` | RW | `0xE000EDF0` | 割り込み書き込みの番地（既定 DHCSR） |
@@ -173,6 +176,7 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
 |---|---|---|---|---|---|---|
 | `0x00000900` | `sample_delay` | 1:0 | `swd` | RW | `0x1` | SWDIO の取り込みを基準（SWCLK を立ち上げる周期）から遅らせる sys 周期数。配線とターゲットの応答遅延の補償 |
+| `0x00000900` | `sample_delay` | 10:8 | `jtag` | RW | `0x0` | TDO の取り込みを次の TCK の立ち下がりの直前から遅らせる sys 周期数（0〜7）。TDO が立ち下がりから 2 × half_period 周期より遅れて届くとき（R16。docs/superpowers/specs/2026-10-23-jtag-tdo-sample-design.md） |
 
 ## trigseq
 
@@ -232,6 +236,23 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000C24` | `status` | 8 | `busy` | RO | — | 読んでいる |
 | `0x00000C24` | `status` | 9 | `held` | RO | — | 線を持っている（ターゲットの SELECT・CSW・TAR はサンプラの値。ホストの次の転送の前に戻す） |
 
+## sampler_match
+
+| アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
+|---|---|---|---|---|---|---|
+| `0x00000C40` | `addr` | 31:0 | `addr` | RW | `0x0` | 比べる番地（サンプラが読む番地の 1 語） |
+| `0x00000C44` | `mask` | 31:0 | `mask` | RW | `0x0` | 比べるビット |
+| `0x00000C48` | `value` | 31:0 | `value` | RW | `0x0` | 比べる値 |
+| `0x00000C4C` | `control` | 0 | `enable` | RW | `0x0` | 1 で比べる（0→1 で数・状態・時刻を消す。条件を変えるときは 0 にしてから書き、1 に戻す） |
+| `0x00000C4C` | `control` | 8 | `matched` | RO | — | 最後の標本が一致 |
+| `0x00000C4C` | `control` | 9 | `seen_any` | RO | — | 有効にした後に標本があった |
+| `0x00000C50` | `seen` | 31:0 | `seen` | RO | — | 有効にした後に比べた標本（ACK OK・番地が一致）の数 |
+| `0x00000C54` | `count` | 31:0 | `count` | RO | — | 発火の回数 |
+| `0x00000C58` | `time_lo` | 31:0 | `time_lo` | RO | — | 最後に発火した標本を受けた時刻（下位） |
+| `0x00000C5C` | `time_hi` | 31:0 | `time_hi` | RO | — | 同（上位 16 ビット。時刻は 48 ビット = イベントの時刻と同じ幅） |
+| `0x00000C60` | `prev_lo` | 31:0 | `prev_lo` | RO | — | その直前の（不一致の）標本を受けた時刻（下位）。条件に入ったのはこの時刻と time の間 |
+| `0x00000C64` | `prev_hi` | 31:0 | `prev_hi` | RO | — | 同（上位 16 ビット） |
+
 ## xtrig_out
 
 | アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
@@ -239,8 +260,8 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000D00` | `status` | 1:0 | `active` | RO | — | 動作 k が動いている（端子を駆動している） |
 | `0x00000D04` | `when0` | 7:0 | `mask` | RW | `0x0` | 端子の並びで見るロジアナの ch（0 なら並びは使わない） |
 | `0x00000D04` | `when0` | 15:8 | `value` | RW | `0x0` | 見る ch の値 |
-| `0x00000D04` | `when0` | 19:16 | `sources` | RW | `0x0` | 条件にする源（xtrig の源のビット） |
-| `0x00000D04` | `when0` | 20 | `any` | RW | `0x0` | 1: 見る ch のどれかが一致で成立、0: すべて一致で成立 |
+| `0x00000D04` | `when0` | 21:16 | `sources` | RW | `0x0` | 条件にする源（xtrig の源のビット） |
+| `0x00000D04` | `when0` | 24 | `any` | RW | `0x0` | 1: 見る ch のどれかが一致で成立、0: すべて一致で成立 |
 | `0x00000D08` | `ctrl0` | 0 | `enable` | RW | `0x0` | 有効（0 で状態を消し、駆動しない） |
 | `0x00000D08` | `ctrl0` | 5:4 | `mode` | RW | `0x0` | 0 脈、1 保持（無効にするまで）、2 条件の間 |
 | `0x00000D08` | `ctrl0` | 8 | `level` | RW | `0x1` | 動いている間に出す値（1 高、0 低） |
@@ -250,8 +271,8 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000D08` | `ctrl0` | 29:28 | `pin` | RW | `0x0` | 動かす端子（ケイパビリティ OUTPUTS の候補の番号） |
 | `0x00000D0C` | `when1` | 7:0 | `mask` | RW | `0x0` | 端子の並びで見るロジアナの ch（0 なら並びは使わない） |
 | `0x00000D0C` | `when1` | 15:8 | `value` | RW | `0x0` | 見る ch の値 |
-| `0x00000D0C` | `when1` | 19:16 | `sources` | RW | `0x0` | 条件にする源（xtrig の源のビット） |
-| `0x00000D0C` | `when1` | 20 | `any` | RW | `0x0` | 1: 見る ch のどれかが一致で成立、0: すべて一致で成立 |
+| `0x00000D0C` | `when1` | 21:16 | `sources` | RW | `0x0` | 条件にする源（xtrig の源のビット） |
+| `0x00000D0C` | `when1` | 24 | `any` | RW | `0x0` | 1: 見る ch のどれかが一致で成立、0: すべて一致で成立 |
 | `0x00000D10` | `ctrl1` | 0 | `enable` | RW | `0x0` | 有効（0 で状態を消し、駆動しない） |
 | `0x00000D10` | `ctrl1` | 5:4 | `mode` | RW | `0x0` | 0 脈、1 保持（無効にするまで）、2 条件の間 |
 | `0x00000D10` | `ctrl1` | 8 | `level` | RW | `0x1` | 動いている間に出す値（1 高、0 低） |
@@ -259,3 +280,47 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000D10` | `ctrl1` | 23:16 | `length` | RW | `0x1` | 脈の長さ（刻みの数。0 は脈を出さない） |
 | `0x00000D10` | `ctrl1` | 26:24 | `unit` | RW | `0x0` | 脈の刻み = 16^unit 周期 |
 | `0x00000D10` | `ctrl1` | 29:28 | `pin` | RW | `0x0` | 動かす端子（ケイパビリティ OUTPUTS の候補の番号） |
+
+## obs
+
+| アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
+|---|---|---|---|---|---|---|
+| `0x00000E00` | `control` | 0 | `enable` | RW | `0x0` | 1 で始める（TAP を戻し、IR = USER、ID の 2 つのレジスタを読んで確かめ、スキャンを繰り返す）。0 で TAP を Test-Logic-Reset に戻してから線を手放す |
+| `0x00000E00` | `control` | 1 | `release` | RW | `0x0` | 1 で TAP を戻さずにすぐ線を手放す（止める） |
+| `0x00000E04` | `half_period` | 15:0 | `half_period` | RW | `0xA` | TCK の半周期（sys の周期数、2 以上） |
+| `0x00000E08` | `chain` | 5:0 | `ir_len` | RW | `0x4` | 対象の IR の長さ（1〜32） |
+| `0x00000E08` | `chain` | 11:6 | `ir_before` | RW | `0x0` | 対象より TDO 側の装置の IR の合計ビット数 |
+| `0x00000E08` | `chain` | 17:12 | `ir_after` | RW | `0x0` | 対象より TDI 側の装置の IR の合計ビット数 |
+| `0x00000E08` | `chain` | 20:18 | `dr_before` | RW | `0x0` | 対象より TDO 側の装置の数 |
+| `0x00000E08` | `chain` | 23:21 | `dr_after` | RW | `0x0` | 対象より TDI 側の装置の数 |
+| `0x00000E0C` | `user_ir` | 31:0 | `user_ir` | RW | `0x2` | 対象の USER の命令の値（obs_soft_tap は 2） |
+| `0x00000E10` | `words` | 8:0 | `words` | RW | `0x10` | 1 スキャンで受ける記録の語数（1〜256） |
+| `0x00000E14` | `sync_period` | 15:0 | `sync_period` | RW | `0x10` | 印（時刻合わせ。op 3、番号つき）を載せる間隔（スキャンの数。0 = 自動では載せない） |
+| `0x00000E18` | `cmd` | 15:0 | `cmd` | RW | `0x0` | 命令 |
+| `0x00000E20` | `cmd_push` | 0 | `cmd_push` | PULSE | `0x0` | 命令を積む（待ち行列が一杯なら捨てて status.cmd_dropped） |
+| `0x00000E24` | `status` | 0 | `running` | RO | — | スキャンを繰り返している |
+| `0x00000E24` | `status` | 1 | `id_ok` | RO | — | 開いてから ID が "FOBS" と照合できた（stuck の後も残る: stuck と組で、答えていた後に止まったのか、初めから答えないのかが分かる） |
+| `0x00000E24` | `status` | 2 | `stuck` | RO | — | 観測の回路が答えない（見出しの印が 0xA6 でない・ID が違う・ID の応答が来ない）ので止めた |
+| `0x00000E24` | `status` | 3 | `cmd_pending` | RO | — | 待ち行列に命令がある |
+| `0x00000E24` | `status` | 4 | `overflow_seen` | RO | — | 最後の見出しの溢れの印 |
+| `0x00000E24` | `status` | 5 | `cmd_dropped` | RO | — | 一杯で捨てた命令がある（enable の 0→1 で消える） |
+| `0x00000E24` | `status` | 6 | `target_running` | RO | — | 最後の見出しの「対象の clk 側が記録中」（対象のリセット等で止まったら 0） |
+| `0x00000E24` | `status` | 7 | `driving` | RO | — | 対象の JTAG の線を駆動している（止めた後は 0 になるまで待つ） |
+| `0x00000E28` | `scans` | 31:0 | `scans` | RO | — | 行ったスキャンの数（イベント 8 の address） |
+| `0x00000E2C` | `read_value` | 31:0 | `read_value` | RO | — | 最後の応答の記録: 番号(31:24。応答のたびに 1 増える) | 番地(19:16) | 値(15:0) |
+| `0x00000E30` | `id` | 31:0 | `id` | RO | — | 始めに読んだ観測の回路の ID |
+| `0x00000E34` | `match` | 15:0 | `mask` | RW | `0x0` | 一致を比べる値のビット |
+| `0x00000E34` | `match` | 31:16 | `value` | RW | `0x0` | 一致の値 |
+| `0x00000E38` | `match_change` | 15:0 | `change` | RW | `0x0` | 前の値からどれかが変わったら比べるビット（0 = 一致に入った瞬間） |
+| `0x00000E38` | `match_change` | 16 | `enable` | RW | `0x0` | 1 で一致を源にする |
+| `0x00000E3C` | `match_count` | 31:0 | `match_count` | RO | — | 値の一致が成り立った回数（enable の 0→1 で 0 に） |
+
+## sync
+
+| アドレス | レジスタ | ビット | フィールド | 種類 | 初期値 / 値 | 説明 |
+|---|---|---|---|---|---|---|
+| `0x00000F00` | `control` | 0 | `enable` | RW | `0x0` | 子として受けて組をイベント 10 にする |
+| `0x00000F00` | `control` | 1 | `master` | RW | `0x0` | 親として sync_out に出す |
+| `0x00000F04` | `period` | 31:0 | `period` | RW | `0x186A0` | 親のパルスの間隔（タイムベースの刻み）。1 回の送りは 730 刻みで、送りの間に 0 を 20 刻み置くので、約 750 より短いと約 750 ごと |
+| `0x00000F08` | `status` | 15:0 | `pairs` | RO | — | 受けた組の数（CRC が合ったもの。16 ビットで一周） |
+| `0x00000F08` | `status` | 31:16 | `crc_errors` | RO | — | CRC が合わず捨てた組の数（0xFFFF で止まる） |

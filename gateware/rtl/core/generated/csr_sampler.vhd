@@ -1,5 +1,5 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
--- CSR ブロック sampler（0x00000C00, 128 バイト）: DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする
+-- CSR ブロック sampler（0x00000C00, 64 バイト）: DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
 -- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
 library ieee;
@@ -41,7 +41,7 @@ architecture rtl of csr_sampler is
   signal err   : std_logic := '0';
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
-  signal index : natural range 0 to 31;
+  signal index : natural range 0 to 15;
   signal control_run_r : std_logic := '0';
   signal control_ap_r : std_logic_vector(7 downto 0) := "00000000";
   signal control_jitter_r : std_logic_vector(3 downto 0) := "0000";
@@ -53,7 +53,7 @@ architecture rtl of csr_sampler is
   signal slot_write_r : std_logic := '0';
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(4 downto 0));
+  index <= to_integer(bus_addr(3 downto 0));
 
   process (clk)
   begin

@@ -73,6 +73,8 @@ architecture rtl of swd_phy is
   signal half      : half_t := H_IDLE;
   signal phase     : phase_t := P_NONE;
   signal timer     : unsigned(15 downto 0) := (others => '0');
+  signal expired   : boolean := false;                      -- timer = 0（1 周期前に timer = 1 を見て決める。比較を
+                                                            -- 多くのレジスタのクロックイネーブルの経路から外す。R24）
   signal bits_left : natural range 0 to 64 := 0;            -- 今のビットを含む残り
   signal tx        : std_logic_vector(63 downto 0) := (others => '1');   -- 出すビット（下位から）
   signal rx        : std_logic_vector(63 downto 0) := (others => '0');   -- 取り込んだビット（読みデータは上位から、
@@ -212,6 +214,7 @@ begin
       sclk      <= '0';
       half      <= H_LOW;
       timer     <= half_period - 1;
+      expired   <= false;                                   -- half_period は 2 以上（timer は 1 以上から始まる）
     end procedure;
   begin
     if rising_edge(clk) then
@@ -264,8 +267,9 @@ begin
             end if;
 
           when H_LOW =>
-            if timer /= 0 then
-              timer <= timer - 1;
+            if not expired then
+              timer   <= timer - 1;
+              expired <= timer = 1;
             else
               -- Low 相の終わり: 取り込みを予約して立ち上げる
               index := 0;
@@ -280,11 +284,13 @@ begin
               sclk  <= '1';
               half  <= H_HIGH;
               timer <= half_period - 1;
+              expired <= false;
             end if;
 
           when H_HIGH =>
-            if timer /= 0 then
-              timer <= timer - 1;
+            if not expired then
+              timer   <= timer - 1;
+              expired <= timer = 1;
             elsif bits_left > 1 then
               bits_left <= bits_left - 1;
               tx        <= '1' & tx(63 downto 1);
@@ -294,6 +300,7 @@ begin
               sclk  <= '0';
               half  <= H_LOW;
               timer <= half_period - 1;
+              expired <= false;
             elsif pend_left /= 0 then
               null;                                           -- 相の最後のビットの取り込みを待つ
             else

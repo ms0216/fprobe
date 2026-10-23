@@ -4,6 +4,8 @@
 イベント 1 件 = 16 バイト: [47:0] 時刻、[79:48] 番地、[111:80] データ、[114:112] ACK、[118:115] 要求
 （APnDP, RnW, A[3:2]）、[119] パリティ異常、[127:120] 種類。
 種類 3 / 4 / 5（UART 受信・UART 送信・SWO）はデータの下位 8 ビットがバイト（波形・DAP と同じ時間軸で並べられる）。
+種類 11（割り込み書き込み。R20）は [119:112] が停止の書き込みまでの転送数（旧い回路の種類 2 は要求・ACK の欄で、転送数なし）。
+旧いホストは種類 11 を知らないので、回路とホストは一緒に更新する。
 """
 
 from dataclasses import dataclass
@@ -11,17 +13,22 @@ from dataclasses import dataclass
 from . import generated as g
 from .device import Device
 
-__all__ = ["Access", "DapEvent", "EventCursor", "EventLog", "KIND_AUX", "KIND_HOST", "KIND_INJECT", "KIND_SAMPLE", "KIND_SWO", "KIND_UART_RX", "KIND_UART_TX",
+__all__ = ["Access", "DapEvent", "EventCursor", "EventLog", "KIND_AUX", "KIND_HOST", "KIND_INJECT", "KIND_INJECT_TRANSFERS", "KIND_OBS_RECORD", "KIND_OBS_SYNC", "KIND_SAMPLE", "KIND_SWO", "KIND_SYNC", "KIND_UART_RX", "KIND_UART_TX",
            "decode_events", "resolve"]
 
 EVENT_BYTES = 16
 KIND_HOST = 1            # ホスト（pyOCD 等）の転送
-KIND_INJECT = 2          # クロストリガの割り込み書き込み
+KIND_INJECT = 2          # クロストリガの割り込み書き込み（旧い回路。転送数は分からない）
 KIND_UART_RX = 3         # UART の受信バイト（ターゲット → PC）
 KIND_UART_TX = 4         # UART の送信バイト（PC → ターゲット）
 KIND_SWO = 5             # SWO のバイト
 KIND_AUX = 6             # 補助マイコンの計測値（data = ch << 16 | mV）
 KIND_SAMPLE = 7          # DAP サンプラ（F4）の 1 語（番地・値。FPGA が自分で周期的に読んだもの）
+KIND_OBS_RECORD = 8      # 対象の FPGA の観測の記録（data = 記録の語、address = スキャンの番号。fprobe.fpga_obs）
+KIND_OBS_SYNC = 9        # 同、時刻合わせ（data = 対象の時刻の下位 32 ビット、address = 上位 16 ビット）
+KIND_SYNC = 10           # ボードの間の時刻の同期の組（時刻 = 子の時刻、address = 親の時刻の下位 32、data = 上位 32。fprobe.timesync）
+KIND_INJECT_TRANSFERS = 11   # 同（R20）: 書き込みまでの SWD の転送数つき（bit 112〜119。WAIT の繰り返しも数える）
+INJECT_KINDS = (KIND_INJECT, KIND_INJECT_TRANSFERS)
 BYTE_KINDS = {KIND_UART_RX: "uart_rx", KIND_UART_TX: "uart_tx", KIND_SWO: "swo"}
 ACK_OK = 0b001
 DP_RDBUFF = 0xC
@@ -39,6 +46,7 @@ class DapEvent:
     parity_error: bool
     address: int             # DRW ならメモリの番地（TAR から）、それ以外はレジスタの番地
     data: int
+    transfers: int | None = None   # 割り込み書き込み（種類 11）の転送数。それ以外・旧い種類 2 は None
 
     @property
     def ok(self) -> bool:
@@ -50,10 +58,14 @@ class Access:
     """意味づけした 1 アクセス（ポストされた読みを対応付けた後）。time は値が確定した転送の時刻。"""
     time: int
     kind: str                # "ap_read" / "ap_write" / "dp_read" / "dp_write" / "fail" / "uart_rx" / "uart_tx" / "swo"
-                             # / "aux"（address = チャンネル、value = mV）/ "sample"（サンプラが読んだ番地と値）
+                             # / "inject"（クロストリガの割り込み書き込み）/ "aux"（address = チャンネル、value = mV）/ "sample"（サンプラが読んだ番地と値）
+                             # / "obs_record"（address = スキャンの番号、value = 記録の語）
+                             # / "obs_sync"（address = 対象の時刻の上位 16 ビット、value = 下位 32 ビット）
+                             # / "sync_pair"（address = 親の時刻の下位 32 ビット、value = 上位 32 ビット）
     address: int
     value: int
     ack: int
+    transfers: int | None = None   # "inject"（割り込み書き込み）の書き込みまでの転送数（旧い回路は None）
 
 
 def decode_events(data: bytes) -> list[DapEvent]:
@@ -62,6 +74,12 @@ def decode_events(data: bytes) -> list[DapEvent]:
     out = []
     for i in range(0, len(data), EVENT_BYTES):
         v = int.from_bytes(data[i:i + EVENT_BYTES], "little")
+        kind = v >> 120 & 0xFF
+        if kind == KIND_INJECT_TRANSFERS:                # 要求・ACK の欄の代わりに転送数（書き込みは常に AP の DRW・OK）
+            out.append(DapEvent(time=v & (1 << 48) - 1, kind=kind, ap=True, read=False, register=0xC, ack=ACK_OK,
+                                parity_error=False, address=v >> 48 & 0xFFFFFFFF, data=v >> 80 & 0xFFFFFFFF,
+                                transfers=v >> 112 & 0xFF))
+            continue
         request = v >> 115 & 0xF
         out.append(DapEvent(time=v & (1 << 48) - 1, kind=v >> 120 & 0xFF, ap=bool(request & 1),
                             read=bool(request & 2), register=(request >> 2) << 2, ack=v >> 112 & 7,
@@ -83,6 +101,16 @@ def resolve(events: list[DapEvent]) -> list[Access]:
             continue
         if e.kind == KIND_SAMPLE:                # サンプラの読みは値が確定済み（ホストのポストの連鎖とは別）
             out.append(Access(e.time, "sample", e.address, e.data, e.ack))
+            continue
+        if e.kind == KIND_SYNC:                  # ボードの間の時刻の同期（DAP とは別の線）
+            out.append(Access(e.time, "sync_pair", e.address, e.data, 0))
+            continue
+        if e.kind in (KIND_OBS_RECORD, KIND_OBS_SYNC):   # 対象の FPGA の観測（DAP とは別の線）
+            out.append(Access(e.time, "obs_record" if e.kind == KIND_OBS_RECORD else "obs_sync", e.address, e.data,
+                              0))
+            continue
+        if e.kind in INJECT_KINDS:               # 割り込み書き込み: ホストのポストの連鎖とは別（ホストの値を戻してから返す）
+            out.append(Access(e.time, "inject" if e.ok else "fail", e.address, e.data, e.ack, e.transfers))
             continue
         if not e.ok:
             out.append(Access(e.time, "fail", e.address, e.data, e.ack))

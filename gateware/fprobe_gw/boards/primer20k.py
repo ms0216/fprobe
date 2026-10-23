@@ -62,6 +62,12 @@ PRIMER20K = Board(
         # ゴミを受けないようプルアップのまま（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md §3.6）
         "pmod1": tuple(Pin(f"pmod1[{i}]", loc, pull="NONE" if i in (4, 7) else "UP", drive=4, hysteresis="HIGH")
                        for i, loc in enumerate("J14 J16 M14 M15 T12 R11 T11 P11".split())),
+        # 対象の FPGA の観測の試験で Primer を「観測される側」にするとき（構成 obs_target_primer）の J12: pmod1 と同じ
+        # 端子を役目どおりに（入力 = TCK・TMS・TDI はヒステリシスと引き上げ、出力 = TDO・照合のビットはプル無し。
+        # Gowin は出力だけの端子のヒステリシスを受け付けない）
+        "obs_target": (*(Pin(port, loc, pull="UP", hysteresis="HIGH")
+                         for port, loc in (("obs_tck", "J14"), ("obs_tms", "J16"), ("obs_tdi", "M14"))),
+                       Pin("obs_tdo", "M15", pull="NONE", drive=8), Pin("obs_mark", "T12", pull="NONE", drive=8)),
         # USB3317（USB-OTG 側, ULPI）。ulpi_rst（F10）は RTL8201F の RESET と共用
         "ulpi": (
             Pin("ulpi_clk", "T15", pull="NONE"),
@@ -80,6 +86,9 @@ PRIMER20K = Board(
         # プルアップと違い、電源の無いターゲットに電流を流し込まない。長いジャンパ線に備えてヒステリシスを付ける。
         # T7 は大域クロック入力（GCLKT_3）だが、ここではただの入力（ETM のトレース受信 U34 は別の構成で使う案）
         "la_in": _bus("la_in", "T8 P8 R8 T7 T6 P6", pull="DOWN", hysteresis="HIGH"),
+        # ボードの間の時刻の同期（docs/superpowers/specs/2026-10-22-modular-design.md §3.2）: J6（pmod2）の 1 番 = 親から、
+        # 2 番 = 子へ。線は休みの間 0（プルダウン: つないでいない入力でパルスを見ない）
+        "sync": (Pin("sync_in", "B12", pull="DOWN", hysteresis="HIGH"), Pin("sync_out", "C12", pull="NONE", drive=8)),
         # RTL8201F（RMII、PHY アドレス 1）。REF_CLK（50 MHz）は PHY の TXC から入る（CLK_CTL の strap = 出力）。
         # eth_rst（F10）は USB3317 の RESET と共用。MDC/MDIO（F14/F16）は v1 では使わない（既定の設定で 100M 全二重）。
         # 出典: Dock 3714 の回路図 P005、Sipeed の Ethernet 例の .cst、LiteX の Dock 定義（3 つで一致）

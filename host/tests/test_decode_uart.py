@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from fprobe.decode import decode_uart, estimate_baud
+from fprobe.decode import decode_uart
 from fprobe.decode.synth import Wave, uart, uart_break
 
 BAUD = 115200
@@ -49,7 +49,7 @@ def test_annotation_extent_text_and_times():
     (a,) = d.annotations
     assert a.kind == "data" and a.text == "0x41 'A'" and a.start == 32 and a.end == 192    # 10 ビット × 16 サンプル
     assert d.since_trigger(a.end) == pytest.approx(0, abs=1e-9)
-    assert d.params["baud"] == BAUD and d.params["baud_estimated"] is False
+    assert d.params["baud"] == BAUD and "baud_estimated" not in d.params
 
 
 def test_parity_and_frame_errors_and_break():
@@ -122,31 +122,15 @@ def test_two_uarts_on_different_channels():
     assert bytes(data_of(decode_uart(t, 7, baud=BAUD))) == b"pong!"
 
 
-@pytest.mark.parametrize("baud", [9600, 115200, 1_000_000, 3_000_000])
-def test_baud_is_estimated_and_snapped(baud):
-    rng = random.Random(baud)
-    data = [rng.randrange(256) for _ in range(50)]
-    w = wave(rate=48e6 if baud > 115200 else baud * 23.3)
-    end = uart(w, 5, data, 7 / baud, baud=baud * 1.01, gap_bits=1.5)          # 1% ずれていても標準値に寄せる
-    t = w.build(end_s=end)
-    assert estimate_baud(t, 5) == baud
-    d = decode_uart(t, 5)
-    assert d.params["baud"] == baud and d.params["baud_estimated"] is True and data_of(d) == data
-
-
-def test_nonstandard_baud_is_estimated_closely():
-    w = wave(rate=10e6)
-    end = uart(w, 5, bytes(range(0x20, 0x80)), T0, baud=83333)
-    assert estimate_baud(w.build(end_s=end), 5) == pytest.approx(83333, rel=0.005)
-
-
-def test_estimation_on_a_quiet_line_gives_nothing():
+def test_the_baud_is_required_and_never_guessed():
+    # ボーレートを波形から推定しない（雑音とみなす割合・標準値に寄せる等の経験則が要るため。CLAUDE.md）。
+    # 1 ビットの長さは la.measure 等でパルスの幅を測って、使う側が決める
     w = wave()
-    w.set(0, 1, 1e-6)
-    t = w.build(end_s=10e-6)
-    assert estimate_baud(t, 5) is None
-    d = decode_uart(t, 5)
-    assert len(d) == 0 and d.params["baud"] is None
+    end = uart(w, 5, b"hi", T0, baud=BAUD)
+    t = w.build(end_s=end)
+    with pytest.raises(ValueError, match="baud"):
+        decode_uart(t, 5)
+    assert decode_uart(t, 5, baud=BAUD).params["baud"] == BAUD
 
 
 def test_bad_parameters_are_rejected():

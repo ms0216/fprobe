@@ -318,3 +318,32 @@ def test_a_sampler_left_running_by_a_previous_owner_is_stopped_when_the_device_i
     p = Probe("0001")
     assert p.session.device is dev
     assert dev.csr[g.SAMPLER_CONTROL] & 1 == 0
+
+
+def test_names_label_the_watches_and_the_sample_rows(probe):
+    # 番地の式に名前を付ける（システム解析の「誤り」等）。値・段の名前に使い、名前は重ねられない・数が合わないと断る
+    probe._symbols = None
+    probe.watch_set(["0x20040804", "0x20040808"], names=["count", "errors"])
+    FakeEventLog.events = [sample(1000, 0x20040804, 7), sample(1001, 0x20040808, 2)]
+    assert {v["name"]: v["value"] for v in probe.watch_values()["values"]} == {"count": 7, "errors": 2}
+    assert probe._sample_name(0x20040808) == "errors"
+    with pytest.raises(ValueError):
+        probe.watch_set(["0x20040804", "0x20040808"], names=["x"])
+    with pytest.raises(ValueError):
+        probe.watch_set(["0x20040804", "0x20040808"], names=["x", "x"])
+
+
+def test_names_stay_with_the_recording(probe, tmp_path, monkeypatch):
+    # 記録中に付けた名前は記録の情報に残り、観測を止めた後・後から開いた記録でも段の名前になる
+    monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
+    monkeypatch.setattr("fprobe.mcp_server.Collector", lambda *a, **k: SimpleNamespace(
+        start=lambda: None, stop=lambda: None, poll=lambda: None, obs=None, lost=0))
+    probe._symbols = None
+    probe.session.device.capabilities = lambda: SimpleNamespace(sampler=True, sys_clock_hz=100_000_000,
+                                                                timebase_hz=100_000_000, board="b", design="d")
+    probe.recording_start(name="named")
+    probe.watch_set(["0x20040808"], names=["errors"])
+    probe.watch_stop()
+    probe._watched = []
+    assert probe._sample_name(0x20040808) == "errors"
+    probe.recording_stop()

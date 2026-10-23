@@ -21,8 +21,10 @@ export class FakeConn {
     this.topics.set(topic, set);
     return () => set.delete(fn);
   }
+  private linkFns: ((s: any, h?: any) => void)[] = [];
   onLink(fn: (s: any, h?: any) => void) {
-    this.link = fn;
+    this.linkFns.push(fn);                 // 受け手はいくつでも（状態・時間軸・画面の同期が同じ接続を見る）
+    this.link = (s, h) => this.linkFns.forEach((f) => f(s, h));
     return () => {};
   }
   emit(topic: string, data: any) {

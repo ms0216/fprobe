@@ -42,8 +42,8 @@ def test_uart_bytes_and_baud_are_decoded(probe):
         t.write32(USART1_DR, b)
     t.flush()
     probe.la_collect(timeout_s=3)
-    d = probe.la_decode("uart", {"channel": 5})
-    assert d["params"]["baud"] == 115_200 and d["errors"] == 0, d["params"]
+    d = probe.la_decode("uart", {"channel": 5, "baud": 115_200})               # ボーは推定しない（必須）
+    assert d["errors"] == 0, d["params"]
     data = bytes(a["value"] for a in d["annotations"] if a["kind"] == "data")
     assert data.startswith(b"Hello"[:len(data)]) and len(data) >= 3, data                       # 窓に入った分
 

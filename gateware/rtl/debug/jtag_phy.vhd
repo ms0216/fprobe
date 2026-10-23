@@ -5,8 +5,16 @@
 -- 前提: TAP は Run-Test/Idle にいる（JTAG_Sequence でホストが入れる）。チェーン上の位置は dr_before / dr_after
 -- （選んだ装置より TDO 側 / TDI 側の装置数）と ir_before / ir_after（その IR の合計ビット数）、ir_len で与える。
 --
--- ビットのタイミングは swd_phy と同じ（Low 相の頭で TMS / TDI を変え、Low 相の終わりに TDO を取り込んで TCK を上げる）。
--- TAP は立ち上がりで TMS / TDI を取り込み、立ち下がりで TDO を変えるので、Low 相の終わりは TDO が落ち着いた時点。
+-- ビットのタイミング: Low 相の頭で TMS / TDI を変えて TCK を下げ、Low 相の終わりに TCK を上げ、次の立ち下がりの直前
+-- （次のビットの TCK を下げる周期。din = その 1 周期前のピン）に TDO を取り込む。TAP は立ち上がりで TMS / TDI を取り込み、立ち下がりで TDO を変えて次の立ち下がり
+-- まで保つので、TDO は立ち下がりから 1 ビットの長さ（2 × half_period + 1 周期）の 1 周期手前まで遅れて
+-- （配線の往復 + ターゲットの出力遅延）届いても正しく読める
+-- （Low 相の終わりで取ると半周期しか待てず、速い TCK で化けた。R16）。それより遅れて届く TDO（Pi 2B で 14.3 MHz 以上）
+-- のために、取り込みをさらに sample_delay 周期遅らせられる（次のビットの Low 相の途中で前のビットの値を取る）。
+-- 遅らせた取り込みは（シーケンスか DR の本体か）の遅延線で運ぶ。取り込みはビットの順に来るので、DR の本体は TDO 用の
+-- シフトレジスタに、シーケンスは取り込んだ数の位置に入れる（ビット番号は運ばない）。TDO は TDI を出すシフトレジスタとは別
+-- （遅れた取り込みが次のビットの TDI を乱さない）。命令の終わり（値を返す・ACK を見る）は遅延線が空になってから。
+-- 仕様: docs/superpowers/specs/2026-10-23-jtag-tdo-sample-design.md
 --
 -- 命令:
 --   OP_SEQ_OUT  SWJ_Sequence: cmd_count ビットを cmd_data の下位から TMS に出す（TDI = 1）
@@ -36,6 +44,7 @@ entity jtag_phy is
     ir_before   : in  natural range 0 to 63;
     ir_after    : in  natural range 0 to 63;
     ir_len      : in  natural range 1 to 32;
+    sample_delay : in natural range 0 to 7;                 -- TDO の取り込みを立ち下がりの直前から遅らせる周期数
     -- 命令（swd_phy と同じ）
     cmd_valid   : in  std_logic;
     cmd_ready   : out std_logic;
@@ -90,13 +99,24 @@ architecture rtl of jtag_phy is
   signal seq_op    : std_logic_vector(1 downto 0) := OP_SEQ_OUT;
   signal seq_tms   : std_logic := '0';
   signal seq_out   : std_logic_vector(63 downto 0) := (others => '1');   -- 出すビット（下位から、毎ビットずらす）
-  signal seq_in    : std_logic_vector(63 downto 0) := (others => '0');   -- 取り込んだ TDO（ビット番号の位置へ）
+  signal seq_in    : std_logic_vector(63 downto 0) := (others => '0');   -- 取り込んだ TDO（取り込んだ数 seq_taken の位置へ）
+  signal seq_taken : natural range 0 to 63 := 0;                         -- このシーケンスで取り込んだビットの数（次の位置）
   -- 転送
   signal ir        : std_logic_vector(3 downto 0) := (others => '0');
   signal ir_valid  : boolean := false;                                   -- TAP の IR が ir_cur になっている
   signal ir_cur    : std_logic_vector(3 downto 0) := (others => '0');
   signal payload   : std_logic_vector(34 downto 0) := (others => '0');   -- RnW, A[3:2], データ
-  signal dr_shift  : std_logic_vector(34 downto 0) := (others => '0');   -- 本体のシフトレジスタ（出す / 取る）
+  signal dr_shift  : std_logic_vector(34 downto 0) := (others => '0');   -- 本体の出すビット（TDI。毎ビットずらす）
+  signal dr_in     : std_logic_vector(34 downto 0) := (others => '0');   -- 本体の取った TDO（上からずらし入れる）
+  -- 遅らせた取り込みの遅延線: 段 k は k + 2 周期前に High 相の終わりを迎えたビット（take_base の後ろ）
+  type take_t is record
+    valid : std_logic;
+    seq   : std_logic;                                                   -- '1' = シーケンス、'0' = DR の本体
+  end record;
+  constant TAKE_NONE : take_t := ('0', '0');
+  type take_line_t is array (0 to 6) of take_t;
+  signal take_line : take_line_t := (others => TAKE_NONE);
+  signal take_base : take_t := TAKE_NONE;                                -- 前の周期に High 相を終えたビット（遅れ 0 の取り込み）
   signal short_dr  : boolean := false;                                   -- IDCODE（32 ビット、ヘッダなし）
   signal dp_read   : boolean := false;                                   -- RDBUFF をもう 1 回スキャンする
 
@@ -221,16 +241,32 @@ begin
       end if;
     end procedure;
 
+    -- 取り込みの残りが無い（遅延線の段 0〜sample_delay - 1 が空。それより後ろの段は取り込み済み）
+    impure function drained return boolean is
+    begin
+      if take_base.valid = '1' then
+        return false;
+      end if;
+      for k in 0 to 6 loop
+        if k < sample_delay and take_line(k).valid = '1' then
+          return false;
+        end if;
+      end loop;
+      return true;
+    end function;
+
     procedure finish(a : std_logic_vector(2 downto 0); data : std_logic_vector(63 downto 0)) is
     begin
       ack    <= a;
       result <= data;
       enter(G_IDLE);
     end procedure;
+    variable now_take, take : take_t;
   begin
     if rising_edge(clk) then
       din  <= tdo;
       done <= '0';
+      now_take := TAKE_NONE;                                            -- この周期に High 相を終えたビット（下で決める）
 
       if rst = '1' or enable = '0' then
         half     <= H_IDLE;
@@ -263,6 +299,7 @@ begin
                     seq_tms  <= cmd_request(0);
                     seq_out  <= cmd_data;
                     seq_in   <= (others => '0');
+                    seq_taken <= 0;
                     length   <= cmd_count;
                     seg_len  <= cmd_count;
                     ir_valid <= false;
@@ -296,6 +333,8 @@ begin
                 ir_valid <= true;
                 enter(G_IR_HEAD);
               end if;
+            elsif index = seg_len and (seg = G_SEQ or seg = G_DR_TAIL) and not drained then
+              null;                                                   -- 取り込みの残りを待つ（値を返す・ACK を見る前。G_DR_TAIL は本体の後に 2 ビット以上あるので実際には待たない保険）
             elsif index = seg_len then
               -- 区間の終わり（長さ 0 の区間もここを通る）
               case seg is
@@ -305,11 +344,11 @@ begin
                   done   <= '1';
                 when G_DR_TAIL =>
                   if short_dr then
-                    finish("001", x"00000000" & dr_shift(34 downto 3));      -- IDCODE: ACK は無い
+                    finish("001", x"00000000" & dr_in(34 downto 3));          -- IDCODE: ACK は無い（32 ビットずらし入れた）
                   elsif ir = IR_ABORT then
                     finish("001", (others => '0'));                       -- ABORT の取り込み値は不定（見ない）
-                  elsif map_ack(dr_shift(2 downto 0)) /= "001" or not dp_read then
-                    finish(map_ack(dr_shift(2 downto 0)), x"00000000" & dr_shift(34 downto 3));
+                  elsif map_ack(dr_in(2 downto 0)) /= "001" or not dp_read then
+                    finish(map_ack(dr_in(2 downto 0)), x"00000000" & dr_in(34 downto 3));
                   else
                     dp_read <= false;                                     -- DPACC RDBUFF の読みで値を受け取る
                     dr_shift    <= RDBUFF_READ;
@@ -329,16 +368,9 @@ begin
             if timer(16) = '0' then
               timer <= timer - 1;
             else
-              -- Low 相の終わり: TDO を取り込んで TCK を上げる
+              -- Low 相の終わり: TCK を上げる
               if seg = G_SEQ then
-                for k in 0 to 63 loop
-                  if k = index then
-                    seq_in(k) <= din;
-                  end if;
-                end loop;
                 seq_out <= '1' & seq_out(63 downto 1);
-              elsif seg = G_DR_BODY then
-                dr_shift <= din & dr_shift(34 downto 1);
               end if;
               if seg = G_IR_BEFORE or seg = G_IR_VALUE or seg = G_IR_AFTER or
                  seg = G_DR_BEFORE or seg = G_DR_BODY or seg = G_DR_AFTER then
@@ -353,10 +385,50 @@ begin
             if timer(16) = '0' then
               timer <= timer - 1;
             else
+              -- High 相の終わり: このビットの TDO の取り込みを予約する（次の周期 = 立ち下がりの直前から sample_delay 周期後）。
+              -- 本体の出すビットはここでずらす（次のビットの TDI）
+              if seg = G_SEQ then
+                now_take := ('1', '1');
+              elsif seg = G_DR_BODY then
+                now_take := ('1', '0');
+                dr_shift <= '0' & dr_shift(34 downto 1);
+              end if;
               index <= index + 1;
               half  <= H_IDLE;                                        -- 次のビット（または区間の終わり）
             end if;
         end case;
+      end if;
+
+      -- 取り込み: din は 1 周期前のピン。sample_delay = 0 は前の周期に High 相を終えたビット（この周期の終わりに TCK が
+      -- 下がる = 立ち下がりの直前）、k > 0 はさらに k 周期後
+      if sample_delay = 0 then
+        take := take_base;
+      else
+        take := take_line(sample_delay - 1);
+      end if;
+      if take.valid = '1' then
+        if take.seq = '1' then
+          for k in 0 to 63 loop
+            if k = seq_taken then
+              seq_in(k) <= din;
+            end if;
+          end loop;
+          if seq_taken /= 63 then
+            seq_taken <= seq_taken + 1;
+          end if;
+        else
+          dr_in <= din & dr_in(34 downto 1);
+        end if;
+      end if;
+      -- 遅延線を進める（遅れは命令の実行中に変えない）
+      take_base    <= now_take;
+      take_line(0) <= take_base;
+      for k in 1 to 6 loop
+        take_line(k) <= take_line(k - 1);
+      end loop;
+      if rst = '1' or enable = '0' then
+        take_base <= TAKE_NONE;
+        take_line <= (others => TAKE_NONE);
       end if;
     end if;
   end process;

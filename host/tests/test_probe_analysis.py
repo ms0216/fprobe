@@ -145,3 +145,11 @@ def test_recording_export_limits_csv_by_range_and_streams(probe, tmp_path):
     assert len(rows) == 2 and rows[1].startswith("300,")
     with pytest.raises(ValueError):
         probe.recording_export(format="vcd", path=str(tmp_path / "x.vcd"), streams=["uart"])
+
+
+def test_recording_status_tells_whether_memory_is_still_read(probe):
+    # 記録中に watch が止まると MCU のメモリは記録に入らない（黙って欠ける）: 状態で分かるように
+    probe.recording_start(name="w")
+    assert probe.recording_status()["watch_running"] is False
+    probe._watch_running = True
+    assert probe.recording_status()["watch_running"] is True

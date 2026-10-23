@@ -35,6 +35,8 @@ entity primer20k_fprobe_top is
     pmod1     : inout std_logic_vector(7 downto 0);   -- 拡張ヘッダ J12
     aux_rx      : in    std_logic;                      -- 補助マイコン（Pico）の UART（J14 の 5 番）
     la_in       : in    std_logic_vector(LA_INPUT_PINS - 1 downto 0);   -- ロジアナの専用の入力（J14 の 7〜12 番）
+    sync_in     : in    std_logic;                      -- ボードの間の時刻の同期（J6 の 1 番。親から）
+    sync_out    : out   std_logic;                      -- 同（J6 の 2 番。子へ。同期の無い構成では Z）
     led       : out   std_logic_vector(5 downto 0);
     -- DDR3
     ddr_addr    : out   std_logic_vector(13 downto 0);
@@ -58,6 +60,7 @@ end entity;
 architecture rtl of primer20k_fprobe_top is
   signal usb_clk, usb_rst, phy_released : std_logic;
   signal sys_clk, sys_rst, pll_lock     : std_logic;
+  signal sync_o : std_logic;                                         -- ボードの間の時刻の同期（コアの出力）
   -- DDR3（mem ドメイン）
   signal ddr3_memory_clk, mem_pll_lock, mem_clk, mem_rst, mem_ready : std_logic;
   signal mem_cmd_valid, mem_cmd_ready, mem_cmd_write, mem_rd_valid : std_logic;
@@ -249,13 +252,13 @@ begin
     generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => 23,
                  MEM_TEST => work.design_caps_pkg.MEM_TEST,
                  XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
                  HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
                  UART_FLOW => work.design_caps_pkg.UART_FLOW,
                  LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
                  LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
-                 AUX => work.design_caps_pkg.AUX, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
+                 AUX => work.design_caps_pkg.AUX, SYNC => work.design_caps_pkg.SYNC, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
                  LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS,
                  LA_INTERNAL => false)        -- ロジアナは DDR3 の深いバッファ（内蔵 BSRAM 版は重複）
     port map (clk => sys_clk, rst => sys_rst,
@@ -289,7 +292,8 @@ begin
               mem_cmd_addr => mem_cmd_addr, mem_cmd_data => mem_cmd_data, mem_rd_valid => mem_rd_valid,
               mem_rd_data => mem_rd_data,
               stream_out_valid => xs_valid, stream_out_ready => xs_ready, stream_out_data => xs_data,
-              aux_rx => aux_rx);
+              aux_rx => aux_rx, sync_in => sync_in, sync_out => sync_o);
+  sync_out <= sync_o when work.design_caps_pkg.SYNC else 'Z';
 
   -- デバッグポートの機能ピン（それ以外のピンは入力のまま）
   process (all)

@@ -49,10 +49,8 @@ export interface LoadSeries {
   windows: LoadWindow[];
   peak: { t0: number; t1: number; load: number } | null;
   meanLoad: number | null;
+  idle: string[];            // 負荷から除いたアイドルのタスク（デーモンがカーネルの情報で決めたもの。名前では決めない）
 }
-
-/** アイドルのタスクの名前（FreeRTOS の IDLE・Zephyr の idle 等） */
-export const isIdle = (name: string): boolean => /^idle\b/i.test(name.trim());
 
 // --- 取った時間軸（デーモンの要約） ---------------------------------------------------------------------
 
@@ -67,12 +65,14 @@ export function tableFromTimeline(r: any): TaskTable {
 
 /** rtos.timeline.load の結果 → 推移 */
 export function loadFromTimeline(r: any): LoadSeries {
-  return { window: r.window, windows: r.windows ?? [], peak: r.peak ?? null, meanLoad: r.mean_load ?? null };
+  return { window: r.window, windows: r.windows ?? [], peak: r.peak ?? null, meanLoad: r.mean_load ?? null,
+           idle: r.idle_tasks ?? [] };
 }
 
 // --- 記録 ---------------------------------------------------------------------------------------
 
-const RUNS_SQL = "SELECT t, t_end, a, json_extract(body, '$.task') FROM events WHERE stream = 'rtos' AND kind = 'run' "
+const RUNS_SQL = "SELECT t, t_end, a, json_extract(body, '$.task'), json_extract(body, '$.idle') FROM events "
+  + "WHERE stream = 'rtos' AND kind = 'run' "
   + "AND t_end IS NOT NULL ORDER BY t";
 const ISRS_SQL = "SELECT t, t_end, a, json_extract(body, '$.name') FROM events WHERE stream = 'rtos' AND kind = 'isr' "
   + "AND t_end IS NOT NULL ORDER BY t";
@@ -89,7 +89,7 @@ export type Interval = [number, number];
 
 /** 記録の区間（タスクの実行・割り込み・抜け） */
 export interface RecordedRuns {
-  runs: [number, number, number, string][];          // t0, t1, TCB, タスク名
+  runs: [number, number, number, string, boolean][]; // t0, t1, TCB, タスク名, アイドルか（記録の印 idle）
   isrs: [number, number, number, string][];          // t0, t1, 例外番号, 名前
   gaps: Interval[];
   truncated: boolean;                                // どれかが ROW_LIMIT で切れた
@@ -98,7 +98,7 @@ export interface RecordedRuns {
 export async function recordedRuns(conn: Conn): Promise<RecordedRuns> {
   const [runs, isrs, gaps] = await Promise.all([RUNS_SQL, ISRS_SQL, GAPS_SQL]
     .map((sql) => conn.call("recording.query", { sql, limit: ROW_LIMIT }, quiet)));
-  return { runs: runs.rows, isrs: isrs.rows, gaps: gaps.rows,
+  return { runs: (runs.rows ?? []).map((r: any[]) => [r[0], r[1], r[2], r[3], !!r[4]]), isrs: isrs.rows, gaps: gaps.rows,
            truncated: !!(runs.truncated || isrs.truncated || gaps.truncated) };
 }
 
@@ -162,7 +162,7 @@ export function overlap(sorted: Interval[], a: number, b: number): number {
  *  （止まっていた間・記録していない間は run が無い） */
 export function loadWindows(rec: Pick<RecordedRuns, "runs" | "isrs" | "gaps">, window: number,
                             span?: Interval): LoadSeries {
-  const empty: LoadSeries = { window, windows: [], peak: null, meanLoad: null };
+  const empty: LoadSeries = { window, windows: [], peak: null, meanLoad: null, idle: [] };
   if (!(window > 0) || !rec.runs.length) return empty;
   const t0 = span?.[0] ?? rec.runs[0][0];
   const t1 = span?.[1] ?? Math.max(...rec.runs.map((r) => r[1]));
@@ -172,6 +172,7 @@ export function loadWindows(rec: Pick<RecordedRuns, "runs" | "isrs" | "gaps">, w
   const gaps = union(rec.gaps);
   const count = Math.ceil((t1 - t0) / window);
   const time: Map<string, number>[] = Array.from({ length: count }, () => new Map());
+  const idleNames = new Set(rec.runs.filter((r) => r[4]).map((r) => r[3]));
   for (const [a0, a1, , name] of rec.runs) {
     for (let k = Math.max(0, Math.floor((a0 - t0) / window)); k < count; k++) {
       const w0 = t0 + k * window;
@@ -187,7 +188,7 @@ export function loadWindows(rec: Pick<RecordedRuns, "runs" | "isrs" | "gaps">, w
     let idle = 0;
     const tasks: Record<string, number> = {};
     for (const [name, v] of [...m].sort((x, y) => y[1] - x[1])) {
-      if (isIdle(name)) idle += v;
+      if (idleNames.has(name)) idle += v;
       if (v > 0) tasks[name] = v / covered;
     }
     return { t0: w0, t1: w1, covered, load: Math.max(0, 1 - idle / covered), isr: overlap(isr, w0, w1) / covered, tasks };
@@ -195,7 +196,7 @@ export function loadWindows(rec: Pick<RecordedRuns, "runs" | "isrs" | "gaps">, w
   const loads = windows.filter((w) => w.load !== null);
   const peak = loads.reduce<LoadWindow | null>((p, w) => (!p || w.load! > p.load! ? w : p), null);
   const covered = loads.reduce((s, w) => s + w.covered, 0);
-  return { window, windows, peak: peak && { t0: peak.t0, t1: peak.t1, load: peak.load! },
+  return { window, windows, idle: [...idleNames].sort(), peak: peak && { t0: peak.t0, t1: peak.t1, load: peak.load! },
            meanLoad: covered ? loads.reduce((s, w) => s + w.load! * w.covered, 0) / covered : null };
 }
 
@@ -208,8 +209,11 @@ export function windowAt(series: LoadSeries, t: number): LoadWindow | null {
 export function busyTasks(series: LoadSeries, max = 6): string[] {
   const sum = new Map<string, number>();
   for (const w of series.windows) for (const [k, v] of Object.entries(w.tasks)) sum.set(k, (sum.get(k) ?? 0) + v * w.covered);
-  return [...sum].filter(([k]) => !isIdle(k)).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
+  const idle = new Set(series.idle);
+  return [...sum].filter(([k]) => !idle.has(k)).sort((a, b) => b[1] - a[1]).slice(0, max).map(([k]) => k);
 }
+
+const ROUNDING_PCT = 1e-9;      // 引き算の丸めの誤差（%）。これより大きい「その他」は小さくても出す
 
 /** CPU 負荷の積み上げ（Chart の type stacked）の系列（%）: 下から多い順のタスク・割り込み・その他（負荷 − 割り込み −
  *  挙げたタスク）。上端が負荷になる。x は窓の始めを xOf で変えたもの。情報の無い窓（load = null）は NaN（線を切る）。
@@ -225,7 +229,7 @@ export function loadStack(series: LoadSeries, xOf: (t: number) => number, labels
   if (ws.some((w) => w.isr)) out.push({ name: labels.isr, x, y: ws.map((w) => pct(w, w.isr ?? 0)), step: true, unit: "%" });
   const rest = ws.map((w) => pct(w, Math.max(0, (w.load ?? 0) - (w.isr ?? 0)
                                           - names.reduce((sum, n) => sum + (w.tasks[n] ?? 0), 0))));
-  if (rest.some((v) => v > 0.05)) out.push({ name: labels.other, x, y: rest, step: true, unit: "%" });
+  if (rest.some((v) => v > ROUNDING_PCT)) out.push({ name: labels.other, x, y: rest, step: true, unit: "%" });
   return focus ? out.map((s) => ({ ...s, dim: s.name !== focus })) : out;
 }
 

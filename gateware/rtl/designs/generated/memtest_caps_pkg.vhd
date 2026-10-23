@@ -50,11 +50,14 @@ package design_caps_pkg is
   constant TRIG_SEQ : boolean := true;
   constant AUX : boolean := false;
   constant SAMPLER : boolean := true;
+  constant SAMPLER_MATCH : boolean := false;
   constant HAS_JTAG : boolean := true;
   constant INJECTOR : boolean := true;
   constant LA_FILTER : boolean := false;
   constant LA_PULSE : boolean := false;
   constant LA_STREAM_EVENTS : boolean := false;
+  constant OBS_PORT : boolean := false;
+  constant SYNC : boolean := false;
   constant XOUT_COUNT : natural := 0;
   constant LA_INPUTS : natural := 0;
   constant SWO_MANCHESTER : boolean := true;

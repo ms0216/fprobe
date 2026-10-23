@@ -362,9 +362,9 @@ def _estimate(plan: TracePlan, request: TraceRequest, trace_cmp: list[Comparator
                              f"{plan.swo_bytes_per_s_max / n:,.0f} 回まで（超えると Overflow で欠ける）")
     if request.counters and core_clock_hz:
         worst = len(request.counters) * core_clock_hz / 256 * _COUNTER_BYTES
-        if worst > 0.5 * plan.swo_bytes_per_s_max:
-            plan.warnings.append(f"イベントカウンタの溢れは最悪で毎秒 {worst:,.0f} バイト（SWO の帯域の"
-                                 f"{worst / plan.swo_bytes_per_s_max:.0%}）: 忙しい区間では溢れて数え落とす")
+        share = worst / plan.swo_bytes_per_s_max                       # 閾値で出す・出さないを決めない
+        plan.warnings.append(f"イベントカウンタの溢れは最悪で毎秒 {worst:,.0f} バイト（SWO の帯域の {share:.0%}）"
+                             + ("。帯域を超える間は Overflow で欠ける" if share > 1 else ""))
 
 
 # --- 時刻付きの解読 ------------------------------------------------------------------------------

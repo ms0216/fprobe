@@ -32,10 +32,13 @@ package csr_map_pkg is
   constant CSR_WIN_TRIGSEQ : natural := 10;
   constant CSR_WIN_AUX : natural := 11;
   constant CSR_WIN_SAMPLER : natural := 12;
-  constant CSR_WIN_XTRIG_OUT : natural := 13;
-  constant CSR_WIN_CAPS : natural := 14;
-  constant CSR_WIN_LA_MEM : natural := 15;
-  constant CSR_WINDOWS : csr_windows_t(0 to 15) := (
+  constant CSR_WIN_SAMPLER_MATCH : natural := 13;
+  constant CSR_WIN_XTRIG_OUT : natural := 14;
+  constant CSR_WIN_OBS : natural := 15;
+  constant CSR_WIN_SYNC : natural := 16;
+  constant CSR_WIN_CAPS : natural := 17;
+  constant CSR_WIN_LA_MEM : natural := 18;
+  constant CSR_WINDOWS : csr_windows_t(0 to 18) := (
     CSR_WIN_SYSTEM => (base => 0, size => 16),
     CSR_WIN_TIMEBASE => (base => 64, size => 16),
     CSR_WIN_GPIO => (base => 128, size => 16),
@@ -48,8 +51,11 @@ package csr_map_pkg is
     CSR_WIN_DEBUG => (base => 576, size => 16),
     CSR_WIN_TRIGSEQ => (base => 640, size => 16),
     CSR_WIN_AUX => (base => 704, size => 16),
-    CSR_WIN_SAMPLER => (base => 768, size => 32),
+    CSR_WIN_SAMPLER => (base => 768, size => 16),
+    CSR_WIN_SAMPLER_MATCH => (base => 784, size => 16),
     CSR_WIN_XTRIG_OUT => (base => 832, size => 16),
+    CSR_WIN_OBS => (base => 896, size => 16),
+    CSR_WIN_SYNC => (base => 960, size => 16),
     CSR_WIN_CAPS => (base => 1024, size => 1024),
     CSR_WIN_LA_MEM => (base => 16384, size => 8192)
   );

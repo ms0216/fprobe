@@ -1,6 +1,6 @@
 // Fault Analyzer の計算: 故障のハンドラの判定・故障で止まったら開く見張り・結果の整理
 import { describe, expect, it } from "vitest";
-import { causeRegister, handlerKind, headline, isFault, reportText, watchFaults, type FaultReport } from "../src/lib/fault";
+import { causeRegister, headline, isFault, reportText, watchFaults, type FaultReport } from "../src/lib/fault";
 import { FakeConn } from "./fake-conn";
 
 const FAULT: FaultReport = {
@@ -24,37 +24,29 @@ function source() {
 }
 
 describe("Fault Analyzer", () => {
-  it("故障のハンドラの名前（CMSIS・pico-sdk・小文字の流儀）と、共通のハンドラ（確かめが要る）", () => {
-    for (const n of ["HardFault_Handler", "MemManage_Handler", "BusFault_Handler", "UsageFault_Handler",
-                     "SecureFault_Handler", "isr_hardfault", "hard_fault_handler"]) expect(handlerKind(n), n).toBe("fault");
-    for (const n of ["Default_Handler", "default_handler", "isr_invalid", "UnhandledInterrupt"]) expect(handlerKind(n), n).toBe("maybe");
-    for (const n of ["main", "tick", "SysTick_Handler", undefined, null]) expect(handlerKind(n)).toBeNull();
-  });
-
-  it("故障のハンドラで止まったらすぐ開き、共通のハンドラなら target.fault で確かめる。同じ止まりでは 1 回", async () => {
+  it("止まるたびに target.fault で確かめ、故障の例外（IPSR）の中なら開く。関数の名前では決めない。同じ止まりでは 1 回", async () => {
     let report: FaultReport = { ...FAULT };
     const conn = new FakeConn({ "target.fault": () => report });
     const app = source();
     let opened = 0;
+    const tick = async () => { await Promise.resolve(); await Promise.resolve(); };
     const stop = watchFaults(conn.call.bind(conn) as any, app, () => opened++);
-    app.push({ state: "HALTED", pc: 0x100, run: 1, function: "HardFault_Handler" });
+    app.push({ state: "HALTED", pc: 0x100, run: 1, function: "my_fault_hook" });       // 名前は関係ない
+    await tick();
     expect(opened).toBe(1);
-    app.push({ state: "HALTED", pc: 0x100, run: 1, function: "HardFault_Handler" });     // 同じ止まり
+    app.push({ state: "HALTED", pc: 0x100, run: 1, function: "my_fault_hook" });       // 同じ止まり
+    await tick();
     expect(opened).toBe(1);
-    app.push({ state: "HALTED", pc: 0x200, run: 2, function: "tick" });
+    // 故障のビットは残っている（CFSR は消すまで残る）が、今は故障の例外の中ではない: 開かない
+    report = { ...FAULT, faulted: true, exception: null };
+    app.push({ state: "HALTED", pc: 0x200, run: 2, function: "HardFault_Handler" });
+    await tick();
     expect(opened).toBe(1);
-    expect(conn.calls).toEqual([]);
-    app.push({ state: "HALTED", pc: 0xb8, run: 3, function: "default_handler" });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(opened).toBe(2);
-    expect(conn.quiet).toEqual(["target.fault"]);
     report = { ...FAULT, faulted: false, exception: { number: 15, name: "SysTick" } };      // 割り込みで止まった
-    app.push({ state: "RUNNING" });
-    app.push({ state: "HALTED", pc: 0xb8, run: 4, function: "default_handler" });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(opened).toBe(2);
+    app.push({ state: "HALTED", pc: 0xb8, run: 3, function: "Default_Handler" });
+    await tick();
+    expect(opened).toBe(1);
+    expect(conn.quiet.every((m: string) => m === "target.fault")).toBe(true);
     stop();
   });
 

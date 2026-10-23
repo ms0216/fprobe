@@ -11,6 +11,8 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_debug�
   選び直した DP に向かうので覗かない。
 """
 
+import time
+
 from . import generated as g
 from .multidrop import CoreProbe, MultidropPart, part_of
 
@@ -70,6 +72,27 @@ class MulticoreTools:
                 cores.append({"core": core.index, "selected": False, "error": str(e)})
         status["cores"] = cores
         return status
+
+    def _rescue(self) -> None:
+        """救済の DP でチップ全体（USB 等の周辺も）をリセットし、最後の接続と同じ設定で attach でつなぎ直して、普通の
+        リセット（SYSRESETREQ）で Flash から起動させる（_lock の中で）。ファームウェアが固まり、コアだけのリセットでは
+        周辺が戻らないとき。"""
+        found = self._multidrop()
+        if found is None or found[0].rescue is None:
+            raise ValueError("rescue のリセットは救済の DP を持つ部品（RP2040）に接続中だけ")
+        connect = dict(getattr(self, "_last_connect", None) or {"target": self._link["target"]})
+        probe = self._core_probe()
+        self._monitor_detach()                              # チップが生きている間に: Flash に書いた BKPT を戻す等
+        self._flash_bp_detach()
+        probe.rescue()
+        try:
+            self.target_disconnect()
+        except Exception:                                   # noqa: BLE001  チップはリセット済み: 片付けに失敗しても捨てる
+            self._debug, self._link = None, None
+        time.sleep(0.05)                                    # リセットからブート ROM が止まるまで
+        self.target_connect(**{**connect, "connect_mode": "attach"})
+        self._clear_halt_reason()                           # 前の停止の理由（DFSR）を残さない
+        self.dbg.reset("system", False)
 
     def _other_core(self, core: int, action: str) -> dict | None:
         """core が接続中のコアでなければ、そのコアを action（halt / resume）して状態を返す。接続中のコアなら None。"""

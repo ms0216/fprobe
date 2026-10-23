@@ -36,6 +36,7 @@ entity dap_harness is
     inj_written  : out std_logic;
     inj_result   : out std_logic_vector(1 downto 0);
     inj_count    : out unsigned(15 downto 0);
+    inj_transfers : out unsigned(7 downto 0);
     -- 一致（dap_monitor）
     match_addr   : in  std_logic_vector(31 downto 0) := x"00000000";
     addr_mask    : in  std_logic_vector(31 downto 0) := x"FFFFFFFF";
@@ -137,7 +138,7 @@ begin
               select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
               shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy_i, written => inj_written, result => inj_result, last_ack => open,
-              count => inj_count,
+              count => inj_count, transfers => inj_transfers,
               dap_cmd_valid => cmd_valid, dap_cmd_ready => cmd_ready, dap_cmd_op => cmd_op,
               dap_cmd_count => cmd_count, dap_cmd_req => cmd_request, dap_cmd_data => cmd_data,
               dap_rsp_valid => d_rsp_valid,
@@ -178,7 +179,7 @@ begin
   phy_i : entity work.debug_port
     generic map (HAS_JTAG => HAS_JTAG)
     port map (clk => clk, rst => rst, enable => enable, jtag => jtag, half_period => half_period,
-              turnaround => turnaround, data_phase => data_phase, idle_cycles => idle_cycles, sample_delay => 0,
+              turnaround => turnaround, data_phase => data_phase, idle_cycles => idle_cycles, sample_delay => 0, jtag_sample_delay => 0,
               jtag_dr_before => dr_before, jtag_dr_after => dr_after, jtag_ir_before => ir_before,
               jtag_ir_after => ir_after, jtag_ir_len => ir_len,
               cmd_valid => p_valid, cmd_ready => p_ready, cmd_op => p_op, cmd_count => p_count,

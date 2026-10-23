@@ -65,3 +65,17 @@ def test_vector_catch_reads_are_separate_from_setting(spec):
     get, put = spec.methods["target.vector_catch.get"], spec.methods["target.vector_catch"]
     assert get.kind == "control" and get.observes
     assert not put.observes and put.params["required"] == ["catch"]
+
+
+IRREVERSIBLE = {"target.flash", "target.flash.erase", "target.option_bytes.write", "target.unlock",
+                "target.flash.algo.remove",
+                # 使い方によって元に戻せない（利用者、2026-10-22）: 書き込み先を渡すと消して書く・nRF の CTRL-AP の
+                # ERASEALL・Flash の書き換え・PC のファイルの上書き
+                "target.flash.benchmark", "target.ap.write", "debug.breakpoint.flash", "target.flash.read"}
+
+
+def test_irreversible_methods_are_declared_in_the_spec(spec):
+    # 取り返しのつかない操作（画面の赤い確かめ）は名前から推測せず、仕様の印で決める
+    marked = {name for name, m in spec.methods.items() if m.irreversible}
+    assert marked == IRREVERSIBLE
+    assert all(spec.methods[name].kind == "control" for name in marked)

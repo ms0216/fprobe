@@ -107,11 +107,11 @@ def frame(*body):
     return bytes(body) + bytes([crc & 0xFF, crc >> 8])
 
 
-def modbus_wave(frames, gap_chars=4.0):
-    w = Wave(channels=2, sample_rate_hz=BAUD * 16, idle={0: 1})
+def modbus_wave(frames, gap_chars=4.0, baud=BAUD, gap_s=None):
+    w = Wave(channels=2, sample_rate_hz=baud * 16, idle={0: 1})
     t = 1e-3
     for f in frames:
-        t = uart(w, 0, f, t, baud=BAUD, parity="even") + gap_chars * 11 / BAUD
+        t = uart(w, 0, f, t, baud=baud, parity="even") + (gap_s if gap_s is not None else gap_chars * 11 / baud)
     return w.build(end_s=t)
 
 
@@ -149,3 +149,18 @@ def test_modbus_frames_split_by_silence_only():
     d = decode_on("modbus", lower)
     assert len(d) == 1 and d.annotations[0].error == "crc"
     assert len(decode_on("modbus", lower, gap_chars=0.3)) == 2
+
+
+def test_modbus_frame_gap_is_the_spec_value_from_the_uart_settings():
+    # 1 文字の長さは UART の設定（ボー・データ・パリティ・ストップ）から出す（バイトの長さの中央値で推定しない）。
+    # 区切りの既定は規格の t3.5: 19200 bps 以下は 3.5 文字、それより速いときは固定の 1.75 ms
+    frames = [frame(1, 3, 0, 0, 0, 1), frame(1, 3, 2, 0, 7)]
+    fast = 115200
+    one = decode_on("modbus", decode("uart", modbus_wave(frames, baud=fast, gap_s=1.0e-3), channel=0, baud=fast,
+                                       parity="even"))
+    assert len(one) == 1                                           # 1 ms（11 文字分）< 1.75 ms: 区切らない
+    two = decode_on("modbus", decode("uart", modbus_wave(frames, baud=fast, gap_s=2.0e-3), channel=0, baud=fast,
+                                       parity="even"))
+    assert len(two) == 2 and two.params["gap_s"] == 1.75e-3
+    slow = decode_on("modbus", decode("uart", modbus_wave(frames, gap_chars=3.0), channel=0, baud=BAUD, parity="even"))
+    assert len(slow) == 1 and slow.params["gap_s"] == 3.5 * 11 / BAUD   # 3 文字 < 3.5 文字

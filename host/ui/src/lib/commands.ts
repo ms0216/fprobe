@@ -28,6 +28,7 @@ export interface CommandState {
   target: string | undefined;                // RUNNING / HALTED / DISCONNECTED / undefined（不明）
   elf: string | null;
   selection: { file: string; line: number } | null;
+  part?: string;                             // 接続中の pyOCD のターゲット名（rp2040_core0 等。部品に固有のコマンド用）
 }
 
 export interface Command {
@@ -73,6 +74,9 @@ export const COMMANDS: Command[] = [
     blocked: (s) => connected(s) ?? withElf(s), run: guarded(({ app }, s) => app.act("target.flash", { path: s.elf! })) },
   { id: "reset", label: "cmd.reset", tip: "tip.reset", shortcut: "Ctrl+Shift+F5", icon: "reset", blocked: connected,
     run: guarded(({ app }) => app.act("target.reset", resetParams(execution.get()))) },
+  { id: "rescueReset", label: "cmd.rescueReset", tip: "tip.rescueReset",
+    blocked: (s) => connected(s) ?? (s.part?.startsWith("rp2040") ? null : "tip.noRescue"),
+    run: guarded(({ app }) => app.act("target.reset", { kind: "rescue" })) },
   { id: "continue", label: "cmd.continue", tip: "tip.continue", shortcut: "F5", icon: "continue", blocked: halted,
     run: guarded(({ app }) => app.act("target.resume")) },
   { id: "halt", label: "cmd.halt", tip: "tip.halt", shortcut: "F6", icon: "halt", blocked: running,

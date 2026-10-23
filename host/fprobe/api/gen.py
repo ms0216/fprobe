@@ -42,7 +42,9 @@ def render_typescript(spec: Spec) -> str:
 def render_markdown(spec: Spec) -> str:
     out = [f"<!-- {HEADER} -->", "# fprobe API", "",
            f"JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 {spec.api_version}。"
-           "仕様: docs/superpowers/specs/2026-10-17-host-daemon-design.md", ""]
+           "仕様: docs/superpowers/specs/2026-10-17-host-daemon-design.md", "",
+           "Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=…)` → `c.call(\"メソッド\", 引数=値, …)`"
+           "（引数はキーワードで。戻り値は dict）。", ""]
     for m in spec.methods.values():
         binary = "応答はバイナリのフレーム（WebSocket の利用者だけ。MCP の道具には無い）。" if m.binary else ""
         out += [f"## {m.name}", "", f"種類: `{m.kind}`。{binary}{m.summary}", ""]

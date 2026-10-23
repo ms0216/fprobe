@@ -27,6 +27,10 @@ export interface CaptureRequest {
   deep: boolean;
   beforeBeats?: number;      // 深いバッファで読むトリガ前・後の拍（1 拍 = RAW 8 サンプル / RLE 4 変化点）
   afterBeats?: number;
+  /** クロストリガ（FPGA の条件など）だけで成立させる: ch0 が 1 かつ立ち下がり = 波形では決して成り立たない条件 */
+  crossOnly?: boolean;
+  /** 深いバッファの RLE（既定は API の既定 = 真）。偽なら RAW: 埋まる時間が信号の変化の多さに依らない */
+  rle?: boolean;
 }
 
 /** 拡大縮小: factor < 1 で拡大。anchor（0..1）の位置は動かない。範囲 extent の外へは出ない。最小 minSpan */
@@ -77,8 +81,11 @@ export function setChannelLayout(layout: LaChannel[] | null | undefined): void {
   currentLayout = layout && layout.length ? layout : null;
 }
 
-export function channelName(ch: number): string {
-  const c = (currentLayout ?? legacyLayout()).find((x) => x.channel === ch);
+/** ch の名前。layout（申告の la_layout）を渡せばそれで（画面はこれで申告に依存させ、届いたら描き直す）、無ければ
+ *  最後に setChannelLayout された並び（無ければ古い並び） */
+export function channelName(ch: number, layout?: LaChannel[] | null | unknown): string {
+  const given = Array.isArray(layout) && layout.length ? (layout as LaChannel[]) : null;   // map(channelName) の添字は無視
+  const c = (given ?? currentLayout ?? legacyLayout()).find((x) => x.channel === ch);
   if (c?.kind === "internal") return c.index === 0 ? t("timeline.swdioDrive") : c.index === 1 ? t("timeline.dapBusy") : `ch${ch}`;
   if (c?.kind === "input") return `in${c.index}`;
   return `ch${ch}`;

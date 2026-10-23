@@ -207,3 +207,39 @@ def test_segmented_event_bins_come_from_the_precomputed_summary(tmp_path):
     assert lane["mode"] == "summary" and lane["bin"] == view.grid.width(3)
     rec.close()
     view.close()
+
+
+def _board_recording(tmp_path):
+    """合成した記録（merge の形）: 親の波形（2 ch）と、boards/b の子の波形（2 ch、親の時刻に換算済み）。"""
+    parent = Recorder(tmp_path / "m", timebase_hz=HZ, meta={"merged": {"children": [{"name": "b", "waveforms": "boards/b"}]}})
+    parent.add_waveform(Transitions(array("H", [0, 1, 3]), array("Q", [0, 10, 20]), 100, 0, 0, 1 / HZ, 2), 1000)
+    parent.close()
+    child = Recorder(tmp_path / "m" / "boards" / "b", timebase_hz=HZ)
+    child.add_waveform(Transitions(array("H", [2, 0]), array("Q", [0, 50]), 100, 0, 0, 1 / HZ, 2), 1005)
+    child.close()
+    return Recording.open(tmp_path / "m")
+
+
+def test_child_board_waveforms_follow_the_parent_channels_with_names(tmp_path):
+    # 子のボードの波形（R25）: 親のチャンネルの後ろに続く番号で、名前は「ボード名.ch番号」
+    tile = recording_tile(_board_recording(tmp_path), 1000, 1100)
+    wave = tile.result["wave"]
+    assert wave["mode"] == "raw" and wave["channels"] == [0, 1, 2, 3]
+    assert wave["names"] == ["ch0", "ch1", "b.ch0", "b.ch1"]
+    child = [p for p in wave["pieces"] if p["channels"] == [2, 3]]
+    assert len(child) == 1 and child[0]["t0"] == 1005 and child[0]["levels"] == [0, 1]     # 子の値 2 = ch1 が 1
+    index = wave["pieces"].index(child[0])
+    assert list(tile.sections[f"wave.{index}.3"]) == [50.0]                                # 子の ch1 が 50 で 0 に
+
+
+def test_child_board_waveforms_in_the_summary(tmp_path):
+    tile = recording_tile(_board_recording(tmp_path), 1000, 1100, max_edges=0)
+    wave = tile.result["wave"]
+    assert wave["mode"] == "summary" and wave["channels"] == [0, 1, 2, 3]
+    bins = wave["bins"]
+    assert len(tile.sections["wave.states"]) == 4 * bins                                  # 4 本ぶんの状態の並び
+
+
+def test_only_requested_board_channels(tmp_path):
+    tile = recording_tile(_board_recording(tmp_path), 1000, 1100, channels=[3])
+    assert tile.result["wave"]["channels"] == [3] and tile.result["wave"]["names"] == ["b.ch1"]

@@ -10,7 +10,7 @@ from .boards.primer20k import PRIMER20K
 from .boards.pynq_z2 import PYNQ_Z2
 from .protocol import PROTOCOL_VERSION
 from .csr.fprobe_map import FPROBE_MAP, LA_DEPTH, LA_WIDTH
-from .rtl import CORE_GENERATED, RTL_ROOT, rtl
+from .rtl import CORE_GENERATED, RTL_ROOT, rtl, target_ip
 from .toolchain.project import ClockConstraint, GowinIp, GowinProject, IoDelay
 from .toolchain.vivado import VivadoProject
 
@@ -66,14 +66,14 @@ _USB = ("usb/usb_types_pkg.vhd", "usb/usb_timing_pkg.vhd", "usb/usb_crc_pkg.vhd"
         "usb/usb_device.vhd")
 
 _CORE = ("common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.vhd", "core/timebase.vhd", "core/caps_rom.vhd",
-         "common/udiv.vhd", "common/udiv_shared.vhd", "debug/generated/dap_info_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/debug_port.vhd",
+         "common/udiv.vhd", "common/udiv_shared.vhd", "debug/generated/dap_info_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
          "debug/dap_pkg.vhd", "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
-         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/dap_monitor.vhd",
+         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
          "la/la_filter.vhd", "la/la_pulse.vhd", "la/la_front.vhd", "la/la_capture.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
          "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_encoder.vhd", "mem/la_mem_writer.vhd",
          "mem/mem_reader.vhd", "la/la_deep_buffer.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
-         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/fprobe_core.vhd")
+         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/fprobe_core.vhd")
 
 
 def core_sources(caps_package: Path) -> list[Path]:
@@ -88,6 +88,8 @@ def core_sources(caps_package: Path) -> list[Path]:
 def _primer_usb(name: str, *, la_inputs: int = 0, **features) -> Design:
     """Primer 20K の USB の製品デザイン（トップ・ピン・IP は共通。features はケイパビリティの機能の取捨、la_inputs は
     J14 の専用の入力を使う本数（U22。0 なら使わない））。"""
+    # R21 のサンプラの値の一致は Primer では外す（入れると配線が混んで 3 版とも 1200 秒で終わらなかった。2026-10-23）
+    features.setdefault("sampler_match", False)
     return Design(
         name=name, board=PRIMER20K, top="primer20k_fprobe_top",
         sources=tuple(dict.fromkeys((          # 重複を除く（コアと共通部品が同じファイルを含む）
@@ -95,7 +97,7 @@ def _primer_usb(name: str, *, la_inputs: int = 0, **features) -> Design:
                  "boards/primer20k/primer20k_ulpi_reset.vhd"),
             *core_sources(caps_package_path(name)),
             *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_fprobe_top.vhd")))),
-        pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in"),
+        pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in", "sync"),
         clocks=(PRIMER20K.input_clock(), PRIMER20K.sys_clock(), PRIMER20K.ulpi_clock(), *PRIMER20K.mem_clocks()),
         ips=(PRIMER20K.ddr3.controller,),
         io_delays=PRIMER20K.ulpi_io_delays(),
@@ -111,7 +113,7 @@ def _primer_usb(name: str, *, la_inputs: int = 0, **features) -> Design:
             uart_flow=PRIMER20K.uart_flow(), la_inputs=la_inputs, **features))
 
 
-PYNQ_Z2_DEEP_BYTES = 32 * 1024 * 1024        # 深いバッファの領域（DDR の 0x1E000000〜。host/pynq/uEnv.txt の mem=480M）
+PYNQ_Z2_DEEP_BYTES = 32 * 1024 * 1024        # 深いバッファの領域（DDR の 0x1E000000〜。host/pynq/uEnv.txt の mem=479M。その下の 1 MB 0x1DF00000〜 は Linux のリング）
 
 
 def _pynq(name: str, *, mem_bytes: int = 0) -> Design:
@@ -128,7 +130,7 @@ def _pynq(name: str, *, mem_bytes: int = 0) -> Design:
                  "hostlink/zynq_frame_link.vhd", "mem/axi_mem_port.vhd"),
             *core_sources(caps_package_path(name)),
             *rtl("boards/pynq_z2/pynq_z2_fprobe_top.vhd")))),
-        pin_groups=("clk125", "led", "pmod1", "la_in"),
+        pin_groups=("clk125", "led", "pmod1", "la_in", "obs_jtag", "sync"),
         clocks=(PYNQ_Z2.input_clock(), PYNQ_Z2.sys_clock()),
         block_designs=(RTL_ROOT / "boards" / "pynq_z2" / ("ps7_hp_bd.tcl" if deep else "ps7_bd.tcl"),),
         capabilities=caps.Capabilities(
@@ -137,7 +139,8 @@ def _pynq(name: str, *, mem_bytes: int = 0) -> Design:
             host_link=caps.LINK_ETH, channels=(caps.CH_CONTROL, caps.CH_DAP, caps.CH_UART0),
             la_channels=LA_WIDTH, la_depth=0 if deep else LA_DEPTH, la_sample_hz=PYNQ_Z2.sync_pll.fout_hz,
             mem_bytes=mem_bytes, la_stream_events=deep, event_ring_bits=0 if deep else 10,
-            outputs=PYNQ_Z2.outputs(), uart_flow=PYNQ_Z2.uart_flow(), la_inputs=PYNQ_Z2.la_inputs()))
+            outputs=PYNQ_Z2.outputs(), uart_flow=PYNQ_Z2.uart_flow(), la_inputs=PYNQ_Z2.la_inputs(),
+            fpga_obs=True, sync=deep))
 
 
 # 線（プロトコル）→ その線に使う Primer の製品デザイン。ホストが書き替えに使う（fprobe gen がホスト定数
@@ -160,6 +163,15 @@ DESIGNS: dict[str, Design] = {
         name="pynq_blinky", board=PYNQ_Z2, top="pynq_z2_blinky_top",
         sources=tuple(rtl("boards/pynq_z2/pynq_z2_blinky_top.vhd")),
         pin_groups=("clk125", "led"), clocks=(PYNQ_Z2.input_clock(),)),
+    # 対象の FPGA の観測の実機の確かめ（O1・O2）: Primer を「観測される対象」にする（target_ip/fprobe_obs の例）。
+    # J12 の 5〜8 番が JTAG（obs_soft_tap）、9 番がカウンタの 12 ビット（fprobe のロジアナで同じ辺を見る）
+    "obs_target_primer": Design(
+        name="obs_target_primer", board=PRIMER20K, top="primer20k_obs_counter_top",
+        sources=tuple(target_ip("fprobe_obs/rtl/obs_async_fifo.vhd", "fprobe_obs/rtl/obs_core.vhd",
+                                "fprobe_obs/rtl/obs_soft_tap.vhd",
+                                "fprobe_obs/examples/primer20k_counter/primer20k_obs_counter_top.vhd")),
+        pin_groups=("clk27", "led", "obs_target"),
+        clocks=(PRIMER20K.input_clock(), ClockConstraint("obs_tck", "obs_tck", "port", 30_000_000))),
     "bringup": Design(
         name="bringup", board=PRIMER20K, top="primer20k_bringup_top",
         sources=tuple(rtl(*_COMMON, *_SERIAL, *_PRIMER20K, "designs/bringup_core.vhd",
@@ -190,11 +202,16 @@ DESIGNS: dict[str, Design] = {
     # 機能に合わせて書き替える（B22: docs/superpowers/specs/2026-10-18-b22-fpga-area-design.md §4）
     "fprobe": _primer_usb("fprobe", jtag=False),                       # 標準: SWD・サンプラ・故障注入・すべての解析
     "fprobe_jtag": _primer_usb("fprobe_jtag", sampler=False, inject=False),   # JTAG（と SWD）。サンプラ・故障注入なし
+    # モジュール化の段階 0（docs/superpowers/specs/2026-10-22-modular-design.md）: メインボードの中心の機能（案 M）だけ。
+    # SWD・JTAG・サンプラ・ロジアナ（深いバッファ）・SWO（NRZ）・UART・クロストリガを残し、故障注入・多段トリガ・
+    # グリッチフィルタ・パルス幅のトリガ・Manchester の SWO・補助の受け口を外す（サブボードに出せる候補の分の大きさを測る）
+    "fprobe_core_m": _primer_usb("fprobe_core_m", inject=False, trig_seq=False, la_filter=False, la_pulse=False,
+                                 swo_manchester=False),
     # ロジアナの専用の入力（J14 の 6 本、U22）: 標準に足すと sys のタイミングを満たさない（2026-10-19）ので、サンプラ・
     # 故障注入を外した SWD の構成に入れる（docs/superpowers/specs/2026-10-19-u22-la-inputs-design.md）
     # ストリームにイベントも流す（R1）のも、標準の余裕が無いのでこの構成（docs/superpowers/specs/2026-10-19-r1-unified-stream-design.md）
     "fprobe_la": _primer_usb("fprobe_la", jtag=False, sampler=False, inject=False, la_inputs=PRIMER20K.la_inputs(),
-                             la_stream_events=True),
+                             la_stream_events=True, sync=True),
     # 基板立ち上げ用: fprobe の深いバッファ・イベント記録の代わりにメモリ試験回路（DDR3 の自己試験・帯域測定）
     "memtest": Design(
         name="memtest", board=PRIMER20K, top="primer20k_fprobe_top",
@@ -203,7 +220,7 @@ DESIGNS: dict[str, Design] = {
                  "boards/primer20k/primer20k_ulpi_reset.vhd"),
             *core_sources(caps_package_path("memtest")),
             *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_fprobe_top.vhd")))),
-        pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in"),   # トップが同じ（入力は使わない）
+        pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in", "sync"),   # トップが同じ（入力は使わない）
         clocks=(PRIMER20K.input_clock(), PRIMER20K.sys_clock(), PRIMER20K.ulpi_clock(), *PRIMER20K.mem_clocks()),
         ips=(PRIMER20K.ddr3.controller,),
         io_delays=PRIMER20K.ulpi_io_delays(),
@@ -212,6 +229,7 @@ DESIGNS: dict[str, Design] = {
         options=("-place_option 1 -route_option 1",),     # sys（100 MHz）: 既定では余裕 0.1% 未満、これで約 3%
         capabilities=caps.Capabilities(
             protocol_version=PROTOCOL_VERSION, board=PRIMER20K.name, design="memtest",
+            sampler_match=False,                    # R21 は Primer では外す
             sys_clock_hz=PRIMER20K.sync_pll.fout_hz, timebase_hz=PRIMER20K.sync_pll.fout_hz,
             host_link=caps.LINK_USB_HS_ULPI, channels=(caps.CH_CONTROL, caps.CH_DAP, caps.CH_UART0),
             mem_bytes=PRIMER20K.ddr3.size_bytes, mem_test=True, la_filter=False, la_pulse=False)),         # ロジアナ無し（外部メモリは試験に使う）
@@ -228,6 +246,7 @@ DESIGNS: dict[str, Design] = {
         options=("-place_option 1 -route_option 1",),
         capabilities=caps.Capabilities(
             protocol_version=PROTOCOL_VERSION, board=PRIMER20K.name, design="fprobe_serial",
+            sampler_match=False,                    # R21 は Primer では外す（USB の構成と同じく配線が混む）
             sys_clock_hz=PRIMER20K.sync_pll.fout_hz, timebase_hz=PRIMER20K.sync_pll.fout_hz,
             host_link=caps.LINK_SERIAL, channels=(caps.CH_CONTROL, caps.CH_DAP, caps.CH_UART0),
             la_channels=LA_WIDTH, la_depth=LA_DEPTH, la_sample_hz=PRIMER20K.sync_pll.fout_hz, aux=True,
@@ -250,6 +269,7 @@ DESIGNS: dict[str, Design] = {
         options=("-place_option 1 -route_option 1",),
         capabilities=caps.Capabilities(
             protocol_version=PROTOCOL_VERSION, board=PRIMER20K.name, design="fprobe_eth",
+            sampler_match=False,                    # R21 は Primer では外す（USB の構成と同じく配線が混む）
             sys_clock_hz=PRIMER20K.sync_pll.fout_hz, timebase_hz=PRIMER20K.sync_pll.fout_hz,
             host_link=caps.LINK_ETH, channels=(caps.CH_CONTROL, caps.CH_DAP, caps.CH_UART0),
             la_channels=LA_WIDTH, la_depth=0, la_sample_hz=PRIMER20K.sync_pll.fout_hz,

@@ -69,6 +69,9 @@ class AnalysisTools:
             return "実行中のタスク（TCB）"
         if address == DWT_PCSR:
             return "PC（DWT_PCSR）"
+        named = (getattr(getattr(self, "_view", None), "meta", None) or {}).get("sample.names") or {}
+        if f"0x{address:08X}" in named:                                    # 記録中に watch_set の names で付けた名前
+            return named[f"0x{address:08X}"]
         syms = self._symbols
         hit = syms.symbol_at(address) if syms is not None else None
         return None if hit is None else hit[0].name + (f"+{hit[1]}" if hit[1] else "")

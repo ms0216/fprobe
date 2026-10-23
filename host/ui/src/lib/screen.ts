@@ -128,7 +128,8 @@ export class ScreenSync {
   private pendingRows: string[] | null = null;        // 段を知ったら当てる
   private applying = false;
   private dataKey = "";                    // 時間軸のデータ（源・捕捉・記録・範囲）。変わったら視点の変化は自動
-  private autoView = false;                // 次に送る視点の変化はデータの読み直しによる（人の操作でない）
+  private autoView = false;
+  private pendingSince = 0;                 // pending を置いた時刻（先の範囲の視点を待つ上限に）                // 次に送る視点の変化はデータの読み直しによる（人の操作でない）
   private pushTimer: ReturnType<typeof setTimeout> | null = null;
   private urlTimer: ReturnType<typeof setTimeout> | null = null;
   private fromUrl: Partial<ScreenData>;
@@ -203,7 +204,8 @@ export class ScreenSync {
   // --- 手元 → 共有 ---------------------------------------------------------------------------------------
 
   private fromTimeline(s: TimelineSnapshot): void {
-    if (this.pending && s.extent && s.source === this.pending.view?.source) {
+    if (this.pending?.view && s.extent && s.source === this.pending.view.source
+        && (!ahead(this.pending.view, s) || Date.now() - this.pendingSince > AHEAD_WAIT_MS)) {
       const state = this.pending;
       this.pending = null;
       this.applyTimeline(state);
@@ -314,9 +316,11 @@ export class ScreenSync {
     this.autoView = true;                  // 当てた結果の視点（データの範囲に収めた等）は人の操作ではない
     const t = this.tl.snapshot;
     const view = state.view;
-    if (view && (view.source !== t.source || !t.extent)) {
-      // 時間軸のデータがまだ無い（源を変える・読み込み中）: 届いてから当てる（新しい捕捉はカーソルを消すため）
+    if (view && (view.source !== t.source || !t.extent || ahead(view, t))) {
+      // 時間軸のデータがまだ無い（源を変える・読み込み中）・伸びている記録のまだ読んでいない範囲: 届いてから当てる
+      // （新しい捕捉はカーソルを消すため。範囲の外を捨てると、追従の視点を送り返して上書きしてしまう）
       this.pending = state;
+      this.pendingSince = Date.now();
       if (view.source !== t.source) this.guard(() => this.tl.setSource(view.source));
     } else {
       this.pending = null;
@@ -360,6 +364,14 @@ export class ScreenSync {
       this.applying = was;
     }
   }
+}
+
+/** 記録中で、視点が時間軸の読んだ範囲より先にある（記録は伸びているので、読み直せば届く） */
+/** 先の範囲の視点を待つ上限（記録が伸びない・時刻が先すぎる: 今の範囲に収めて当て、手元の変化を送れるように戻す） */
+const AHEAD_WAIT_MS = 5000;
+
+function ahead(view: { t1: number }, t: TimelineSnapshot): boolean {
+  return t.live && !!t.extent && view.t1 > t.extent[1];
 }
 
 function pick(r: any): ScreenData {

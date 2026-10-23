@@ -1,12 +1,11 @@
 """UART の解読の上の Modbus RTU。仕様: docs/superpowers/specs/2026-10-18-u20-decoders-design.md
 
-バイトの間の無音が gap_chars 文字以上の所でフレームを区切る（1 文字の長さは UART のバイトの注釈の長さの中央値）。
-既定の 2.5 は、規格のフレームの中の上限（1.5 文字）とフレームの間の下限（3.5 文字）の中間（送り手の時間のずれに強い）。
+バイトの間の無音が gap_s 秒以上の所でフレームを区切る。既定は規格（Modbus over Serial Line 2.5.1.1）の t3.5: 19200 bps
+以下は 3.5 文字（1 文字 = UART の設定のスタート + データ + パリティ + ストップのビット ÷ ボー）、それより速いときは固定の
+1.75 ms。gap_chars（文字数）か gap_s（秒）を渡せば、それで区切る。
 フレーム = [スレーブ] [機能] [データ…] [CRC-16（下位バイトが先）]。要求と応答は形と直前の要求で見分け、
 応答には要求からの遅れ（latency_s）を付ける。
 """
-
-from statistics import median
 
 from .core import Annotation, Decoding
 
@@ -35,20 +34,29 @@ def _u16(b: list[int], i: int) -> int:
     return b[i] << 8 | b[i + 1]
 
 
-def decode_modbus(lower: Decoding, *, gap_chars: float = 2.5) -> Decoding:
+def decode_modbus(lower: Decoding, *, gap_chars: float | None = None, gap_s: float | None = None) -> Decoding:
     """UART の解読の上で Modbus RTU のフレームを読む。"""
     if lower.protocol != "uart":
         raise ValueError("uart の解読の上に重ねる")
-    if gap_chars <= 0:
-        raise ValueError(f"gap_chars が正でない（{gap_chars}）")
+    p = lower.params
+    char_s = (1 + p["data_bits"] + (p["parity"] != "none") + p["stop_bits"]) / p["baud"]
+    if gap_chars is not None and gap_s is not None:
+        raise ValueError("gap_chars と gap_s はどちらか一方")
+    if gap_chars is not None:
+        gap_s = gap_chars * char_s
+    elif gap_s is None:
+        gap_s = 3.5 * char_s if p["baud"] <= 19200 else 1.75e-3          # 規格の t3.5
+    if gap_s <= 0:
+        raise ValueError(f"区切りの無音が正でない（{gap_s} 秒）")
+    params = {"gap_s": gap_s}
     data = [a for a in lower.of("data", "break")]
     out: list[Annotation] = []
     if not data:
-        return lower.derive("modbus", out, {"gap_chars": gap_chars})
-    char = median(a.end - a.start for a in data if a.kind == "data") if any(a.kind == "data" for a in data) else 1
+        return lower.derive("modbus", out, params)
+    gap = gap_s / lower.sample_period_s                                   # サンプル
     frames: list[list[Annotation]] = [[data[0]]]
     for prev, a in zip(data, data[1:]):
-        if a.start - prev.end >= gap_chars * char or a.kind == "break" or prev.kind == "break":
+        if a.start - prev.end >= gap or a.kind == "break" or prev.kind == "break":
             frames.append([a])
         else:
             frames[-1].append(a)
@@ -58,7 +66,7 @@ def decode_modbus(lower: Decoding, *, gap_chars: float = 2.5) -> Decoding:
             continue
         ann, request = _frame(frame, request, lower.sample_period_s)
         out.append(ann)
-    return lower.derive("modbus", out, {"gap_chars": gap_chars})
+    return lower.derive("modbus", out, params)
 
 
 def _frame(frame: list[Annotation], request, period: float):

@@ -1,13 +1,13 @@
 // 止めると壊れるターゲットの安全: 止める前の警告（debug.halt_risk）と、走らせたままの致命的エラー（target.state の fatal）
 import { describe, expect, it } from "vitest";
 import { t } from "../src/lib/i18n";
-import { Safety, clueText, confirmText, fatalTitle, linkText, needsWarning, reasonText, type HaltRisk } from "../src/lib/safety";
+import { Safety, clueText, confirmText, fatalTitle, isFatal, linkText, needsWarning, reasonText, type HaltRisk } from "../src/lib/safety";
 import { AppState } from "../src/lib/state";
 import { FakeConn } from "./fake-conn";
 
 const RISK: HaltRisk = {
-  elf: "/x/zmk.elf", risky: true, monitor_in_elf: false,
-  reasons: [{ kind: "radio", count: 12, symbols: ["RADIO_IRQHandler", "ll_adv_enable"] },
+  elf: "/x/zmk.elf", matched: true, monitor_in_elf: false,
+  matches: [{ kind: "radio", count: 12, symbols: ["RADIO_IRQHandler", "ll_adv_enable"] },
             { kind: "rtos", count: 1, symbols: ["_kernel"], rtos: "Zephyr" }],
 };
 
@@ -25,14 +25,14 @@ describe("止める前の警告", () => {
   it("止めると壊れうる ELF で、モニタ方式でなければ警告する", () => {
     expect(needsWarning(RISK, { state: "RUNNING" })).toBe(true);
     expect(needsWarning(RISK, { state: "HALTED", debug_mode: "monitor" })).toBe(false);
-    expect(needsWarning({ ...RISK, risky: false, reasons: [] }, { state: "RUNNING" })).toBe(false);
+    expect(needsWarning({ ...RISK, matched: false, matches: [] }, { state: "RUNNING" })).toBe(false);
     expect(needsWarning(null, { state: "RUNNING" })).toBe(false);
   });
 
   it("理由は手がかりのシンボルと数で、止めずに調べる方法へ案内する", () => {
-    expect(reasonText(RISK.reasons[0], t)).toContain("RADIO_IRQHandler");
-    expect(reasonText(RISK.reasons[0], t)).toContain("11");
-    expect(reasonText(RISK.reasons[1], t)).toContain("Zephyr");
+    expect(reasonText(RISK.matches[0], t)).toContain("RADIO_IRQHandler");
+    expect(reasonText(RISK.matches[0], t)).toContain("11");
+    expect(reasonText(RISK.matches[1], t)).toContain("Zephyr");
     const text = confirmText(RISK, "halt", t);
     expect(text).toContain(t("safety.action.halt"));
     expect(text).toContain(t("safety.addMonitor"));
@@ -43,7 +43,7 @@ describe("止める前の警告", () => {
     const { conn, app, safety, asked } = setup(RISK);
     conn.link!("open");
     await tick();
-    expect(safety.snapshot.risk?.risky).toBe(true);
+    expect(safety.snapshot.risk?.matched).toBe(true);
     expect(conn.quiet).toContain("debug.halt_risk");
     conn.emit("target.state", { state: "RUNNING" });
     expect(await safety.confirmHalt("halt", t)).toBe(true);
@@ -78,6 +78,11 @@ describe("止める前の警告", () => {
 });
 
 describe("走らせたままの致命的エラー", () => {
+  it("ティックが変わっていないだけ（tick_stopped）は致命的エラーと言わない。ほかの種類は PC・ロックアップの事実", () => {
+    expect(isFatal({ kind: "tick_stopped", since: 1, evidence: [] } as any)).toBe(false);
+    for (const kind of ["lockup", "fatal_halt", "fault_loop"]) expect(isFatal({ kind, since: 1, evidence: [] } as any)).toBe(true);
+  });
+
   it("target.state の fatal を受け取り、見出しと手がかりを言葉にする", () => {
     const { conn, safety } = setup(null);
     const fatal = { kind: "fatal_halt", function: "arch_system_halt", since: 1700000000,

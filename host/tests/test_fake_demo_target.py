@@ -66,7 +66,7 @@ def test_continuing_from_the_fault_handler_keeps_running_in_it_and_is_reported_a
     wait_for(lambda: demo.state == "HALTED")
     demo.target_resume()                                  # ハンドラの無限ループを回り続ける
     status = demo.target_status()
-    assert status["state"] == "RUNNING" and "fatal" not in status                 # 一瞬では決めない
+    assert status["state"] == "RUNNING" and status["fatal"]["kind"] == "fault_loop"   # 待たずに事実として
     clock[0] += 2
     fatal = demo.target_status()["fatal"]
     assert fatal["kind"] == "fault_loop" and fatal["function"] == "default_handler" and fatal["since"] == 5000.0
@@ -79,7 +79,7 @@ def test_fatal_demo_is_risky_to_halt_and_crashes_while_running(tmp_path, monkeyp
     d = DemoProbe(fatal_after_s=0.05)
     try:
         risk = d.halt_risk()
-        assert risk["risky"] and [r["kind"] for r in risk["reasons"]] == ["radio", "rtos"]
+        assert risk["matched"] and [r["kind"] for r in risk["matches"]] == ["radio", "rtos"]
         clock = [100.0]
         d._clock = lambda: clock[0]
         assert d.state == "RUNNING"
@@ -92,7 +92,7 @@ def test_fatal_demo_is_risky_to_halt_and_crashes_while_running(tmp_path, monkeyp
 
 
 def test_the_plain_demo_is_not_risky(demo):
-    assert demo.halt_risk()["risky"] is False
+    assert demo.halt_risk()["matched"] is False
 
 
 def test_breakpoint_actions_are_kept_and_listed(demo):

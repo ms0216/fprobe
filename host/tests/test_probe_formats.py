@@ -173,6 +173,9 @@ def test_systemview_over_rtt_becomes_a_recorded_timeline(probe):
     assert got["method"] == "systemview" and not got["running"] and got["exceptions"]["activations"] == 1
     assert abs(got["stats"]["tasks"]["sensor"]["total_us"] - 1000) < 1                # 64 MHz で 64000 サイクル
     assert any("systemview" in w for w in got["warnings"])
+    assert any("名前で決めた" in w and "IDLE" in w for w in got["warnings"])            # どう決めたかを明示する
+    runs = probe.recording_events(streams=["rtos"], kinds=["run"])["events"]
+    assert {e["body"]["task"] for e in runs if e["body"].get("idle")} == {"IDLE"}
     load = probe.rtos_timeline_load(window_us=500)
     assert load["windows"]
     assert probe.recording_find({"stream": "trace", "kind": "isr_enter"})["events"]

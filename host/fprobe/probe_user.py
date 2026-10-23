@@ -198,15 +198,15 @@ class UserTools:
         out.update(total=len(selected), offset=offset, records=[r.to_dict() for r in selected[offset:offset + limit]])
         return out
 
-    def user_trace_stats(self, name: str | None = None, bins: int = 20, outliers: str = "iqr",
+    def user_trace_stats(self, name: str | None = None, bins: int = 20, longest: int = 10,
                          limit: int = 100) -> dict:
         """集計: 値は名前ごと（構造体は "名前.欄" ごと）の数・最小・最大・平均・最後、区間（start / stop を名前ごとに
-        後入れ先出しで対にしたもの）は名前ごとの回数・最小・最大・平均・σ・分位・分布・外れ値（timing_measure と同じ）。
+        後入れ先出しで対にしたもの）は名前ごとの回数・最小・最大・平均・σ・分位・分布・長い順の上位 longest 件（timing_measure と同じ）。
         区間の一覧は limit 件まで。"""
         run = self._user_current()
         records, pairing, errors = self._user_build(run)
         values = value_stats(records)
-        intervals = interval_stats(pairing.intervals, run.timebase_hz, bins=bins, outliers=outliers)
+        intervals = interval_stats(pairing.intervals, run.timebase_hz, bins=bins, longest=longest)
         marks: dict[str, int] = {}
         for r in records:
             if r.kind == "mark":
@@ -216,7 +216,7 @@ class UserTools:
             intervals = {k: v for k, v in intervals.items() if k == name}
             marks = {k: v for k, v in marks.items() if k == name}
         for row in intervals.values():
-            for key in ("intervals", "outliers"):
+            for key in ("intervals",):
                 if len(row.get(key, ())) > limit:
                     row[f"{key}_total"] = len(row[key])
                     row[key] = row[key][:limit]

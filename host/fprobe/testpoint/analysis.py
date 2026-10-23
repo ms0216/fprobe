@@ -30,14 +30,16 @@ class Stats:
         self.total = 0
         self.min: int | None = None
         self.max: int | None = None
+        self.max_at: int | None = None       # いちばん大きかった値の時刻（呼び出しの始め。分かるとき）
         self._mean = 0.0
         self._m2 = 0.0
 
-    def add(self, x: int) -> None:
+    def add(self, x: int, at: int | None = None) -> None:
         self.count += 1
         self.total += x
         self.min = x if self.min is None else min(self.min, x)
-        self.max = x if self.max is None else max(self.max, x)
+        if self.max is None or x > self.max:
+            self.max, self.max_at = x, at
         delta = x - self._mean
         self._mean += delta / self.count
         self._m2 += delta * (x - self._mean)
@@ -55,7 +57,7 @@ class Stats:
         if not self.count:
             return {"count": 0}
         return {"count": self.count, "total_s": self.total / hz, "min_s": self.min / hz, "max_s": self.max / hz,
-                "mean_s": self.mean / hz, "stdev_s": self.stdev / hz}
+                "max_at": self.max_at, "mean_s": self.mean / hz, "stdev_s": self.stdev / hz}
 
 
 @dataclass(frozen=True)
@@ -221,13 +223,14 @@ class _Frame:
 class Analyzer:
     """Hit / Loss を逐次に受けて解析する。
 
-    long_call: それまでの long_min_calls 回以上の平均 + long_sigma × 標準偏差を超え、かつ平均の long_ratio 倍を超える。
+    long_call: 使う側が long_s（秒）を明示したときだけ、それより長い呼び出し（経験則の「いつもより長い」は付けない。
+    いちばん長い呼び出しの長さと時刻は統計の max_s・max_at で事実として返す）。
     silence_s: これより長く何も来なければ silence。open_s: 終わりの時点でこれより長く開いた入口は no_exit。
     on_call / on_hit / on_anomaly: 流しながら記録に書くためのコールバック（record.RecorderSink）。
     """
 
     def __init__(self, table: ProbeTable, hz: float, *, bucket_s: float = 1.0, keep_calls: bool = True,
-                 keep_values: bool = True, long_sigma: float = 6.0, long_min_calls: int = 30, long_ratio: float = 1.2,
+                 keep_values: bool = True, long_s: float | None = None,
                  silence_s: float | None = None, open_s: float | None = None, max_depth: int = 64,
                  on_call: Callable[[Call], None] | None = None,
                  on_hit: Callable[[Hit, Probe, str], None] | None = None,
@@ -236,7 +239,7 @@ class Analyzer:
         self.names = table.function_names()
         self.bucket_ticks = max(1, round(bucket_s * hz))
         self.keep_calls, self.keep_values = keep_calls, keep_values
-        self.long_sigma, self.long_min_calls, self.long_ratio = long_sigma, long_min_calls, long_ratio
+        self.long_ticks = None if long_s is None else long_s * hz
         self.silence_ticks = None if silence_s is None else silence_s * hz
         self.open_ticks = None if open_s is None else open_s * hz
         self.max_depth = max_depth
@@ -354,12 +357,10 @@ class Analyzer:
         stats = self.functions[frame.name]
         if complete:
             inc = stats.inclusive
-            if (inc.count >= self.long_min_calls and ticks > inc.mean + self.long_sigma * inc.stdev
-                    and ticks > inc.mean * self.long_ratio):
+            if self.long_ticks is not None and ticks > self.long_ticks:
                 self._anomaly(frame.t0, "long_call", frame.entry_id, frame.name,
-                              f"{ticks / self.hz:.6g} 秒（平均 {inc.mean / self.hz:.6g} 秒、"
-                              f"標準偏差 {inc.stdev / self.hz:.3g} 秒）")
-            inc.add(ticks)
+                              f"{ticks / self.hz:.6g} 秒（指定 {self.long_ticks / self.hz:.6g} 秒より長い）")
+            inc.add(ticks, frame.t0)
             stats.exclusive.add(own)
         if self.active[frame.name] == 1:
             stats.total_inclusive += ticks

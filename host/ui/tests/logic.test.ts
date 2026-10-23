@@ -92,3 +92,13 @@ describe("解読の件数と表", () => {
     expect(hiddenKinds({ counts: { frame: 2 } })).toEqual({ n: 0, kinds: [] });              // 古いデーモン
   });
 });
+
+describe("laExportParams（捕捉の保存。la.export）", async () => {
+  const { laExportParams } = await import("../src/lib/logic");
+  it("既定のパスは日時と形式の拡張子。手で変えたパスはそのまま", () => {
+    const at = new Date(2026, 9, 22, 21, 5, 9);
+    expect(laExportParams("sr", null, at)).toEqual({ format: "sr", path: "capture-20261022-210509.sr" });   // 2 回目に上書きしない
+    expect(laExportParams("vcd", null, at)).toEqual({ format: "vcd", path: "capture-20261022-210509.vcd" });
+    expect(laExportParams("vcd", "D:/x/a.vcd", at)).toEqual({ format: "vcd", path: "D:/x/a.vcd" });
+  });
+});

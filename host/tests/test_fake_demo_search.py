@@ -18,8 +18,7 @@ def demo():
 
 
 def test_the_capture_has_a_uart_line_that_the_real_decoder_reads(demo):
-    out = demo.la_decode("uart", {"channel": 2})
-    assert out["params"]["baud"] == pytest.approx(1_000_000, rel=0.05)
+    out = demo.la_decode("uart", {"channel": 2, "baud": 1_000_000})          # ボーレートは渡す（推定しない）
     text = bytes(a["value"] for a in out["annotations"] if a["value"] is not None)
     assert text.startswith(b"fprobe: hello\r\n")
     assert out["errors"] == 1                                     # 枠の誤りが 1 か所

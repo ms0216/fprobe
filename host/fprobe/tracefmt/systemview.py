@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass
 
 from ..logfmt.printf import Words, format_c
-from .model import Trace, TraceEvent
+from .model import Trace, TraceEvent, is_rtos_idle_name
 
 __all__ = ["COMMAND_START", "COMMAND_STOP", "CHANNEL_NAME", "SyncNotFound", "SystemViewDecoder", "SystemViewError",
            "decode_systemview", "parse_description", "strip_svdat_header"]
@@ -273,7 +273,7 @@ class SystemViewDecoder:
             task = self._task(args[0])
             info = self.trace.task(task)
             info.priority, info.name = args[1], args[2]
-            if args[2].lower() in ("idle", "idle task") or args[2].upper().startswith("IDLE"):
+            if is_rtos_idle_name(args[2]):
                 self.trace.idle.add(task)
             return self._event(ts, "task_info", name, task, {"priority": args[1], "name": args[2]})
         if event_id in (10, 11):

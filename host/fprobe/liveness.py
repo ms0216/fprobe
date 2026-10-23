@@ -1,19 +1,19 @@
-"""走らせたままの致命的エラーの見張り: コアがエラーで止まり続けている（無限ループ・ロックアップ）のを、止めずに見つける。
+"""走らせたままの致命的エラーの見張り: 止めずに読める材料（DHCSR・DWT_PCSR・ティックの変数）から、事実を返す。
 
 「実行中」のままでも、致命的エラーの後のコアは同じ所を回り続けるだけで、スレッド・CPU 負荷の画面は古い値を
-出し続ける。止めずに読める材料を見張りの周期ごとに受け取り、組み合わせて決める:
+出し続ける。見張りの周期ごとに材料を受け取り、事実だけを返す（経験則の閾値 = 何秒いたら・PC の範囲が何バイト
+以内なら、で判定しない。CLAUDE.md）:
 
-- ロックアップ（DHCSR.S_LOCKUP）: 故障の処理の中で故障した。それだけで致命的（kind = lockup）。
-- PC の見本（DWT_PCSR。読むたびにコアが最近実行した命令の番地）が、RTOS・ランタイムの「止まって回り続ける」関数
-  （Zephyr の arch_system_halt・k_fatal_halt、FreeRTOS の assert・フック、newlib の abort・_exit、Rust の panic 等）
-  の中に CONFIRM_S 秒いる（kind = fatal_halt）、故障の処理（HardFault_Handler・Default_Handler 等）の中にいる
-  （kind = fault_loop）。
-- PC が狭い範囲（SPIN_BYTES）を STUCK_S 秒回り続け、その間 RTOS・ランタイムのティックの変数が進まない
-  （割り込みを止めて回る。FreeRTOS の configASSERT の既定等。kind = stuck）。ティックが分からなければ決めない
-  （ベアメタルの待ちのループと区別できない）。アイドルの関数の中は回っていても正常。
+- ロックアップ（DHCSR.S_LOCKUP）: 故障の処理の中で故障した（kind = lockup）。
+- PC の見本（DWT_PCSR。読むたびにコアが最近実行した命令の番地）がすべて、RTOS・ランタイムが定めた「止まって
+  回り続ける」関数（Zephyr の arch_system_halt・k_fatal_halt、FreeRTOS の assert・フック、newlib の abort・_exit、
+  Rust の panic 等）の中にある（kind = fatal_halt）、故障の処理（HardFault_Handler・Default_Handler 等）の中にある
+  （kind = fault_loop）。見た時点で返し、since に最初に見た時刻。
+- RTOS・ランタイムのティックの変数が、前の見張りから変わっていない（kind = tick_stopped。そのときの PC の範囲と
+  関数を添える。アイドルの中かどうかは関数の名前で見せ、正常かどうかは決めない）。ティックが分からなければ返さない。
 
 名前は RTOS・ランタイム・CMSIS の共通の名前で、特定の機器のものではない。結果は {"kind", "function"?, "since"
-（見つけ始めた時刻）, "evidence"（手がかり: {"clue": "lockup"} / {"clue": "pc_in", "function"} / {"clue": "pc_loop",
+（見つけ始めた時刻）, "evidence"（手がかり: {"clue": "lockup"} / {"clue": "pc_in", "function"} / {"clue": "pc_range",
 "function", "bytes"} / {"clue": "tick_stopped", "tick"}）}。値は状態が続く間は変わらない（見張りが変化だけを送るため、
 経過の秒は入れない）。材料が正常に戻ったら None（リセット・再起動で直った）。
 """
@@ -21,11 +21,7 @@
 import re
 from collections.abc import Callable
 
-__all__ = ["CONFIRM_S", "FATAL_FUNCTIONS", "FAULT_HANDLERS", "IDLE_FUNCTIONS", "Liveness", "STUCK_S", "TICK_VARIABLES"]
-
-CONFIRM_S = 1.5                      # 致命的エラーの関数・故障の処理にこれだけ居続けたら決める
-STUCK_S = 3.0                        # 細かいループ + ティックの停止がこれだけ続いたら決める
-SPIN_BYTES = 64                      # 細かいループとみなす PC の範囲
+__all__ = ["FATAL_FUNCTIONS", "FAULT_HANDLERS", "Liveness", "TICK_VARIABLES"]
 
 # 止まって回り続ける関数（RTOS・ランタイム・ツールチェーン）
 FATAL_FUNCTIONS = frozenset({
@@ -38,10 +34,6 @@ FATAL_FUNCTIONS = frozenset({
 # 故障の処理（CMSIS の名前・cortex-m-rt・既定の処理）
 FAULT_HANDLERS = re.compile(r"^(HardFault|MemManage|BusFault|UsageFault|SecureFault)(_Handler)?$|^Default_?Handler_?$",
                             re.I)
-# アイドル（回っていても正常）
-IDLE_FUNCTIONS = frozenset({"arch_cpu_idle", "arch_cpu_atomic_idle", "k_cpu_idle", "k_cpu_atomic_idle", "idle",
-                            "prvIdleTask", "vApplicationIdleHook", "_tx_thread_schedule", "osRtxIdleThread",
-                            "cpu_idle", "__WFI", "__WFE"})
 # ティックの変数（RTOS・ランタイム。下位の語を読む）
 TICK_VARIABLES = ("xTickCount", "curr_tick", "_tx_timer_system_clock", "OSTickCtr", "uwTick")
 _INVALID = (0, 0xFFFFFFFF)           # PCSR が読めない（止まっている・眠っている・DWT が無い）
@@ -57,65 +49,45 @@ class Liveness:
     def reset(self) -> None:
         """履歴を捨てる（止めた・再開した・リセットした・接続し直した）。"""
         self._condition: tuple | None = None        # 続いている状態（種類, 関数）
-        self._first = 0.0                           # その状態を初めて見た時刻
-        self._lo = self._hi = 0                     # 細かいループの PC の範囲
-        self._tick: int | None = None               # その状態を初めて見たときのティック
-        self._since: float | None = None            # 致命的と決めた状態の始まり
+        self._since = 0.0                           # その状態を初めて見た時刻
+        self._tick: int | None = None               # 前の見張りのティック
+        self._tick_since = 0.0                      # ティックがその値になったのを初めて見た時刻
 
     def observe(self, lockup: bool, pcs: list[int | None], tick: int | None, now: float) -> dict | None:
-        """見張りの 1 回: ロックアップか、PC の見本（いくつか）、ティック（無ければ None）。致命的なら結果、でなければ
+        """見張りの 1 回: ロックアップか、PC の見本（いくつか）、ティック（無ければ None）。事実があれば結果、無ければ
         None。"""
+        tick_stopped = tick is not None and tick == self._tick
+        if tick is None or tick != self._tick:
+            self._tick, self._tick_since = tick, now
         if lockup:
-            return self._decide(("lockup", None), now, now, [{"clue": "lockup"}])
+            return self._report(("lockup", None), now, [{"clue": "lockup"}])
         valid = [pc for pc in pcs if pc is not None and pc not in _INVALID]
         if not valid:
-            self.reset()                                                   # 見本が無い（眠っている等）: 決めない
+            self._condition = None                                         # 見本が無い（眠っている等）: 返さない
             return None
         names = {self.function_at(pc) for pc in valid}
         name = next(iter(names)) if len(names) == 1 else None
-        lo, hi = min(valid), max(valid)
         if name is not None and (name in FATAL_FUNCTIONS or FAULT_HANDLERS.match(name)):
             kind = "fault_loop" if FAULT_HANDLERS.match(name) else "fatal_halt"
-            first = self._continue((kind, name), now, lo, hi, tick)
-            if now - first < CONFIRM_S:
-                return None
             evidence = [{"clue": "pc_in", "function": name}]
-            if tick is not None and tick == self._tick:
+            if tick_stopped:
                 evidence.append({"clue": "tick_stopped", "tick": tick})
-            return self._decide((kind, name), first, now, evidence)
-        if name in IDLE_FUNCTIONS:
-            self.reset()
-            return None
-        if self._condition is not None and self._condition[0] == "stuck":
-            lo, hi = min(lo, self._lo), max(hi, self._hi)
-        if hi - lo > SPIN_BYTES or tick is None:
-            self.reset()
-            return None
-        first = self._continue(("stuck", None), now, lo, hi, tick)
-        if tick != self._tick:                                             # ティックが進んだ: 待っているだけ
-            self.reset()
-            return None
-        if now - first < STUCK_S:
-            return None
-        where = ", ".join(sorted(n for n in names if n)) or f"0x{lo:08X}"
-        return self._decide(("stuck", None), first, now,
-                            [{"clue": "pc_loop", "function": where, "bytes": hi - lo + 2},
-                             {"clue": "tick_stopped", "tick": tick}], function=where)
+            return self._report((kind, name), now, evidence)
+        if tick_stopped:
+            lo, hi = min(valid), max(valid)
+            where = ", ".join(sorted(n for n in names if n)) or f"0x{lo:08X}"
+            out = self._report(("tick_stopped", None), self._tick_since,
+                               [{"clue": "pc_range", "function": where, "bytes": hi - lo + 2},
+                                {"clue": "tick_stopped", "tick": tick}])
+            out["function"] = where
+            return out
+        self._condition = None
+        return None
 
-    def _continue(self, condition: tuple, now: float, lo: int, hi: int, tick: int | None) -> float:
-        """同じ状態が続いていれば初めて見た時刻、新しい状態なら now から数え直す。"""
+    def _report(self, condition: tuple, now: float, evidence: list[dict]) -> dict:
         if self._condition != condition:
-            self._condition, self._first, self._tick, self._since = condition, now, tick, None
-        self._lo, self._hi = lo, hi
-        return self._first
-
-    def _decide(self, condition: tuple, first: float, now: float, evidence: list[dict],
-                function: str | None = None) -> dict:
-        if self._condition != condition:
-            self._condition, self._first, self._tick, self._since = condition, first, None, None
-        if self._since is None:
-            self._since = first
+            self._condition, self._since = condition, now
         out = {"kind": condition[0], "since": self._since, "evidence": evidence}
-        if function or condition[1]:
-            out["function"] = function or condition[1]
+        if condition[1]:
+            out["function"] = condition[1]
         return out

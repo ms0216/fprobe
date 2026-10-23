@@ -126,7 +126,7 @@ def test_stacks(image):
     logger = tasks["logger"].stack                            # OS_OPT_TASK_STK_CLR 無し: 塗りが無い
     assert logger.fill == "none" and logger.untouched is None and not logger.overflow
     parked = tasks["parked"]
-    assert parked.stack.overflow and parked.stack.fill == "none" and parked.notes
+    assert not parked.stack.overflow and parked.stack.fill == "none" and parked.stack.fill_above and parked.notes
     assert tasks["main"].stack.pointer is None                # 実行中: レジスタが読めない
 
 

@@ -1,6 +1,6 @@
 """PYNQ-Z2 の P3: 深いバッファ（PS の DDR の上端 32 MB、S_AXI_HP0）で、XIAO の SWD の線の取り込み・流し続け・イベント記録。
 
-準備: `python -m fprobe_gw pynq reserve`（/boot/uEnv.txt の mem=480M と /etc/fprobe/mem を置いて再起動）の後。
+準備: `python -m fprobe_gw pynq reserve`（/boot/uEnv.txt の mem=479M と /etc/fprobe/mem を置いて再起動）の後。
 予約がまだ（外部メモリの準備ができていない）なら飛ばす。環境変数 FPROBE_PYNQ_HOST（PYNQ の IP）を入れたときだけ実行。
 XIAO は止めない（attach で読むだけ）。docs/superpowers/plans/2026-10-20-pynq-p3-deep-buffer.md の Task 3。
 """
@@ -59,6 +59,12 @@ def test_captures_the_xiao_swd_traffic_into_the_ps_ddr(session, rle):
     la = DeepAnalyzer(session.device)
     la.start(rle=rle, fall=1 << PROBE_DRIVES_SWDIO, post_beats=20_000)
     swd_traffic(session)
+    if rle:
+        # RLE は線が変わったときだけ拍を書く。XIAO の線は静かなので（Primer の Nucleo と違う）、トリガの後ろの 20,000 拍が
+        # たまるまで通信を続ける（2026-10-20 に実機で: 通信を止めると 2.5 秒で 1 拍しか増えなかった）
+        deadline = time.monotonic() + 30
+        while not la.status() >> g.LA_DEEP_STATUS_DONE[0] & 1 and time.monotonic() < deadline:
+            swd_traffic(session, 50)
     la.wait(5)
     if rle:
         tr = la.read_transitions(before_beats=2_000)

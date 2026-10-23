@@ -30,7 +30,7 @@ def test_install_needs_the_sudo_password(tmp_path):
 
 
 def test_reserve_puts_uenv_and_the_region_then_reboots(tmp_path):
-    # P3: DDR の上端を Linux から外す（/boot/uEnv.txt の mem=480M）と、中継が読む領域（/etc/fprobe/mem）を置いて再起動する
+    # P3: DDR の上端を Linux から外す（/boot/uEnv.txt の mem=479M）と、中継が読む領域（/etc/fprobe/mem）を置いて再起動する
     from fprobe_gw.pynq_setup import reserve
     calls = []
 

@@ -1,5 +1,9 @@
 // 画面の状態の同期（lib/screen.ts）: URL のハッシュ・デーモンの ui.state との往復
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { InlineDecimator } from "../src/lib/timeline/decimator";
+import { decodeFrame } from "../src/lib/timeline/frame";
 import { Debugger } from "../src/lib/debugger";
 import { ScreenSync, configShowing, emptyScreen, fromHash, toHash, type Place } from "../src/lib/screen";
 import { AppState } from "../src/lib/state";
@@ -154,6 +158,44 @@ describe("画面の状態の同期", () => {
     expect(conn.quiet).toEqual(["ui.state.set"]);
     sync.leave();                                                     // もう無ければ送らない
     expect(conn.calls).toHaveLength(1);
+  });
+
+  it("伸びている記録の、画面がまだ読んでいない端の視点が届いたら、追いついてから当てる（追従で上書きしない）", async () => {
+    // 2026-10-21 の実機: 記録中に「波形を捕捉」が記録の端の近くの視点を送ると、画面の範囲（1 秒ごとに読む）がまだ
+    // 届かず捨て、画面の「全体・追従」の視点を送り返して上書きしていた
+    const bytes = readFileSync(resolve(import.meta.dirname, "fixtures", "recording-raw.bin"));
+    const raw = () => decodeFrame(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer).result;
+    let span: [number, number] = [0, 19999];
+    const conn = new FakeConn({
+      "ui.state.get": { rev: 3, view: null, cursors: { selection: null, mouse: null, reference: null }, rows: null, event: null, frame: 0 },
+      "ui.state.set": (p: any) => ({ rev: 4, ...emptyScreen(), ...p, changed: [] }),
+      "session.status": { boot: "a", device: null, control: { paused: false, paused_by: null, held: 0 }, clients: [], target: null },
+      "session.activity.list": { entries: [] },
+      "probe.info": { capabilities: {} },
+      "recording.status": () => ({ recording: true, name: "rec-1", span, timebase_hz: 1e6 }),
+      "timeline.tiles": () => raw(),
+    });
+    const app = new AppState(conn as any);
+    const tl = new TimelineState(conn as any, app, new InlineDecimator(), 10);
+    const dbg = new Debugger(conn as any, app);
+    const place: Place = { hash: () => "", replace: () => {} };
+    const sync = new ScreenSync(conn as any, tl, dbg, () => {}, place, 5);
+    tl.setWidth(500);
+    conn.link!("open", {});
+    await settle();
+    tl.setSource("recording");
+    await settle(30);
+    expect(tl.snapshot.extent).toEqual([0, 20000]);
+    span = [0, 39999];                                              // 記録が伸びた（画面はまだ 20000 まで）
+    const state = { ...emptyScreen(), view: { source: "recording" as const, t0: 30000, t1: 30200 },
+                    cursors: { selection: 30100, mouse: null, reference: null } };
+    const before = conn.calls.length;
+    conn.emit("ui.state", { rev: 5, origin: "other", changed: ["view", "cursors"], state });
+    await settle(60);
+    expect(tl.snapshot.view).toEqual({ start: 30000, end: 30200 });
+    const sent = conn.calls.slice(before).filter(([m]) => m === "ui.state.set").map(([, p]) => p as any);
+    expect(sent.some((p) => p.view && p.view.t0 !== 30000)).toBe(false);   // 古い視点を送り返さない
+    void sync;
   });
 
   it("ui.state の無いデーモンでは URL だけ", async () => {

@@ -60,7 +60,22 @@ export class CanvasRenderer implements TimelineRenderer {
             g.fillStyle = cssColor(colors.line);
             g.fillRect(x0, t0, x1 - x0, lw);
             g.fillRect(x0, y1 - lw, x1 - x0, lw);
-          } else if (s !== ST_NONE) {
+          } else if (s === ST_NONE) {                    // 波形の無い所: 薄い斜線（値 0 の線と見分ける）
+            g.save();
+            g.beginPath();
+            g.rect(x0, t0, x1 - x0, y1 - t0);
+            g.clip();
+            g.strokeStyle = cssColor(colors.grid);
+            g.globalAlpha = 0.7;
+            g.lineWidth = dpr;
+            g.beginPath();
+            for (let x = x0 - (y1 - t0) - ((x0 + t0) % (6 * dpr)); x < x1; x += 6 * dpr) {
+              g.moveTo(x, y1);
+              g.lineTo(x + (y1 - t0), t0);
+            }
+            g.stroke();
+            g.restore();
+          } else {
             g.fillStyle = cssColor(colors.line);
             g.fillRect(x0, s ? t0 : y1 - lw, x1 - x0, lw);
             const next = e < W ? d[base + e * 4] : ST_NONE;

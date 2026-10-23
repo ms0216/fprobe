@@ -21,6 +21,8 @@ class Source(IntFlag):
     DAP_MATCH = 2       # ホストの DRW アクセスの番地一致
     HOST = 4            # CrossTrigger.fire()
     SEQUENCE = 8        # 多段トリガ（TriggerSequencer）の発火
+    OBS_MATCH = 16      # FPGA の観測の値の一致（CSR obs.match。fprobe.fpga_obs.compile_match）
+    SAMPLER_MATCH = 32  # サンプラの値の一致（CSR sampler_match。R21）
 
 
 @dataclass(frozen=True)

@@ -76,7 +76,12 @@ def test_resume_steps_over_a_breakpoint_at_the_current_pc(probe, monkeypatch):
         def resume(self):
             calls.append("dbg.resume")                           # ブレークポイントを 1 命令踏み越えてから再開する
 
-    monkeypatch.setattr(Probe, "dbg", property(lambda self: FakeDebugger()))
-    monkeypatch.setattr(Probe, "target_status", lambda self: {"state": "RUNNING"})
-    monkeypatch.setattr(Probe, "target", property(lambda self: object()))
+    class OnlyThisProbe(Probe):                                   # クラス全体を差し替えない（ほかの試験の背景の
+        dbg = property(lambda self: FakeDebugger())               # スレッドが偽物を踏まないように）
+        target = property(lambda self: object())
+
+        def target_status(self):
+            return {"state": "RUNNING"}
+
+    monkeypatch.setattr(probe, "__class__", OnlyThisProbe)
     assert probe.target_resume() == {"state": "RUNNING"} and calls == ["dbg.resume"]

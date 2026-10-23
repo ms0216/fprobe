@@ -249,3 +249,16 @@ describe("段の表と構成", () => {
     expect(rowTitle({ ...base, type: "group", group: "sample", id: "group:sample", title: null }, tr)).toBe("Data Sampling");
   });
 });
+
+describe("値の段の値なしの点", () => {
+  it("値なし（NaN）の点の後は、次の点まで空白（前の値を伸ばさない。MCU のメモリの読みの空白・読めなかった語）", () => {
+    // 点: 0 → 5、10 → 6、20 → 値なし（読みの空白の始め）、80 → 7。画素 10 個 × 10
+    const ev = { t: new Float64Array([0, 10, 20, 80]), value: new Float64Array([5, 6, NaN, 7]) };
+    const tile = { t0: 0, t1: 100 } as unknown as Tile;
+    const px = new Pixels(0, 100, 10);
+    const lo = new Float64Array(10), hi = new Float64Array(10);
+    valueEnvelope(tile, ev as never, px, lo, hi);
+    const got = Array.from(lo, (v, i) => (Number.isNaN(v) ? null : [v, hi[i]]));
+    expect(got).toEqual([[5, 5], [5, 6], [6, 6], null, null, null, null, null, [7, 7], [7, 7]]);  // 画素 1・2 は始めに保たれている値も含む
+  });
+});

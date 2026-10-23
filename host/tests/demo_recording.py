@@ -109,11 +109,11 @@ def write_demo_recording(directory: Path) -> None:
                 add("rtos", "queue_receive", cursor + 5 * US, 0x20003000, handle, {"object": "log_queue", "task": name})
             cursor = end
         if tick % 10 == 0:                                 # sensor は 10 ms ごとに起き、次まで delay で待つ
-            add("rtos", "blocked", t + 300 * US, TASKS[1][1], 0, {"task": "sensor", "on": "delay", "outcome": "timeout"},
+            add("rtos", "blocked", t + 300 * US, TASKS[1][1], 0, {"task": "sensor", "on": "delay", "outcome": None},
                 t + 10 * MS)
         if tick % 3 == 1:
             add("rtos", "blocked", t + 200 * US, TASKS[2][1], 0x20003040,
-                {"task": "comm", "on": "rx_queue", "outcome": "received"}, t + 2 * MS + 100 * US)
+                {"task": "comm", "on": "rx_queue", "outcome": "ok"}, t + 2 * MS + 100 * US)
         if tick % 10 == 5:                                  # センサの割り込み（EXTI0）と I2C の読み
             e = t + 400 * US
             wave.level(e, e + 20 * US, 5)

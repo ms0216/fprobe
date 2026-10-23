@@ -22,6 +22,7 @@ entity debug_port is
     data_phase      : in  std_logic;
     idle_cycles     : in  natural range 0 to 255;
     sample_delay    : in  natural range 0 to 3;              -- SWD の取り込みの遅れ（swd_phy）
+    jtag_sample_delay : in natural range 0 to 7;             -- JTAG の TDO の取り込みの遅れ（jtag_phy）
     jtag_dr_before  : in  natural range 0 to 7;
     jtag_dr_after   : in  natural range 0 to 7;
     jtag_ir_before  : in  natural range 0 to 63;
@@ -75,7 +76,7 @@ begin
   jtag_i : entity work.jtag_phy
     port map (clk => clk, rst => rst, enable => jtag_en, half_period => half_period, idle_cycles => idle_cycles,
               dr_before => jtag_dr_before, dr_after => jtag_dr_after, ir_before => jtag_ir_before,
-              ir_after => jtag_ir_after, ir_len => jtag_ir_len,
+              ir_after => jtag_ir_after, ir_len => jtag_ir_len, sample_delay => jtag_sample_delay,
               cmd_valid => j_cmd_valid, cmd_ready => j_ready, cmd_op => cmd_op, cmd_count => cmd_count,
               cmd_request => cmd_request, cmd_data => cmd_data, rsp_valid => j_valid, rsp_ack => j_ack,
               rsp_data => j_data, tck => j_tck, tms => j_tms, tdi => j_tdi, tdo => tdo);

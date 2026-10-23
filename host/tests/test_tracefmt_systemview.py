@@ -129,3 +129,12 @@ def test_a_broken_packet_resynchronizes_at_the_next_sync():
     d = SystemViewDecoder()
     d.feed(broken)
     assert d.trace.errors >= 1 and sum(1 for e in d.trace.events if e.kind == "print") >= 1
+
+
+def test_idle_is_only_the_names_the_rtos_defines():
+    # 名前の部分一致・前方一致で idle を決めない（「idler」等の利用者のタスクを idle にしてしまう）。RTOS のソースが
+    # 定める名前だけ: FreeRTOS の configIDLE_TASK_NAME の既定 "IDLE"（SMP は "IDLE<n>"）、Zephyr の "idle"（SMP は
+    # "idle <nn>"）、RTX5 の "osRtxIdleThread"
+    from fprobe.tracefmt.model import is_rtos_idle_name
+    assert all(map(is_rtos_idle_name, ["IDLE", "IDLE1", "idle", "idle 01", "osRtxIdleThread"]))
+    assert not any(map(is_rtos_idle_name, ["idler", "IDLE_task", "Idle hook", "my_idle", "Idle", "idle task"]))

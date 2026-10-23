@@ -22,7 +22,7 @@ import math
 import os
 import secrets
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -125,6 +125,9 @@ class Daemon:
         self.loop: asyncio.AbstractEventLoop | None = None
         self._ids = itertools.count(1)
         self.arbiter = Arbiter(on_control=lambda state: self.publish("control", state))
+        # 機器に触らない要求（offline: 記録の読み・画面の状態）の作業スレッド。大きな記録のタイルの間も機器の操作・状態の
+        # 読みが止まらず、重い機器の操作の間も記録を読める。読みどうしは 1 本で順に（Probe の記録の読み手を同時に使わない）
+        self.reader = ThreadPoolExecutor(1, thread_name_prefix="fprobe-reader")
         self.hooks = getattr(backend, "hook_table", None)      # フックの登録簿（U44。機能の実装が持つ）
         self._observe_lock: asyncio.Lock | None = None
         self._inline = 0                                       # 応答の前に状態を見直す操作の数（止まりはその操作のもの）
@@ -297,9 +300,12 @@ class Daemon:
         # quiet（画面の自動の読み）は状態を変えない読みにだけ効く。操作は必ず記録する
         record = method.record and not (quiet and (method.kind == "read" or method.observes))
         try:
-            result = await self.run(client, method.kind, self._guarded(lambda: fn(**params)),
-                                    record=(method.name, params) if record else None, moves=method.name in RUN_METHODS,
-                                    operation=method.name)
+            if method.offline:
+                result = await self._read_offline(client, method.name, lambda: fn(**params), record, params)
+            else:
+                result = await self.run(client, method.kind, self._guarded(lambda: fn(**params)),
+                                        record=(method.name, params) if record else None,
+                                        moves=method.name in RUN_METHODS, operation=method.name)
         except asyncio.CancelledError:
             raise                                        # 利用者が切れた: 応答は要らない
         except BaseException as e:                       # 機器の処理の BaseException（SystemExit 等）にも必ず応答する
@@ -316,6 +322,13 @@ class Daemon:
             return jsonable(result)
         except TypeError as e:
             raise _Rpc(E_INTERNAL, f"結果を返せない: {e}") from None
+
+    async def _read_offline(self, client: Client, name: str, fn: Callable[[], Any], record: bool, params: dict) -> Any:
+        """機器に触らない要求を読みのスレッドで実行する（調停・フックの外。操作の記録には残す）。"""
+        future = self.reader.submit(fn)
+        if record:
+            future.add_done_callback(self._recorder(client, name, params, time.monotonic()))
+        return await asyncio.wrap_future(future)
 
     def _announce_recording(self, client: Client, method: str, result: Any) -> None:
         """記録を開いた・始めた・止めたことを知らせる（通知 recording）。"""
@@ -710,6 +723,7 @@ def main() -> None:
     for s in args.stream:
         print(f"流れ {s['stream']}: 127.0.0.1:{s['port']}（{s['protocol']}）", flush=True)
     backend = Probe(args.serial, args.port, args.baud, args.eth, bitstreams=args.bitstreams)
+    backend.ui_state_persist(fprobe_home() / "ui_state.json")   # 信号の定義・システム解析の表等を再起動を越えて
     app = create_app(backend, token=token, activity_dir=fprobe_home() / "activity",
                      device=device_of(args.serial, args.port, args.eth), gdb_port=args.gdb,
                      gdb_options=GdbOptions(args.gdb_target, args.gdb_frequency), gdb_role=args.gdb_role,

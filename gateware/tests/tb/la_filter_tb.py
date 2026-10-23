@@ -120,3 +120,23 @@ async def cycles_zero_means_no_filter(dut):
 @cocotb.test()
 async def cycles_one_means_no_filter(dut):
     await check_no_filter(dut, 1)
+
+
+@cocotb.test()
+async def an_unfiltered_change_reaches_q_after_la_filter_delay(dut):
+    # 辺の直後に変わった入力が q に出るまでの辺の数（ケイパビリティ LA_DELAY の元。fprobe_gw.caps.LA_FILTER_DELAY）
+    from cocotb.triggers import Timer
+
+    from fprobe_gw.caps import LA_FILTER_DELAY
+    await setup(dut)
+    await RisingEdge(dut.clk)
+    await Timer(1, "ns")
+    dut.d.value = 0b0001
+    edges = 0
+    while True:
+        await RisingEdge(dut.clk)
+        edges += 1
+        await ReadOnly()
+        if int(dut.q.value) & 1:
+            break
+    assert edges == LA_FILTER_DELAY

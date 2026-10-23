@@ -25,8 +25,8 @@ def probe():
     p.close()
 
 
-def test_halt_risk_of_a_bare_metal_demo_is_low(probe):
-    assert probe.halt_risk()["risky"] is False
+def test_halt_risk_of_a_bare_metal_demo_matches_nothing(probe):
+    assert probe.halt_risk()["matched"] is False
 
 
 def test_live_watch_reads_globals_while_running(probe):

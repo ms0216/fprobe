@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { LaChannel } from "../lib/waveform";
+  import { shared } from "../lib/context";
   // 時間軸の部品: 段（波形・区間・箱・状態・印・値・密度）を WebGL2（無ければ Canvas 2D）で描き、目盛り・カーソル 3 種・
   // ラベルを Canvas 2D で重ねる。拡大（ホイール）・移動（ドラッグ・Shift + ホイール）・クリックで選ぶ・Shift + クリックで
   // 基準・ダブルクリックで出来事の元へ（無ければ全体）・ホバーの説明・キーボード。
@@ -204,6 +206,8 @@
   const hoverRow = $derived(hover ? t.rows.find((r) => r.def.id === hover!.row)?.def : undefined);
   const value = (item: PickedItem) =>
     item.value === null ? "" : `${plainNumber(item.value)}${item.unit ? ` ${item.unit}` : ""}`;
+  const { app } = shared();
+  const laLayout = $derived((($app.probe?.capabilities ?? {}) as { la_layout?: LaChannel[] }).la_layout ?? null);
 </script>
 
 <div class="timeline" bind:this={box} style:height="{height}px" tabindex="0" role="slider"
@@ -218,7 +222,7 @@
   {#if hover && hoverRow}
     {@const item = hover.item}
     <div class="tip" style:left="{Math.min(hover.x + 14, cssWidth - 260)}px" style:top="{hover.y + 16}px">
-      <div class="title">{rowTitle(hoverRow, $i18n)}{item.label && item.label !== rowTitle(hoverRow, $i18n) ? ` · ${item.label}` : ""}</div>
+      <div class="title">{rowTitle(hoverRow, $i18n, laLayout)}{item.label && item.label !== rowTitle(hoverRow, $i18n, laLayout) ? ` · ${item.label}` : ""}</div>
       <div class="grid">
         <span>{$i18n("timeline.kind")}</span><span>{item.stream}.{item.kind}</span>
         <span>{$i18n("timeline.start")}</span><span>{formatSeconds(seconds(item.t), resolution)}</span>

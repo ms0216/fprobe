@@ -80,3 +80,18 @@ async def stream_through_axi_survives_host_stalls_without_gaps(dut):
     gaps = [(i, a, b) for i, (a, b) in enumerate(zip(samples[1:], samples[2:])) if (b - a) & 0xFFFF != 8]
     assert not gaps, (len(samples), gaps[:5])
     assert dut.overrun.value == 0 and int(dut.mem_errors.value) == 0
+
+
+@cocotb.test()
+async def trigger_time_is_la_deep_delay_after_the_trigger_sample(dut):
+    # setup のカウンタ: probes と time を同じ辺で進める。トリガのサンプル（値 0x3000）の time と、報告の trigger_time の差
+    # = 深いバッファの入り口から時刻の付くまでの遅れ（fprobe_gw.caps.LA_DEEP_DELAY）
+    from fprobe_gw.caps import LA_DEEP_DELAY
+    await setup(dut, stall=0.0)
+    await ClockCycles(dut.clk, 3)
+    p0, t0 = int(dut.probes.value), int(dut.time.value)
+    await capture(dut, rle=False, rate=0, post=100, value=0x3000)
+    tt = int(dut.trigger_time.value)
+    t_true = t0 + ((0x3000 - p0) % 0x10000)
+    t_true += (tt - t_true) // 0x10000 * 0x10000
+    assert tt - t_true == LA_DEEP_DELAY

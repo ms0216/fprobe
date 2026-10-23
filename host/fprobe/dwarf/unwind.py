@@ -100,7 +100,8 @@ class FrameState:
     lookup_pc: int                # 関数・行・変数を引く番地（戻り先なら −1 = 呼び出し命令の中）
     cfa: int | None               # このフレームの CFA（呼び出し元の sp）。分からなければ None
     registers: RegisterFile = field(repr=False)
-    note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した
+    note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した、"lr_without_cfi" = 最内の
+                                  # 関数に CFI が無く、葉と仮定して LR から呼び出し元を出した（確かめていない）
 
 
 @dataclass(frozen=True)
@@ -190,13 +191,15 @@ class Unwinder:
     def _step(self, frame: FrameState, access: TargetAccess) -> FrameState | None:
         regs = frame.registers
         found = self.table.row_at(frame.lookup_pc)
+        note = ""
         try:
             if found is None:
                 if frame.index != 0:
                     return None                           # デバッグ情報の無い関数の中: これ以上は推測しない
-                cfa = regs.read(SP)                       # 葉とみなす（何も積んでいない）
+                cfa = regs.read(SP)                       # 葉と仮定する（何も積んでいない）: 結果のフレームに書く
                 restored = RegisterFile({SP: cfa, LR: regs.read(LR)}, parent=regs)
                 return_register = LR
+                note = "lr_without_cfi"
             else:
                 row, return_register, parser = found
                 cfa = self._cfa(row["cfa"], regs, access, parser)
@@ -213,7 +216,7 @@ class Unwinder:
             return None                                   # スタックが逆向き: 壊れている
         pc = return_address & ~1
         restored.known[PC] = pc
-        return FrameState(frame.index + 1, pc, pc - 1, None, restored)
+        return FrameState(frame.index + 1, pc, pc - 1, None, restored, note)
 
     @staticmethod
     def _context(regs: RegisterFile, access: TargetAccess, cfa: int | None = None) -> EvalContext:

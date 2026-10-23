@@ -38,6 +38,7 @@ entity swd_injector is
     result        : out std_logic_vector(1 downto 0);    -- 最後の要求: 0 成功 / 1 SWD の異常 / 2 未接続
     last_ack      : out std_logic_vector(2 downto 0);
     count         : out unsigned(15 downto 0);           -- 成功した回数
+    transfers     : out unsigned(7 downto 0);            -- 最後の要求で停止の書き込みまでに出した転送の数（WAIT の繰り返しを含む、255 で止まる。R20）
     -- dap_processor 側（swd_phy の命令 I/F と同じ）
     dap_cmd_valid : in  std_logic;
     dap_cmd_ready : out std_logic;
@@ -89,6 +90,8 @@ architecture rtl of swd_injector is
   signal result_r    : std_logic_vector(1 downto 0) := "00";
   signal ack_r       : std_logic_vector(2 downto 0) := "000";
   signal count_r     : unsigned(15 downto 0) := (others => '0');
+  signal issued      : unsigned(7 downto 0) := (others => '0');   -- 借りてから出した転送の数
+  signal transfers_r : unsigned(7 downto 0) := (others => '0');
 begin
   -- PHY の命令の切り替え（mine は境界でしか変わらない）
   phy_cmd_valid <= valid_r when mine else dap_cmd_valid;
@@ -138,6 +141,7 @@ begin
         result_r    <= "00";
         ack_r       <= "000";
         count_r     <= (others => '0');
+        transfers_r <= (others => '0');
       else
         case state is
           when S_IDLE =>
@@ -155,6 +159,7 @@ begin
               state    <= S_IDLE;
             elsif dap_busy = '0' and dap_cmd_valid = '0' and not dap_pending then
               mine  <= true;
+              issued <= (others => '0');
               step  <= 0;
               tries <= 0;
               fast  <= shadow_valid = '1';
@@ -165,6 +170,9 @@ begin
 
           when S_ISSUE =>
             issue(step);
+            if issued /= 255 then
+              issued <= issued + 1;
+            end if;
             state <= S_RESPONSE;
 
           when S_RESPONSE =>
@@ -177,7 +185,8 @@ begin
                 elsif step = 3 then
                   tar <= phy_rsp_data;
                 elsif step = 6 then
-                  written_r <= '1';
+                  written_r   <= '1';
+                  transfers_r <= issued;                      -- 停止の書き込みまで（この転送を含む）
                 end if;
                 if step = LAST_STEP then
                   result_r <= "00";
@@ -219,4 +228,5 @@ begin
   result   <= result_r;
   last_ack <= ack_r;
   count    <= count_r;
+  transfers <= transfers_r;
 end architecture;

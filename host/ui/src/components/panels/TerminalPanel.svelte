@@ -56,7 +56,7 @@
   let swoForm = $state(false);
   let swoBaud = $state(Number(load("terminal.swoBaud", "2000000")));
   let swoSetup = $state(load("terminal.swoSetup", "0") === "1");
-  let coreClock = $state(load("terminal.coreClock", "84000000"));
+  let coreClock = $state(load("terminal.coreClock", ""));      // 既定の値を推測しない（使う側が入れる）
   const next: Record<string, number> = {};
   let polling = false;
 

@@ -4,7 +4,7 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
-  import { clueText, fatalTitle, linkText, needsWarning, reasonText, type LinkLost } from "../../lib/safety";
+  import { clueText, fatalTitle, isFatal, linkText, needsWarning, reasonText, type LinkLost } from "../../lib/safety";
 
   const { app, safety, dock } = shared();
   let hidden = $state<string | null>(null);             // 知らせを閉じた ELF（読み直すとまた出す）
@@ -27,11 +27,11 @@
 
 <div class="safety">
   {#if fatal}
-    <div class="bar bad" role="alert">
-      <strong>⚠ {fatalTitle(fatal, $i18n)}</strong>
+    <div class="bar {isFatal(fatal) ? 'bad' : 'warn'}" role={isFatal(fatal) ? "alert" : "status"}>
+      <strong>{isFatal(fatal) ? "⚠ " : ""}{fatalTitle(fatal, $i18n)}</strong>
       <span class="muted">{$i18n("safety.since", { time: since })}</span>
       <span class="clues">{fatal.evidence.map((c) => clueText(c, $i18n)).join(" · ")}</span>
-      <span class="hint">{$i18n("safety.fatalHint")}</span>
+      {#if isFatal(fatal)}<span class="hint">{$i18n("safety.fatalHint")}</span>{/if}
       <span class="spacer"></span>
       <button class="small" onclick={analyze}>{$i18n("safety.analyze")}</button>
     </div>
@@ -46,9 +46,9 @@
     </div>
   {/if}
   {#if warn && risk}
-    <div class="bar warn" title={risk.reasons.map((r) => reasonText(r, $i18n)).join("\n")}>
+    <div class="bar warn" title={risk.matches.map((r) => reasonText(r, $i18n)).join("\n")}>
       <strong>⚠ {$i18n("safety.badge")}</strong>
-      <span class="clues">{risk.reasons.map((r) => reasonText(r, $i18n)).join(" · ")}</span>
+      <span class="clues">{risk.matches.map((r) => reasonText(r, $i18n)).join(" · ")}</span>
       <span class="hint">{$i18n(risk.monitor_in_elf ? "safety.useMonitor" : "safety.addMonitor")}</span>
       <span class="spacer"></span>
       <button class="small" onclick={() => dock.show("breakpoints")}>{$i18n("safety.debugMode")}</button>

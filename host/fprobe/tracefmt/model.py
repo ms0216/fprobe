@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -18,9 +20,17 @@ from ..profile.exceptions import Activation
 from ..rtos.timeline import TaskEvent
 
 __all__ = ["KINDS", "STREAM", "TargetClock", "TaskInfo", "Trace", "TraceEvent", "activations", "task_events",
-           "unwrap32", "write_trace"]
+           "is_rtos_idle_name", "unwrap32", "write_trace"]
 
 STREAM = "trace"
+# RTOS のソースが定めるアイドルのタスクの名前: FreeRTOS の configIDLE_TASK_NAME の既定 "IDLE"（SMP はコアの番号が付く）・
+# Zephyr の "idle"（SMP は "idle %02d"）・RTX5 の "osRtxIdleThread"。部分一致はしない（利用者のタスクを idle にしない）
+_IDLE_NAME = re.compile(r"IDLE\d*|idle( \d+)?|osRtxIdleThread")
+
+
+def is_rtos_idle_name(name: str) -> bool:
+    """RTOS が定めるアイドルのタスクの名前と完全に一致するか（取り込んだトレースでカーネルの情報が無いとき）。"""
+    return bool(_IDLE_NAME.fullmatch(name))
 KINDS = (
     "task_in",        # タスクが CPU を使い始めた（task = そのタスク）
     "task_out",       # タスクが CPU を手放した

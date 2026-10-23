@@ -138,36 +138,45 @@ class GowinBuilder:
 
 
     def build_best(self, project: GowinProject, build_dir: Path, place_options=(1, 0, 2), *,
-                   parallel: int = 3) -> BuildResult:
+                   parallel: int = 3, fallback_route: int = 0) -> BuildResult:
         """配置アルゴリズム（-place_option）を変えた版を build_dir/p<n> に並列にビルドし、タイミングを満たした中で
         余裕（最も厳しいクロックの Fmax / 制約 - 1）が最大のものを返す。回路が混んでいると、小さな変更でも配置次第で
-        タイミングを落とすため（CLS 90% 超）。前回成功した版が入力そのままなら、ビルドせずにそれを使う。
-        採用した版のビットストリームと成功したビルドの印は build_dir 直下にも写す（決まった場所。ホストが構成を
+        タイミングを落とすため（CLS 90% 超）。どの版も満たさず、プロジェクトの -route_option が fallback_route と違えば、
+        同じ配置で -route_option fallback_route の版（build_dir/p<n>r<m>）も試す（route_option 1 は sys の余裕が出やすいが、
+        混んだ回路では配線しきれない。2026-10-23、Primer の fprobe）。前回成功した版が入力そのままなら、ビルドせずに
+        それを使う。採用した版のビットストリームと成功したビルドの印は build_dir 直下にも写す（決まった場所。ホストが構成を
         書き替えるときに使う: build/<design>/top.fs）。"""
         build_dir = Path(build_dir)
-        variants = {n: (dataclasses.replace(project, options=_with_place_option(project.options, n)), build_dir / f"p{n}")
-                    for n in place_options}
-        for n, (variant, directory) in variants.items():
-            if self.is_current(variant, directory):
-                return _publish(self.build(variant, directory), build_dir)    # 検証して再利用
-        for n in place_options:                                        # IP は先に 1 回だけ用意する（並列で触らない）
-            for ip in project.ips:
-                self._generate_ip(project, ip, variants[n][1])
-        passed: list[BuildResult] = []
+        stages = [{f"p{n}": dataclasses.replace(project, options=_with_place_option(project.options, n))
+                   for n in place_options}]
+        route = _route_option(project.options)
+        if route is not None and route != fallback_route:
+            stages.append({f"p{n}r{fallback_route}": dataclasses.replace(
+                project, options=_with_route_option(_with_place_option(project.options, n), fallback_route))
+                for n in place_options})
+        for variants in stages:
+            for name, variant in variants.items():
+                if self.is_current(variant, build_dir / name):
+                    return _publish(self.build(variant, build_dir / name), build_dir)    # 検証して再利用
         errors: list[str] = []
-        order = list(place_options)
-        while order and not passed:
-            batch, order = order[:parallel], order[parallel:]
-            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-                futures = {n: pool.submit(self.build, *variants[n]) for n in batch}
-            for n, future in futures.items():
-                try:
-                    passed.append(future.result())
-                except BuildError as e:
-                    errors.append(f"place_option {n}: {str(e).splitlines()[0]}")
-        if not passed:
-            raise BuildError("どの配置でもタイミングを満たさない:\n" + "\n".join(errors))
-        return _publish(max(passed, key=lambda r: margin(r.timing)), build_dir)
+        for variants in stages:
+            for name in variants:                                      # IP は先に 1 回だけ用意する（並列で触らない）
+                for ip in project.ips:
+                    self._generate_ip(project, ip, build_dir / name)
+            passed: list[BuildResult] = []
+            order = list(variants)
+            while order and not passed:
+                batch, order = order[:parallel], order[parallel:]
+                with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                    futures = {name: pool.submit(self.build, variants[name], build_dir / name) for name in batch}
+                for name, future in futures.items():
+                    try:
+                        passed.append(future.result())
+                    except BuildError as e:
+                        errors.append(f"{name}: {str(e).splitlines()[0]}")
+            if passed:
+                return _publish(max(passed, key=lambda r: margin(r.timing)), build_dir)
+        raise BuildError("どの配置でもタイミングを満たさない:\n" + "\n".join(errors))
 
     def is_current(self, project: GowinProject, build_dir: Path) -> bool:
         """build_dir の成果物が、いまの入力から成功したビルドのものか（ビルドはしない）。"""
@@ -249,6 +258,18 @@ def margin(timing: TimingSummary) -> float:
     """最も厳しい（制約のある）クロックの余裕: Fmax / 制約 - 1。"""
     return min((c.fmax_mhz / c.constraint_mhz - 1 for c in timing.clocks
                 if c.constraint_mhz and c.fmax_mhz is not None), default=0.0)
+
+
+def _route_option(options: tuple[str, ...]) -> int | None:
+    for o in options:
+        m = re.search(r"-route_option (\d)", o)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _with_route_option(options: tuple[str, ...], n: int) -> tuple[str, ...]:
+    return tuple(re.sub(r"-route_option \d", f"-route_option {n}", o) for o in options)
 
 
 def _with_place_option(options: tuple[str, ...], n: int) -> tuple[str, ...]:

@@ -5,6 +5,7 @@
   import { tick } from "svelte";
   import { filterActivity, loadHostCalls, ROLES, roleOf, callKey, type HostCallIndex, type RoleFilter } from "../../lib/activity";
   import { shared } from "../../lib/context";
+  import { inApiPanel } from "../../lib/apispec";
   import { clock, outcome, seconds } from "../../lib/format";
   import { i18n, type Key } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
@@ -17,7 +18,7 @@
   const ROLE_LABEL: Record<(typeof ROLES)[number], Key> = { ai: "activity.roleAi", human: "activity.roleHuman",
                                                              script: "activity.roleScript", hook: "activity.roleHook" };
 
-  const { app, conn, reveal } = shared();
+  const { app, conn, reveal, showApi } = shared();
   let box = $state<HTMLDivElement>();
   let follow = $state(true);              // いちばん下を見ているときだけ新しい行に追従する
   let loading = false;
@@ -177,7 +178,11 @@
     <div class="detail mono">
       <div><strong>#{chosen.seq}</strong> {chosen.time} {chosen.client} ({roleOf(chosen)}) {chosen.method}
         {seconds(chosen.seconds)}
-        <button class="small" onclick={() => chosen && void jump(chosen)}>{$i18n("activity.showInTimeline")}</button></div>
+        <button class="small" onclick={() => chosen && void jump(chosen)}>{$i18n("activity.showInTimeline")}</button>
+        {#if inApiPanel(chosen.method)}
+          <button class="small" onclick={() => chosen && showApi(chosen.method, (chosen.params ?? {}) as Record<string, unknown>)}>
+            {$i18n("activity.openInApi")}</button>
+        {/if}</div>
       <div class="cols">
         <div><div class="muted">{$i18n("activity.params")}</div><pre>{pretty(chosen.params)}</pre></div>
         <div>

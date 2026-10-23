@@ -113,6 +113,24 @@ def test_jtag_dp_transfers_use_the_chain_position():
     dap.clear_errors()
 
 
+def test_jtag_faults_are_found_through_ctrl_stat():
+    """JTAG-DP の AP の誤りは応答に出ず STICKYERR だけ: 読んだ値と同じ往復で CTRL/STAT を見て、誤りなら値を返さない"""
+    ap = FakeMemAp(words={0x20000000: 0x11111111, 0x20000004: 0x22222222})
+    link = FakeDapLink(FakeTarget(swd=False, jtag_dp_index=0, aps={0: ap}))
+    dap = RawDap(link)
+    dap.start("jtag", 1_000_000, jtag_chain=[4], dap_index=0)
+    dap.read_dpidr()
+    dap.power_up()
+    assert dap.mem_read32(0, 0x20000000) == 0x11111111
+    with pytest.raises(DapError) as e:
+        dap.mem_read32(0, 0x60000000)
+    assert e.value.ack == Ack.FAULT and "CTRL/STAT" in str(e.value) and not link.sticky   # 印は消してある
+    assert dap.mem_read32(0, 0x20000004) == 0x22222222
+    with pytest.raises(DapError):
+        dap.mem_read32_repeat(0, 0x60000000, 3)
+    assert dap.mem_read32_repeat(0, 0x20000000, 2) == [0x11111111, 0x11111111]
+
+
 def test_dp_register_names_and_addresses():
     assert dp_address("ctrl/stat") == 4 and dp_address("TARGETID") == 0x24 and dp_address("0x34") == 0x34
     for bad in ("FOO", 0x3, 0x100):

@@ -59,7 +59,7 @@ def status(loader: PynqLoader) -> str:
 def reserve(loader: PynqLoader, *, run=subprocess.run, env=os.environ, undo: bool = False) -> None:
     """P3 の深いバッファの領域を予約して再起動する（undo = True なら予約を外して再起動する）。
 
-    /boot/uEnv.txt（host/pynq/uEnv.txt: 今の起動の引数 + mem=480M）で DDR の上端 32 MB を Linux から外し、
+    /boot/uEnv.txt（host/pynq/uEnv.txt: 今の起動の引数 + mem=479M）で DDR の上端 33 MB（Linux のリングの 1 MB 0x1DF00000〜 + 深いバッファの 32 MB）を Linux から外し、
     /etc/fprobe/mem（host/pynq/fprobe-mem）で中継に領域を知らせる。再起動の前に中継を止め、レベルシフタを切る。
     再起動の後、PL は未構成（boot.py は空）なので、fprobe の回路を書き直す（build fprobe_pynq_deep --program）。
     起動しなくなったら、SD を PC に挿して uEnv.txt を消す。"""

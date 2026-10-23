@@ -48,6 +48,8 @@ describe("表示の区間の計算", () => {
       setChannelLayout(null);
     }
     expect(channelName(10)).toBe("ch10");
+    // 並びを渡せば、それで名前を付ける（画面は申告が後から届いても描き直す: 申告を引数で依存させる）
+    expect(channelName(10, layout)).toBe("in0");
     // 申告の無い古いデバイスは ch 0〜7 = ピン、8・9 = 内部
     expect(channelChoices({ la_channels: 16 })).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(channelChoices({})).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -188,6 +190,66 @@ describe("TimelineState", () => {
     expect(get().capture?.id).toBe(2);
   });
 
+  it("クロストリガだけで捕捉する（FPGA の条件など。値は 1 かつ立ち下がりの ch0 = 決して成立しないパターン）", async () => {
+    const { conn, tl } = setup();
+    tl.setWidth(500);
+    conn.link!("open", {});
+    await settle();
+    conn.responders["la.deep.capture"] = { trigger_time: 12345, trigger_index: 7 };
+    await tl.capture({ rate_hz: 25e6, pretrigger: 512, deep: false, crossOnly: true });
+    expect(await tl.capture({ rate_hz: 25e6, pretrigger: 0, deep: true, crossOnly: true, rle: false }))
+      .toMatchObject({ trigger_time: 12345 });                     // 呼び出し元がトリガの時刻（記録の時間軸）を使う
+    expect(conn.calls.find(([m]) => m === "la.capture")?.[1]).toEqual({ rate_hz: 25e6, pretrigger: 512, mask: 1, value: 1, fall: 1, rise: 0 });
+    expect(conn.calls.find(([m]) => m === "la.deep.capture")?.[1]).toMatchObject({ mask: 1, value: 1, fall: 1, rise: 0, rle: false });
+  });
+
+  it("捕捉の読み込みの途中で記録へ替えても、遅れて届いた捕捉の結果を記録に当てない（記録の時刻へ飛べる）", async () => {
+    const { conn, tl, get } = setup();
+    tl.setWidth(500);
+    conn.link!("open", {});
+    await settle();
+    const tiles = conn.responders["timeline.tiles"];
+    let release!: () => void;
+    conn.responders["timeline.tiles"] = (p: any) => p.source === "capture"
+      ? new Promise((resolve) => { release = () => resolve(tiles(p)); }) : tiles(p);
+    tl.reload();                                                  // 捕捉を読み直している途中で…
+    tl.reveal({ source: "recording", t: 10000, tEnd: 10100 });    // …記録の時刻へ
+    release();
+    await settle();
+    expect(get().source).toBe("recording");
+    expect(get().extent).toEqual([0, 20000]);
+    expect(get().view.start).toBeGreaterThan(9000);               // 全体（0〜20000）に戻らない
+    expect(get().view.end).toBeLessThan(11000);
+  });
+
+  it("伸びている記録の、まだ読んでいない時刻へ飛ぶなら、範囲を読み直してから飛ぶ（端に切り詰めない）", async () => {
+    const { conn, tl, get } = setup();
+    tl.setWidth(500);
+    conn.link!("open", {});
+    tl.setSource("recording");
+    await settle();
+    expect(get().extent).toEqual([0, 20000]);
+    conn.responders["recording.status"] = { recording: true, name: "rec-1", span: [0, 39999], timebase_hz: 1e6 };
+    tl.reveal({ source: "recording", t: 30000, tEnd: 30100 });     // 記録中に捕捉した直後（範囲がまだ古い）
+    await settle();
+    expect(get().selection).toBe(30000);
+    expect(get().view.start).toBeGreaterThan(29000);
+  });
+
+  it("記録中、捕捉の後の読み直しと同時に記録の時刻へ飛んでも、その範囲を表示する（全体・追従に戻らない）", async () => {
+    const { conn, tl, get } = setup();
+    tl.setWidth(500);
+    conn.link!("open", {});
+    conn.responders["recording.status"] = { recording: true, name: "rec-1", span: [0, 19999], timebase_hz: 1e6 };
+    tl.setSource("recording");
+    await settle();
+    tl.reload();                                                   // 捕捉が終わって読み直す（記録にも入った）
+    tl.reveal({ source: "recording", t: 18000, tEnd: 18100 });
+    await settle();
+    expect(get().selection).toBe(18000);
+    expect(get().view.end - get().view.start).toBeLessThan(1000);
+  });
+
   it("つなぎ直しても捕捉が同じなら、拡大していた表示を保つ", async () => {
     const { conn, tl, get } = setup();
     tl.setWidth(500);
@@ -280,6 +342,7 @@ describe("TimelineState", () => {
     tl.reveal({ source: "recording", us: 7000 });              // 記録の 1 単位 = 1 µs（tick_s）
     expect(get().selection).toBe(Math.round(7000e-6 / get().tickS));
     tl.reveal({ source: "recording", t: 99999 });              // 範囲の外は端に収める
+    await settle();                                            // 読み直しても範囲に無ければ端
     expect(get().selection).toBe(19999);
   });
 
@@ -341,10 +404,27 @@ describe("TimelineState", () => {
     conn.emit("activity", { method: "recording.mark", client: "claude" });   // 印を置いた: 印の段を読み直す
     await settle();
     expect(tileCalls(conn).length).toBe(tiles + 2);
+    conn.emit("activity", { method: "fpga_obs.signals_set", client: "claude" });   // FPGA の信号の名前を変えた: 段の名前
+    await settle();
+    expect(tileCalls(conn).length).toBe(tiles + 3);
     conn.emit("activity", { method: "recording.find", client: "claude" });   // 読みでは読み直さない
     await settle();
-    expect(tileCalls(conn).length).toBe(tiles + 2);
+    expect(tileCalls(conn).length).toBe(tiles + 3);
     expect(conn.quiet.filter((m) => m === "timeline.tiles").length).toBe(tileCalls(conn).length);
+  });
+
+  it("記録中、全体の読み込みが重ければ読み直しの間を空ける（前の読みの 2 倍。重い記録で読み込みが途切れなく続かない）", async () => {
+    const { conn, tl } = setup(5);
+    let end = 19999;
+    conn.responders["recording.status"] = () => ({ recording: true, name: "rec-live", span: [0, (end += 1000)], timebase_hz: 1e6 });
+    const tiles = conn.responders["timeline.tiles"];
+    conn.responders["timeline.tiles"] = (p: any) => new Promise((r) => setTimeout(() => r(tiles(p)), 40));   // 1 回 40 ms
+    tl.setWidth(400);
+    conn.link!("open", {});
+    tl.setSource("recording");
+    await new Promise((r) => setTimeout(r, 400));
+    const reads = conn.calls.filter(([m, p]) => m === "timeline.tiles" && p.source === "recording").length;
+    expect(reads).toBeLessThanOrEqual(5);                       // 間を空けなければ 400 / (40 + 5) ≒ 9 回
   });
 
   it("記録中は伸びていく端を追いかける。利用者が戻って見ているときは追わない（M8）", async () => {

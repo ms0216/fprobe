@@ -67,6 +67,8 @@ architecture rtl of usb_cdc_acm_requests is
   constant MS_CYCLES : positive := CLK_HZ / 1000;
   signal brk_ms     : unsigned(15 downto 0) := (others => '0');
   signal ms_timer   : natural range 0 to MS_CYCLES - 1 := 0;
+  -- ブレークの出力はレジスタから（別のクロックの同期化へ入るので、組み合わせの論理のグリッチを渡さない。R24）
+  signal brk_r      : std_logic := '0';
 begin
   process (clk)
     variable ours : boolean;
@@ -82,7 +84,9 @@ begin
         expecting <= '0';
         brk_ms    <= (others => '0');
         ms_timer  <= 0;
+        brk_r     <= '0';
       else
+        brk_r <= '1' when brk_ms /= 0 else '0';
         -- ブレークの長さを数える（0xFFFF は数えない）
         if ms_timer = MS_CYCLES - 1 then
           ms_timer <= 0;
@@ -138,5 +142,5 @@ begin
   line_data_bits <= unsigned(coding(55 downto 48));
   dtr            <= dtr_r;
   rts            <= rts_r;
-  brk            <= '1' when brk_ms /= 0 else '0';
+  brk            <= brk_r;
 end architecture;

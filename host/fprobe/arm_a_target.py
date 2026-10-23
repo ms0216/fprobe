@@ -24,6 +24,8 @@ from .armv7a_debug import V7DebugPort, find_apb_ap, find_debug_bases
 from .jtag_chain import dap_link_wire, scan_chain
 from .raw_dap import DpPort, RawDap
 
+FAST_WORDS = 4                              # これ以上の語数は速い読み（少ないと手順の往復の方が多い）
+
 __all__ = ["ARM_A_PARTS", "ArmAConnection", "ArmAPart", "ArmATarget", "arm_a_part", "open_arm_a"]
 
 
@@ -150,6 +152,8 @@ class ArmATarget:
         self.core.write_memory(address, [value], transfer_size // 8)
 
     def read_memory_block32(self, address: int, words: int) -> list[int]:
+        if words >= FAST_WORDS:
+            return self.core.read_memory_fast(address, words)    # DCC の速いモード + ブロック転送（ARMv7）
         return self.core.read_memory(address, words)
 
     def write_memory_block32(self, address: int, data) -> None:

@@ -108,10 +108,11 @@ FPROBE_MAP = CsrMap(blocks=(
     Block("xtrig", 0x0500, 0x40,
           doc="クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。"
               "源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、"
-              "bit3 = 多段トリガ（trigseq）",
+              "bit3 = 多段トリガ（trigseq）、bit4 = FPGA の観測の値の一致（obs.match）、"
+              "bit5 = サンプラの値の一致（sampler_match。構成によって無い）",
           registers=(
-        Register("route", 0x00, (Field("to_la", 0, 4, "RW", doc="ロジアナをトリガする源"),
-                                 Field("to_inject", 8, 4, "RW", doc="割り込み書き込み（既定は停止）をする源")),
+        Register("route", 0x00, (Field("to_la", 0, 6, "RW", doc="ロジアナをトリガする源"),
+                                 Field("to_inject", 8, 6, "RW", doc="割り込み書き込み（既定は停止）をする源")),
                  doc="源 → 動作の対応"),
         Register("command", 0x04, (Field("fire", 0, 1, "PULSE", doc="ホストの指令（源 bit2）"),),
                  doc="1 を書くと源 bit2 を 1 回発火"),
@@ -199,7 +200,10 @@ FPROBE_MAP = CsrMap(blocks=(
     Block("debug", 0x0900, 0x40, doc="SWD / JTAG の物理層の調整", registers=(
         Register("sample_delay", 0x00, (Field("swd", 0, 2, "RW", value=1,
                                               doc="SWDIO の取り込みを基準（SWCLK を立ち上げる周期）から遅らせる "
-                                                  "sys 周期数。配線とターゲットの応答遅延の補償"),)),
+                                                  "sys 周期数。配線とターゲットの応答遅延の補償"),
+                                        Field("jtag", 8, 3, "RW",
+                                              doc="TDO の取り込みを次の TCK の立ち下がりの直前から遅らせる sys 周期数（0〜7）。"
+                                                  "TDO が立ち下がりから 2 × half_period 周期より遅れて届くとき（R16。docs/superpowers/specs/2026-10-23-jtag-tdo-sample-design.md）"))),
     )),
     Block("trigseq", 0x0A00, 0x40,
           doc="多段トリガ（docs/superpowers/specs/2026-10-16-m9c-trigger-sequencer-design.md）。"
@@ -235,7 +239,7 @@ FPROBE_MAP = CsrMap(blocks=(
         Register.word("samples", 0x04, "RO", doc="受け取った計測値の数（補助マイコンが動いているかの目安）"),
         Register.word("errors", 0x08, "RO", doc="形の崩れた受信（停止ビットの異常・組の途中の先頭）の数"),
     )),
-    Block("sampler", 0x0C00, 0x80,
+    Block("sampler", 0x0C00, 0x40,
           doc="DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。"
               "最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする",
           registers=(
@@ -263,10 +267,31 @@ FPROBE_MAP = CsrMap(blocks=(
                                         doc="線を持っている（ターゲットの SELECT・CSW・TAR はサンプラの値。"
                                             "ホストの次の転送の前に戻す）")), doc="状態"),
     )),
+    Block("sampler_match", 0x0C40, 0x40,
+          doc="サンプラの値の一致（R21。docs/superpowers/specs/2026-10-23-sampler-match-trigger-design.md）。"
+              "サンプラの標本（ACK OK・番地が addr）が (値 xor value) and mask = 0 に入った瞬間（前の標本が不一致）に"
+              "クロストリガの源 bit5。構成によって無い（FEATURES bit10。無ければ読むとエラー）",
+          registers=(
+        Register.word("addr", 0x00, "RW", doc="比べる番地（サンプラが読む番地の 1 語）"),
+        Register.word("mask", 0x04, "RW", doc="比べるビット"),
+        Register.word("value", 0x08, "RW", doc="比べる値"),
+        Register("control", 0x0C, (Field("enable", 0, 1, "RW",
+                                         doc="1 で比べる（0→1 で数・状態・時刻を消す。条件を変えるときは 0 にしてから書き、1 に戻す）"),
+                                   Field("matched", 8, 1, "RO", doc="最後の標本が一致"),
+                                   Field("seen_any", 9, 1, "RO", doc="有効にした後に標本があった")),
+                 doc="前の標本が不一致・今の標本が一致で発火（有効にした後の最初の標本では発火しない）"),
+        Register.word("seen", 0x10, "RO", doc="有効にした後に比べた標本（ACK OK・番地が一致）の数"),
+        Register.word("count", 0x14, "RO", doc="発火の回数"),
+        Register.word("time_lo", 0x18, "RO", doc="最後に発火した標本を受けた時刻（下位）"),
+        Register.word("time_hi", 0x1C, "RO", doc="同（上位 16 ビット。時刻は 48 ビット = イベントの時刻と同じ幅）"),
+        Register.word("prev_lo", 0x20, "RO", doc="その直前の（不一致の）標本を受けた時刻（下位）。条件に入ったのはこの時刻と time の間"),
+        Register.word("prev_hi", 0x24, "RO", doc="同（上位 16 ビット）"),
+    )),
     Block("xtrig_out", 0x0D00, 0x40,
           doc="クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。"
               f"動作 k（同時に {XOUT_ACTIONS} 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。"
-              "源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ）",
+              "源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ、"
+              "bit4 FPGA の観測の値の一致、bit5 サンプラの値の一致）",
           registers=(
         Register("status", 0x00, (Field("active", 0, XOUT_ACTIONS, "RO", doc="動作 k が動いている（端子を駆動している）"),),
                  doc="状態"),
@@ -274,8 +299,8 @@ FPROBE_MAP = CsrMap(blocks=(
             Register(f"when{k}", 0x04 + 8 * k,
                      (Field("mask", 0, 8, "RW", doc="端子の並びで見るロジアナの ch（0 なら並びは使わない）"),
                       Field("value", 8, 8, "RW", doc="見る ch の値"),
-                      Field("sources", 16, 4, "RW", doc="条件にする源（xtrig の源のビット）"),
-                      Field("any", 20, 1, "RW", doc="1: 見る ch のどれかが一致で成立、0: すべて一致で成立")),
+                      Field("sources", 16, 6, "RW", doc="条件にする源（xtrig の源のビット）"),
+                      Field("any", 24, 1, "RW", doc="1: 見る ch のどれかが一致で成立、0: すべて一致で成立")),
                      doc=f"動作 {k} の条件（端子の並び or 源）"),
             Register(f"ctrl{k}", 0x08 + 8 * k,
                      (Field("enable", 0, 1, "RW", doc="有効（0 で状態を消し、駆動しない）"),
@@ -287,6 +312,74 @@ FPROBE_MAP = CsrMap(blocks=(
                       Field("unit", 24, 3, "RW", doc="脈の刻み = 16^unit 周期"),
                       Field("pin", 28, 2, "RW", doc="動かす端子（ケイパビリティ OUTPUTS の候補の番号）")),
                      doc=f"動作 {k} の動き"))),
+    )),
+    Block("obs", 0x0E00, 0x40,
+          doc="対象の FPGA の観測（docs/superpowers/specs/2026-10-20-fpga-observation-v2-design.md）。対象の JTAG の"
+              "ユーザーの DR の観測の回路（target_ip/fprobe_obs）をスキャンし続け、記録をイベント 8、時刻合わせを"
+              "イベント 9 にする",
+          registers=(
+        Register("control", 0x00, (Field("enable", 0, 1, "RW",
+                                         doc="1 で始める（TAP を戻し、IR = USER、ID の 2 つのレジスタを読んで確かめ、"
+                                             "スキャンを繰り返す）。"
+                                             "0 で TAP を Test-Logic-Reset に戻してから線を手放す"),
+                                   Field("release", 1, 1, "RW", doc="1 で TAP を戻さずにすぐ線を手放す（止める）")),
+                 doc="動作"),
+        Register("half_period", 0x04, (Field("half_period", 0, 16, "RW", value=10),),
+                 doc="TCK の半周期（sys の周期数、2 以上）"),
+        Register("chain", 0x08, (Field("ir_len", 0, 6, "RW", value=4, doc="対象の IR の長さ（1〜32）"),
+                                 Field("ir_before", 6, 6, "RW", doc="対象より TDO 側の装置の IR の合計ビット数"),
+                                 Field("ir_after", 12, 6, "RW", doc="対象より TDI 側の装置の IR の合計ビット数"),
+                                 Field("dr_before", 18, 3, "RW", doc="対象より TDO 側の装置の数"),
+                                 Field("dr_after", 21, 3, "RW", doc="対象より TDI 側の装置の数")),
+                 doc="JTAG の鎖での対象の位置（jtag_phy と同じ意味）"),
+        Register.word("user_ir", 0x0C, "RW", value=2, doc="対象の USER の命令の値（obs_soft_tap は 2）"),
+        Register("words", 0x10, (Field("words", 0, 9, "RW", value=16),),
+                 doc="1 スキャンで受ける記録の語数（1〜256）"),
+        Register("sync_period", 0x14, (Field("sync_period", 0, 16, "RW", value=16),),
+                 doc="印（時刻合わせ。op 3、番号つき）を載せる間隔（スキャンの数。0 = 自動では載せない）"),
+        Register("cmd", 0x18, (Field("cmd", 0, 16, "RW",
+                                     doc="次に積む命令: op(3:0) | 番地(7:4) | データ(15:8)（op 1 書き・2 読み）"),),
+                 doc="命令"),
+        Register("cmd_push", 0x20, (Field("cmd_push", 0, 1, "PULSE",
+                                          doc="1 で cmd を命令の待ち行列（深さ 4）に積む"),),
+                 doc="命令を積む（待ち行列が一杯なら捨てて status.cmd_dropped）"),
+        Register("status", 0x24, (Field("running", 0, 1, "RO", doc="スキャンを繰り返している"),
+                                  Field("id_ok", 1, 1, "RO", doc="開いてから ID が \"FOBS\" と照合できた（stuck の後も残る: stuck と組で、答えていた後に止まったのか、初めから答えないのかが分かる）"),
+                                  Field("stuck", 2, 1, "RO",
+                                        doc="観測の回路が答えない（見出しの印が 0xA6 でない・ID が違う・ID の応答が"
+                                            "来ない）ので止めた"),
+                                  Field("cmd_pending", 3, 1, "RO", doc="待ち行列に命令がある"),
+                                  Field("overflow_seen", 4, 1, "RO", doc="最後の見出しの溢れの印"),
+                                  Field("cmd_dropped", 5, 1, "RO", doc="一杯で捨てた命令がある（enable の 0→1 で消える）"),
+                                  Field("target_running", 6, 1, "RO",
+                                        doc="最後の見出しの「対象の clk 側が記録中」（対象のリセット等で止まったら 0）"),
+                                  Field("driving", 7, 1, "RO",
+                                        doc="対象の JTAG の線を駆動している（止めた後は 0 になるまで待つ）")),
+                 doc="状態"),
+        Register.word("scans", 0x28, "RO", doc="行ったスキャンの数（イベント 8 の address）"),
+        Register.word("read_value", 0x2C, "RO",
+                      doc="最後の応答の記録: 番号(31:24。応答のたびに 1 増える) | 番地(19:16) | 値(15:0)"),
+        Register.word("id", 0x30, "RO", doc="始めに読んだ観測の回路の ID"),
+        Register("match", 0x34, (Field("mask", 0, 16, "RW", doc="一致を比べる値のビット"),
+                                 Field("value", 16, 16, "RW", doc="一致の値")),
+                 doc="値の一致（クロストリガの源 bit4）: (値 xor value) and mask = 0"),
+        Register("match_change", 0x38, (Field("change", 0, 16, "RW",
+                                              doc="前の値からどれかが変わったら比べるビット（0 = 一致に入った瞬間）"),
+                                       Field("enable", 16, 1, "RW", doc="1 で一致を源にする")),
+                 doc="値の一致の起こり方"),
+        Register.word("match_count", 0x3C, "RO", doc="値の一致が成り立った回数（enable の 0→1 で 0 に）"),
+    )),
+    Block("sync", 0x0F00, 0x40,
+          doc="ボードの間の時刻の同期（docs/superpowers/specs/2026-10-22-modular-design.md §3.2）。親は period ごとに"
+              "パルスと自分の時刻を sync_out に出し、子は sync_in で受けた組（自分の時刻・親の時刻）をイベント 10 にする",
+          registers=(
+        Register("control", 0x00, (Field("enable", 0, 1, "RW", doc="子として受けて組をイベント 10 にする"),
+                                   Field("master", 1, 1, "RW", doc="親として sync_out に出す")),
+                 doc="受ける・出す（両方 1 で、受けながら下流へも出す）"),
+        Register.word("period", 0x04, "RW", value=100000, doc="親のパルスの間隔（タイムベースの刻み）。1 回の送りは 730 刻みで、送りの間に 0 を 20 刻み置くので、約 750 より短いと約 750 ごと"),
+        Register("status", 0x08, (Field("pairs", 0, 16, "RO", doc="受けた組の数（CRC が合ったもの。16 ビットで一周）"),
+                                  Field("crc_errors", 16, 16, "RO", doc="CRC が合わず捨てた組の数（0xFFFF で止まる）")),
+                 doc="受けた組の数（enable の 0 → 1 で 0 から）"),
     )),
     Block("caps", 0x1000, 0x1000, external=True, doc="ケイパビリティ ROM（TLV。範囲外は 0）"),
     Block("la_mem", 0x10000, 4 * LA_DEPTH, external=True,

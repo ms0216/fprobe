@@ -236,3 +236,16 @@ def test_starting_without_a_ready_memory_is_an_error_with_the_reason():
     with pytest.raises(RuntimeError, match="外部メモリ"):
         DeepAnalyzer(dev).start(rate_hz=1e6)
     assert dev.control_writes == []
+
+
+@pytest.mark.parametrize("was_running", [False, True])
+def test_leftovers_of_an_earlier_stream_are_discarded_before_starting(was_running):
+    # 前の流れが止められた後に出し切った残り（例外で抜けた・デーモンが落ちた）が受け取り口に残っていても、
+    # 新しい流れの先頭にしない（見出しの無い所から読み始めて StreamFormatError になり、止めるたびに残りが増える）
+    rng = random.Random(11)
+    source = raw_source(rng, 20000)
+    dev = FakeStreamDevice(source, rng=rng)
+    dev.packets.extend([b"\x31\xc9" * (MPS // 2), b"\xff" * 7])
+    dev.running = was_running                                           # 前の流れが走ったまま（落ちたデーモン）
+    stream, chunks = run_stream(dev, False)
+    assert b"".join(c.data for c in chunks) == source[:dev.written * 16]

@@ -23,7 +23,7 @@ export class RpcError extends Error {
 /** API の名前空間（MCP の道具の名前の頭: target_halt・profile_start 等）。誤りの文の AI 向けの案内を見分ける */
 export const TOOL_NAMESPACES = ["session", "ui", "probe", "target", "jtag", "debug", "la", "timeline", "events", "watch",
   "rtos", "profile", "cycles", "timing", "testpoint", "xtrig", "swo", "rtt", "terminal", "user", "uart", "recording",
-  "snapshot", "rules", "inject", "hooks", "heap", "stream", "log", "trace", "scvd", "gpio", "spi"];
+  "snapshot", "rules", "inject", "hooks", "heap", "stream", "log", "trace", "scvd", "gpio", "spi", "fpga_obs", "system", "linux", "sampler"];
 const TOOL = new RegExp(`\\b(?:${TOOL_NAMESPACES.join("|")})_[a-z0-9_]+\\b`);
 const PARAM = /\b[a-z][a-z0-9_]*=[^\s、。）]+/;
 
@@ -32,7 +32,7 @@ const PARAM = /\b[a-z][a-z0-9_]*=[^\s、。）]+/;
  *  外す（画面ではその操作のボタンの名前が違い、利用者の言葉でない） */
 export function errorText(e: unknown): string {
   const message = (e instanceof Error ? e.message : String(e))
-    .replace(/^(?:[A-Z][A-Za-z0-9_.]*(?:Error|Exception|Expired|Connected|Exit)|NoData): /, "");
+    .replace(/^(?:[A-Z][A-Za-z0-9_.]*(?:Error|Exception|Expired|Connected|Disconnected|Exit)|NoData): /, "");
   const plain = message.replace(/（[^（）]*）/g, (group) => (TOOL.test(group) || PARAM.test(group) ? "" : group));
   const sentences = plain.split("。").filter((s) => !TOOL.test(s) && !PARAM.test(s));
   return (sentences.join("。").trim() || plain.trim()).replace(/。$/, "");

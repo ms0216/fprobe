@@ -9,7 +9,7 @@ from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 from tests.tb.common import start_clock_and_reset
 
 PULSE, HOLD, WHILE = 0, 1, 2
-LA, MATCH, HOST, SEQ = 1, 2, 4, 8
+LA, MATCH, HOST, SEQ, OBS, SMP = 1, 2, 4, 8, 16, 32
 COUNT, WIDTH = 4, 8
 
 
@@ -43,7 +43,7 @@ class Out:
         d.any.value = pack("any", 1)
         d.mask.value = pack("mask", WIDTH)
         d.value.value = pack("value", WIDTH)
-        d.src.value = pack("src", 4)
+        d.src.value = pack("src", 6)
         d.length.value = pack("length", 8)
         d.unit.value = pack("unit", 3)
 
@@ -142,6 +142,20 @@ async def pulse_from_a_source_has_the_exact_length_in_cycles(dut):
     await out.pulse_source(LA)
     await ClockCycles(dut.clk, 60)
     assert out.high_cycles(2, start) == 0
+
+
+@cocotb.test()
+async def sampler_match_source_is_bit5(dut):
+    out = await setup(dut)
+    await out.set(3, enable=1, mode=PULSE, src=SMP, length=9, unit=0)
+    start = out.cycle
+    await out.pulse_source(OBS)                                         # 隣の源（bit4）では動かない
+    await ClockCycles(dut.clk, 20)
+    assert out.high_cycles(3, start) == 0
+    start = out.cycle
+    await out.pulse_source(SMP)
+    await ClockCycles(dut.clk, 20)
+    assert out.high_cycles(3, start) == 9
 
 
 @cocotb.test()

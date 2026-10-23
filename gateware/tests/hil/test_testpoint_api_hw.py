@@ -61,7 +61,8 @@ def test_two_wire_stream_runs_long_and_goes_to_the_recording(probe):
     probe.recording_start(name="testpoint-stream")
     try:
         probe.testpoint_start("gpio_serial", map_path=MAP, clock_channel=4, data_channel=5, capture="stream",
-                              rate_hz=25e6, rle=True, duration_s=5.0, bucket_s=1.0)
+                              rate_hz=25e6, rle=True, duration_s=5.0, bucket_s=1.0,
+                              long_s=100e-6)   # 長い呼び出しの印は明示したときだけ（inject_delay の spin(2000) は約 0.5 ms）
         time.sleep(2.5)
         middle = probe.testpoint_report(top=5)
         assert middle["running"] and middle["hits"] > 1000

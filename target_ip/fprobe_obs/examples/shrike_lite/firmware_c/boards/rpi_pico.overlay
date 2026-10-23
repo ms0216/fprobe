@@ -1,0 +1,30 @@
+/* Shrike-Lite: RP2040 と ForgeFPGA の間の SPI（GPIO0 = MISO、2 = SCK、3 = MOSI。CS = GPIO1 は GPIO で手で）。
+ * GPIO0・1 は rpi_pico の既定では UART0 なので止める（ログは RTT）。GPIO12 = FPGA の電源、13 = 有効、
+ * 26 = 要求中のマーカー、27 = 題材の印（どれも GPIO で手で）。 */
+&pinctrl {
+	spi0_shrike: spi0_shrike {
+		group1 {
+			pinmux = <SPI0_SCK_P2>, <SPI0_TX_P3>;
+		};
+		group2 {
+			pinmux = <SPI0_RX_P0>;
+			input-enable;
+		};
+	};
+};
+
+&spi0 {
+	pinctrl-0 = <&spi0_shrike>;
+	clock-frequency = <DT_FREQ_M(1)>;
+};
+
+&uart0 {
+	status = "disabled";
+};
+
+/ {
+	chosen {
+		/delete-property/ zephyr,console;
+		/delete-property/ zephyr,shell-uart;
+	};
+};

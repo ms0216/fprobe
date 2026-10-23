@@ -117,6 +117,31 @@ def test_v7_memory_through_the_core_with_cache_maintenance_after_writes():
     assert core.regs[0] == 0x1234 and core.regs[1] == 0x5678                    # 借りたレジスタは戻す
 
 
+def test_v7_fast_read_matches_slow_read():
+    """4 語以上は DCC の速いモードとブロック転送で読む（1 語ごとの往復を無くす）。最後の語を落とさない"""
+    link, cores, _ = pi2()
+    core = cores[0]
+    core.memory = {0x2000 + i: (i * 37 + 5) & 0xFF for i in range(0x400)}
+    expect = [int.from_bytes(bytes(core.memory[0x2000 + 4 * w + i] for i in range(4)), "little") for w in range(256)]
+    t = connect(link, "bcm2836").target
+    for n in (1, 2, 3, 4, 5, 256):
+        assert t.read_memory_block32(0x2000, n) == expect[:n], n
+    assert link.repeat_reads >= 255                                     # 速い読みはブロック転送を使った
+    assert core.ctrl & (3 << 20) == 0                                   # 非ブロックのモードに戻した
+    t.resume()
+
+
+def test_v7_fast_read_reports_abort():
+    link, cores, _ = pi2()
+    cores[0].faults = [(0x2010, 0x2014)]
+    t = connect(link, "bcm2836").target
+    with pytest.raises(ArmDebugError, match="0x00002000.*アボート"):
+        t.read_memory_block32(0x2000, 16)
+    assert cores[0].sticky == 0 and cores[0].ctrl & (3 << 20) == 0
+    assert t.read_memory_block32(0x3000, 8) == [0] * 8                   # 続けて読める
+    t.resume()
+
+
 def test_v7_abort_is_reported_with_the_address_and_cleared():
     link, cores, _ = pi2()
     cores[0].faults = [(0x5000, 0x5004)]

@@ -115,7 +115,7 @@ class ProfileExportTools:
     def profile_export(self, format: str, path: str, t0_s: float | None = None, t1_s: float | None = None,
                        t0: int | None = None, t1: int | None = None, source_root: str | None = None,
                        test_name: str = "fprobe_pc_sampling", low: int | None = None, high: int | None = None,
-                       min_fraction: float = 0.005, static_calls: bool = True) -> dict:
+                       min_fraction: float = 0.0, static_calls: bool = True) -> dict:
         """プロファイルを書き出す（区間で切れる）。gmon（gprof。番地の度数。low / high で範囲）/ callgrind
         （KCacheGrind。関数・行の自分のサンプル）/ lcov（近似のカバレッジ。SF は source_root を前に付ける）/ gcov
         （path はディレクトリ。ファイルごとの .gcov）/ dot（関数の割合と、static_calls なら逆アセンブルの静的な呼び出し）。"""

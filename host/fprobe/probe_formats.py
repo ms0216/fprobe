@@ -576,13 +576,16 @@ class FormatTools:
                            order=_PRIORITY_ORDER.get(trace.format, self._priority_order(trace)),
                            priorities={t.id: t.priority for t in trace.tasks.values() if t.priority is not None},
                            idle=set(trace.idle), exceptions=isr is not None)
+        if trace.idle:
+            idle_names = sorted(names.get(h, f"0x{h:08X}") for h in trace.idle)
+            run.warnings.append(f"アイドルのタスクは名前で決めた（RTOS が定める名前と完全に一致: {', '.join(idle_names)}）")
         run.warnings.append(f"取り込んだトレース（{trace.format}）から作った時間軸" +
                             ("" if feed.clock is not None else "（時刻はターゲットの時計のまま）"))
         self._rtos_last = _TimelineResult(tl, events, run, activations=isr)
         rec = self._recorder
         recorded = rec is not None and feed.clock is not None
         if recorded:
-            write_timeline(rec, tl)
+            write_timeline(rec, tl, run.idle)
         return {"made": True, "runs": len(tl.runs), "switches": len(tl.switches), "gaps": len(tl.gaps),
                 "isr": len(isr) if isr is not None else None, "recorded": recorded, "timebase_hz": hz,
                 "stats": tl.stats()}

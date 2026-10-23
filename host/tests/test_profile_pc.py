@@ -134,14 +134,15 @@ class FakeSymbols:
         return Symbol("idle", 0x1000, 6, "function")
 
 
-def test_wfi_is_sleep():
+def test_pc_on_wfi_is_counted_as_wfi_not_assumed_sleep():
+    # 「WFI / WFE とその次の番地に当たったら眠り」とみなさない（次の番地は起きて実行していることもある）。
+    # 眠り（sleep）はコアが送る眠りのサンプル（PC 無し）だけ。PC が WFI / WFE の上なら wfi（事実）、次の番地は code
     code = bytes.fromhex("00bf" "30bf" "fee7")               # nop; wfi; b .
     dis = Disassembler(BytesMemory(0x1000, code))
-    pcs = [0x1002] * 5 + [0x1004] * 3 + [0x1000] * 2
+    pcs = [0x1002] * 5 + [0x1004] * 3 + [0x1000] * 2 + [None]
     prof = Profiler(FakeSymbols(), dis).profile(PcSamples.from_pcs(pcs))
-    assert (prof.categories["sleep"], prof.categories["code"]) == (8, 2)
-    strict = Profiler(FakeSymbols(), dis, sleep_after_wfi=False).profile(PcSamples.from_pcs(pcs))
-    assert (strict.categories["sleep"], strict.categories["code"]) == (5, 5)
+    assert (prof.categories["sleep"], prof.categories["wfi"], prof.categories["code"]) == (1, 5, 5)
+    assert 0x1002 in prof.hit_addresses() and prof.active == 10
 
 
 def test_exception_breakdown_and_json(syms, dis):

@@ -88,12 +88,12 @@ LA_PULSE_CHANNEL = (8, 4)
 LA_PULSE_MIN = 0x00000438
 LA_PULSE_MAX = 0x0000043C
 
-# xtrig: クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）
+# xtrig: クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）、bit4 = FPGA の観測の値の一致（obs.match）、bit5 = サンプラの値の一致（sampler_match。構成によって無い）
 XTRIG_BASE = 0x00000500
 XTRIG_SIZE = 0x40
 XTRIG_ROUTE = 0x00000500
-XTRIG_ROUTE_TO_LA = (0, 4)
-XTRIG_ROUTE_TO_INJECT = (8, 4)
+XTRIG_ROUTE_TO_LA = (0, 6)
+XTRIG_ROUTE_TO_INJECT = (8, 6)
 XTRIG_COMMAND = 0x00000504
 XTRIG_COMMAND_FIRE = (0, 1)
 XTRIG_INJECT_AP = 0x00000508
@@ -177,6 +177,7 @@ DEBUG_BASE = 0x00000900
 DEBUG_SIZE = 0x40
 DEBUG_SAMPLE_DELAY = 0x00000900
 DEBUG_SAMPLE_DELAY_SWD = (0, 2)
+DEBUG_SAMPLE_DELAY_JTAG = (8, 3)
 
 # trigseq: 多段トリガ（docs/superpowers/specs/2026-10-16-m9c-trigger-sequencer-design.md）。事象: bit0 = パターン A、bit1 = パターン B、bit2 = DAP の番地一致、bit3 = ホストの指令。発火は xtrig の源 bit3
 TRIGSEQ_BASE = 0x00000A00
@@ -227,7 +228,7 @@ AUX_ERRORS = 0x00000B08
 
 # sampler: DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする
 SAMPLER_BASE = 0x00000C00
-SAMPLER_SIZE = 0x80
+SAMPLER_SIZE = 0x40
 SAMPLER_CONTROL = 0x00000C00
 SAMPLER_CONTROL_RUN = (0, 1)
 SAMPLER_CONTROL_AP = (8, 8)
@@ -247,7 +248,24 @@ SAMPLER_STATUS_LAST_ACK = (0, 3)
 SAMPLER_STATUS_BUSY = (8, 1)
 SAMPLER_STATUS_HELD = (9, 1)
 
-# xtrig_out: クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ）
+# sampler_match: サンプラの値の一致（R21。docs/superpowers/specs/2026-10-23-sampler-match-trigger-design.md）。サンプラの標本（ACK OK・番地が addr）が (値 xor value) and mask = 0 に入った瞬間（前の標本が不一致）にクロストリガの源 bit5。構成によって無い（FEATURES bit10。無ければ読むとエラー）
+SAMPLER_MATCH_BASE = 0x00000C40
+SAMPLER_MATCH_SIZE = 0x40
+SAMPLER_MATCH_ADDR = 0x00000C40
+SAMPLER_MATCH_MASK = 0x00000C44
+SAMPLER_MATCH_VALUE = 0x00000C48
+SAMPLER_MATCH_CONTROL = 0x00000C4C
+SAMPLER_MATCH_CONTROL_ENABLE = (0, 1)
+SAMPLER_MATCH_CONTROL_MATCHED = (8, 1)
+SAMPLER_MATCH_CONTROL_SEEN_ANY = (9, 1)
+SAMPLER_MATCH_SEEN = 0x00000C50
+SAMPLER_MATCH_COUNT = 0x00000C54
+SAMPLER_MATCH_TIME_LO = 0x00000C58
+SAMPLER_MATCH_TIME_HI = 0x00000C5C
+SAMPLER_MATCH_PREV_LO = 0x00000C60
+SAMPLER_MATCH_PREV_HI = 0x00000C64
+
+# xtrig_out: クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ、bit4 FPGA の観測の値の一致、bit5 サンプラの値の一致）
 XTRIG_OUT_BASE = 0x00000D00
 XTRIG_OUT_SIZE = 0x40
 XTRIG_OUT_STATUS = 0x00000D00
@@ -255,8 +273,8 @@ XTRIG_OUT_STATUS_ACTIVE = (0, 2)
 XTRIG_OUT_WHEN0 = 0x00000D04
 XTRIG_OUT_WHEN0_MASK = (0, 8)
 XTRIG_OUT_WHEN0_VALUE = (8, 8)
-XTRIG_OUT_WHEN0_SOURCES = (16, 4)
-XTRIG_OUT_WHEN0_ANY = (20, 1)
+XTRIG_OUT_WHEN0_SOURCES = (16, 6)
+XTRIG_OUT_WHEN0_ANY = (24, 1)
 XTRIG_OUT_CTRL0 = 0x00000D08
 XTRIG_OUT_CTRL0_ENABLE = (0, 1)
 XTRIG_OUT_CTRL0_MODE = (4, 2)
@@ -268,8 +286,8 @@ XTRIG_OUT_CTRL0_PIN = (28, 2)
 XTRIG_OUT_WHEN1 = 0x00000D0C
 XTRIG_OUT_WHEN1_MASK = (0, 8)
 XTRIG_OUT_WHEN1_VALUE = (8, 8)
-XTRIG_OUT_WHEN1_SOURCES = (16, 4)
-XTRIG_OUT_WHEN1_ANY = (20, 1)
+XTRIG_OUT_WHEN1_SOURCES = (16, 6)
+XTRIG_OUT_WHEN1_ANY = (24, 1)
 XTRIG_OUT_CTRL1 = 0x00000D10
 XTRIG_OUT_CTRL1_ENABLE = (0, 1)
 XTRIG_OUT_CTRL1_MODE = (4, 2)
@@ -278,6 +296,55 @@ XTRIG_OUT_CTRL1_CLAIM = (12, 1)
 XTRIG_OUT_CTRL1_LENGTH = (16, 8)
 XTRIG_OUT_CTRL1_UNIT = (24, 3)
 XTRIG_OUT_CTRL1_PIN = (28, 2)
+
+# obs: 対象の FPGA の観測（docs/superpowers/specs/2026-10-20-fpga-observation-v2-design.md）。対象の JTAG のユーザーの DR の観測の回路（target_ip/fprobe_obs）をスキャンし続け、記録をイベント 8、時刻合わせをイベント 9 にする
+OBS_BASE = 0x00000E00
+OBS_SIZE = 0x40
+OBS_CONTROL = 0x00000E00
+OBS_CONTROL_ENABLE = (0, 1)
+OBS_CONTROL_RELEASE = (1, 1)
+OBS_HALF_PERIOD = 0x00000E04
+OBS_CHAIN = 0x00000E08
+OBS_CHAIN_IR_LEN = (0, 6)
+OBS_CHAIN_IR_BEFORE = (6, 6)
+OBS_CHAIN_IR_AFTER = (12, 6)
+OBS_CHAIN_DR_BEFORE = (18, 3)
+OBS_CHAIN_DR_AFTER = (21, 3)
+OBS_USER_IR = 0x00000E0C
+OBS_WORDS = 0x00000E10
+OBS_SYNC_PERIOD = 0x00000E14
+OBS_CMD = 0x00000E18
+OBS_CMD_PUSH = 0x00000E20
+OBS_STATUS = 0x00000E24
+OBS_STATUS_RUNNING = (0, 1)
+OBS_STATUS_ID_OK = (1, 1)
+OBS_STATUS_STUCK = (2, 1)
+OBS_STATUS_CMD_PENDING = (3, 1)
+OBS_STATUS_OVERFLOW_SEEN = (4, 1)
+OBS_STATUS_CMD_DROPPED = (5, 1)
+OBS_STATUS_TARGET_RUNNING = (6, 1)
+OBS_STATUS_DRIVING = (7, 1)
+OBS_SCANS = 0x00000E28
+OBS_READ_VALUE = 0x00000E2C
+OBS_ID = 0x00000E30
+OBS_MATCH = 0x00000E34
+OBS_MATCH_MASK = (0, 16)
+OBS_MATCH_VALUE = (16, 16)
+OBS_MATCH_CHANGE = 0x00000E38
+OBS_MATCH_CHANGE_CHANGE = (0, 16)
+OBS_MATCH_CHANGE_ENABLE = (16, 1)
+OBS_MATCH_COUNT = 0x00000E3C
+
+# sync: ボードの間の時刻の同期（docs/superpowers/specs/2026-10-22-modular-design.md §3.2）。親は period ごとにパルスと自分の時刻を sync_out に出し、子は sync_in で受けた組（自分の時刻・親の時刻）をイベント 10 にする
+SYNC_BASE = 0x00000F00
+SYNC_SIZE = 0x40
+SYNC_CONTROL = 0x00000F00
+SYNC_CONTROL_ENABLE = (0, 1)
+SYNC_CONTROL_MASTER = (1, 1)
+SYNC_PERIOD = 0x00000F04
+SYNC_STATUS = 0x00000F08
+SYNC_STATUS_PAIRS = (0, 16)
+SYNC_STATUS_CRC_ERRORS = (16, 16)
 
 # caps: ケイパビリティ ROM（TLV。範囲外は 0）
 CAPS_BASE = 0x00001000
@@ -317,8 +384,16 @@ FEATURE_SAMPLER = 8
 FEATURE_LA_FILTER = 16
 FEATURE_LA_PULSE = 32
 FEATURE_LA_STREAM_EVENTS = 64
+FEATURE_FPGA_OBS = 128
+FEATURE_OBS_MATCH = 0x100
+FEATURE_SAMPLER_MATCH = 0x400
+FEATURE_SYNC = 0x200
+SYNC_RX_LATENCY_TICKS = 2
+SYNC_TX_LATENCY_TICKS = 1
+SYNC_RX_PHASE_TICKS = 0.5
 CAPS_BUILD = 16
 CAPS_DEBUG = 14
+CAPS_LA_DELAY = 19
 DEBUG_JTAG = 1
 DEBUG_INJECT = 2
 CAPS_LA_LAYOUT = 18

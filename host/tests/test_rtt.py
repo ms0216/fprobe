@@ -367,3 +367,36 @@ def test_a_known_write_offset_skips_the_descriptor_read(setup):
 def test_write_offset_addresses_are_given_for_the_sampler(setup):
     _, _, rtt = setup
     assert rtt.wroff_addresses() == {0: CB + 24 + 12, 1: CB + 48 + 12}
+
+
+def test_a_reinitialized_ring_is_reopened_instead_of_read_at_the_old_address(setup):
+    # 開いた後にターゲットが RTT を初期化し直す（リセット・書き直し）と記述子のリングの番地・大きさが変わりうる。古い番地の
+    # まま読むと、別のデータ（実機ではブート ROM のような値）を文字として返した（R22、2026-10-21・22 の Shrike）。
+    # 記述子の番地・大きさが開いたときと違えば読まずに開き直し、その回は何も返さない
+    mem, target, rtt = setup
+    other = BASE + 0x600
+    mem.poke(other, b"\x01\x07a\x18" * 8)                                        # 古い番地に残るごみ
+    mem.poke(CB + 24, struct.pack("<IIIIII", 0, other + 0x80, 128, 0, 0, RttMode.NO_BLOCK_SKIP))   # 初期化し直した
+    mem.poke(UP0, b"\xFF" * 32)
+    target.write(0, b"req 1\n")
+    assert rtt.poll() == {}                                                      # 古い番地を読まない
+    assert rtt.control_block.up[0].buffer_address == other + 0x80 and rtt.reopens == 1
+    target.write(0, b"req 2\n")
+    assert rtt.poll() == {0: b"req 1\nreq 2\n"}
+
+
+def test_a_descriptor_without_a_ring_is_not_ready():
+    # 初期化の途中（リングの番地 0・大きさあり）は、使える記述子として受け付けない
+    mem = FakeMemory()
+    build(mem, CB, up=[("Terminal", 0, 256, RttMode.NO_BLOCK_SKIP)], down=[])
+    with pytest.raises(RttError, match="番地"):
+        Rtt(mem, CB).open()
+
+
+def test_reopening_during_initialization_waits_for_the_next_poll(setup):
+    mem, target, rtt = setup
+    mem.poke(CB + 24, struct.pack("<IIIIII", 0, 0, 256, 0, 0, RttMode.NO_BLOCK_SKIP))   # 初期化の途中（番地 0）
+    assert rtt.poll() == {} and rtt.reopens == 0
+    mem.poke(CB + 24, struct.pack("<IIIIII", 0, UP0, 256, 0, 0, RttMode.NO_BLOCK_SKIP))
+    target.write(0, b"ok\n")
+    assert rtt.poll() == {0: b"ok\n"} and rtt.reopens == 0                     # 元と同じリングに戻った: そのまま読む

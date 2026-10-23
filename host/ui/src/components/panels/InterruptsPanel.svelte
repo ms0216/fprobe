@@ -2,7 +2,7 @@
   // Interrupts（SystemView の Context / Runtime・IAR の Interrupt Log Summary・MCUXpresso の SWO Interrupt Trace の型）:
   // 割り込みごとの回数・合計・排他（自分）・最小・最大・平均・負荷と最大の回の時刻。源は記録の割り込みの区間（時刻が
   // タイムベース = 時間軸へ飛べる）か、Code Profile の SWO 例外トレース（profile.exceptions）。選んだ割り込みの時間の
-  // 分布図（外れ値の棒のダブルクリックでその回へ）。外れ値は時間軸にも印を置く
+  // 分布図（長い順の上位の棒のダブルクリックでその回へ）。長い順の上位は時間軸にも印を置く
   import { onDestroy } from "svelte";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
@@ -42,10 +42,10 @@
   // ほかの利用者（AI も）がプロファイルを始め・止めた、記録を開いた・始めた・止めたら読み直す
   $effect(() => onCalls(conn, ["profile.start", "profile.stop"], () => void refresh()));
   $effect(() => onRecording(conn, () => void refresh()));
-  // 選んだ割り込みの外れ値を時間軸に印として置く
+  // 選んだ割り込みの長い順の上位を時間軸に印として置く（普通の色: 異常とは言わない）
   $effect(() => {
-    tl.setMarks("interrupts", "recording", hist.outliers.slice(0, 200).map((a) => ({
-      t: a.t, tEnd: a.tEnd, tone: 3 as const, label: `${chosen?.name ?? ""} ${formatDuration(a.inclusive / hz)}` })));
+    tl.setMarks("interrupts", "recording", hist.longest.map((a) => ({
+      t: a.t, tEnd: a.tEnd, tone: 0 as const, label: `${chosen?.name ?? ""} ${formatDuration(a.inclusive / hz)}` })));
   });
   onDestroy(() => tl.setMarks("interrupts", "recording", []));
   // 時間軸の 1 回クリック（記録）: その時刻に処理していた割り込みの行を選ぶ
@@ -134,7 +134,6 @@
       <div class="dist">
         <div class="head">
           <span>{$i18n("interrupts.distribution", { name: chosen.name })}</span>
-          {#if hist.outliers.length}<span class="warn">{$i18n("interrupts.outliers", { n: hist.outliers.length })}</span>{/if}
         </div>
         {#if active === "recording"}
           <div title={$i18n("interrupts.histTip")}>
@@ -158,5 +157,4 @@
   .row:hover td, .row.sel td { background: var(--select); }
   .dist { padding: 6px 8px; }
   .head { display: flex; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  .warn { color: var(--warn); }
 </style>

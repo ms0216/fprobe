@@ -134,3 +134,14 @@ async def pulse_width_event_is_anded_with_the_pattern(dut):
     assert trigger == 4
     assert int(dut.trigger_time.value) - events[0] in range(0, 12)
     assert all((b - a) % 16 == 7 for a, b in zip(samples, samples[1:]))
+
+
+@cocotb.test()
+async def trigger_time_is_la_internal_delay_after_the_trigger_sample(dut):
+    # プローブ（カウンタ）と time は同じ辺で進む。トリガのサンプル（値 5）の time と、報告の trigger_time の差
+    # = 内蔵ロジアナの入り口から時刻の付くまでの遅れ（fprobe_gw.caps.LA_INTERNAL_DELAY）
+    from fprobe_gw.caps import LA_INTERNAL_DELAY
+    await setup(dut)
+    p0, t0 = int(dut.probes.value), int(dut.time.value)
+    await capture(dut, mask=0xF, value=5)
+    assert (int(dut.trigger_time.value) - 5 - (t0 - p0)) % 16 == LA_INTERNAL_DELAY

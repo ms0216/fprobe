@@ -222,7 +222,7 @@ class UCOS3(KernelAwareness):
                 notes.append(f"OSTaskSuspend で止められている（入れ子 {self._field(handle, 'SuspendCtr')}）")
         stack = self._stack(handle, running)
         if stack.overflow:
-            notes.append("スタックの底（StkBasePtr）が 0 の塗りのままでないか、SP が底より下")
+            notes.append("SP がスタックの底（StkBasePtr）より下")
         base = self._field(handle, "BasePrio") if self.tcb.has("BasePrio") else None
         return Task(handle, self.task_name(handle), self._field(handle, "Prio"), state, stack, wait, base, notes=notes)
 

@@ -178,10 +178,10 @@ class StackTools:
         return {"bottom": start, "end": end, "top": bounds.top, "fill": fill, "bytes": end - start, "msp": sp,
                 "bounds": bounds.as_dict()}
 
-    def stack_usage(self, threshold: float = 0.9, fill: int | None = None, bottom: int | None = None,
+    def stack_usage(self, threshold: float | None = None, fill: int | None = None, bottom: int | None = None,
                     top: int | None = None) -> dict:
-        """MSP のスタックの使用量の実測: 底から塗りが残っているバイト数から、使った最大の深さ・割合（threshold 以上で
-        warning、底まで使っていたら overflow）。止まっていれば いまの深さ（current）も。走行中でも読める。
+        """MSP のスタックの使用量の実測: 底から塗りが残っているバイト数から、使った最大の深さ・割合（事実。
+        reached_bottom = 塗りが残っていない、overflow = SP が下端より下、warning は threshold を明示したときだけ）。止まっていれば いまの深さ（current）も。走行中でも読める。
         範囲・塗りの値は stack_paint のもの（無ければ ELF の範囲と fill）。"""
         with self._lock:
             target = self.target

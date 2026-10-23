@@ -24,7 +24,8 @@ class StackInfo:
     pointer: int | None = None    # いまの SP（止まっているタスクは保存した SP）
     untouched: int | None = None  # base から上へ、塗りつぶしの値が残っていたバイト数（塗られていなければ None）
     fill: str = "unknown"         # intact（底が塗りのまま）/ none（底が塗られていない）/ unknown（読めない）
-    overflow: bool = False        # SP が base より下、または塗りがあるのに底が壊れている
+    overflow: bool = False        # SP が base より下（RTOS 自身の印: RTX5 のマジックワードが壊れた、も）
+    fill_above: bool | None = None  # 底が塗りでないとき、底の少し上に塗りの並びが残っているか（事実。あふれと推定しない）
 
     @property
     def size(self) -> int | None:

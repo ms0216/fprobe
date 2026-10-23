@@ -7,7 +7,7 @@ import { confirmer } from "./confirm";
 import { t, type Key, type Translate } from "./i18n";
 import type { AppState, Snapshot } from "./state";
 
-export interface RiskReason {
+export interface RiskMatch {
   kind: "radio" | "usb" | "watchdog" | "rtos";
   count: number;
   symbols: string[];
@@ -16,20 +16,20 @@ export interface RiskReason {
 
 export interface HaltRisk {
   elf: string;
-  risky: boolean;
-  reasons: RiskReason[];
+  matched: boolean;                   // ELF のシンボルが、無線・USB・ウォッチドッグ・RTOS の決まった名前と合った
+  matches: RiskMatch[];
   monitor_in_elf: boolean;
 }
 
 export interface Clue {
-  clue: "lockup" | "pc_in" | "pc_loop" | "tick_stopped";
+  clue: "lockup" | "pc_in" | "pc_range" | "tick_stopped";
   function?: string;
   bytes?: number;
   tick?: number;
 }
 
 export interface Fatal {
-  kind: "lockup" | "fatal_halt" | "fault_loop" | "stuck";
+  kind: "lockup" | "fatal_halt" | "fault_loop" | "tick_stopped";
   function?: string;
   since: number;                      // UNIX 秒
   evidence: Clue[];
@@ -37,13 +37,13 @@ export interface Fatal {
 
 export type HaltAction = "halt" | "step" | "breakpoint" | "call";
 
-/** 止める前に警告するか（止めると壊れうる ELF で、モニタ方式でないとき） */
+/** 止める前に知らせるか（ELF に手がかりの名前があり、モニタ方式でないとき） */
 export function needsWarning(risk: HaltRisk | null, target: Record<string, any> | null): boolean {
-  return !!risk?.risky && target?.debug_mode !== "monitor";
+  return !!risk?.matched && target?.debug_mode !== "monitor";
 }
 
 /** 理由の 1 行（「無線（RADIO_IRQHandler ほか 11）」） */
-export function reasonText(r: RiskReason, tr: Translate): string {
+export function reasonText(r: RiskMatch, tr: Translate): string {
   const what = tr(`safety.reason.${r.kind}` as Key, { rtos: r.rtos ?? "" });
   const first = r.symbols[0];
   if (!first) return what;
@@ -52,7 +52,7 @@ export function reasonText(r: RiskReason, tr: Translate): string {
 
 /** 止める前の確かめの文 */
 export function confirmText(risk: HaltRisk, action: HaltAction, tr: Translate): string {
-  const reasons = risk.reasons.map((r) => `・${reasonText(r, tr)}`).join("\n");
+  const reasons = risk.matches.map((r) => `・${reasonText(r, tr)}`).join("\n");
   const way = tr(risk.monitor_in_elf ? "safety.useMonitor" : "safety.addMonitor");
   return [tr("safety.confirm", { action: tr(`safety.action.${action}` as Key) }), reasons, "", tr("safety.ways"), way,
           "", tr("safety.continue")].join("\n");
@@ -63,6 +63,12 @@ export function clueText(c: Clue, tr: Translate): string {
   return tr(`safety.clue.${c.clue}` as Key, { function: c.function ?? "?", bytes: c.bytes ?? 0, tick: c.tick ?? 0 });
 }
 
+/** 致命的エラーと言える種類か: ロックアップ・PC が止まって回り続ける処理や故障の処理の中。tick_stopped（ティックが前の
+ *  見張りから変わっていない）は事実だけで、正常かどうかは決めない（busy-poll 等でも起きる） */
+export function isFatal(f: Fatal): boolean {
+  return f.kind !== "tick_stopped";
+}
+
 /** 致命的エラーの見出し（「致命的エラーの処理で回り続けています: arch_system_halt()」） */
 export function fatalTitle(f: Fatal, tr: Translate): string {
   return tr(`safety.fatal.${f.kind}` as Key, { function: f.function ?? "?" });
@@ -71,13 +77,13 @@ export function fatalTitle(f: Fatal, tr: Translate): string {
 /** プローブの USB が切れて開き直した（target.state の link_lost。B28） */
 export interface LinkLost {
   at: number;                                   // UNIX 秒
-  changed: Record<string, [unknown, unknown]>;  // 前と変わった機能（Flash の古い版で立ち上がった等）
+  changed: Record<string, [unknown, unknown]>;  // 前と変わった機能（事実。原因は推測しない）
   // ビットストリームの版の比較（U49。changed / latest_build は分からなければ null。古いデーモンには無い）
   version?: { before: string | null; after: string | null; changed: boolean | null; latest_build: boolean | null } | null;
 }
 
-/** つなぎ直しの知らせの文。版が分かれば版が変わったかを確実に言い、分からなければ変わった機能（「jtag: false → true, …」）
- *  から推測を添える */
+/** つなぎ直しの知らせの文。版が分かれば版が変わったかを言い、分からなければ変わった機能（「jtag: false → true, …」）
+ *  だけを書く（原因は推測しない） */
 export function linkText(l: LinkLost, tr: Translate): string {
   const v = l.version;
   if (v && v.changed !== null) {

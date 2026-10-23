@@ -18,15 +18,13 @@ from dataclasses import dataclass, field
 
 from . import coresight_id as ci
 from .jtag_chain import ChainScan, dap_link_wire, scan_chain
+from .multidrop import PARTS
 from .raw_dap import AP_BASE, AP_CSW, AP_IDR, CSW_DEVICE_EN, DP_BASEPTR0, DP_CTRL_STAT, DP_TARGETID, Ack, DapError, RawDap
 
-__all__ = ["Diagnosis", "Step", "diagnose", "MIN_VOLTS"]
+__all__ = ["Diagnosis", "Step", "diagnose"]
 
-MIN_VOLTS = 1.0                        # これ未満は電源が入っていないとみなす
-LOW_VOLTS = 1.65                       # fprobe の入出力は 3.3 V: これ未満はレベル変換が要る
-HIGH_VOLTS = 3.6
+IO_VOLTS = 3.3                         # fprobe の入出力の電圧（LVCMOS33）。比べた判定はしない（事実として並べる）
 SLOW_HZ = 100_000
-RP2040_TARGETSEL = (0x01002927, 0x11002927)
 _DHCSR, _CPUID = 0xE000EDF0, 0xE000ED00
 _NORDIC_CTRL_AP_IDR = 0x02880000
 _MEM_AP_ARCHID = 0x0A17               # ADIv6 の DEVARCH の ARCHID（MEM-AP）
@@ -68,15 +66,15 @@ class Diagnosis:
 
     def verdict(self) -> str:
         fails = [s for s in self.steps if s.status == "fail"]
-        warns = [s for s in self.steps if s.status == "warn"]
-        if self.connect is None:
+        if not self.ok:                                  # 失敗した段があれば「接続できる」とは書かない（ok と食い違わない）
             head = fails[0].message if fails else "ターゲットのデバッグポートに届かなかった"
-            return f"接続できない: {head}"
+            volts = next((s.data["volts"] for s in self.steps if s.name == "voltage" and s.status == "ok"), None)
+            return f"接続できない: {head}" + ("" if volts is None else f"（Vtarget = {volts:.2f} V）")
         what = (self.part.name if self.part else self.core["core"] if self.core else "ターゲット")
         text = f"接続できる（{what}、{self.protocol.upper()} {self.frequency_hz:,} Hz）"
-        problems = fails + warns
-        if problems:
-            text += "。ただし: " + " / ".join(s.message for s in problems)
+        warns = [s for s in self.steps if s.status == "warn"]
+        if warns:
+            text += "。ただし: " + " / ".join(s.message for s in warns)
         return text
 
     def as_dict(self) -> dict:
@@ -98,7 +96,6 @@ def diagnose(dap: RawDap, frequency_hz: int = 1_000_000, voltage: Callable[[], d
         attempt = _connect_jtag(d, dap, frequency_hz)
     if attempt is None:
         return d
-    _voltage_contradicted(d)
     d.protocol, d.frequency_hz = dap.protocol, dap.frequency_hz
     if not _check_dp(d, dap):
         return d
@@ -137,16 +134,6 @@ def _walk_with_trcena(dap: RawDap, ap: int, base: int) -> "ci.Component":
 
 # --- 1. 電圧・2. ピン ------------------------------------------------------------------------------
 
-def _voltage_contradicted(d: Diagnosis) -> None:
-    """ターゲットが応答したのに「電源が入っていない」: 電源ではなく電圧の計測（分圧・補助マイコンの配線）を疑う
-    （実機で、補助の Pico の計測の線がつながっていないときに誤って結論した。2026-10-18）。"""
-    for step in d.steps:
-        if step.name == "voltage" and step.status == "fail":
-            step.status = "warn"
-            step.message = (f"電圧の計測は {step.data.get('volts', 0):.2f} V だが、ターゲットは応答している: "
-                            "電圧の計測の配線（分圧・補助マイコン）を確かめる")
-
-
 def _check_voltage(d: Diagnosis, voltage) -> None:
     if voltage is None:
         d.add("voltage", "skip", "電圧を測る手段が無い")
@@ -159,15 +146,9 @@ def _check_voltage(d: Diagnosis, voltage) -> None:
     if not v.get("live"):
         d.add("voltage", "skip", "電圧を測れない（補助マイコンが計測値を送っていない）", **v)
     elif v.get("over_range"):
-        d.add("voltage", "warn", "ターゲットの電圧が測れる上限を超えている（分圧の配線を確かめる）", **v)
-    elif v["volts"] < MIN_VOLTS:
-        d.add("voltage", "fail", f"ターゲットの電源が入っていない（Vtarget = {v['volts']:.2f} V）", **v)
-    elif v["volts"] < LOW_VOLTS:
-        d.add("voltage", "warn", f"ターゲットの電圧が低い（{v['volts']:.2f} V）: fprobe の入出力は 3.3 V。レベル変換が要る", **v)
-    elif v["volts"] > HIGH_VOLTS:
-        d.add("voltage", "warn", f"ターゲットの電圧が高い（{v['volts']:.2f} V）: 3.3 V を超える入力は fprobe を壊す", **v)
-    else:
-        d.add("voltage", "ok", f"Vtarget = {v['volts']:.2f} V", **v)
+        d.add("voltage", "warn", "ターゲットの電圧が測れる上限を超えている", **v)
+    else:                               # 閾値で「電源が入っていない」等と判定しない（計測の線が外れても 0 V になる）
+        d.add("voltage", "ok", f"Vtarget = {v['volts']:.2f} V（fprobe の入出力は {IO_VOLTS} V）", **v)
 
 
 def _check_pins(d: Diagnosis, pins) -> None:
@@ -176,12 +157,9 @@ def _check_pins(d: Diagnosis, pins) -> None:
         return
     value = pins()
     state = {"swclk": value & 1, "swdio": (value >> 1) & 1, "nreset": (value >> 7) & 1}
-    notes = []
-    if not state["nreset"]:
-        notes.append("nRESET が Low（リセットが掛かったまま。外部で押さえていないか・プルアップ）")
-    if not state["swdio"]:
-        notes.append("SWDIO が Low（ターゲットのプルアップが無い・短絡・電源が無い）")
-    d.add("pins", "warn" if notes else "ok", " / ".join(notes) or "nRESET = High、SWDIO = High", **state)
+    low = [name for key, name in (("nreset", "nRESET"), ("swdio", "SWDIO")) if not state[key]]
+    text = " / ".join(f"{name} = Low" for name in low) or "nRESET = High、SWDIO = High"
+    d.add("pins", "warn" if low else "ok", text, **state)          # 原因の候補は並べない（事実だけ）
 
 
 # --- 3. SWD・4. JTAG ------------------------------------------------------------------------------
@@ -193,35 +171,69 @@ def _try_dpidr(dap: RawDap) -> tuple[int | None, Ack]:
         return None, e.ack
 
 
+def _dp_targetsel(dap: RawDap, dpidr: int) -> int | None:
+    """応答した DP の TARGETSEL の値（DPv2 の TARGETID の下位 28 ビットと DLPIDR の TINSTANCE）。DPv1 なら None。"""
+    if ci.decode_dpidr(dpidr)["version"] < 2:
+        return None
+    try:
+        return (dap.read_dp("TARGETID") & 0x0FFFFFFF) | (dap.read_dp("DLPIDR") & 0xF0000000)
+    except DapError:
+        _clear(dap)
+        return None
+
+
+def _rescue_dp(dap: RawDap, dpidr: int) -> int | None:
+    """応答した DP が複数ドロップの部品の救済の DP なら、その TARGETSEL。救済の DP は CTRL/STAT の CDBGPWRUPREQ で
+    チップ全体をリセットして止める（RP2040）ので、電源を要求してはいけない。"""
+    sel = _dp_targetsel(dap, dpidr)
+    return sel if sel in {p.rescue for p in PARTS if p.rescue is not None} else None
+
+
 def _connect_swd(d: Diagnosis, dap: RawDap, frequency_hz: int) -> int | None:
     attempts: list[dict] = []
+    rescue_seen: int | None = None
+    core_sels = [core.targetsel for part in PARTS for core in part.cores]   # 複数ドロップの部品の表（multidrop.PARTS）
     speeds = [frequency_hz] + [f for f in (frequency_hz // 10, SLOW_HZ) if SLOW_HZ <= f < frequency_hz]
     for hz in dict.fromkeys(speeds):
         dap.start("swd", hz)
-        for how in ("jtag_to_swd", "dormant", "multidrop"):
+        # 複数ドロップを先に: TARGETSEL の無い線では複数ドロップの DP が全部同時に応答し、書き込みが救済の DP にも
+        # 届いてチップがリセットされたまま止まる（2026-10-22、RP2040）。選んだ DP の TARGETID・DLPIDR が選んだ値と
+        # 合ったときだけ複数ドロップのコアとし、合わなければ（TARGETSEL を無視する普通の DP）素の切り替えへ
+        for how in ("multidrop", "jtag_to_swd", "dormant"):
             if how == "multidrop":
                 dap.switch_to_swd(dormant=True)
-                for sel in RP2040_TARGETSEL:
+                for sel in core_sels:
                     dap.line_reset()
                     dap.link.swj_sequence(8, 0)
                     dap.targetsel(sel)
                     value, ack = _try_dpidr(dap)
                     attempts.append({"frequency_hz": hz, "method": f"targetsel 0x{sel:08X}", "ack": ack.value})
-                    if value is not None:
+                    if value is None:
+                        continue
+                    if _dp_targetsel(dap, value) == sel:
                         return _swd_ok(d, dap, value, attempts, frequency_hz, targetsel=sel)
+                    attempts[-1]["ignored_targetsel"] = True       # 複数ドロップでない DP が応答した
+                    break
                 continue
             dap.switch_to_swd(dormant=how == "dormant")
             value, ack = _try_dpidr(dap)
             attempts.append({"frequency_hz": hz, "method": how, "ack": ack.value})
             if value is not None:
-                return _swd_ok(d, dap, value, attempts, frequency_hz)
+                rescue = _rescue_dp(dap, value)
+                if rescue is None:
+                    return _swd_ok(d, dap, value, attempts, frequency_hz)
+                attempts[-1]["rescue_dp"] = f"0x{rescue:08X}"         # 救済の DP: 電源を要求せず、コアの DP を選びに行く
+                rescue_seen = rescue
     acks = {a["ack"] for a in attempts}
-    if acks == {Ack.NO_ACK.value}:
-        msg = "SWD に応答が無い（配線・電源・GND・SWD が無効のターゲット）"
+    if rescue_seen is not None:
+        msg = (f"TARGETSEL なしで応答したのは救済の DP（TARGETSEL 0x{rescue_seen:08X}）だけで、コアの DP は"
+               "応答しなかった（救済の DP には電源を要求しない: チップ全体がリセットされて止まる）")
+    elif acks == {Ack.NO_ACK.value}:
+        msg = "SWD に応答が無い（どの試し方・速さでも ACK が来ない）"
     elif Ack.PROTOCOL.value in acks:
-        msg = "SWD の応答にパリティ誤りがある（信号品質: 配線長・GND・速度）"
+        msg = "SWD の応答にパリティ誤りがある"
     elif Ack.WAIT.value in acks:
-        msg = "SWD が WAIT を返し続ける（ターゲットが低消費電力・クロック停止）"
+        msg = "SWD が WAIT を返し続ける"
     else:
         msg = f"SWD の DPIDR を読めない（{', '.join(sorted(acks))}）"
     d.add("swd", "fail", msg, attempts=attempts)
@@ -237,7 +249,7 @@ def _swd_ok(d: Diagnosis, dap: RawDap, dpidr: int, attempts: list[dict], wanted_
     status = "ok"
     if dap.frequency_hz < wanted_hz:
         status = "warn"
-        text += f"。{wanted_hz:,} Hz では応答せず {dap.frequency_hz:,} Hz で応答: 配線長・GND・信号品質を疑う"
+        text += f"。{wanted_hz:,} Hz では応答せず {dap.frequency_hz:,} Hz で応答"
     d.add("swd", status, text, attempts=attempts, **({"targetsel": targetsel} if targetsel is not None else {}))
     d.dp = {"dpidr": info}
     return dpidr
@@ -289,8 +301,7 @@ def _check_dp(d: Diagnosis, dap: RawDap) -> bool:
         return False
     d.dp["power"] = power
     if not power["debug_power"]:
-        d.add("power", "fail", "デバッグ電源の要求に応答しない（CDBGPWRUPACK = 0）: ターゲットが深い低消費電力・"
-                               "電源ドメインが落ちている・保護", **power)
+        d.add("power", "fail", "デバッグ電源の要求に応答しない（CDBGPWRUPACK = 0）", **power)
         return False
     d.add("power", "ok" if power["system_power"] else "warn",
           "デバッグ電源が上がった" if power["system_power"] else "システム電源の応答が無い（CSYSPWRUPACK = 0）", **power)
@@ -331,7 +342,7 @@ def _list_aps(d: Diagnosis, dap: RawDap, max_aps: int) -> list[tuple[int, ci.Com
         if info["kind"] != "mem-ap":
             continue
         if not info.get("device_enabled", True):
-            d.add("ap_disabled", "warn", f"MEM-AP {_ap_name(ap)} が無効（CSW.DeviceEn = 0: 保護・電源ドメイン）")
+            d.add("ap_disabled", "warn", f"MEM-AP {_ap_name(ap)} が無効（CSW.DeviceEn = 0）")
             mem_aps.append((ap, None))
             continue
         root = None

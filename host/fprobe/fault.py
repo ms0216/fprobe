@@ -28,39 +28,41 @@ class _Bit:
     hint: str = ""
 
 
+# hint はアーキテクチャの定義から言えることだけ（ARMv7-M ARM B3.2.15〜B3.2.16）。経験的な原因の候補は書かない
 _CFSR_BITS = (
     # MemManage（MMFSR）
-    _Bit(0, "IACCVIOL", "命令の読み出しが MPU に違反した", "実行禁止（XN）の領域・MPU で許していない番地へ分岐した"),
-    _Bit(1, "DACCVIOL", "データのアクセスが MPU に違反した", "MMFAR の番地（MMARVALID のとき）。NULL ポインタの参照が多い"),
-    _Bit(3, "MUNSTKERR", "例外から戻るときの取り出しで MPU 違反", "スタックの壊れ"),
-    _Bit(4, "MSTKERR", "例外に入るときの積み込みで MPU 違反", "スタックのあふれ（スタックの下限を越えた）"),
-    _Bit(5, "MLSPERR", "浮動小数点の文脈の遅延保存で MPU 違反", "スタックのあふれ"),
+    _Bit(0, "IACCVIOL", "命令の読み出しが MPU に違反した", "XN（実行禁止）の領域からの読み出しも含む（MPU が無効でも）"),
+    _Bit(1, "DACCVIOL", "データのアクセスが MPU に違反した", "MMFAR に番地（MMARVALID のとき）。積まれた PC が故障した命令"),
+    _Bit(3, "MUNSTKERR", "例外から戻るときの取り出しで MPU 違反"),
+    _Bit(4, "MSTKERR", "例外に入るときの積み込みで MPU 違反"),
+    _Bit(5, "MLSPERR", "浮動小数点の文脈の遅延保存で MPU 違反"),
     _Bit(7, "MMARVALID", "MMFAR に故障の番地が入っている"),
     # BusFault（BFSR）
-    _Bit(8, "IBUSERR", "命令の読み出しでバスエラー", "存在しない番地・電源や時計の止まった領域へ分岐した"),
-    _Bit(9, "PRECISERR", "データのアクセスでバスエラー（正確）", "BFAR の番地（BFARVALID のとき）。積まれた PC が故障した命令"),
+    _Bit(8, "IBUSERR", "命令の読み出しでバスエラー"),
+    _Bit(9, "PRECISERR", "データのアクセスでバスエラー（正確）", "BFAR に番地（BFARVALID のとき）。積まれた PC が故障した命令"),
     _Bit(10, "IMPRECISERR", "データの書き込みでバスエラー（不正確）",
-         "書き込みバッファのため、積まれた PC は故障の後の命令。時計の入っていない周辺への書き込みが多い"),
-    _Bit(11, "UNSTKERR", "例外から戻るときの取り出しでバスエラー", "スタックの壊れ"),
-    _Bit(12, "STKERR", "例外に入るときの積み込みでバスエラー", "スタックのあふれ（SRAM の外へ）"),
-    _Bit(13, "LSPERR", "浮動小数点の文脈の遅延保存でバスエラー", "スタックのあふれ"),
+         "書き込みバッファのため、積まれた PC は故障の後の命令。BFAR は入らない"),
+    _Bit(11, "UNSTKERR", "例外から戻るときの取り出しでバスエラー"),
+    _Bit(12, "STKERR", "例外に入るときの積み込みでバスエラー"),
+    _Bit(13, "LSPERR", "浮動小数点の文脈の遅延保存でバスエラー"),
     _Bit(15, "BFARVALID", "BFAR に故障の番地が入っている"),
     # UsageFault（UFSR）
-    _Bit(16, "UNDEFINSTR", "未定義の命令を実行した", "壊れたコード・データ領域への分岐・別の CPU 向けのビルド"),
+    _Bit(16, "UNDEFINSTR", "未定義の命令を実行した"),
     _Bit(17, "INVSTATE", "Thumb の状態でない実行（EPSR.T = 0）",
-         "番地の bit0 が 0 の関数ポインタへ分岐した（関数ポインタの壊れ・ベクタ表の bit0）"),
-    _Bit(18, "INVPC", "例外からの戻りの値（EXC_RETURN）が不正", "LR の壊れ・スタックの壊れ"),
+         "分岐先・ベクタ表の番地の bit0 が 0 だった（EPSR.T はそこから入る）"),
+    _Bit(18, "INVPC", "例外からの戻りの値（EXC_RETURN）が不正"),
     _Bit(19, "NOCP", "コプロセッサ（FPU）の命令を、無効のまま実行した",
-         "CPACR の CP10・CP11 を有効にしていない（起動のコードで FPU を有効にする）"),
-    _Bit(20, "STKOF", "スタックの下限（PSPLIM・MSPLIM）を越えた（ARMv8-M）", "スタックのあふれ"),
-    _Bit(24, "UNALIGNED", "揃っていない番地へのアクセス（UNALIGN_TRP が 1）", "構造体のパック・ポインタの型の取り違え"),
+         "CPACR の CP10・CP11 が有効でないか、コプロセッサが無い"),
+    _Bit(20, "STKOF", "スタックの下限（PSPLIM・MSPLIM）を越えた（ARMv8-M）"),
+    _Bit(24, "UNALIGNED", "揃っていない番地へのアクセス（UNALIGN_TRP が 1）"),
     _Bit(25, "DIVBYZERO", "0 で割った（DIV_0_TRP が 1）"),
 )
 _HFSR_BITS = (
-    _Bit(1, "VECTTBL", "例外のベクタ表の読み出しでバスエラー", "VTOR の値・ベクタ表の場所"),
+    _Bit(1, "VECTTBL", "例外のベクタ表の読み出しでバスエラー", "読んだ番地は VTOR + 4 × 例外の番号"),
     _Bit(30, "FORCED", "設定できる故障（MemManage・BusFault・UsageFault）が HardFault に格上げされた",
-         "その故障が無効か、優先度が足りない。原因は CFSR を見る"),
-    _Bit(31, "DEBUGEVT", "デバッグの出来事が HardFault になった", "デバッガが無いのに BKPT を実行した等"),
+         "その故障が無効か、優先度で入れなかった。元の故障は CFSR に出る"),
+    _Bit(31, "DEBUGEVT", "デバッグの出来事が HardFault になった",
+         "停止のデバッグ（DHCSR.C_DEBUGEN）もデバッグモニタも無効のときの BKPT 等"),
 )
 _DFSR_BITS = (
     _Bit(0, "HALTED", "止める要求・1 命令の実行で止まった"),
@@ -86,6 +88,19 @@ def decode_hfsr(value: int) -> list[dict]:
 
 def decode_dfsr(value: int) -> list[dict]:
     return _decode(value, _DFSR_BITS)
+
+
+def halt_reason(dfsr: int, instruction: int | None, breakpoint: bool = False) -> str | None:
+    """止まった理由を 1 語で（DFSR は pyOCD が再開・ステップのたびにクリアするので、その停止の分だけ）。
+    instruction: PC の 16 ビットの命令（BKPT 0xBExx なら、デバッガが置いたもの（breakpoint=True）でなければファームウェア
+    自身の BKPT = panic・assert・セミホスティング等）。複数のビットなら具体的なほうを優先（ステップで踏んだブレークポイント等）。"""
+    if dfsr & 0x02:
+        own = instruction is not None and instruction & 0xFF00 == 0xBE00 and not breakpoint
+        return "bkpt_instruction" if own else "breakpoint"
+    for bit, name in ((0x04, "watchpoint"), (0x08, "vector_catch"), (0x10, "external"), (0x01, "request")):
+        if dfsr & bit:
+            return name
+    return None
 
 
 def _place(symbols, address: int) -> dict:
@@ -124,7 +139,7 @@ def analyze(target, symbols=None, entry_sp: int | None = None) -> dict:
     elif ipsr == 3:
         out["faulted"] = True                       # v6-M: HardFault の中。原因のレジスタは無い
         out["causes"] = [{"bit": "HardFault", "meaning": "HardFault（ARMv6-M は原因のレジスタが無い）",
-                          "hint": "積まれた PC の命令と、その時のレジスタから推測する"}]
+                          "hint": "原因はレジスタに残らない。積まれたフレーム（frame）に故障したときの PC とレジスタがある"}]
     if ipsr:
         out["frame"] = _stacked_frame(target, symbols, entry_sp)
     return out

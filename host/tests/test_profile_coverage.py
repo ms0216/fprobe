@@ -63,10 +63,10 @@ def test_default_is_functions_with_hits(sram):
     assert cov.samples == 2
 
 
-def test_sleep_samples_count_as_executed(sram):
-    # 眠りとして分けたサンプルも、その命令が実行された証拠（Profile.hit_addresses に含む）
+def test_wfi_samples_count_as_executed(sram):
+    # WFI / WFE の上として分けたサンプルも、その命令が実行された証拠（Profile.hit_addresses に含む）
     prof = Profiler(sram.symbols, sram).profile(PcSamples.from_pcs([code(sram, "tick")[0].address]))
-    prof.sleep_pcs[code(sram, "tick")[1].address] += 1
+    prof.wfi_pcs[code(sram, "tick")[1].address] += 1
     cov = coverage(prof, sram, functions=["tick"])
     assert cov.function("tick").instructions_hit == 2
 

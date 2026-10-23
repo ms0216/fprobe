@@ -101,7 +101,9 @@ def test_indirect_jumps_and_growing_loops():
     assert [(c.callee, c.kind, c.depth) for c in f.calls] == [(None, "indirect_tail", 0)]
     loop = [ins(0x100, "push", "{r4}"), ins(0x102, "b", "#0x100", flow="jump", target=0x100)]
     g = analyze_function(loop, "f", 0x100, 0x104, names)
-    assert g.dynamic and any("伸び" in r for r in g.reasons)
+    # 「伸び続ける」と断定しない: 解析を打ち切った事実と、その回数・深さが下限であることを書く
+    assert g.dynamic and any("打ち切った" in r and "下限" in r for r in g.reasons)
+    assert not any("伸び続ける" in r for r in g.reasons)
 
 
 def test_unknown_table_counts_the_unreached_code():

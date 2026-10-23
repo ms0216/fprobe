@@ -20,6 +20,10 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。機器には触らない�
   name・role・client（利用者の番号）はデーモンが渡す呼び出し元（caller）。mouse = null で消え、窓・利用者が切れたら
   デーモンが ui_state_client_left で消す。どちらも届かなかったもの（MCP 越しで切れ方が分からない等）は POINTER_TTL_S 秒で
   古いものから消える。
+- fpga_signals: FPGA の観測の組に付ける信号の定義（fprobe.fpga_signals の形）。記録していないときの既定で、
+  記録を始めるとその記録の付帯情報に写す。null = まだ無い。
+- system: システム解析の MCU のメモリの表と FPGA の条件 {"watches": [{"name", "address"}], "conditions": [{"name", "expr"}]}
+  （別の窓・別の PC・AI が同じものを見る。名前は記録の段・条件で使うので重ならない）。null = まだ無い。
 
 仕様: docs/superpowers/specs/2026-10-18-ui-framework-evaluation.md §4・§5 段取り 4
 """
@@ -28,12 +32,17 @@ import copy
 import json
 import threading
 import time
+from pathlib import Path
+
+from .fpga_signals import FpgaSignals
 
 __all__ = ["CURSORS", "UiStateTools"]
 
 CURSORS = ("selection", "mouse", "reference")
 SOURCES = ("capture", "recording")
-KEYS = ("view", "cursors", "rows", "event", "frame", "sampling", "dashboard")
+KEYS = ("view", "cursors", "rows", "event", "frame", "sampling", "dashboard", "fpga_signals", "system")
+LASTING = ("sampling", "dashboard", "fpga_signals", "system")   # デーモンの再起動を越えて残す（ui_state_persist）
+SYSTEM_ITEMS = 64                                              # システム解析の表・条件の数の上限
 POINTER_TTL_S = 600.0
 DASHBOARD_WIDGETS = 64                                         # 部品の数の上限（画面の MAX_WIDGETS と同じ）
 DASHBOARD_BYTES = 65536                                        # 配置の JSON の大きさの上限
@@ -41,7 +50,7 @@ DASHBOARD_BYTES = 65536                                        # 配置の JSON 
 
 def _default() -> dict:
     return {"view": None, "cursors": dict.fromkeys(CURSORS), "rows": None, "event": None, "frame": 0, "sampling": None,
-            "dashboard": None}
+            "dashboard": None, "fpga_signals": None, "system": None}
 
 
 class UiStateTools:
@@ -52,6 +61,40 @@ class UiStateTools:
         self._ui_state = _default()
         self._ui_rev = 0
         self._ui_pointers: dict[str, dict] = {}
+        self._ui_path: Path | None = None
+        self._ui_rejected: dict = {}                               # 読み戻せなかった保存の項目（そのまま書き戻す）
+
+    def ui_state_persist(self, path: Path) -> None:
+        """長く持つ項目（LASTING: データ サンプリング・操作パネル・FPGA の信号の定義・システム解析の表）を path に
+        保存し、いまある内容を読み戻す（デーモンが起動時に呼ぶ。API のメソッドではない）。壊れたファイルは無視する。"""
+        self._ui_path = Path(path)
+        try:
+            saved = json.loads(self._ui_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return                                                 # 無い・壊れた保存: 既定で始める
+        if not isinstance(saved, dict):
+            return
+        for key in LASTING:                                        # 項目ごとに: 1 つが今の検査に通らなくても残りは戻す
+            if saved.get(key) is None:
+                continue
+            try:
+                self.ui_state_set(**{key: saved[key]})
+            except (ValueError, TypeError, AttributeError):
+                self._ui_rejected[key] = saved[key]                # 戻せなかった項目もファイルからは消さない
+
+    def _ui_save(self, state: dict) -> None:
+        """長く持つ項目をファイルへ（書きかけを残さないよう別名に書いて置き換える）。"""
+        if self._ui_path is None:
+            return
+        try:
+            self._ui_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._ui_path.with_suffix(".tmp")
+            kept = {k: state[k] if state[k] is not None or k not in self._ui_rejected else self._ui_rejected[k]
+                    for k in LASTING}
+            tmp.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._ui_path)
+        except OSError:
+            pass                                                   # 書けない: 画面の状態はそのまま使える
 
     def ui_state_get(self) -> dict:
         """画面の状態（rev は変わるたびに 1 増える番号）。"""
@@ -60,7 +103,8 @@ class UiStateTools:
 
     def ui_state_set(self, view: dict | None = None, cursors: dict | None = None, rows: list[str] | None = None,
                      event: dict | None = None, frame: int | None = None, sampling: dict | None = None,
-                     dashboard: dict | None = None, clear: list[str] | None = None,
+                     dashboard: dict | None = None, fpga_signals: dict | None = None, system: dict | None = None,
+                     clear: list[str] | None = None,
                      origin: str | None = None, caller: dict | None = None) -> dict:
         """画面の状態を変える（渡したものだけ。cursors は渡したカーソルだけ、null で消す）。clear に挙げたもの
         （view / cursors / rows / event / frame / sampling / dashboard）は既定（null・すべて・0）に戻す。sampling はデータ サンプリングの
@@ -89,6 +133,10 @@ class UiStateTools:
             patch["sampling"] = _sampling(sampling)
         if dashboard is not None:
             patch["dashboard"] = _dashboard(dashboard)
+        if fpga_signals is not None:                       # 検査して既定を埋めた形で（fprobe.fpga_signals）
+            patch["fpga_signals"] = FpgaSignals.from_dict(fpga_signals).to_dict()
+        if system is not None:
+            patch["system"] = _system(system)
         with self._ui_lock:
             before = copy.deepcopy(self._ui_state)
             state = self._ui_state
@@ -103,6 +151,8 @@ class UiStateTools:
                 changed.append("pointers")
             if changed:
                 self._ui_rev += 1
+            if any(k in LASTING for k in changed):
+                self._ui_save(state)
             out = {"rev": self._ui_rev, **copy.deepcopy(state), "pointers": self._pointers()}
         if changed:
             publish = getattr(self, "_publish", None)
@@ -146,6 +196,32 @@ class UiStateTools:
         for key in [k for k, p in self._ui_pointers.items() if now - p["time"] > POINTER_TTL_S]:
             del self._ui_pointers[key]
         return [dict(p) for p in self._ui_pointers.values()]
+
+
+def _system(system: dict) -> dict:
+    """システム解析の表と条件: 名前の前後の空白を除く。番地は 32 ビットの語（4 の倍数）、名前は空でなく重ならない。
+    条件は式が空でなく、名前が空なら式。"""
+    watches, conditions = system.get("watches", []), system.get("conditions", [])
+    if not isinstance(watches, list) or not isinstance(conditions, list) or \
+            len(watches) > SYSTEM_ITEMS or len(conditions) > SYSTEM_ITEMS:
+        raise ValueError(f"system.watches・conditions は {SYSTEM_ITEMS} 個までの並び")
+    out_w, names = [], set()
+    for w in watches:
+        name = str(w.get("name", "")).strip() if isinstance(w, dict) else ""
+        address = w.get("address") if isinstance(w, dict) else None
+        if not name or not isinstance(address, int) or not 0 <= address <= 0xFFFF_FFFF or address % 4:
+            raise ValueError(f"system.watches の {w!r}: 名前と 32 ビットの語の番地（4 の倍数）")
+        if name in names:
+            raise ValueError(f"system.watches の名前 {name!r} が重なる")
+        names.add(name)
+        out_w.append({"name": name, "address": address})
+    out_c = []
+    for c in conditions:
+        expr = str(c.get("expr", "")).strip() if isinstance(c, dict) else ""
+        if not expr:
+            raise ValueError(f"system.conditions の {c!r}: 式が空")
+        out_c.append({"name": str(c.get("name", "")).strip() or expr, "expr": expr})
+    return {"watches": out_w, "conditions": out_c}
 
 
 def _view(view: dict) -> dict:

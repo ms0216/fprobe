@@ -11,7 +11,7 @@ from fprobe.itm import DecodeError, Instrumentation, Overflow
 from fprobe.rtos.analysis import find_jobs, job_summary
 from fprobe.rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, job_events,
                               overhead, queue_usage)
-from fprobe.rtos.kernel_trace import (PAYLOAD_CYCLES, CLASSES, EVENTS, KERNEL_PORT, PAYLOAD_PORT, QUEUE_TYPES, WAITS, KernelOp,
+from fprobe.rtos.kernel_trace import (CLASSES, EVENTS, KERNEL_PORT, PAYLOAD_PORT, QUEUE_TYPES, WAITS, KernelOp,
                                       kernel_trace, object_table)
 from fprobe.rtos.timeline import task_events, timeline_from_events
 
@@ -245,31 +245,23 @@ def test_job_events_give_response_times_to_find_jobs():
     trace = kernel_trace(tr.packets)
     events = task_events(tr.packets)
     tl = timeline_from_events(events, NAMES, t_end=120)
-    jobs = find_jobs(tl, PRIO, events=job_events(trace, events))
+    jobs = find_jobs(tl, events=job_events(trace, events))
     hi = [j for j in jobs if j.task == "hi"]
     assert [(j.release, j.end, j.end_reason) for j in hi][:1] == [(41, 60, "blocked")]
     assert job_summary(jobs)["hi"]["response"]["max"] == 19
 
 
-def test_overhead_counts_words_bandwidth_and_cpu_estimate():
+def test_overhead_counts_words_and_bandwidth_without_a_cpu_estimate():
+    # 命令数の見積もり（1 語 14 サイクル等）で CPU の負荷を推定しない（2026-10-18 の実機で見積もり 1.5 % に対し実測
+    # 6.2 % だった）。返すのは数えた語・バイトと、SWO の帯域の使用率（送ったビット ÷ 帯域）だけ
     trace = kernel_trace(producer_consumer().packets)
-    out = overhead(trace, duration=1000, timebase_hz=1000, baud=2_000_000, core_clock_hz=16e6)
+    out = overhead(trace, duration=1000, timebase_hz=1000, baud=2_000_000)
     words = trace.words["task"] + trace.words["kernel"] + trace.words["payload"]
     assert out["words"] == words and out["bytes"] == 5 * words
-    assert out["swo_share"] == pytest.approx(5 * words * 10 / 2e6)
-    assert 0 < out["cpu_share"] < 0.001 and out["by_kind"]["send"] == 2
+    assert out["swo_share"] == pytest.approx(5 * words * 10 / 2e6) and out["by_kind"]["send"] == 2
     assert overhead(trace, duration=1000, timebase_hz=1000)["swo_share"] is None
-
-
-def test_overhead_counts_the_wait_for_the_fifo_behind_the_header():
-    """記録の中身の語は見出しのすぐ後に書くので、見出しが SWO に出る（1 語 = 5 バイト × 10 ビット）まで FIFO の空きを
-    待つ。2026-10-18 の実機（4 Mbaud・16 MHz）で、待ちを数えない見積もり 1.5 % に対し実測 6.2 % だった。"""
-    trace = kernel_trace(producer_consumer().packets)
-    out = overhead(trace, duration=1000, timebase_hz=1000, baud=4_000_000, core_clock_hz=16e6)
-    tx = 50 / 4e6 * 16e6                                                  # 1 語を送る間のコアのクロック数 = 200
-    assert out["fifo_wait_cycles"] == pytest.approx(trace.words["payload"] * (tx - PAYLOAD_CYCLES))
-    assert out["cycles"] == pytest.approx(out["instruction_cycles"] + out["fifo_wait_cycles"])
-    assert overhead(trace, duration=1000, timebase_hz=1000)["fifo_wait_cycles"] is None
+    assert not {"cpu_share", "cycles", "instruction_cycles", "fifo_wait_cycles", "cycles_model"} & set(out)
+    assert not any("8 割" in n for n in overhead(trace, duration=1, timebase_hz=1000, baud=1000)["notes"])
 
 
 def test_kernel_op_dict_names_things():
@@ -282,7 +274,7 @@ def test_kernel_op_dict_names_things():
 # --- 作り直した freertos_demo.elf ---------------------------------------------------------------------
 
 def test_freertos_demo_calls_the_record_from_the_kernel_and_the_record_code_is_small():
-    """カーネルの関数がフックの記録を呼び、記録の関数は小さい（負荷の見積もり WORD_CYCLES 等の前提）。"""
+    """カーネルの関数がフックの記録を呼び、記録の関数は小さい。"""
     from fprobe.disasm import Disassembler
     elf = HEADER.parent / "freertos_demo.elf"
     d = Disassembler.from_elf(elf)
@@ -293,3 +285,16 @@ def test_freertos_demo_calls_the_record_from_the_kernel_and_the_record_code_is_s
                    "vTaskDelay", "xPortSysTickHandler"):
         calls = {i.target_name for i in d.function(caller).instructions if i.flow == "call"}
         assert "fprobe_trace_record" in calls, caller
+
+
+def test_a_failed_operation_after_a_wait_is_failed_not_assumed_timeout():
+    # 起きた後の同じオブジェクトへの操作が失敗した理由（時間切れ・待ちの中断等）は推定しない: outcome = failed
+    tr = Trace().at(0).switch_in(HI)
+    tr.at(5).obj("block", QUEUE, "queue")
+    tr.at(6).switch_out(HI).at(7).switch_in(MID)
+    tr.at(20).record("ready", HI, ipsr=15)
+    tr.at(21).switch_out(MID).at(22).switch_in(HI)
+    tr.at(23).obj("receive_failed", QUEUE, "queue")
+    result = blocking(kernel_trace(tr.packets), NAMES, {}, t_end=50)
+    assert [w["outcome"] for w in result["waits"]] == ["failed"]
+    assert result["tasks"]["hi"]["failed"] == 1 and "timeouts" not in result["tasks"]["hi"]

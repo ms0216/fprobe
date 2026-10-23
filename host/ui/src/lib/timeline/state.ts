@@ -26,13 +26,12 @@ import { announceSelect } from "./events";
 import type { PickedItem } from "./query";
 import {
   EMPTY_CONFIG, RowRegistry, moveGroup, moveRow, parseConfig, setShown, toggleFold, type GroupDef, type RowConfig,
-  type VisibleRow,
-} from "./rows";
+  type VisibleRow, systemOrder } from "./rows";
 import { overlapOf, tileServes, type TileHeader } from "./tile";
 
 export type Source = "capture" | "recording";
 
-/** ビューが時間軸に置く印（検索の結果・解読の注釈・外れ値）。目盛りの帯と縮図に描く。時刻は源の単位 */
+/** ビューが時間軸に置く印（検索の結果・解読の注釈・長い順の上位）。目盛りの帯と縮図に描く。時刻は源の単位 */
 export interface Mark {
   t: number;
   tEnd?: number;
@@ -97,7 +96,8 @@ export interface TimelineSnapshot {
 }
 
 const CAPTURE_METHODS = new Set(["la.capture", "la.collect", "la.deep.capture", "la.deep.collect"]);
-const MARK_METHODS = new Set(["recording.mark"]);      // 記録に印を足す（記録の印の段が変わる）
+// 記録の段が変わる操作: 印を足す・FPGA の信号の定義を変える（記録の情報の名前で段を作り直す）
+const MARK_METHODS = new Set(["recording.mark", "fpga_obs.signals_set"]);
 const MAX_PX_PER_SAMPLE = 32;         // 拡大の限界（1 単位を最大 32 画素に）
 const MAX_TILES = 4;
 const LIVE_POLL_MS = 1000;            // 記録中の範囲の読みの間（前の読みが終わってから）
@@ -147,7 +147,8 @@ export class TimelineState {
   private registry = new RowRegistry();
   private overviewWidth = 0;
   private overviewKey = "";
-  private revealing: Reveal | null = null;   // 源を変える・読み込みの後に当てる reveal
+  private revealing: Reveal | null = null;
+  private lastFullMs = 0;                     // 前の全体の読み込みにかかった時間（記録中の読み直しの間に使う）   // 源を変える・読み込みの後に当てる reveal
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private conn: Conn, private app: AppState, private decimator: Decimator = createDecimator(),
@@ -303,6 +304,11 @@ export class TimelineState {
     this.setConfig(moveGroup(this.snap.config, this.snap.groups, group, before));
   }
 
+  /** システム解析の並び（MCU と FPGA が隣り合う。rows.ts の systemOrder） */
+  arrangeForSystem(flat: number[] = []): void {
+    this.setConfig(systemOrder(this.snap.config, this.snap.groups, flat));
+  }
+
   resetRows(): void {
     this.setConfig(EMPTY_CONFIG);
   }
@@ -405,13 +411,15 @@ export class TimelineState {
     return [...new Set(ids)];
   }
 
-  async capture(r: CaptureRequest): Promise<void> {
-    const trigger = { rise: r.rise ?? 0, fall: r.fall ?? 0 };
+  /** 捕捉して、最新のキャプチャを読み直す。結果（trigger_time = タイムベースのトリガの時刻 等）を返す（失敗は undefined） */
+  async capture(r: CaptureRequest): Promise<{ trigger_time?: number; trigger_index?: number } | undefined> {
+    const trigger = r.crossOnly ? { mask: 1, value: 1, fall: 1, rise: 0 } : { rise: r.rise ?? 0, fall: r.fall ?? 0 };
     const done = r.deep
       ? await this.app.act("la.deep.capture", { rate_hz: r.rate_hz, ...trigger, before_beats: r.beforeBeats ?? 4096,
-                                                  after_beats: r.afterBeats ?? 4096 })
+                                                  after_beats: r.afterBeats ?? 4096, ...(r.rle !== undefined ? { rle: r.rle } : {}) })
       : await this.app.act("la.capture", { rate_hz: r.rate_hz, pretrigger: r.pretrigger, ...trigger });
     if (done !== undefined) this.reload();
+    return done;
   }
 
   /** ほかの窓・AI のマウスのカーソル（ScreenSync が ui.state から） */
@@ -434,13 +442,20 @@ export class TimelineState {
     if (r.source !== this.snap.source) {
       this.revealing = r;
       this.setSource(r.source);
-    } else if (!this.snap.extent) {
-      this.revealing = r;
+    } else if (!this.snap.extent || this.revealTicks(r) >= this.snap.extent[1]) {
+      this.revealing = r;          // 範囲がまだ無い・伸びている記録のまだ読んでいない時刻: 読み直してから当てる
       this.reload();
     } else {
       this.revealing = null;
       this.applyReveal(r);
     }
+  }
+
+  /** 移動先の時刻（源の単位。µs で指定されていれば換算。無ければ -∞） */
+  private revealTicks(r: Reveal): number {
+    const { tickS } = this.snap;
+    if (r.t !== undefined) return r.t;
+    return r.us !== undefined && tickS > 0 ? Math.round(r.us * 1e-6 / tickS) : -Infinity;
   }
 
   private applyReveal(r: Reveal): void {
@@ -508,7 +523,9 @@ export class TimelineState {
         this.reset = false;
         if (!full && this.serving()) continue;
         try {
+          const began = Date.now();
           await (full ? this.fetchAll() : this.fetchAround());
+          if (full) this.lastFullMs = Date.now() - began;
           this.set({ error: null });
           const pending = this.revealing;
           if (full && pending && pending.source === this.snap.source && this.snap.extent) {
@@ -518,6 +535,7 @@ export class TimelineState {
         } catch (e) {
           // 捕捉・記録がまだ無いのは誤りにしない（空のまま）。読みの間に操作があれば、その視点で読み直す
           const message = e instanceof Error ? e.message : String(e);
+          this.revealing = null;                // 当てられなかった移動を残さない（後の関係ない読み直しで当たる）
           if (!/捕捉が無い|読む記録が無い|記録が空/.test(message)) this.set({ error: message });
           else if (full) this.set({ capture: null, extent: null, frame: null, header: null, overview: null });
         }
@@ -533,6 +551,7 @@ export class TimelineState {
     const { source, width } = this.snap;
     if (source === "capture") {
       const result = await this.conn.call("timeline.tiles", { source, t0: 0, t1: null, bin: null }, { quiet: true });
+      if (this.snap.source !== source) return;              // 読む間に源が替わった: 古い源の結果は当てない
       const info = result.capture as CaptureInfo;
       const fresh = info.id !== this.snap.capture?.id;
       const extent: [number, number] = [0, info.length];
@@ -549,13 +568,15 @@ export class TimelineState {
       return;
     }
     const status = await this.conn.call("recording.status", {}, { quiet: true });
+    if (this.snap.source !== source) return;
     if (!status.name || !status.span) throw new Error("読む記録が無い");
     const extent: [number, number] = [status.span[0], status.span[1] + 1];
     const named = status.name !== this.snap.recording;
-    this.dropTiles(true);
-    if (named) this.registry.clear();
     const bin = Math.max(1, Math.floor((extent[1] - extent[0]) / Math.max(1, width) / 2));
     const result = await this.conn.call("timeline.tiles", { source, t0: extent[0], t1: extent[1], bin }, { quiet: true });
+    if (this.snap.source !== source) return;
+    this.dropTiles(true);                       // 新しい全体を受け取ってから捨てる（読みが失敗しても前のタイルは残る）
+    if (named) this.registry.clear();
     this.setOrigin("recording", { t0: extent[0], tickS: result.tick_s });
     const before = this.snap.extent;
     // 新しい記録は全体を表示。範囲が変わったら、端を追いかけていれば追う（戻って見ていれば視点を保つ）
@@ -586,7 +607,7 @@ export class TimelineState {
       }
       this.liveTimer = null;
       this.watchLive();
-    }, this.livePollMs);
+    }, Math.max(this.livePollMs, 2 * this.lastFullMs));    // 重い記録は前の読みの 2 倍空ける（読み込みを続けない）
   }
 
   /** 視点の前後 1 画面ずつを、1 画素の半分の細かさで */

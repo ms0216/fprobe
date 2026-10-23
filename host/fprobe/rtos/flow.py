@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 from ..profile.exceptions import Activation, exception_name
 from .analysis import KernelEvent, inversion_episode, inversion_summary, runs_by_task
-from .kernel_trace import PAYLOAD_CYCLES, RECORD_CYCLES, WORD_CYCLES, KernelOp, KernelTrace, object_table
+from .kernel_trace import KernelOp, KernelTrace, object_table
 from .timeline import TaskEvent, Timeline, name_of
 
 __all__ = ["blocking", "communication_flow", "inversions_from_ops", "isr_activations", "job_events", "overhead",
@@ -148,7 +148,8 @@ class _Wait:
 def blocking(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[int, dict] | None = None,
              t_end: int | None = None, hz: float | None = None) -> dict:
     """待ちの区間: block（オブジェクト・通知を待った）/ delay / suspend から、そのタスクの次の ready まで。
-    outcome: 起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = timeout（分からなければ None）。観測の終わりで
+    outcome: 起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = failed（理由 = 時間切れ・待ちの中断等は推定しない。
+    分からなければ None）。観測の終わりで
     開いている待ちは truncated（統計に入れない）。lost（あふれ）で開いていた待ちは忘れる（forgotten）。"""
     table = object_table(trace, objects)
     open_waits: dict[int, _Wait] = {}
@@ -170,7 +171,7 @@ def blocking(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[int,
             if op.kind == "block":
                 del awaiting[op.actor]
             elif op.obj == w.obj and (op.kind in _SUCCESS or op.kind in _FAILED):
-                w.outcome = "ok" if op.kind in _SUCCESS else "timeout"
+                w.outcome = "ok" if op.kind in _SUCCESS else "failed"
                 del awaiting[op.actor]
         if op.kind == "block" and not op.isr and op.actor is not None:
             on = _object_name(table, op.obj) if op.obj else "notify"
@@ -216,7 +217,7 @@ def _wait_stats(waits: list[_Wait], hz: float | None, by: str, names: Mapping[in
     out = {"count": len(waits), "total": sum(durations), "mean": sum(durations) / len(durations),
            "max": {"t0": longest.t0, "t1": longest.t1, "duration": longest.t1 - longest.t0, "on": longest.on,
                    "task": name_of(names or {}, longest.task)},
-           "timeouts": sum(1 for w in waits if w.outcome == "timeout"), "by_" + by: split}
+           "failed": sum(1 for w in waits if w.outcome == "failed"), "by_" + by: split}
     if hz:
         out["total_us"] = out["total"] * 1e6 / hz
         out["max"]["duration_us"] = out["max"]["duration"] * 1e6 / hz
@@ -420,30 +421,18 @@ def job_events(trace: KernelTrace, task_events: Iterable[TaskEvent] = ()) -> lis
 
 def overhead(trace: KernelTrace, duration: int, timebase_hz: float, baud: float | None = None,
              core_clock_hz: float | None = None) -> dict:
-    """トレースの語の数（ポート 31・見出し・中身）・SWO のバイト数と帯域の使用率・CPU の負荷の見積もり。
-    CPU は語の数 × 1 語あたりの命令の見積もり（kernel_trace の WORD_CYCLES 等）+ FIFO の待ち / コアのクロック。
-    FIFO の待ち（baud と core_clock_hz があるとき）: 記録の中身の語は見出しのすぐ後に書くので、見出しが SWO に出る
-    （1 語 = 5 バイト × 10 ビット）まで待つ。語どうしが離れている分（ポート 31 の語・記録の見出し）の待ちは数えない
-    （swo_share が 1 に近いとそれも増え、あふれる）。"""
+    """トレースの語の数（ポート 31・見出し・中身）・SWO のバイト数と、帯域の使用率（送ったビット ÷ 帯域。baud が
+    あるとき）。数えた事実だけで、CPU の負荷は推定しない（命令数の見積もりは実機で 4 倍外れた。負荷は実測する:
+    gateware/tests/hil/test_trace_hooks_hw.py = トレースの有無でアイドルの回る数を比べる）。core_clock_hz は使わない
+    （互換のために受ける）。"""
     w = trace.words
     words = w["task"] + w["kernel"] + w["payload"]
     seconds = duration / timebase_hz if timebase_hz else 0
-    instructions = w["task"] * WORD_CYCLES + w["kernel"] * RECORD_CYCLES + w["payload"] * PAYLOAD_CYCLES
-    wait = None
-    if baud and core_clock_hz:
-        wait = w["payload"] * max(0.0, 50 / baud * core_clock_hz - PAYLOAD_CYCLES)
-    cycles = instructions + (wait or 0)
     out = {"words": words, "words_by_port": dict(w), "bytes": 5 * words, "seconds": seconds,
            "words_per_s": words / seconds if seconds else None, "by_kind": trace.by_kind(), "lost": trace.lost,
-           "cycles": cycles, "instruction_cycles": instructions, "fifo_wait_cycles": wait,
-           "swo_share": None, "cpu_share": None,
-           "cycles_model": {"task_word": WORD_CYCLES, "record": RECORD_CYCLES, "payload_word": PAYLOAD_CYCLES},
-           "notes": ["CPU の負荷は命令数と、記録の中身の語が FIFO の空きを待つ時間からの見積もり。実機の計測は"
-                     "gateware/tests/hil/test_trace_hooks_hw.py（トレースの有無でアイドルの回る数を比べる）"]}
+           "swo_share": None,
+           "notes": ["CPU の負荷は推定しない（実測は gateware/tests/hil/test_trace_hooks_hw.py: トレースの有無で"
+                     "アイドルの回る数を比べる）"]}
     if baud and seconds:
         out["swo_share"] = 5 * words * 10 / baud / seconds
-        if out["swo_share"] > 0.8:
-            out["notes"].append("SWO の帯域の 8 割を超えている: ITM の FIFO が待ち・あふれる。SWO を速くするか出来事を減らす")
-    if core_clock_hz and seconds:
-        out["cpu_share"] = cycles / core_clock_hz / seconds
     return out

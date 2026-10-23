@@ -135,10 +135,10 @@ class GdbTraceTools:
         if self._symbols is None or getattr(self, "_monitor", None) is not None:
             return None
         report = assess(self._symbols.names())
-        if not report["risky"]:
+        if not report["matched"]:
             return None
-        reasons = "、".join(f"{r['kind']}（{', '.join(r['symbols'][:2])}）" for r in report["reasons"])
-        return (f"止めると壊れうるターゲット: {reasons}。トレースポイントは当たるたびにコアを止めて集める（1 回に数 ms と、"
+        found = "、".join(f"{r['kind']}（{', '.join(r['symbols'][:2])}）" for r in report["matches"])
+        return (f"ELF に、止めている間も外の相手が待たない処理の名前がある: {found}。トレースポイントは当たるたびにコアを止めて集める（1 回に数 ms と、"
                 "止まったことに気づくまでの見張りの周期）。許すなら monitor trace allow-halt、止めずに済ませるならモニタ方式"
                 "（monitor target.debug_mode.set mode=monitor）か変数のライブ観測（monitor watch.set）")
 

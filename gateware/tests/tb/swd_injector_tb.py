@@ -139,12 +139,17 @@ async def injection_uses_the_host_state_shadow(dut):
     assert await inject(dut) == 0
     slow = model.transactions[n:]
     assert len(slow) == 10 and sum(1 for t in slow if t[1]) == 3    # CSW・TAR・RDBUFF を読む
+    assert int(dut.inj_transfers.value) == 7                       # R20: 停止の書き込みまでの転送数（読んで保存する経路）
     await dap.transfer((AP_TAR_W, 0x20000100))
     n = len(model.transactions)
     assert await inject(dut) == 0
     fast = model.transactions[n:]
     assert len(fast) == 7 and not any(t[1] for t in fast)          # 読みが無い
     assert [t[0] for t in fast[:4]] == [0, 1, 1, 1]                 # SELECT, CSW, TAR, DRW（停止）
+    assert int(dut.inj_transfers.value) == 4                       # R20: 控えを使う経路
+    model.wait_next = 2                                            # 次の AP アクセス 2 回は WAIT: 繰り返しも数える
+    assert await inject(dut) == 0
+    assert int(dut.inj_transfers.value) == 6
     assert model.memory[DHCSR] == HALT
     assert (await dap.block(AP_DRW_W, 1, [0x55]))[:2] == (1, OK)  # TAR が戻っている
     assert model.memory[0x20000100] == 0x55

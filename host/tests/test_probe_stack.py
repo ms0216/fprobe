@@ -93,7 +93,7 @@ def test_paint_then_measure_the_msp(probe):
     m = probe.stack_usage(threshold=0.5)
     assert m["current"] == 0x40 and m["warning"] and m["fraction"] == 0.5
     target.memory.write_memory(BOTTOM, b"\x00" * 16)
-    assert probe.stack_usage()["overflow"]
+    assert probe.stack_usage()["reached_bottom"]
 
 
 def test_paint_needs_a_halted_core_and_room(probe):
@@ -112,7 +112,7 @@ def test_paint_needs_a_halted_core_and_room(probe):
 def test_usage_without_paint_is_marked(probe):
     connect(probe)
     m = probe.stack_usage()
-    assert not m["painted"] and m["overflow"] and any("塗" in n for n in m["notes"])
+    assert not m["painted"] and m["reached_bottom"] and any("塗" in n for n in m["notes"])
 
 
 def test_stack_static_reuses_the_loaded_symbols(probe, monkeypatch):

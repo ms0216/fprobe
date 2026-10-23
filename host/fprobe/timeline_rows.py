@@ -107,6 +107,27 @@ class Rule:
         return " AND ".join(clauses) or "1", args
 
 
+# Cortex-M のデバッグ・システム制御のレジスタ（ARMv6-M / v7-M / v8-M 共通の番地）。DAP の段のラベルに名前で出す
+_DEBUG_REGISTERS = {0xE000EDF0: "DHCSR", 0xE000EDF4: "DCRSR", 0xE000EDF8: "DCRDR", 0xE000EDFC: "DEMCR",
+                    0xE000ED0C: "AIRCR", 0xE000ED30: "DFSR", 0xE000ED00: "CPUID", 0xE0002000: "FP_CTRL"}
+
+
+def _dhcsr_action(e: Event) -> str | None:
+    """DHCSR への書き込み（DBGKEY つき）の意味: halt（C_HALT）/ step（C_STEP）/ run（どちらも無い）。それ以外は None。"""
+    if e.kind not in ("ap_write", "inject") or e.a != 0xE000EDF0 or e.b >> 16 != 0xA05F:
+        return None
+    return "step" if e.b & 0x4 else "halt" if e.b & 0x2 else "run"
+
+
+def _ap_label(e: Event) -> str:
+    """AP の読み書きのラベル: R / W、番地（デバッグのレジスタは名前）、値、DHCSR の書き込みは意味（halt 等）。"""
+    action = _dhcsr_action(e)
+    head = "xtrig W" if e.kind == "inject" else "R" if "read" in e.kind else "W"
+    transfers = _body(e, "transfers", None) if e.kind == "inject" else None
+    return (f"{head} {_DEBUG_REGISTERS.get(e.a, _hex(e.a))} = {_hex(e.b)}" + (f" ({action})" if action else "")
+            + (f" [{transfers} transfers]" if transfers is not None else ""))
+
+
 def _j(path: str) -> str:
     """本体の JSON の欄（SQL）。"""
     return f"json_extract(body, '$.{path}')"
@@ -145,8 +166,8 @@ def _rules() -> dict[str, list[Rule]]:
     dap_label = lambda e: (f"{'R' if 'read' in e.kind else 'W'} {_hex(e.a)}" +           # noqa: E731
                            (f" = {_hex(e.b)}" if e.kind != "fail" else ""))
     dap = [
-        Rule("dap", "ap", "points", ("ap_read", "ap_write"), label=dap_label, address=lambda e: e.a, jump="memory",
-             tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "normal"),
+        Rule("dap", "ap", "points", ("ap_read", "ap_write", "inject"), label=_ap_label, address=lambda e: e.a, jump="memory",
+             tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "warn" if _dhcsr_action(e) == "halt" else "normal"),
         Rule("dap", "dp", "points", ("dp_read", "dp_write"), label=dap_label,
              tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "normal"),
         Rule("dap", "fail", "points", label=lambda e: f"{e.kind} {_hex(e.a)}", tone=lambda e: "bad"),
@@ -155,7 +176,9 @@ def _rules() -> dict[str, list[Rule]]:
                 value_sql="b / 1000.0", unit="V"),
            Rule("aux", "other", "points", label=lambda e: e.kind)]
     sample = [Rule("sample", "word", "values", key=lambda e: e.a, key_sql="a", title=lambda e: _hex(e.a),
-                   title_sql="printf('0x%08X', a)", value=lambda e: float(e.b), value_sql="b",
+                   title_sql="printf('0x%08X', a)",
+                   value=lambda e: float(e.b) if _body(e, "ack", 1) == 1 else None,          # 読めなかった語は値なし
+                   value_sql=f"CASE WHEN COALESCE({_j('ack')}, 1) = 1 THEN b END",
                    address=lambda e: e.a, jump="memory",
                    tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "normal")]
     name = lambda e: _body(e, "name")                                      # noqa: E731
@@ -202,9 +225,19 @@ def _rules() -> dict[str, list[Rule]]:
         Rule("testpoint", "hit", "points", label=lambda e: _body(e, "name") or f"#{e.a}"),
     ]
     snapshot = [Rule("snapshot", "save", "points", label=lambda e: e.kind, address=pc_of, jump="source")]
+    # FPGA の観測: 段は fprobe.timeline_fpga が記録の信号の定義で展開した仮の出来事から（生の値の SQL は使わない）
+    row = lambda e: _body(e, "row")                                      # noqa: E731
+    fpga = [Rule("fpga", "state", "state", ("signal_state",), key=row, title=lambda e: _body(e, "title"),
+                 label=lambda e: _body(e, "text")),
+            Rule("fpga", "number", "values", ("signal_number",), key=row, title=lambda e: _body(e, "title"),
+                 label=lambda e: _body(e, "text"), value=lambda e: None if _body(e, "unknown") else float(e.b)),
+            Rule("fpga", "gap", "points", ("gap",), label=lambda e: f"-{e.a}", tone=lambda e: "bad"),
+            Rule("fpga", "hidden", "points", ("hidden",), label=lambda e: f"+{e.a}"),     # 標本型の標本の間の変化
+            Rule("fpga", "group", "points", ("group",), label=lambda e: f"#{e.a}"),
+            Rule("fpga", "other", "points", label=lambda e: e.kind)]
     clock = [Rule("clock", "point", "points", hidden=True)]
     out: dict[str, list[Rule]] = {}
-    for rules in (rtos, uart, swo, dap, aux, sample, user, annotation, host, target, testpoint, snapshot, clock):
+    for rules in (rtos, uart, swo, dap, aux, sample, user, annotation, host, target, testpoint, snapshot, clock, fpga):
         out[rules[0].stream] = rules
     return out
 

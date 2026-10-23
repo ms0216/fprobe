@@ -1,5 +1,5 @@
 """Probe の道具: ヒープの解析（U27）。走査（使用量・断片化・壊れ）と、malloc / free の記録（ブレークポイント）からの
-リークの候補。
+呼び出し元ごとの生きている確保（リークかは判定しない）。
 
 Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_where / _place_of・
 _record_host・_watch_stops と、BreakpointActions の _break_hooks（道具が置くブレークポイントの処理）を使う。
@@ -110,7 +110,7 @@ class HeapTools:
 
     def heap_trace_start(self, allocators: list[str] | None = None) -> dict:
         """malloc / free の記録を始める（確保・解放の関数にブレークポイント。止めずに続ける）。記録中なら
-        stream "heap" にも入る。→ `heap_trace_report`（リークの候補）/ `heap_trace_events`。"""
+        stream "heap" にも入る。→ `heap_trace_report`（呼び出し元ごとの生きている確保）/ `heap_trace_events`。"""
         with self._lock:
             if self._heap_trace is not None and self._heap_trace.active:
                 raise RuntimeError("記録している（heap_trace_stop を先に）")
@@ -178,9 +178,10 @@ class HeapTools:
             trace.active = False
             trace.notes.append("breakpoint_clear でブレークポイントが外れたので記録が止まった")
 
-    def heap_trace_report(self, min_age_s: float = 1.0, top: int = 20) -> dict:
+    def heap_trace_report(self, min_age_s: float = 0.0, top: int = 20) -> dict:
         """記録の要約: 確保・解放の回数、生きている確保、最大の使用量、誤り（二重の解放・失敗・解放されていない番地の
-        再利用）、リークの候補（呼び出し元ごと。min_age_s より古い生きている確保。growing = 増え続ける）、使用量の推移。
+        再利用）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。live_counts = 5 つの時点の
+        生きている数。リークかは判定しない）、使用量の推移。
         時刻は記録を始めてからの秒。"""
         with self._lock:
             trace = self._heap_trace
@@ -191,8 +192,9 @@ class HeapTools:
             t0 = trace.started
             for issue in out["issues"]:
                 issue["t"] = round(issue["t"] - t0, 6)
-            for leak in out["leak_candidates"]:
-                leak["oldest_age_s"] = round(now - leak.pop("oldest_t"), 3)
+            for c in out["live_by_caller"]:
+                c["oldest_age_s"] = round(now - c.pop("oldest_t"), 3)
+                c["live_counts"] = [(round(t - t0, 6), n) for t, n in c["live_counts"]]
             out["series"] = [(round(t - t0, 6), b) for t, b in out["series"]]
             out.update(active=trace.active, elapsed_s=round(now - t0, 3), notes=list(trace.notes),
                        functions=sorted({e.function for e in trace.entries.values()}))

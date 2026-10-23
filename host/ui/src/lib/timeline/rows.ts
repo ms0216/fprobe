@@ -177,6 +177,23 @@ export function moveGroup(c: RowConfig, groups: GroupDef[], group: string, befor
   return { ...c, groups: order };
 }
 
+/** システム解析の並び: MCU と FPGA が隣り合うように、MCU のメモリの標本 → FPGA の観測 → ピン（ロジアナ。MCU の目印も）
+ *  → DAP の転送 → 端末 → 調査の印を先に置き、残りは今の並びのまま。それらは開き、ほかは畳む。flat = 記録の中で変化の無いピンの ch
+ *  （隠す。16 段が画面を占めて MCU の段が見えなくなるのを防ぐ。段の表示の設定から戻せる） */
+export const SYSTEM_GROUPS = ["sample", "fpga", "target", "logic", "dap", "uart", "swo", "rtt", "user", "annotation"];
+/** システム解析で畳むまとまり（操作の記録・時計の対応・流しの印）。まだ無くても畳む（記録に切り替えた直後にも効く） */
+const SYSTEM_FOLDED = ["host", "clock", "la"];
+
+export function systemOrder(c: RowConfig, groups: GroupDef[], flat: number[] = []): RowConfig {
+  // まだ無いまとまりも並びに入れる（並びは名前の順位なので、無いものは効かない。記録に切り替えた直後にも効く）
+  const ids = groups.map((x) => x.id);
+  const hide = flat.map((ch) => `wave:${ch}`);
+  return { ...c, groups: [...SYSTEM_GROUPS, ...ids.filter((id) => !SYSTEM_GROUPS.includes(id))],
+           folded: [...new Set([...ids.filter((id) => !SYSTEM_GROUPS.includes(id)), ...SYSTEM_FOLDED])],
+           hidden: [...c.hidden, ...hide.filter((id) => !c.hidden.includes(id))],
+           shown: c.shown.filter((id) => !hide.includes(id)) };
+}
+
 export function parseConfig(text: string | null): RowConfig {
   try {
     const v = JSON.parse(text ?? "");

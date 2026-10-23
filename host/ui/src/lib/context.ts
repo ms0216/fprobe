@@ -8,7 +8,7 @@ import type { Reveal } from "./timeline/state";
 
 export interface Shared extends CommandContext {
   conn: Pick<DaemonConnection, "call" | "on" | "onLink">;
-  dock: { show(panel: string): void; reset(): void };
+  dock: { show(panel: string): void; reset(): void; layout(name: "default" | "system"): void };
   screen: ScreenSync;
   /** ビューの行から時間軸のその時刻へ飛ぶ（Timeline のパネルを前に出し、選択カーソルを置く） */
   reveal(r: Reveal): void;
@@ -16,6 +16,8 @@ export interface Shared extends CommandContext {
   showAddress(address: number): void;
   /** Memory のパネルをその番地で開く（時間軸のダブルクリック・ビューの番地から） */
   showMemory(address: number): void;
+  /** API のパネルをそのメソッドと引数で開く（Activity の行から） */
+  showApi(method: string, params: Record<string, unknown>, favorite?: string): void;
 }
 
 export const SHARED = Symbol("fprobe");

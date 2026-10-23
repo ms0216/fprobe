@@ -35,11 +35,13 @@ def test_unknown_devices_ir_lengths_are_measured_from_capture_ir():
     assert [d.ir_length_source for d in scan.devices] == ["measured", "measured"]
 
 
-def test_ambiguous_capture_ir_is_marked_guessed():
+def test_ambiguous_capture_ir_is_left_undecided_with_the_candidates():
+    # 境目の候補が複数あるとき、いちばん近いものを選んで推測しない。決まらないまま候補を返す（chain は None）
     chain = FakeChain([Tap(4, 0x11111111, ir_capture=0b0101), Tap(3, 0x22222223, ir_capture=0b001)])
     scan = jc.scan_chain(chain)
-    assert scan.devices[0].ir_length_source == "guessed"
-    assert any("推測" in n for n in scan.notes)
+    first = scan.devices[0]
+    assert first.ir_length is None and first.ir_length_source == "ambiguous" and first.ir_candidates == [2, 4]
+    assert scan.chain is None and any("決まらない" in n for n in scan.notes)
 
 
 def test_the_scan_never_loads_zero_into_an_ir():
@@ -53,6 +55,7 @@ def test_the_scan_never_loads_zero_into_an_ir():
 def test_stuck_tdo_is_reported(stuck, expected):
     scan = jc.scan_chain(FakeChain([Tap(4, DP)], tdo_stuck=stuck))
     assert scan.tdo == expected and not scan.devices and scan.notes
+    assert not any(w in n for n in scan.notes for w in ("配線", "電源", "プルアップ", "確かめる"))   # 原因の候補は並べない
 
 
 def test_shift_device_puts_the_others_in_bypass():
@@ -95,3 +98,17 @@ def test_sequences_are_at_most_64_clocks():
             assert cycles <= 64
             return super().sequence(cycles, tms, tdi, capture)
     jc.scan_chain(Counting([Tap(4, DP)]))
+
+
+def test_a_boundary_that_leaves_too_few_bits_for_the_rest_is_not_a_candidate():
+    # 2 台目の Capture-IR の最上位が 1 でも（上位のビットは任意）、残りの装置に 2 ビット未満しか残らない位置は境目に
+    # なれない。候補が 1 つに決まるなら measured
+    chain = FakeChain([Tap(4, 0x11111111, ir_capture=0b0001), Tap(3, 0x22222223, ir_capture=0b101)])
+    scan = jc.scan_chain(chain)
+    assert scan.chain == [4, 3] and [d.ir_length_source for d in scan.devices] == ["measured", "measured"]
+
+
+def test_three_unknown_devices_split_when_the_boundaries_match_the_count():
+    chain = FakeChain([Tap(4, 0x11111111, ir_capture=0b0001), Tap(3, 0x22222223, ir_capture=0b001),
+                       Tap(5, 0x33333333, ir_capture=0b00001)])
+    assert jc.scan_chain(chain).chain == [4, 3, 5]

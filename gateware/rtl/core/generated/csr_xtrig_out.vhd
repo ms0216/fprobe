@@ -1,5 +1,5 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
--- CSR ブロック xtrig_out（0x00000D00, 64 バイト）: クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ）
+-- CSR ブロック xtrig_out（0x00000D00, 64 バイト）: クロストリガの動作: 出力の端子（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md）。動作 k（同時に 2 本）が、ボードの出力の端子の候補（ケイパビリティ OUTPUTS）の 1 本を動かす。源は xtrig と同じ（bit0 ロジアナのトリガ、bit1 DAP の番地一致、bit2 ホストの指令、bit3 多段トリガ、bit4 FPGA の観測の値の一致、bit5 サンプラの値の一致）
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
 -- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
 library ieee;
@@ -21,7 +21,7 @@ entity csr_xtrig_out is
     status_active : in  std_logic_vector(1 downto 0);   -- status.active（RO）
     when0_mask : out std_logic_vector(7 downto 0);   -- when0.mask（RW）
     when0_value : out std_logic_vector(7 downto 0);   -- when0.value（RW）
-    when0_sources : out std_logic_vector(3 downto 0);   -- when0.sources（RW）
+    when0_sources : out std_logic_vector(5 downto 0);   -- when0.sources（RW）
     when0_any : out std_logic;   -- when0.any（RW）
     ctrl0_enable : out std_logic;   -- ctrl0.enable（RW）
     ctrl0_mode : out std_logic_vector(1 downto 0);   -- ctrl0.mode（RW）
@@ -32,7 +32,7 @@ entity csr_xtrig_out is
     ctrl0_pin : out std_logic_vector(1 downto 0);   -- ctrl0.pin（RW）
     when1_mask : out std_logic_vector(7 downto 0);   -- when1.mask（RW）
     when1_value : out std_logic_vector(7 downto 0);   -- when1.value（RW）
-    when1_sources : out std_logic_vector(3 downto 0);   -- when1.sources（RW）
+    when1_sources : out std_logic_vector(5 downto 0);   -- when1.sources（RW）
     when1_any : out std_logic;   -- when1.any（RW）
     ctrl1_enable : out std_logic;   -- ctrl1.enable（RW）
     ctrl1_mode : out std_logic_vector(1 downto 0);   -- ctrl1.mode（RW）
@@ -52,7 +52,7 @@ architecture rtl of csr_xtrig_out is
   signal index : natural range 0 to 15;
   signal when0_mask_r : std_logic_vector(7 downto 0) := "00000000";
   signal when0_value_r : std_logic_vector(7 downto 0) := "00000000";
-  signal when0_sources_r : std_logic_vector(3 downto 0) := "0000";
+  signal when0_sources_r : std_logic_vector(5 downto 0) := "000000";
   signal when0_any_r : std_logic := '0';
   signal ctrl0_enable_r : std_logic := '0';
   signal ctrl0_mode_r : std_logic_vector(1 downto 0) := "00";
@@ -63,7 +63,7 @@ architecture rtl of csr_xtrig_out is
   signal ctrl0_pin_r : std_logic_vector(1 downto 0) := "00";
   signal when1_mask_r : std_logic_vector(7 downto 0) := "00000000";
   signal when1_value_r : std_logic_vector(7 downto 0) := "00000000";
-  signal when1_sources_r : std_logic_vector(3 downto 0) := "0000";
+  signal when1_sources_r : std_logic_vector(5 downto 0) := "000000";
   signal when1_any_r : std_logic := '0';
   signal ctrl1_enable_r : std_logic := '0';
   signal ctrl1_mode_r : std_logic_vector(1 downto 0) := "00";
@@ -85,7 +85,7 @@ begin
       if rst = '1' then
         when0_mask_r <= "00000000";
         when0_value_r <= "00000000";
-        when0_sources_r <= "0000";
+        when0_sources_r <= "000000";
         when0_any_r <= '0';
         ctrl0_enable_r <= '0';
         ctrl0_mode_r <= "00";
@@ -96,7 +96,7 @@ begin
         ctrl0_pin_r <= "00";
         when1_mask_r <= "00000000";
         when1_value_r <= "00000000";
-        when1_sources_r <= "0000";
+        when1_sources_r <= "000000";
         when1_any_r <= '0';
         ctrl1_enable_r <= '0';
         ctrl1_mode_r <= "00";
@@ -113,13 +113,13 @@ begin
           when 1 =>   -- when0
             rdata(7 downto 0) <= when0_mask_r;
             rdata(15 downto 8) <= when0_value_r;
-            rdata(19 downto 16) <= when0_sources_r;
-            rdata(20) <= when0_any_r;
+            rdata(21 downto 16) <= when0_sources_r;
+            rdata(24) <= when0_any_r;
             if bus_we = '1' then
               when0_mask_r <= bus_wdata(7 downto 0);
               when0_value_r <= bus_wdata(15 downto 8);
-              when0_sources_r <= bus_wdata(19 downto 16);
-              when0_any_r <= bus_wdata(20);
+              when0_sources_r <= bus_wdata(21 downto 16);
+              when0_any_r <= bus_wdata(24);
             end if;
           when 2 =>   -- ctrl0
             rdata(0) <= ctrl0_enable_r;
@@ -141,13 +141,13 @@ begin
           when 3 =>   -- when1
             rdata(7 downto 0) <= when1_mask_r;
             rdata(15 downto 8) <= when1_value_r;
-            rdata(19 downto 16) <= when1_sources_r;
-            rdata(20) <= when1_any_r;
+            rdata(21 downto 16) <= when1_sources_r;
+            rdata(24) <= when1_any_r;
             if bus_we = '1' then
               when1_mask_r <= bus_wdata(7 downto 0);
               when1_value_r <= bus_wdata(15 downto 8);
-              when1_sources_r <= bus_wdata(19 downto 16);
-              when1_any_r <= bus_wdata(20);
+              when1_sources_r <= bus_wdata(21 downto 16);
+              when1_any_r <= bus_wdata(24);
             end if;
           when 4 =>   -- ctrl1
             rdata(0) <= ctrl1_enable_r;

@@ -66,8 +66,8 @@ describe("実行すると API を呼ぶ", () => {
     const conn = new FakeConn({ "debug.step": {}, "target.resume": {}, "target.halt": {}, "debug.breakpoint.set": {},
                                 "debug.breakpoint.list": { breakpoints: [], watchpoints: [] }, "debug.elf.load_demo":
                                   { path: "/demo.elf", files: [] }, "debug.source.list": { files: [] },
-                                "debug.halt_risk": { elf: "/x/app.elf", risky: true, monitor_in_elf: false,
-                                                     reasons: [{ kind: "radio", count: 1, symbols: ["RADIO_IRQHandler"] }] } });
+                                "debug.halt_risk": { elf: "/x/app.elf", matched: true, monitor_in_elf: false,
+                                                     matches: [{ kind: "radio", count: 1, symbols: ["RADIO_IRQHandler"] }] } });
     const app = new AppState(conn as any);
     const dbg = new Debugger(conn as any, app);
     const ui = new UiState();
@@ -125,6 +125,17 @@ describe("実行すると API を呼ぶ", () => {
       ["target.reset", { halt: true, kind: "system" }],
     ]));
     expect(command("stepInstruction").blocked({ ...halted, target: "RUNNING" })).toBe("tip.notHalted");
+  });
+
+  it("チップ全体のリセット（RP2040 の救済の DP）は RP2040 に接続中だけ。target.reset kind=rescue", async () => {
+    const rp = { ...halted, target: "RUNNING", part: "rp2040_core0" };
+    expect(command("rescueReset").blocked(rp)).toBeNull();
+    expect(command("rescueReset").blocked({ ...rp, part: "stm32f401xe" })).toBe("tip.noRescue");
+    expect(command("rescueReset").blocked({ ...rp, target: "DISCONNECTED" })).toBe("tip.notConnected");
+    const { conn, ctx } = setup();
+    conn.responders["target.reset"] = {};
+    await command("rescueReset").run(ctx, rp);
+    expect(conn.calls.map(([m, p]) => [m, p])).toContainEqual(["target.reset", { kind: "rescue" }]);
   });
 
   it("Load Demo は開いた ELF を最近使った項目に足す。Open ELF はダイアログを開く", async () => {
