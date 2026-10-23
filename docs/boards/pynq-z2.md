@@ -67,6 +67,24 @@ TCK・TMS が別の穴に入った）: ヘッダ 15 → J14、16 → J16、18 �
   -149 ns（ロジアナの入り口 7.5 刻み・観測の写し取り 2.5 周期・記録 1 周期。残りの -12 ns は端子と線）。
 - XIAO のサンプラの出来事と FPGA の観測が、同じイベントの記録に時刻の順で並ぶ。
 
+## PS の DAP の JTAG（PJTAG、Raspberry Pi のヘッダ）
+
+PS（Cortex-A9）の DAP を、fprobe の汎用の JTAG の口からジャンパ線でつなぐための端子
+（docs/superpowers/specs/2026-10-23-zynq-pjtag-design.md）。fprobe_pynq・fprobe_pynq_deep の回路が、PS7 の PJTAG（EMIO）を
+そのまま端子へ素通しする。**DAP がこの線につながるのは、起動のときに MIO2 = 1（independent）のときだけ**。今の基板
+（MIO2 = 0、cascade）では PS はこの線を見ない（TDO の出力は出るが意味は無い）。
+
+| 役目 | ヘッダの番号 | Raspberry Pi の名前 | FPGA | FPGA のプル |
+|---|---|---|---|---|
+| TCK（入力） | 23 | GPIO11 | W10 | 引き下げ |
+| TMS（入力） | 24 | GPIO8 | F19 | 引き上げ |
+| TDI（入力） | 19 | GPIO10 | V8 | 引き上げ |
+| TDO（出力） | 21 | GPIO9 | V10 | — |
+| GND | 25 | — | — | — |
+
+- 出典は上の観測の口と同じ base.xdc（rpi_gpio_tri_io の GPIO8〜11）。この 4 本は実機ではまだ確かめていない。
+- independent にすると、基板の USB の JTAG（hw_server）からは PS の DAP が見えなくなる（PL の書き込みはできる）。
+
 ## PL の書き込み
 
 PYNQ の Linux 経由（`pynq.Bitstream`・fpga_manager）で書くと Linux が固まった（2026-10-19）。JTAG（Vivado の hw_server）で

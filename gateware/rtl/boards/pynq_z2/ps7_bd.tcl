@@ -4,7 +4,9 @@
 # 変換は 1 語ずつの読み書きにし、AXI3 の ID・バーストの応答を PL の回路が持たなくてよいようにする。
 # ACLK は外から入れる sys（MMCM の 100 MHz）。FCLK・PS のリセットの出力は使わない（クロックまたぎを作らない）。
 # 番地は 0x40000000 から 4 KB（zynq_frame_link のレジスタ。PS の中継が /dev/mem で写す）。
-# 生成される包み ps7_bd_wrapper の口: aclk・aresetn・m_axi_*（DDR と MIO は PS の専用の端子で、外に出さない）。
+# 生成される包み ps7_bd_wrapper の口: aclk・aresetn・m_axi_*・pjtag_*（DDR と MIO は PS の専用の端子で、外に出さない）。
+# PS の DAP の PJTAG を EMIO にして口 pjtag_tck・tms・tdi（入）・tdo（出）に出す（ボードの端子へ素通し。DAP がつながるのは
+# independent の起動のときだけ。docs/superpowers/specs/2026-10-23-zynq-pjtag-design.md）。
 #
 # 呼ぶ前に fprobe_hp0 = 1 にすると（ps7_hp_bd.tcl）、S_AXI_HP0（AXI3、64 ビット、ACLK = aclk）も口 s_axi_hp0_* として出し、
 # PL から PS の DDR（0〜512 MB）を読み書きできるようにする（P3 の深いバッファ。axi_mem_port がつながる）。
@@ -18,7 +20,13 @@ set_property -dict [list \
   CONFIG.PCW_USE_M_AXI_GP0 1 \
   CONFIG.PCW_EN_CLK0_PORT 0 \
   CONFIG.PCW_EN_RST0_PORT 0 \
+  CONFIG.PCW_PJTAG_PERIPHERAL_ENABLE 1 \
+  CONFIG.PCW_PJTAG_PJTAG_IO EMIO \
 ] $ps
+foreach {port dir} {tck I tms I tdi I tdo O} {
+  create_bd_port -dir $dir pjtag_$port
+  connect_bd_net [get_bd_ports pjtag_$port] [get_bd_pins ps/PJTAG_[string toupper $port]]
+}
 
 set conv [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter conv]
 set_property -dict [list CONFIG.SI_PROTOCOL AXI3 CONFIG.MI_PROTOCOL AXI4LITE CONFIG.TRANSLATION_MODE 2] $conv

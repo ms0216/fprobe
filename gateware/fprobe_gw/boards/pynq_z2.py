@@ -32,6 +32,10 @@ _JA = "Y18 Y19 Y16 Y17 U18 U19 W18 W19"
 # ID_SD/ID_SC は PMOD JA と共有）。GPIO22〜25 = ヘッダの 15・16・18・22 番（GND は 20 番）を使う。
 # 基板の抵抗は未確認（PMOD と違い制約ファイルにプルの指定が無い）。FPGA のプルは JTAG の慣例（TCK は下げ、他は上げ）
 _OBS_JTAG = (("obs_tck", "U8", "DOWN"), ("obs_tms", "W6", "UP"), ("obs_tdi", "Y7", "UP"), ("obs_tdo", "F20", "UP"))
+# PS の DAP の PJTAG（EMIO）を出す端子（docs/superpowers/specs/2026-10-23-zynq-pjtag-design.md）: Raspberry Pi のヘッダの
+# GPIO11 = 23 番（TCK）・GPIO8 = 24 番（TMS）・GPIO10 = 19 番（TDI）・GPIO9 = 21 番（TDO）、GND は 25 番。出典は上と同じ。
+# DAP がこの線につながるのは independent の起動（MIO2 = 1、JTAG_JP1）のときだけ。cascade では PS は入力を見ない
+_PS_PJTAG = (("ps_pjtag_tck", "W10", "DOWN"), ("ps_pjtag_tms", "F19", "UP"), ("ps_pjtag_tdi", "V8", "UP"))
 
 PYNQ_Z2 = Board(
     name="PYNQ-Z2",
@@ -51,6 +55,7 @@ PYNQ_Z2 = Board(
         "sync": (Pin("sync_in", "B19", pull="DOWN"), Pin("sync_out", "A20", drive=8)),
         "obs_jtag": tuple(Pin(port, loc, pull=pull, drive=8) if port != "obs_tdo" else Pin(port, loc, pull=pull)
                           for port, loc, pull in _OBS_JTAG),
+        "ps_pjtag": (*(Pin(port, loc, pull=pull) for port, loc, pull in _PS_PJTAG), Pin("ps_pjtag_tdo", "V10", drive=8)),
     },
     input_clock_port="sys_clk_in",
     input_clock_hz=125_000_000,

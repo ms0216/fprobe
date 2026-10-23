@@ -130,7 +130,7 @@ def _pynq(name: str, *, mem_bytes: int = 0) -> Design:
                  "hostlink/zynq_frame_link.vhd", "mem/axi_mem_port.vhd"),
             *core_sources(caps_package_path(name)),
             *rtl("boards/pynq_z2/pynq_z2_fprobe_top.vhd")))),
-        pin_groups=("clk125", "led", "pmod1", "la_in", "obs_jtag", "sync"),
+        pin_groups=("clk125", "led", "pmod1", "la_in", "obs_jtag", "sync", "ps_pjtag"),
         clocks=(PYNQ_Z2.input_clock(), PYNQ_Z2.sys_clock()),
         block_designs=(RTL_ROOT / "boards" / "pynq_z2" / ("ps7_hp_bd.tcl" if deep else "ps7_bd.tcl"),),
         capabilities=caps.Capabilities(

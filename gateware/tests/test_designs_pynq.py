@@ -40,3 +40,4 @@ def test_only_the_pynq_designs_have_the_fpga_observation_port():
     for name in ("fprobe_pynq", "fprobe_pynq_deep"):
         ports = {pin.port for pin in DESIGNS[name].project().pins}
         assert {"obs_tck", "obs_tms", "obs_tdi", "obs_tdo"} <= ports
+        assert {"ps_pjtag_tck", "ps_pjtag_tms", "ps_pjtag_tdi", "ps_pjtag_tdo"} <= ports
