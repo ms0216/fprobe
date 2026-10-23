@@ -70,3 +70,14 @@ def test_xilinx_mmcm_model_locks_and_runs(tmp_path):
     run_cocotb(toplevel="xilinx_mmcm", sources=[RTL_ROOT.parent / "tests" / "rtl" / "sim_xilinx_prims.vhd",
                                                 *rtl("boards/pynq_z2/xilinx_mmcm.vhd")],
                test_module="tests.tb.xilinx_mmcm_tb", build_dir=tmp_path)
+
+
+def test_ps_pjtag_is_routed_to_the_raspberry_pi_header():
+    # PS の DAP の PJTAG（EMIO）を Raspberry Pi のヘッダの GPIO8〜11（19・21・23・24 番、GND は 25 番）に出す
+    # （docs/superpowers/specs/2026-10-23-zynq-pjtag-design.md）。independent の起動（MIO2 = 1）のときだけ DAP がつながる
+    pins = {p.port: (p.location, p.pull) for p in PYNQ_Z2.pin_groups["ps_pjtag"]}
+    assert pins == {"ps_pjtag_tck": ("W10", "DOWN"), "ps_pjtag_tms": ("F19", "UP"),
+                    "ps_pjtag_tdi": ("V8", "UP"), "ps_pjtag_tdo": ("V10", None)}
+    tcl = (RTL_ROOT / "boards" / "pynq_z2" / "ps7_bd.tcl").read_text(encoding="utf-8")
+    assert "PCW_PJTAG_PERIPHERAL_ENABLE 1" in tcl and "PCW_PJTAG_PJTAG_IO EMIO" in tcl
+    assert "{tck I tms I tdi I tdo O}" in tcl and "ps/PJTAG_[string toupper $port]" in tcl

@@ -29,6 +29,11 @@ entity pynq_z2_fprobe_top is
     -- ボードの間の時刻の同期（Raspberry Pi のヘッダの GPIO16 = 36 番が親から、GPIO20 = 38 番が子へ。同期の無い構成では Z）
     sync_in    : in    std_logic;
     sync_out   : out   std_logic;
+    -- PS の DAP の PJTAG（EMIO）の素通し（Raspberry Pi のヘッダの GPIO8〜11。independent の起動のときだけ DAP がつながる）
+    ps_pjtag_tck : in  std_logic;
+    ps_pjtag_tms : in  std_logic;
+    ps_pjtag_tdi : in  std_logic;
+    ps_pjtag_tdo : out std_logic;
     led        : out   std_logic_vector(3 downto 0)
   );
 end entity;
@@ -39,6 +44,10 @@ architecture rtl of pynq_z2_fprobe_top is
     port (
       aclk          : in  std_logic;
       aresetn       : in  std_logic;
+      pjtag_tck     : in  std_logic;
+      pjtag_tms     : in  std_logic;
+      pjtag_tdi     : in  std_logic;
+      pjtag_tdo     : out std_logic;
       m_axi_araddr  : out std_logic_vector(31 downto 0);
       m_axi_arprot  : out std_logic_vector(2 downto 0);
       m_axi_arready : in  std_logic;
@@ -65,6 +74,10 @@ architecture rtl of pynq_z2_fprobe_top is
     port (
       aclk          : in  std_logic;
       aresetn       : in  std_logic;
+      pjtag_tck     : in  std_logic;
+      pjtag_tms     : in  std_logic;
+      pjtag_tdi     : in  std_logic;
+      pjtag_tdo     : out std_logic;
       m_axi_araddr  : out std_logic_vector(31 downto 0);
       m_axi_arprot  : out std_logic_vector(2 downto 0);
       m_axi_arready : in  std_logic;
@@ -182,6 +195,8 @@ begin
   ps_plain : if not DEEP generate
     ps_i : ps7_bd_wrapper
       port map (aclk => sys_clk, aresetn => aresetn,
+                pjtag_tck => ps_pjtag_tck, pjtag_tms => ps_pjtag_tms, pjtag_tdi => ps_pjtag_tdi,
+                pjtag_tdo => ps_pjtag_tdo,
                 m_axi_araddr => araddr, m_axi_arprot => arprot, m_axi_arready => arready, m_axi_arvalid => arvalid,
                 m_axi_awaddr => awaddr, m_axi_awprot => awprot, m_axi_awready => awready, m_axi_awvalid => awvalid,
                 m_axi_bready => bready, m_axi_bresp => bresp, m_axi_bvalid => bvalid,
@@ -207,6 +222,8 @@ begin
   begin
     ps_i : ps7_hp_bd_wrapper
       port map (aclk => sys_clk, aresetn => aresetn,
+                pjtag_tck => ps_pjtag_tck, pjtag_tms => ps_pjtag_tms, pjtag_tdi => ps_pjtag_tdi,
+                pjtag_tdo => ps_pjtag_tdo,
                 m_axi_araddr => araddr, m_axi_arprot => arprot, m_axi_arready => arready, m_axi_arvalid => arvalid,
                 m_axi_awaddr => awaddr, m_axi_awprot => awprot, m_axi_awready => awready, m_axi_awvalid => awvalid,
                 m_axi_bready => bready, m_axi_bresp => bresp, m_axi_bvalid => bvalid,
