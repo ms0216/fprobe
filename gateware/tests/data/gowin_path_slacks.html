@@ -1,0 +1,76 @@
+<!-- Gowin 1.9.11.03 の project_tr_content.html の経路の表（fprobe_core_m の p1、2026-10-22。各表の先頭 2 行）。
+     setup の 1 行目は set_max_delay（Relation 8.000）の経路で、TNS の要約には現れない -->
+<h3><a name="Setup_Slack_Table">Setup Paths Table</a></h3>
+<h4>Report Command:report_timing -setup -max_paths 25 -max_common_paths 1</h4>
+<table class="detail_table">
+<tr>
+<th class="label">Path Number</th>
+<th class="label">Path Slack</th>
+<th class="label">From Node</th>
+<th class="label">To Node</th>
+<th class="label">From Clock</th>
+<th class="label">To Clock</th>
+<th class="label">Relation</th>
+<th class="label">Clock Skew</th>
+<th class="label">Data Delay</th>
+</tr>
+<tr style="color: #FF0000;" class = "error">
+<td>1</td>
+<td>-0.312</td>
+<td>device_i/cdc_requests_i/brk_ms_0_s1/Q</td>
+<td>core_i/host_break_sync_i/stage_0_s0/D</td>
+<td>ulpi_clk:[R]</td>
+<td>sys_clk:[R]</td>
+<td>8.000</td>
+<td>3.058</td>
+<td>5.184</td>
+</tr>
+<tr>
+<td>2</td>
+<td>0.658</td>
+<td>core_i/dap_i/transfer_i/index_r_0_s2/Q</td>
+<td>core_i/dap_i/config_i/ir_after_1_s0/D</td>
+<td>sys_clk:[R]</td>
+<td>sys_clk:[R]</td>
+<td>9.972</td>
+<td>0.000</td>
+<td>9.278</td>
+</tr>
+</table>
+<h3><a name="Hold_Slack_Table">Hold Paths Table</a></h3>
+<h4>Report Command:report_timing -hold -max_paths 25 -max_common_paths 1</h4>
+<table class="detail_table">
+<tr>
+<th class="label">Path Number</th>
+<th class="label">Path Slack</th>
+<th class="label">From Node</th>
+<th class="label">To Node</th>
+<th class="label">From Clock</th>
+<th class="label">To Clock</th>
+<th class="label">Relation</th>
+<th class="label">Clock Skew</th>
+<th class="label">Data Delay</th>
+</tr>
+<tr>
+<td>1</td>
+<td>0.208</td>
+<td>stream_to_usb_i/rd_bin_3_s0/Q</td>
+<td>stream_to_usb_i/memory_memory_0_0_s/ADB[6]</td>
+<td>ulpi_clk:[R]</td>
+<td>ulpi_clk:[R]</td>
+<td>0.000</td>
+<td>0.000</td>
+<td>0.326</td>
+</tr>
+<tr>
+<td>2</td>
+<td>0.210</td>
+<td>device_i/ctrl_out_i/rd_ptr_6_s0/Q</td>
+<td>device_i/ctrl_out_i/memory_memory_0_0_s/ADB[9]</td>
+<td>ulpi_clk:[R]</td>
+<td>ulpi_clk:[R]</td>
+<td>0.000</td>
+<td>0.000</td>
+<td>0.328</td>
+</tr>
+</table>

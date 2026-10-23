@@ -89,14 +89,15 @@ def test_sampled_timeline_load_jobs_memory_and_inversions(running):
     probe.target_resume()
     time.sleep(2.0)
     stopped = probe.rtos_timeline_stop()
-    assert stopped["stats"]["gaps"] == 0, stopped["warnings"]
+    # 抜けは gap_factor を明示したときだけ（既定は判定しない）: 実際の間隔は分解能（resolution_us）として事実で返る
+    print("resolution:", stopped.get("resolution_us"), stopped["warnings"])
     load = probe.rtos_timeline_load(window_us=100_000)
     assert 0.2 < load["mean_load"] < 0.8, load["mean_load"]               # worker が約 30 %（6 ms / 20 ms）
     jobs = probe.rtos_timeline_jobs(task="sensor")
-    sensor = jobs["tasks"]["sensor"]
+    sensor = jobs["runs"]["sensor"]                                       # 出来事が無いので区間（ジョブは推定しない）
     # 方法 sampled は、サンプルの間隔（語を足すほど長い）より短い実行を取りこぼす: 回数は下限。sensor は 5 ms ごとに
     # 数 µs しか走らないので、見えた回の周期は 5 ms の倍数になる
-    assert sensor["jobs"] > 10, sensor
+    assert sensor["runs"] > 10, sensor
     median = sensor["period_us"]["median"]
     assert median > 4000, sensor                                          # 見えた回の始まりはサンプルの間隔だけずれる
     memory = probe.rtos_timeline_memory()
@@ -130,4 +131,4 @@ def test_itm_timeline_with_exception_trace(running):
     share = profile["share"]
     assert share["idle"] > 0.2 and 0 < share["interrupt"] < 0.2, share
     jobs = probe.rtos_timeline_jobs()
-    assert 4500 < jobs["tasks"]["sensor"]["period_us"]["median"] < 5500
+    assert 4500 < jobs["runs"]["sensor"]["period_us"]["median"] < 5500

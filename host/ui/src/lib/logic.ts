@@ -88,7 +88,8 @@ export function decodeMarks(annotations: Annotation[]): Mark[] {
 
 export const EVENTS = ["pattern_a", "pattern_b", "dap_match", "host"] as const;
 export type TriggerEvent = (typeof EVENTS)[number];
-export const SOURCES = ["la_trigger", "dap_match", "host", "sequence"] as const;
+// obs_match・sampler_match は条件を fpga_obs.trigger_set・sampler.trigger_set で書く（ここでは経路だけ。表は機器の経路の事実から始める）
+export const SOURCES = ["la_trigger", "dap_match", "host", "sequence", "obs_match", "sampler_match"] as const;
 export type TriggerSource = (typeof SOURCES)[number];
 
 export interface StageForm { when: TriggerEvent[]; count: number; withinUs: string }
@@ -208,4 +209,16 @@ export function formatHz(hz: number | null | undefined): string {
 export function measuredChannels(channels: Record<string, ChannelMeasure> | undefined): [number, ChannelMeasure][] {
   return Object.entries(channels ?? {}).map(([k, v]) => [Number(k), v] as [number, ChannelMeasure])
     .filter(([, v]) => v.rises + v.falls > 0).sort((a, b) => a[0] - b[0]);
+}
+
+/** 捕捉の保存（la.export）の形式: sr = PulseView（sigrok）、vcd */
+export type LaExportFormat = "sr" | "vcd";
+
+/** la.export の引数。path が null なら日時と形式の拡張子の既定の名前（2 回目に前のファイルを上書きしない。パスはデーモンの
+ *  PC。相対ならデーモンの作業場所） */
+export function laExportParams(format: LaExportFormat, path: string | null, at: Date = new Date()):
+  { format: LaExportFormat; path: string } {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
+  return { format, path: path ?? `capture-${stamp}.${format}` };
 }

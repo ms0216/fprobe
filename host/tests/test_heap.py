@@ -33,12 +33,15 @@ def test_heap_4_with_the_heap_protector():
     assert not r.issues and len([b for b in r.blocks if not b.used]) == 2
 
 
-def test_heap_4_overflow_breaks_the_next_header_and_is_blamed_on_the_previous_block():
+def test_heap_4_broken_header_reports_the_previous_used_block_as_a_fact():
+    # 壊した者を「直前の使用中のブロックからのあふれの疑い」と推定しない（間に空きを挟むこともある）。
+    # 直前の使用中のブロック（previous_used）を事実として添える
     h = FreeRTOSHeap([(64, True), (128, True), (32, False)])
     h.mem.u32(h.addresses[1] + 4, 0x41414141)                   # 1 つ目の本体があふれて 2 つ目の頭を上書き
     r = scan(h.mem.read, h.syms, "freertos")
     bad = [i for i in r.issues if i["kind"] == "bad_size"]
-    assert bad and bad[0]["address"] == h.addresses[1] and bad[0]["suspect"] == h.start + 8
+    assert bad and bad[0]["address"] == h.addresses[1] and bad[0]["previous_used"] == h.start + 8
+    assert "suspect" not in bad[0] and not any("疑い" in i["detail"] for i in r.issues)
 
 
 def test_heap_4_detects_list_and_counter_inconsistencies():
@@ -190,7 +193,9 @@ def test_tracker_live_peak_and_issues():
     assert r["untracked_frees"] == 1
 
 
-def test_tracker_leak_candidates_grow_per_caller():
+def test_tracker_live_by_caller_is_facts_without_a_growing_verdict():
+    # 「4 時点で減らずに増えた → growing（強い候補）を先頭」と判定しない。呼び出し元ごとの生きている確保と、
+    # 時点ごとの生きている数（live_counts）を事実として返し、バイトの多い順に並べる
     t = AllocationTracker()
     now = 0.0
     for i in range(40):                                          # leaky は確保だけ、steady は確保と解放
@@ -200,8 +205,12 @@ def test_tracker_leak_candidates_grow_per_caller():
         t.free(now + 0.5, 0x8000, caller="steady")
     t.alloc(now, 0x9000, 100, caller="once")                     # 最後に 1 回（若い）
     r = t.report(now=now + 1, min_age_s=5)
-    leaks = r["leak_candidates"]
-    assert leaks[0]["caller"] == "leaky" and leaks[0]["count"] >= 35 and leaks[0]["growing"]
+    leaks = r["live_by_caller"]
+    assert "leak_candidates" not in r and not any("growing" in c for c in leaks)
+    assert leaks[0]["caller"] == "leaky" and leaks[0]["count"] >= 35
+    ns = [n for _, n in leaks[0]["live_counts"]]
+    assert len(ns) == 5 and ns[0] <= 1 and ns[-1] == 40 and ns == sorted(ns)
+    assert [c["bytes"] for c in leaks] == sorted((c["bytes"] for c in leaks), reverse=True)
     assert all(c["caller"] != "steady" for c in leaks)
     assert all(c["caller"] != "once" for c in leaks)
     assert r["series"][-1][1] == r["live"]["bytes"]

@@ -22,7 +22,7 @@ export interface Bar {
   x1: number;
   y: number;
   color?: string;
-  mark?: boolean;                    // 目立たせる（外れ値・選んだもの）
+  mark?: boolean;                    // 目立たせる（長い順の上位・選んだもの）
 }
 
 export const seriesColor = (s: Series, i: number): string => s.color ?? CATEGORICAL[i % CATEGORICAL.length];

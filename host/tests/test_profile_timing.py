@@ -30,14 +30,16 @@ def recording(tmp_path):
     r.close()
 
 
-def test_measure_statistics_and_outlier(recording):
+def test_measure_statistics_and_the_longest(recording):
     report = measure(recording, START, END)
     d = report.as_dict()
     assert d["count"] == 200 and d["timebase_hz"] == 100e6
     assert d["max"] == 5000 and d["max_at"] == 1000 + 137 * 10_000
     assert 980 <= d["min"] <= 1000 and 990 < d["median"] < 1010
-    assert [o["t"] for o in d["outliers"]] == [1000 + 137 * 10_000]
-    assert d["outliers"][0]["t_end"] == d["outliers"][0]["t"] + 5000
+    # 外れ値の経験則（1.5 IQR・3σ）は使わない: 長い順の上位を事実として（t は記録・タイムラインのその時刻）
+    assert d["longest"][0]["t"] == 1000 + 137 * 10_000 and len(d["longest"]) == 10 and "outliers" not in d
+    assert d["longest"][0]["t_end"] == d["longest"][0]["t"] + 5000
+    assert [o["duration"] for o in d["longest"]] == sorted((o["duration"] for o in d["longest"]), reverse=True)
     assert sum(b["count"] for b in d["histogram"]) == 200 and len(d["histogram"]) == 20
     assert d["seconds"]["max"] == pytest.approx(50e-6)
     expected = recording.intervals(START, END)
@@ -58,11 +60,9 @@ def test_pair_times_rules():
     assert pair_times([5], []) == []
 
 
-def test_interval_report_without_timebase_and_zscore():
+def test_interval_report_without_timebase_and_the_number_of_longest():
     pairs = [(k * 100, 50 + (k % 5)) for k in range(100)] + [(10_000, 500)]
-    d = interval_report(pairs, outliers="zscore", bins=5).as_dict()
+    d = interval_report(pairs, longest=3, bins=5).as_dict()
     assert "seconds" not in d and len(d["histogram"]) == 5
-    assert [o["t"] for o in d["outliers"]] == [10_000]
+    assert [o["t"] for o in d["longest"]] == [10_000, 400, 900]
     assert interval_report([]).as_dict() == {"count": 0, "unit": "ticks", "timebase_hz": None, "intervals": []}
-    with pytest.raises(ValueError):
-        interval_report(pairs, outliers="mad")

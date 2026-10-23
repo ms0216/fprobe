@@ -26,6 +26,13 @@ def _bus(name: str, locations: str, **attrs) -> tuple[Pin, ...]:
 _BOARD_PULL = ("DOWN", "DOWN", "UP", "UP", "DOWN", "DOWN", "UP", "UP")
 _JA = "Y18 Y19 Y16 Y17 U18 U19 W18 W19"
 
+# 対象の FPGA の観測の JTAG（Raspberry Pi のヘッダ。docs/superpowers/specs/2026-10-20-fpga-observation-design.md）。
+# 出典: Xilinx/PYNQ v2.7.0 の boards/Pynq-Z2/base/vivado/constraints/base.xdc の rpi_gpio_tri_io[0〜19]
+# = F19 V10 V8 W10 B20 W8 V6 Y6 B19 U7 C20 Y8 A20 Y9 U8 W6 Y7 F20 W9 V7（Raspberry Pi の GPIO8〜27。GPIO2〜7 と
+# ID_SD/ID_SC は PMOD JA と共有）。GPIO22〜25 = ヘッダの 15・16・18・22 番（GND は 20 番）を使う。
+# 基板の抵抗は未確認（PMOD と違い制約ファイルにプルの指定が無い）。FPGA のプルは JTAG の慣例（TCK は下げ、他は上げ）
+_OBS_JTAG = (("obs_tck", "U8", "DOWN"), ("obs_tms", "W6", "UP"), ("obs_tdi", "Y7", "UP"), ("obs_tdo", "F20", "UP"))
+
 PYNQ_Z2 = Board(
     name="PYNQ-Z2",
     part="xc7z020clg400-1",
@@ -39,6 +46,11 @@ PYNQ_Z2 = Board(
         # ロジアナの専用の入力（PMOD JB の 1〜4・7〜8 = PMOD の 0〜5 番）。プルは JA と同じく基板に合わせる
         # （つないでいない入力は 0・1 番・4・5 番が 0、2・3 番が 1）
         "la_in": tuple(Pin(f"la_in[{i}]", loc, pull=_BOARD_PULL[i]) for i, loc in enumerate("W14 Y14 T11 T10 V16 W16".split())),
+        # ボードの間の時刻の同期: Raspberry Pi のヘッダの GPIO16（36 番、B19）= 親から、GPIO20（38 番、A20）= 子へ
+        # （出典は上の _OBS_JTAG と同じ base.xdc の rpi_gpio_tri_io[8]・[12]）
+        "sync": (Pin("sync_in", "B19", pull="DOWN"), Pin("sync_out", "A20", drive=8)),
+        "obs_jtag": tuple(Pin(port, loc, pull=pull, drive=8) if port != "obs_tdo" else Pin(port, loc, pull=pull)
+                          for port, loc, pull in _OBS_JTAG),
     },
     input_clock_port="sys_clk_in",
     input_clock_hz=125_000_000,

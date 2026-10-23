@@ -78,7 +78,8 @@ class Watch:
 class Frame:
     pc: int                       # 呼び出し元のフレームでは戻り先、例外で中断された処理では正確な番地
     where: Location               # 呼び出し元では呼び出し命令の行（戻り先 − 1 で引く）
-    note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した位置
+    note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した位置、"lr_without_cfi" = CFI の
+                                  # 無い最内の関数を葉と仮定して LR から出した（確かめていない）
     cfa: int | None = None        # CFI で巻き戻したときの CFA（呼び出し元の sp）
 
 

@@ -158,6 +158,7 @@ describe("errorText", () => {
     expect(errorText(new RpcError(-32020, "KeyError: \"シンボル 'x' が無い\""))).toBe("\"シンボル 'x' が無い\"");
     expect(errorText(new RpcError(-32020, "ExpressionError: void は構造体ではない"))).toBe("void は構造体ではない");
     expect(errorText(new RpcError(-32021, "NotConnected: ターゲット未接続"))).toBe("ターゲット未接続");
+    expect(errorText(new RpcError(-32021, "NotDisconnected: 接続中は使えない"))).toBe("接続中は使えない");
     expect(errorText(new Error("ふつうの誤り: 本文"))).toBe("ふつうの誤り: 本文");
     expect(errorText("文字列")).toBe("文字列");
   });

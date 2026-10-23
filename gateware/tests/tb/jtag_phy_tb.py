@@ -41,11 +41,12 @@ class Phy:
         return await self.command(OP_TRANSFER, req=request(kind, addr), data=data)
 
 
-async def setup(dut, idle_cycles=0):
+async def setup(dut, idle_cycles=0, tdo_delay_ns=0, sample_delay=0):
     dp = JtagDp()
-    chain = JtagChain(dut, [dp, Bypass()])
+    chain = JtagChain(dut, [dp, Bypass()], tdo_delay_ns=tdo_delay_ns)
     dut.enable.value = 1
     dut.half_period.value = 2
+    dut.sample_delay.value = sample_delay
     dut.idle_cycles.value = idle_cycles
     dut.dr_before.value, dut.dr_after.value = 0, 1
     dut.ir_before.value, dut.ir_after.value, dut.ir_len.value = 0, 5, 4
@@ -65,6 +66,63 @@ async def sequence_reads_both_idcodes(dut):
     await phy.command(OP_SEQ_IN, count=2, req=0)                     # Capture-DR → Shift-DR
     _, tdo = await phy.command(OP_SEQ_IN, count=64, req=0, data=(1 << 64) - 1)
     assert tdo & 0xFFFFFFFF == JTAG_DP_IDCODE and tdo >> 32 == BSC_IDCODE
+
+
+@cocotb.test()
+async def late_tdo_within_a_period(dut):
+    # TDO は立ち下がりから次の立ち下がりまで保たれるので、取り込みは次の立ち下がりの直前（din = その 1 周期前のピン）。
+    # half_period = 2 の 1 ビットは 5 周期（50 ns）: 立ち下がりから 35 ns 遅れて変わる TDO も読める
+    phy, dp = await setup(dut, tdo_delay_ns=35)
+    await phy.command(OP_SEQ_IN, count=1, req=1)                     # Select-DR
+    await phy.command(OP_SEQ_IN, count=2, req=0)                     # Capture-DR → Shift-DR
+    _, tdo = await phy.command(OP_SEQ_IN, count=64, req=0, data=(1 << 64) - 1)
+    assert tdo & 0xFFFFFFFF == JTAG_DP_IDCODE and tdo >> 32 == BSC_IDCODE
+    await phy.command(OP_SEQ_IN, count=2, req=1)                     # Exit1 → Update
+    await phy.command(OP_SEQ_IN, count=1, req=0)                     # Run-Test/Idle
+    assert await phy.transfer(DP_R, 0x0) == (OK, JTAG_DP_IDCODE)
+    assert (await phy.transfer(DP_W, A_CTRL, CDBGPWRUPREQ))[0] == OK
+    ack, ctrl = await phy.transfer(DP_R, A_CTRL)
+    assert ack == OK and ctrl & CDBGPWRUPACK
+
+
+async def read_idcodes(phy):
+    await phy.command(OP_SEQ_IN, count=1, req=1)                     # Select-DR
+    await phy.command(OP_SEQ_IN, count=2, req=0)                     # Capture-DR → Shift-DR
+    _, tdo = await phy.command(OP_SEQ_IN, count=64, req=0, data=(1 << 64) - 1)
+    await phy.command(OP_SEQ_IN, count=2, req=1)                     # Exit1 → Update
+    await phy.command(OP_SEQ_IN, count=1, req=0)                     # Run-Test/Idle
+    return tdo & 0xFFFFFFFF, tdo >> 32
+
+
+@cocotb.test()
+async def tdo_later_than_a_period_needs_sample_delay(dut):
+    # 立ち下がりから 55 ns（1 周期 50 ns より長い）遅れて変わる TDO（Pi 2B の 14.3 MHz 以上で見た形）: High 相の終わりでは
+    # 前のビットを読む（1 ビットずれる）
+    phy, _ = await setup(dut, tdo_delay_ns=55)
+    dp_id, _ = await read_idcodes(phy)
+    assert dp_id == (JTAG_DP_IDCODE << 1 | 1) & 0xFFFFFFFF
+
+
+@cocotb.test()
+async def sample_delay_reads_tdo_later_than_a_period(dut):
+    # 取り込みを High 相の終わりから 3 周期（30 ns）遅らせると読める。遅れた取り込みは次のビットの出力と重なるが、
+    # TDI（IR・DR の書き込み）は乱れない
+    phy, dp = await setup(dut, tdo_delay_ns=55, sample_delay=3)
+    assert await read_idcodes(phy) == (JTAG_DP_IDCODE, BSC_IDCODE)
+    assert await phy.transfer(DP_R, 0x0) == (OK, JTAG_DP_IDCODE)
+    assert (await phy.transfer(DP_W, A_CTRL, CDBGPWRUPREQ))[0] == OK
+    ack, ctrl = await phy.transfer(DP_R, A_CTRL)
+    assert ack == OK and ctrl & CDBGPWRUPACK
+    await phy.transfer(DP_W, A_SELECT, 0)
+    await phy.transfer(AP_W, A_CSW, 0x23000012)
+    await phy.transfer(AP_W, A_TAR, 0x20000000)
+    for v in (0x11111111, 0xA5A5A5A5, 0x0F0F0F0F):
+        assert (await phy.transfer(AP_W, A_DRW, v))[0] == OK
+    assert [dp.regs.memory[0x20000000 + 4 * i] for i in range(3)] == [0x11111111, 0xA5A5A5A5, 0x0F0F0F0F]
+    await phy.transfer(AP_W, A_TAR, 0x20000000)
+    await phy.transfer(AP_R, A_DRW)
+    assert (await phy.transfer(AP_R, A_DRW))[1] == 0x11111111
+    assert (await phy.transfer(DP_R, A_RDBUFF))[1] == 0xA5A5A5A5
 
 
 @cocotb.test()

@@ -4,7 +4,8 @@
 仕様: docs/superpowers/specs/2026-10-18-u08-u09-rtos-objects-timeline-design.md の 2 節。
 
     load_series(tl, window, idle={idle_tcb})                   # 窓ごとの CPU 負荷・タスクごとの割合
-    job_summary(find_jobs(tl, priorities, idle=...))           # ジョブの実行時間・周期・（応答時間）と最悪値
+    job_summary(find_jobs(tl, idle=..., events=...))           # ジョブ（出来事で区切る）の実行時間・周期・応答時間
+    run_summary(tl, idle=...)                                   # タスクの区間の回数・時間・周期・次に動いたタスク
     run_time_in(tl, pairs)                                     # 2 点の間で、そのタスクが実際に使った時間
     memory_series(samples, slots)                              # 保存された SP・ヒープの残量の推移
     execution_profile(tl, activations, idle=...)               # スレッド・割り込み・アイドルの割合
@@ -27,7 +28,7 @@ from .timeline import Timeline, name_of
 
 __all__ = ["BLOCK_KINDS", "Intervals", "Job", "KernelEvent", "MemorySlot", "MutexWatch", "exception_activations",
            "execution_profile", "find_jobs", "inversion_episode", "inversion_episodes", "inversion_summary",
-           "isr_intervals", "job_summary", "load_series", "memory_series", "run_time_in", "runs_by_task"]
+           "isr_intervals", "job_summary", "load_series", "memory_series", "run_summary", "run_time_in", "runs_by_task"]
 
 BLOCK_KINDS = ("block", "delay", "suspend", "delete")      # 実行可能でなくなった出来事（U10 のトレースフック）
 
@@ -150,7 +151,8 @@ def load_series(tl: Timeline, window: int, idle: Iterable[int] = (), isr: Iterab
     total_covered = sum(w["covered"] for w in loads)
     out = {"window": window, "window_us": _us(window, hz), "windows": windows,
            "peak": None if peak is None else {"t0": peak["t0"], "t1": peak["t1"], "load": peak["load"]},
-           "mean_load": sum(w["load"] * w["covered"] for w in loads) / total_covered if total_covered else None}
+           "mean_load": sum(w["load"] * w["covered"] for w in loads) / total_covered if total_covered else None,
+           "idle_tasks": sorted({names[h] for h in idle if h in names})}
     return out
 
 
@@ -167,7 +169,7 @@ class KernelEvent:
 @dataclass
 class Job:
     """タスクの 1 回の仕事: 起きて（release）・動き始め（start）・待つまで（end）。exec_time は横取り・割り込みを除く。
-    end_reason: blocked（待った）/ uncertain（同じ優先度へ移った: 時分割か譲りか分からない）/ truncated（抜け・観測の
+    end_reason: blocked（待った）/ truncated（抜け・観測の
     端で終わりが分からない。統計に入れない）。"""
     handle: int
     task: str
@@ -194,14 +196,12 @@ class Job:
         return out
 
 
-def find_jobs(tl: Timeline, priorities: Mapping[int, int], order: int = 1, idle: Iterable[int] = (),
-              isr: Iterable[tuple[int, int]] = (), events: Iterable[KernelEvent] | None = None) -> list[Job]:
-    """時間軸の区間をジョブにまとめる。出来事（ready / block）のあるタスクはそれで区切る（応答時間も分かる）。
-    無いタスクは、区間の次に動いたタスクの優先度で決める（固定優先度: より高い方へ = 横取り、低い方へ = 待った、
-    同じ = uncertain）。priorities は TCB → 元の優先度、order は優先度の向き（1 = 大きい方が高い）。"""
+def find_jobs(tl: Timeline, idle: Iterable[int] = (), isr: Iterable[tuple[int, int]] = (),
+              events: Iterable[KernelEvent] | None = None) -> list[Job]:
+    """カーネルの出来事（ready / block）でタスクの区間をジョブにまとめる（応答時間も分かる）。出来事の無いタスクの
+    ジョブは作らない（次に動いたタスクの優先度から横取りか待ちかを推定しない。区間の事実は run_summary）。"""
     idle = set(idle)
     isr_iv = Intervals(isr)
-    gaps = sorted((g.t0, g.t1) for g in tl.gaps)
     runs = sorted(tl.runs, key=lambda r: r.t0)
     by_task: dict[int, list[KernelEvent]] = {}
     for e in events or ():
@@ -210,40 +210,45 @@ def find_jobs(tl: Timeline, priorities: Mapping[int, int], order: int = 1, idle:
     for handle in {r.handle for r in runs} - idle:
         if handle in by_task:
             jobs += _jobs_from_events(handle, runs, sorted(by_task[handle], key=lambda e: e.t), isr_iv, tl)
-    open_jobs: dict[int, Job] = {}
-
-    def urgency(h: int) -> int | None:
-        p = priorities.get(h)
-        return None if p is None else p * order
-    for i, r in enumerate(runs):
-        if r.handle in idle or r.handle in by_task:
-            continue
-        own = r.duration - isr_iv.overlap(r.t0, r.t1)
-        job = open_jobs.get(r.handle)
-        if job is None:
-            job = open_jobs[r.handle] = Job(r.handle, r.task, r.t0, r.t1, 0, 0, "truncated")
-        else:
-            job.preemptions += 1
-        job.exec_time += own
-        job.end = r.t1
-        nxt = runs[i + 1] if i + 1 < len(runs) else None
-        if nxt is None or any(r.t1 <= g0 <= nxt.t0 or g0 <= r.t1 < g1 for g0, g1 in gaps):
-            reason = "truncated"                                     # 観測の端・抜け: 終わりが分からない
-        elif nxt.handle == r.handle:
-            continue                                                 # 同じタスクが続く（譲った相手がいない等）
-        else:
-            mine, theirs = urgency(r.handle), urgency(nxt.handle)
-            if mine is None or theirs is None or theirs == mine:
-                reason = "uncertain"
-            elif theirs > mine:
-                continue                                             # 横取りされた: 仕事は続く
-            else:
-                reason = "blocked"
-        job.end_reason = reason
-        jobs.append(open_jobs.pop(r.handle))
-    for job in open_jobs.values():
-        jobs.append(job)
     return sorted(jobs, key=lambda j: (j.start, j.task))
+
+
+def run_summary(tl: Timeline, idle: Iterable[int] = (), isr: Iterable[tuple[int, int]] = (),
+                hz: float | None = None) -> dict[str, dict]:
+    """タスクごとの区間（続けて動いた間）の事実: 回数・自分の時間（割り込みを除く）・周期（始めの間隔）の分布、最長の回、
+    次に動いたタスクの回数（followed_by。抜けで切れたら "(gap)"、観測の端なら "(end)"）。なぜ切り替わったかは推定しない。"""
+    idle = set(idle)
+    isr_iv = Intervals(isr)
+    gaps = sorted((g.t0, g.t1) for g in tl.gaps)
+    runs = sorted(tl.runs, key=lambda r: r.t0)
+    per: dict[int, list[tuple]] = {}
+    for i, r in enumerate(runs):
+        if r.handle in idle:
+            continue
+        nxt = runs[i + 1] if i + 1 < len(runs) else None
+        if nxt is None:
+            after = "(end)"
+        elif any(r.t1 <= g0 <= nxt.t0 or g0 <= r.t1 < g1 for g0, g1 in gaps):
+            after = "(gap)"
+        else:
+            after = nxt.task
+        per.setdefault(r.handle, []).append((r, r.duration - isr_iv.overlap(r.t0, r.t1), after))
+    out = {}
+    for rows in per.values():
+        task = rows[0][0].task
+        starts = [r.t0 for r, _, _ in rows]
+        followed: dict[str, int] = {}
+        for _, _, after in rows:
+            followed[after] = followed.get(after, 0) + 1
+        worst, own, _ = max(rows, key=lambda x: x[1])
+        row = {"handle": rows[0][0].handle, "runs": len(rows), "exec": _dist([o for _, o, _ in rows]),
+               "period": _dist([b - a for a, b in zip(starts, starts[1:])]),
+               "worst_exec": {"start": worst.t0, "end": worst.t1, "exec": own}, "followed_by": followed}
+        for key in ("exec", "period"):
+            if row[key] is not None and hz:
+                row[f"{key}_us"] = _dist_us(row[key], hz)
+        out[task] = row
+    return out
 
 
 def _jobs_from_events(handle: int, runs, events: list[KernelEvent], isr_iv: Intervals, tl: Timeline) -> list[Job]:
@@ -284,7 +289,6 @@ def job_summary(jobs: Iterable[Job], hz: float | None = None) -> dict[str, dict]
         responses = [j.response for j in done if j.response is not None]
         row: dict = {"handle": js[0].handle, "jobs": len(done),
                      "truncated": sum(1 for j in js if j.end_reason == "truncated"),
-                     "uncertain": sum(1 for j in js if j.end_reason == "uncertain"),
                      "preemptions": sum(j.preemptions for j in done),
                      "exec": _dist([j.exec_time for j in done]), "wall": _dist([j.wall for j in done]),
                      "period": _dist(periods), "response": _dist(responses) if responses else None}

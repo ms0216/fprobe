@@ -20,8 +20,8 @@ from dataclasses import dataclass, field
 from ..itm import DecodeError, Instrumentation, Overflow, Packet, Sync
 from .timeline import TRACE_PORT, decode_trace_word, name_of
 
-__all__ = ["CLASSES", "EVENTS", "KERNEL_PORT", "OBJECT_EVENTS", "PAYLOAD_PORT", "QUEUE_TYPES", "RECORD_CYCLES",
-           "TASK_EVENTS", "WAITS", "WORD_CYCLES", "KernelOp", "KernelTrace", "kernel_trace", "object_table"]
+__all__ = ["CLASSES", "EVENTS", "KERNEL_PORT", "OBJECT_EVENTS", "PAYLOAD_PORT", "QUEUE_TYPES",
+           "TASK_EVENTS", "WAITS", "KernelOp", "KernelTrace", "kernel_trace", "object_table"]
 
 KERNEL_PORT = 30                       # fprobe_trace.h の FPROBE_KERNEL_PORT（見出し）
 PAYLOAD_PORT = 29                      # FPROBE_PAYLOAD_PORT（中身）
@@ -36,13 +36,6 @@ TASK_EVENTS = frozenset({"ready", "delay", "suspend", "prio_inherit", "prio_disi
 OBJECT_EVENTS = frozenset({"block", "send", "send_failed", "receive", "receive_failed", "peek", "object_create",
                            "stream_send", "stream_receive", "event_set"})
 
-# フックの負荷の見積もり（Cortex-M4、FIFO が空いているとき）: freertos_demo.elf の逆アセンブル（fprobe_trace_record は
-# 有効の確認・IPSR と PRIMASK・語ごとの FIFO の確認とストアで、中身 2 語の道筋が約 45 命令）と、ポート 31 の 1 語の
-# インライン（約 12 命令）から。周辺のレジスタ（PPB）の読み書きの待ちを含めたおおよその値。実機の計測は本流
-# （gateware/tests/hil/test_trace_hooks_hw.py）。
-WORD_CYCLES = 14                       # ポート 31 の 1 語
-RECORD_CYCLES = 36                     # 記録の固定分（呼び出し・確認・割り込みの禁止と戻し）
-PAYLOAD_CYCLES = 7                     # 記録の 1 語ごと（FIFO の確認とストア）
 
 
 @dataclass(frozen=True)

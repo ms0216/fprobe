@@ -27,6 +27,8 @@ class Method:
     observes: bool = False  # control だが状態を変えない読み（要求の quiet で記録から外せる）
     binary: bool = False    # 応答をバイナリのフレームで返す（fprobe.api.binary。WebSocket の利用者だけ、MCP には出さない）
     caller: bool = False    # デーモンが呼び出し元 caller = {id, name, role} を実装へ渡す（引数の仕様には出さない）
+    offline: bool = False   # 機器に触らない（記録・画面の状態を読むだけ）: 機器の作業スレッドでなく読みのスレッドで実行
+    irreversible: bool = False  # 取り返しのつかない操作（Flash・オプションバイトの書き込み・消去等。画面は赤く確かめる）
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,6 @@ def load_spec(path: Path | None = None) -> Spec:
     data = json.loads((path or SPEC_PATH).read_text(encoding="utf-8"))
     methods = {name: Method(name, m["kind"], m.get("summary", ""), m.get("impl", ""), m["params"], m.get("result", {}),
                             m.get("record", True), m.get("observes", False), m.get("binary", False),
-                            m.get("caller", False))
+                            m.get("caller", False), m.get("offline", False), m.get("irreversible", False))
                for name, m in data["methods"].items()}
     return Spec(data["api_version"], methods, data.get("notifications", {}))

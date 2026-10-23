@@ -51,7 +51,7 @@ def test_task_timeline_by_sampling_the_current_tcb(probe):
     time.sleep(1.0)
     stats = probe.rtos_timeline_stop()["stats"]
     tasks = stats["tasks"]
-    assert stats["gaps"] == 0 and stats["switches"] > 500, stats
+    assert stats["switches"] > 500, stats                          # 抜けは既定で判定しない（gap_factor を明示したときだけ）
     # worker はミューテックスを持ったまま回る（優先度の逆転の試験用）ので、IDLE より多いこともある
     assert tasks["IDLE"]["cpu"] > 0.05 and tasks["worker"]["cpu"] > 0.05, {n: t["cpu"] for n, t in tasks.items()}
     assert 0.95 < sum(t["cpu"] for t in tasks.values()) <= 1.001

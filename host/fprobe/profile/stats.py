@@ -1,4 +1,4 @@
-"""統計の部品: 割合の信頼区間（Wilson）と、値の分布（統計・箱・外れ値）。
+"""統計の部品: 割合の信頼区間（Wilson）と、値の分布（統計・箱）。
 
 仕様: docs/superpowers/specs/2026-10-17-f5-profile-design.md の 3 節・5 節。
 """
@@ -91,35 +91,6 @@ class Distribution:
             counts[min(int((v - lo) / width), bins - 1)] += 1
         return [{"lo": lo + k * width, "hi": hi if k == bins - 1 else lo + (k + 1) * width, "count": c}
                 for k, c in enumerate(counts)]
-
-    def outliers(self, rule: str = "iqr") -> list[tuple[int, float]]:
-        """外れ値の (値の位置, 点数) を点数の大きい順に。
-        "iqr": Tukey の柵（第 1・第 3 四分位から四分位範囲の 1.5 倍の外）。点数 = 柵からの距離 / 四分位範囲
-        （四分位範囲が 0 なら値の単位 1 で割る）。"zscore": 平均から 3 σ の外。点数 = |z|。"""
-        if rule not in ("iqr", "zscore"):
-            raise ValueError(f"外れ値の規則は iqr か zscore: {rule!r}")
-        if self.count < 2:
-            return []
-        out = []
-        if rule == "iqr":
-            q1, q3 = self.quantile(0.25), self.quantile(0.75)
-            iqr = q3 - q1
-            low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-            scale = iqr if iqr > 0 else 1.0
-            for i, v in enumerate(self.values):
-                if v > high:
-                    out.append((i, (v - high) / scale))
-                elif v < low:
-                    out.append((i, (low - v) / scale))
-        else:
-            mean, sd = self.mean, self.stdev
-            if sd == 0:
-                return []
-            for i, v in enumerate(self.values):
-                z = abs(v - mean) / sd
-                if z > 3:
-                    out.append((i, z))
-        return sorted(out, key=lambda item: -item[1])
 
     def as_dict(self) -> dict:
         if not self.values:

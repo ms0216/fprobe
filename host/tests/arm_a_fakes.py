@@ -15,13 +15,14 @@ from dataclasses import dataclass, field
 from dap_fakes import FakeMemAp
 from jtag_fakes import Tap
 
-from fprobe.arm_debug import CP15, DSB, ISB, LOAD_STORE, MOV_PC_R0, MOV_R0_PC, MRS_R0_CPSR, MSR_CPSR_R0
+from fprobe.arm_debug import CP15, DSB, ISB, LDC_DTRTX, LOAD_STORE, MOV_PC_R0, MOV_R0_PC, MRS_R0_CPSR, MSR_CPSR_R0
 
 HALTED, RESTARTED = 1 << 0, 1 << 1
 SDABORT, UND = 1 << 6, 1 << 8
 INTDIS, ITREN, HDBGEN = 1 << 11, 1 << 13, 1 << 14
 WRITABLE = (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 15) | (3 << 20)
 CPSR_T, CPSR_I = 1 << 5, 1 << 7
+EXTDCC, FAST = 3 << 20, 2 << 20                         # DSCR.ExtDCCmode と速いモード
 _LOADS = {v[0]: k for k, v in LOAD_STORE.items()}
 _STORES = {v[1]: k for k, v in LOAD_STORE.items()}
 _CACHE_OPS = {v: k for k, v in CP15.items() if k not in ("ctr", "mpidr")}
@@ -56,6 +57,7 @@ class ArmCore:
     ignored: list[int] = field(default_factory=list)       # ITR が無効・走っている間に来た命令
     cache_ops: list[tuple[str, int]] = field(default_factory=list)
     restarts: int = 0
+    latched: int | None = None                             # DCC の速いモードで覚えた命令（DTRTX を読むたびに実行し直す）
 
     @property
     def thumb(self) -> bool:
@@ -140,6 +142,12 @@ class ArmCore:
             r[0] = self.cpsr
         elif op == MSR_CPSR_R0:
             self.cpsr = r[0]
+        elif op == LDC_DTRTX:                               # LDC p14, c5, [r0], #4: メモリの語を DTRTX へ
+            if self._fault(r[0], 4):
+                self.sticky |= SDABORT
+                return
+            self.tx, self.txfull = sum(self.memory.get(r[0] + i, 0) << 8 * i for i in range(4)), True
+            r[0] += 4
         elif op in _LOADS:
             size = _LOADS[op]
             if self._fault(r[0], size):
@@ -192,6 +200,8 @@ class V7DebugBlock:
             return c.dscr()
         if offset == 0x08C:
             value, c.txfull = c.tx, False
+            if c.ctrl & EXTDCC == FAST and c.latched is not None and not c.sticky:
+                c.issue(c.latched)                          # 速いモード: 読むたびに覚えた命令を実行し直す
             return value
         if offset == 0x304:
             return 1 | (2 if self.os_lock else 0)
@@ -218,7 +228,11 @@ class V7DebugBlock:
         if self.os_lock and offset in (0x084, 0x088, 0x090):
             return
         if offset == 0x084:
-            c.issue(value)
+            if c.ctrl & EXTDCC == FAST:                     # 速いモード: 書いても実行しない（DTRTX を読んだときに実行する。実機の Cortex-A7）
+                c.latched = value
+            else:
+                c.latched = None
+                c.issue(value)
         elif offset == 0x088:
             c.write_dscr(value)
         elif offset == 0x090:

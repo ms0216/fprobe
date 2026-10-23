@@ -36,7 +36,7 @@ _NO_WRITE = ("str", "vstr", "stm", "vstm", "cmp", "cmn", "tst", "teq", "b", "cb"
 _IMM = re.compile(r"#(-?(?:0x[0-9a-fA-F]+|\d+))")
 _PRE_DEC = re.compile(r"\[sp, #(-(?:0x[0-9a-fA-F]+|\d+))\]!")
 _POST_INC = re.compile(r"\[sp\], #((?:0x[0-9a-fA-F]+|\d+))")
-_REVISITS = 8                       # 同じ場所をより深く訪ねる回数の上限（超えたら伸び続けるループ）
+_REVISITS = 8                       # 同じ場所をより深い SP で訪ねなおす回数の上限（解析の打ち切り。判定ではない）
 
 
 @dataclass(frozen=True)
@@ -238,7 +238,8 @@ def analyze_function(code: Sequence[Instruction], name: str, start: int, end: in
                 if revisits[n] > _REVISITS:
                     if not flow.dynamic:
                         flow.dynamic = True
-                        flow.reasons.append(f"0x{code[n].address:08X}: ループのたびにスタックが伸び続ける")
+                        flow.reasons.append(f"0x{code[n].address:08X}: より深い SP で {_REVISITS} 回を超えて訪ねなおしたので"
+                                            "解析を打ち切った（深さはここまでの下限）")
                     break
             seen[n] = state.depth
             insn = code[n]

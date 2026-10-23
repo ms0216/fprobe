@@ -58,6 +58,11 @@ def make_parser() -> argparse.ArgumentParser:
                    help="reserve / unreserve: P3 の深いバッファの DDR の予約を置く / 外して、PYNQ を再起動する")
 
     sub.add_parser("gen", help="生成物（USB ディスクリプタ ROM・CSR・ホスト定数・レジスタ表）を再生成する")
+
+    r = sub.add_parser("resources", help="ビルド済みのデザインのモジュールごとの資源と、版ごとの Fmax を表にする")
+    r.add_argument("design", choices=sorted(DESIGNS))
+    r.add_argument("--build-dir", help="ビルドの置き場所（既定 gateware/build/<デザイン>）")
+    r.add_argument("--depth", type=int, default=2, help="表に出す階層の深さ（最上位 = 0）")
     return p
 
 
@@ -101,6 +106,33 @@ def _program_pynq(bitstream: Path, *, relay: bool) -> None:
     print(f"書き込み完了（PYNQ-Z2、JTAG。中継: {'起動' if relay else '止めたまま'}）")
 
 
+def _resources(design, build_dir: Path, depth: int) -> None:
+    """モジュールごとの資源（合成の報告。配置の版によらず同じ）と、版ごとの Fmax（配置配線の時間の報告）。"""
+    from .toolchain.resources import read_gowin_hierarchy, read_vivado_hierarchy, table
+    from .toolchain.timing import parse_timing_report
+    from .toolchain.vivado import parse_vivado_timing
+    vivado = design.board.toolchain == "vivado"
+    variants = sorted(d for d in build_dir.iterdir() if d.is_dir()) if build_dir.is_dir() else []
+    if not variants:
+        raise FileNotFoundError(f"{build_dir} にビルドの版が無い（先に build）")
+    if vivado:
+        hier = next((v / "util_hier.rpt" for v in variants if (v / "util_hier.rpt").is_file()), None)
+        modules = read_vivado_hierarchy(hier) if hier else None
+    else:
+        rsc = next((v / "impl" / "gwsynthesis" / "project_syn_rsc.xml" for v in variants
+                    if (v / "impl" / "gwsynthesis" / "project_syn_rsc.xml").is_file()), None)
+        modules = read_gowin_hierarchy(rsc) if rsc else None
+    print(table(modules, depth) if modules else "階層別の資源の報告が無い")
+    for v in variants:
+        report = v / ("timing.rpt" if vivado else "impl/pnr/project_tr_content.html")
+        if not report.is_file():
+            print(f"{v.name}: Fmax の報告なし")
+            continue
+        text = report.read_text(encoding="utf-8", errors="replace")
+        summary = parse_vivado_timing(text) if vivado else parse_timing_report(text)
+        print(f"{v.name}:\n{summary.describe()}")
+
+
 def main(argv=None) -> int:
     args = make_parser().parse_args(argv)
     try:
@@ -118,6 +150,9 @@ def main(argv=None) -> int:
             else:
                 text = pynq_setup.status(loader)       # PYNQ の日本語のログ（cp932 で出せない文字は置き換える）
                 print(text.encode(sys.stdout.encoding or "utf-8", "replace").decode(sys.stdout.encoding or "utf-8"))
+            return 0
+        if args.command == "resources":
+            _resources(DESIGNS[args.design], Path(args.build_dir or BUILD_ROOT / args.design), args.depth)
             return 0
         if args.command == "gen":
             written = write_all()

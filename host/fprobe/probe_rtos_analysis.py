@@ -13,7 +13,7 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。RtosTools の時間軸（
 docs/superpowers/specs/2026-10-18-u10-u16-trace-hooks-user-events-design.md の 2 節。
 """
 
-from .rtos.analysis import (execution_profile, find_jobs, inversion_episodes, isr_intervals, job_summary, load_series,
+from .rtos.analysis import (Intervals, execution_profile, find_jobs, inversion_episodes, isr_intervals, job_summary, load_series, run_summary,
                             memory_series, run_time_in)
 from .rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, job_events, overhead,
                         queue_usage)
@@ -26,9 +26,8 @@ _NO_KERNEL = ("カーネルの出来事が無い: rtos_timeline_start(method='it
               "カーネルの出来事のフック（ITM のポート 30・29）が要る")
 EVENTS_LIMIT = 500                       # rtos_timeline_events が 1 回に返す数の既定
 _JOB_EVENTS = "トレースフックの ready / block の出来事で区切った（応答時間 = 終わり − ready）"
-_JOB_RULE = ("トレースフックの ready / block の出来事が無いので、区間の終わりは次に動いたタスクの優先度で決めた（より高い"
-             "優先度へ = 横取り、低い方へ = 待った、同じ = uncertain）。応答時間は分からない（経過時間は動き始めからの"
-             "下限）。優先度の継承で動的に変わった間は誤ることがある")
+_JOB_NONE = ("トレースフックの ready / block の出来事が無いので、ジョブ（起きてから待つまで）は作らない（次に動いた"
+             "タスクの優先度から横取りか待ちかを推定しない）。runs は区間（続けて動いた間）の事実")
 
 
 class RtosAnalysisTools:
@@ -73,8 +72,6 @@ class RtosAnalysisTools:
         out = self._analysis_base(result)
         hz = result.run.timebase_hz
         window = max(1, round(window_us * hz / 1e6))
-        if result.timeline.resolution and window < 2 * result.timeline.resolution:
-            out["notes"].append("窓が分解能の 2 倍より短い: 割合が粗い")
         load = load_series(result.timeline, window, result.run.idle, self._isr(result), hz)
         if not result.run.idle:
             out["notes"].append("アイドルのタスクが分からない: 負荷は 1（すべて動いている）になる")
@@ -85,18 +82,20 @@ class RtosAnalysisTools:
         return out
 
     def rtos_timeline_jobs(self, task: str | None = None, limit: int = 50) -> dict:
-        """タスクのジョブ（起きてから待つまでの 1 回の仕事）ごとの実行時間（横取り・割り込みを除く）・経過時間・周期の
-        分布と最悪の回（いつ）。task を渡すとそのタスクのジョブの一覧も（最悪の実行時間の順に limit 件）。"""
+        """tasks: カーネルの出来事（ready / block）で区切ったジョブ（起きてから待つまでの 1 回の仕事）ごとの実行時間
+        （横取り・割り込みを除く）・経過時間・周期・応答時間の分布と最悪の回。出来事の無いタスクは入らない。
+        runs: タスクごとの区間（続けて動いた間）の回数・時間・周期・次に動いたタスク（run_summary。いつも出す）。
+        task を渡すと、そのタスクのジョブ（jobs）と区間（task_runs）の一覧も（自分の時間の長い順に limit 件）。"""
         result = self._current_timeline()
         run = result.run
         out = self._analysis_base(result)
         events = job_events(result.kernel, result.events or ()) if result.has_kernel else None
-        jobs = find_jobs(result.timeline, run.priorities, run.order, run.idle, self._isr(result), events)
-        out["notes"].append(_JOB_EVENTS if events else _JOB_RULE)
-        if not run.priorities:
-            out["notes"].append("タスクの優先度が分からない（動いている間に始めた）: すべて uncertain になる")
+        isr = self._isr(result)
+        jobs = find_jobs(result.timeline, run.idle, isr, events)
+        out["notes"].append(_JOB_EVENTS if events else _JOB_NONE)
         self._isr_note(result, out)
         out["tasks"] = job_summary(jobs, run.timebase_hz)
+        out["runs"] = run_summary(result.timeline, run.idle, isr, run.timebase_hz)
         if task is not None:
             mine = [j for j in jobs if j.task == task]
             if not mine and task not in run.names.values():
@@ -104,6 +103,12 @@ class RtosAnalysisTools:
             mine.sort(key=lambda j: -j.exec_time)
             out["jobs_total"] = len(mine)
             out["jobs"] = [j.to_dict() for j in mine[:limit]]
+            isr_iv = Intervals(isr)
+            spans = [{"start": r.t0, "end": r.t1, "exec": r.duration - isr_iv.overlap(r.t0, r.t1)}
+                     for r in result.timeline.runs if r.task == task]
+            spans.sort(key=lambda r: -r["exec"])
+            out["task_runs_total"] = len(spans)
+            out["task_runs"] = spans[:limit]
         return out
 
     def rtos_timeline_interval(self, start: dict, end: dict, task: str | None = None, limit: int = 1000) -> dict:
@@ -221,7 +226,7 @@ class RtosAnalysisTools:
 
     def rtos_timeline_blocking(self, task: str | None = None, limit: int = 200) -> dict:
         """ブロック時間: 待ちの区間（block = オブジェクト・通知を待った / delay / suspend から ready まで）と、タスクごと・
-        オブジェクトごとの回数・合計・平均・最長（いつ）・時間切れの回数。task で区間の一覧を絞る（limit 件）。"""
+        オブジェクトごとの回数・合計・平均・最長（いつ）・失敗（failed）の回数。task で区間の一覧を絞る（limit 件）。"""
         result = self._kernel_result()
         out = self._kernel_base(result)
         found = blocking(result.kernel, result.run.names, result.objects(), result.timeline.t1,
@@ -239,14 +244,12 @@ class RtosAnalysisTools:
         return out
 
     def rtos_timeline_overhead(self) -> dict:
-        """トレースフックの負荷: 語の数（ポート 31・見出し・中身）・出来事の種類ごとの数・SWO のバイト数と帯域の使用率・
-        CPU の負荷の見積もり（命令数から。実機の計測は HIL の手順）。"""
+        """トレースフックの負荷: 語の数（ポート 31・見出し・中身）・出来事の種類ごとの数・SWO のバイト数と帯域の使用率。
+        CPU の負荷は見積もらない（実測は HIL の手順）。"""
         result = self._kernel_result()
         run, tl = result.run, result.timeline
         out = self._kernel_base(result)
         found = overhead(result.kernel, tl.t1 - tl.t0, run.timebase_hz, run.baud, run.core_clock_hz)
         out["notes"] += found.pop("notes")
-        if run.core_clock_hz is None:
-            out["notes"].append("コアのクロックが分からない（rtos_timeline_start の core_clock_hz）: CPU の負荷は出さない")
         out.update(found)
         return out

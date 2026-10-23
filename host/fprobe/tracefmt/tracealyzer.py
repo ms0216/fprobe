@@ -24,7 +24,7 @@ from __future__ import annotations
 import struct
 
 from ..logfmt.printf import Words, format_c
-from .model import Trace, TraceEvent, unwrap32
+from .model import Trace, TraceEvent, is_rtos_idle_name, unwrap32
 
 __all__ = ["CHANNEL_NAME", "COMMAND_START", "COMMAND_STOP", "PSF_MAGIC", "TracealyzerDecoder", "TracealyzerError",
            "decode_tracealyzer"]
@@ -194,7 +194,7 @@ class TracealyzerDecoder:
         info = self.trace.task(task)
         if info.name is None and task in self._names:
             info.name = self._names[task]
-        if info.name and info.name.upper().startswith("IDLE"):
+        if info.name and is_rtos_idle_name(info.name):
             self.trace.idle.add(task)
         return info
 

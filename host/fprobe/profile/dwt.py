@@ -36,11 +36,11 @@ _CYCCNTENA = 1 << 0
 _POSTPRESET_SHIFT = 1              # [4:1]
 _POSTINIT_SHIFT = 5                # [8:5]
 _CYCTAP = 1 << 9
-_SYNCTAP_SHIFT = 10                # [11:10]: 3 = CYCCNT のビット 28（同期パケットは 2^28 サイクルに 1 回）
+_SYNCTAP_SHIFT = 10                # [11:10]: 1 = CYCCNT のビット 24（同期パケットは 2^24 サイクルに 1 回。16 MHz で約 1 秒）
 _PCSAMPLENA = 1 << 12
 _EXCTRCENA = 1 << 16
 _DWT_CTRL_WRITABLE = (1 << 23) - 1  # ビット 0〜22（上位は読み出し専用の NUMCOMP 等）
-_SYNCTAP = 3
+_SYNCTAP = 1                       # 解読は同期パケットを待つ（推定で再開しない）ので、落ちた後の欠けを短くする
 
 # ITM_TCR のビット
 _ITMENA, _TSENA, _SYNCENA, _DWTENA = 1 << 0, 1 << 1, 1 << 2, 1 << 3
@@ -54,7 +54,6 @@ _BITS_PER_BYTE = 10
 _PC_PACKET = 5                     # ヘッダ + 4 バイト（眠りのときは 2 バイトだが、多い方で見積もる）
 _EXC_PACKET = 3                    # ヘッダ + 2 バイト
 _EXC_PACKETS_PER_EXCEPTION = 3     # 入る・出る・戻る
-_BAUD_TOLERANCE = 0.03
 
 
 @dataclass(frozen=True)
@@ -120,8 +119,9 @@ def _bandwidth(rate_hz: float, interval: int, exception_rate_hz: float, timestam
 
 def plan_itm_sampling(core_clock_hz: float, rate_hz: float, swo_baud: float, *, traceclk_hz: float | None = None,
                       exception_trace: bool = False, exception_rate_hz: float = 0, timestamps: bool = False,
-                      headroom: float = 0.75) -> SamplingPlan:
-    """SWO で PC サンプルを受けるための設定。サンプル率は目標より速くしない。帯域の headroom を超えるなら間隔を延ばす。
+                      headroom: float = 1.0) -> SamplingPlan:
+    """SWO で PC サンプルを受けるための設定。サンプル率は目標より速くしない。見積もった使用率が headroom（既定 1.0 =
+    帯域の上限。余裕は使う側が明示する）を超えるなら間隔を延ばす。
     exception_rate_hz は例外トレースの見積もりに使う 1 秒あたりの例外の回数。"""
     if core_clock_hz <= 0 or rate_hz <= 0 or swo_baud <= 0:
         raise ValueError("クロック・サンプル率・SWO の速度は正")
@@ -197,8 +197,8 @@ def plan_swo(traceclk_hz: float, swo_baud: float) -> SwoPlan:
         warnings.append(f"SWO の速度 {swo_baud:g} は TRACECLKIN {traceclk_hz:g} Hz から作れない（ACPR を {acpr} にした）")
     baud = traceclk_hz / (acpr + 1)
     error = abs(baud - swo_baud) / swo_baud
-    if error > _BAUD_TOLERANCE:
-        warnings.append(f"SWO の速度が求めた値と {error:.1%} ずれる（{baud:g}）。受信側も {baud:g} にする")
+    if error > 0:                       # 閾値で隠さない: 違えば実際の速度を書く
+        warnings.append(f"SWO の速度は {baud:g}（求めた {swo_baud:g} と {error:.2%} 違う）。受信側も {baud:g} にする")
     writes = (
         RegisterWrite(TPIU_CSPSR, 1, note="TPIU: ポートの幅 1"),
         RegisterWrite(TPIU_ACPR, acpr, note=f"TPIU: SWO の分周（{baud:g} baud）"),
@@ -216,7 +216,18 @@ def itm_port_writes(port: int) -> list[RegisterWrite]:
     return [RegisterWrite(DEMCR, DEMCR_TRCENA, DEMCR_TRCENA, "DEMCR.TRCENA: ITM を使う"),
             RegisterWrite(ITM_LAR, ITM_UNLOCK, note="ITM の鍵を外す"),
             RegisterWrite(ITM_TCR, _ITMENA | _SYNCENA, _ITMENA | _SYNCENA, "ITM: 有効・同期"),
-            RegisterWrite(ITM_TER, 1 << port, 1 << port, f"ITM: ポート {port} を有効に")]
+            _sync_packets(),
+            RegisterWrite(ITM_TER, 1 << port, 1 << port, f"ITM: ポート {port} を有効に")]   # TER は最後（呼び出し側が分ける）
+
+
+_SYNC_BITS = _CYCCNTENA | _SYNCTAP << _SYNCTAP_SHIFT       # CYCCNT を回し、SYNCTAP でビット 24 ごとに同期パケット
+_SYNC_MASK = _CYCCNTENA | 3 << _SYNCTAP_SHIFT
+
+
+def _sync_packets() -> RegisterWrite:
+    """DWT の同期パケット。ITM の解読は既定で同期パケットを待つ（推定で再開しない）ので、これが無いと 1 バイト化けた
+    後に二度と解けない。DWT_CTRL のほかのビットは変えない。"""
+    return RegisterWrite(DWT_CTRL, _SYNC_BITS, _SYNC_MASK, "DWT: CYCCNT・同期パケット（SYNCTAP）")
 
 
 def exception_trace_writes() -> list[RegisterWrite]:
@@ -226,7 +237,8 @@ def exception_trace_writes() -> list[RegisterWrite]:
             RegisterWrite(ITM_LAR, ITM_UNLOCK, note="ITM の鍵を外す"),
             RegisterWrite(ITM_TCR, _ITMENA | _SYNCENA | _DWTENA, _ITMENA | _SYNCENA | _DWTENA,
                           "ITM: 有効・同期・DWT のパケットを流す"),
-            RegisterWrite(DWT_CTRL, _EXCTRCENA, _EXCTRCENA, "DWT: 例外トレース（EXCTRCENA）")]
+            RegisterWrite(DWT_CTRL, _EXCTRCENA | _SYNC_BITS, _EXCTRCENA | _SYNC_MASK,
+                          "DWT: 例外トレース（EXCTRCENA）・CYCCNT・同期パケット（SYNCTAP）")]
 
 
 def plan_pcsr_sampling(rate_hz: float, sys_clock_hz: int | None = None, swd_hz: float | None = None) -> SamplingPlan:

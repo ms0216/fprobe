@@ -122,4 +122,8 @@ def test_measure_painted_stack():
     assert m["warning"] and not m["overflow"]
     ram.write(0x2000_0000, b"\x00" * 16)                        # 底まで届いた
     over = measure_stack(ram.read, 0x2000_0000, 0x2000_1000, 0xCD)
-    assert over["overflow"] and over["used"] == 0x1000 and over["current"] is None
+    # 「底から 16 バイト未満ならあふれの疑い」と推定しない: 塗りが 1 バイトも残っていない事実（reached_bottom）だけ。
+    # overflow は SP が下端より下のときだけ。警告は threshold を明示したときだけ
+    assert over["reached_bottom"] and not over["overflow"] and over["used"] == 0x1000 and over["current"] is None
+    assert over["warning"] is None
+    assert measure_stack(ram.read, 0x2000_0000, 0x2000_1000, 0xCD, sp=0x1FFF_FFF0)["overflow"]

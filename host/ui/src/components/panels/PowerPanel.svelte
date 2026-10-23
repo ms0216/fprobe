@@ -19,12 +19,13 @@
 
   const OWNER = "power";
   const POLL_MS = 500, PAGE_LIMIT = 20;         // 記録の電圧は 1000 件ずつ、20 回まで
-  const THRESHOLDS_MV = [20, 50, 100, 200];
 
   const { app, conn, tl, reveal } = shared();
 
   let spanS = $state(Number(load("power.span", "60")) || 60);
-  let thresholdMv = $state(Number(load("power.threshold", "50")) || 50);
+  // 低下は使う人が指定した電圧以下の区間（既定の値・基準の水準の推定で決めない）。null = 指定していない
+  const savedV = parseFloat(load("power.below", ""));
+  let belowV = $state<number | null>(Number.isFinite(savedV) ? savedV : null);
   let paused = $state(false);
   let latest = $state<VoltageReading | null>(null);
   let readError = $state<string | null>(null);
@@ -42,7 +43,7 @@
 
   $effect(() => {
     save("power.span", String(spanS));
-    save("power.threshold", String(thresholdMv));
+    save("power.below", belowV === null ? "" : String(belowV));
     win.setSpan(spanS);
     untrack(() => gen++);
   });
@@ -118,7 +119,7 @@
     }
   }
 
-  const dips = $derived(recVolts ? findDips(recVolts.x, recVolts.y, thresholdMv / 1000) : []);
+  const dips = $derived(recVolts && belowV !== null && Number.isFinite(belowV) ? findDips(recVolts.x, recVolts.y, belowV) : []);
   const lowest = $derived(recVolts ? minIndex(recVolts.y) : -1);
   const recSeries = $derived<Series[]>(recVolts?.x.length ? [{ name: $i18n("timeline.row.aux.voltage"), x: recVolts.x, y: recVolts.y, unit: "V" }] : []);
   // 横軸はタイムベース。表示は記録の始めからの秒（lib/time.ts）
@@ -128,7 +129,7 @@
 
   // 低下を時間軸の印に
   $effect(() => {
-    tl.setMarks(OWNER, "recording", dips.map((d) => ({ t: d.t, tEnd: d.tEnd, label: `-${Math.round(d.drop * 1000)} mV`, tone: 3 as const })));
+    tl.setMarks(OWNER, "recording", dips.map((d) => ({ t: d.t, tEnd: d.tEnd, label: formatVolts(d.min), tone: 3 as const })));
   });
   $effect(() => () => tl.setMarks(OWNER, "recording", []));
 
@@ -193,7 +194,7 @@
     <span class="spacer"></span>
     {#if recVolts?.x.length}
       <label title={$i18n("power.dipThresholdTip")}>{$i18n("power.dipThreshold")}
-        <select bind:value={thresholdMv}>{#each THRESHOLDS_MV as m (m)}<option value={m}>{m} mV</option>{/each}</select>
+        <input type="number" step="0.01" min="0" class="volts" bind:value={belowV} placeholder="—" /> V
       </label>
       <button disabled={lowest < 0} title={$i18n("power.revealLowestTip")}
               onclick={() => recVolts && openAt(recVolts.x[lowest])}>{$i18n("power.revealLowest")}</button>
@@ -217,11 +218,11 @@
           <tr ondblclick={() => openAt(d.t, d.tEnd)}>
             <td><TimeLink to={{ source: "recording", t: d.at }} /></td>
             <td class="mono">{formatVolts(d.min)}</td>
-            <td class="mono">{Math.round(d.drop * 1000)} mV</td>
+            <td class="mono">{Math.round(d.under * 1000)} mV</td>
             <td class="mono">{tickS ? formatDuration((d.tEnd - d.t) * tickS) : d.tEnd - d.t}</td>
           </tr>
         {:else}
-          <tr><td colspan="4" class="muted">{$i18n("power.noDips")}</td></tr>
+          <tr><td colspan="4" class="muted">{$i18n(belowV === null ? "power.pickThreshold" : "power.noDips")}</td></tr>
         {/each}
       </tbody>
     </table>
@@ -229,6 +230,7 @@
 </div>
 
 <style>
+  .volts { width: 5em; }
   .big { font-size: 16px; font-weight: 600; }
   .badge { font-size: 11px; border: 1px solid currentColor; border-radius: 8px; padding: 0 6px; }
   .ok { color: var(--ok); }

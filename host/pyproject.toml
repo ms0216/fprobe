@@ -12,9 +12,11 @@ dependencies = ["pyusb>=1.2", "libusb-package>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# 入っていれば大きな記録のロジアナの波形（数千万の変化点）を一括の計算で開く（無くても同じ結果で遅いだけ）
+fast = ["numpy>=1.24"]
 debug = ["pyocd>=0.45", "capstone>=5"]     # fprobe.session（pyOCD と同時利用）、fprobe.disasm
 serial = ["pyserial>=3.5"]                   # SerialLink（UART のホストリンク）
-mcp = ["fprobe[debug]", "mcp>=2.3", "pyserial>=3.5", "pyyaml>=6"]   # fprobe-mcp（pyyaml: 規則・台本の YAML）
+mcp = ["fprobe[debug,fast]", "mcp>=2.3", "pyserial>=3.5", "pyyaml>=6"]   # fprobe-mcp（pyyaml: 規則・台本の YAML）
 aux = ["mpremote>=1.25", "pyserial>=3.5"]    # 補助マイコン（Pico）へのプログラムの書き込み（fprobe.aux_flash）
 
 [project.scripts]
@@ -26,7 +28,7 @@ fprobe-daemon = "fprobe.api.daemon:main"
 include = ["fprobe*"]
 
 [tool.setuptools.package-data]
-fprobe = ["data/svd/*", "data/connect_scripts/*.py", "testpoint/*.h"]     # 同梱の SVD（fprobe.svd。出典・ライセンスは data/svd/README.md）、内蔵の接続の手順（fprobe.connect_scripts）、テストポイントのヘッダ
+fprobe = ["data/svd/*", "data/connect_scripts/*.py", "testpoint/*.h", "linux/agent/*.c"]     # Linux のエージェントの源（fprobe.linux.agent）、同梱の SVD（fprobe.svd。出典・ライセンスは data/svd/README.md）、内蔵の接続の手順（fprobe.connect_scripts）、テストポイントのヘッダ
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

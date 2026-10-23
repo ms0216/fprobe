@@ -22,7 +22,7 @@ from .stats import wilson_interval
 
 __all__ = ["CATEGORIES", "Profile", "Profiler", "SymbolSource"]
 
-CATEGORIES = ("code", "sleep", "unknown")
+CATEGORIES = ("code", "sleep", "wfi", "unknown")   # sleep = コアが送った眠りのサンプル、wfi = PC が WFI / WFE の上
 _SLEEP_MNEMONICS = ("wfi", "wfe")
 _BY = ("function", "line", "instruction", "exception")
 
@@ -39,16 +39,15 @@ class _Function:
     address: int
     size: int
     instructions: dict[int, object] = field(default_factory=dict)    # 番地 → disasm.Instruction（逆アセンブラがあれば）
-    sleep: frozenset[int] = frozenset()                              # 眠りとみなす番地（WFI / WFE とその直後）
+    wfi: frozenset[int] = frozenset()                                # WFI / WFE の番地
 
 
 class Profiler:
-    def __init__(self, symbols: SymbolSource, disassembler=None, *, sleep_after_wfi: bool = True):
-        """disassembler（fprobe.disasm.Disassembler）があれば、命令の文字列と WFI / WFE の場所（眠りの判定）を使う。
-        sleep_after_wfi: WFI / WFE の直後の命令に当たったサンプルも眠りとみなす（PC が次の命令を指すコアがあるため）。"""
+    def __init__(self, symbols: SymbolSource, disassembler=None):
+        """disassembler（fprobe.disasm.Disassembler）があれば、命令の文字列と WFI / WFE の場所を使う。PC が WFI / WFE の
+        上のサンプルは wfi に数える（眠っていたとはみなさない。直後の命令に当たったサンプルも code のまま）。"""
         self.symbols = symbols
         self.disassembler = disassembler
-        self.sleep_after_wfi = sleep_after_wfi
         self._functions: dict[str, _Function | None] = {}
 
     def function_at(self, location: Location) -> _Function | None:
@@ -72,13 +71,8 @@ class Profiler:
         except (MemoryReadError, ValueError):                # 中身が読めない（ROM の外など）: 命令の情報なしで続ける
             return f
         f.instructions = {i.address: i for i in listing.instructions}
-        sleep = set()
-        for i in listing.instructions:
-            if i.kind == "code" and i.mnemonic in _SLEEP_MNEMONICS:
-                sleep.add(i.address)
-                if self.sleep_after_wfi:
-                    sleep.add(i.address + i.size)
-        f.sleep = frozenset(sleep)
+        f.wfi = frozenset(i.address for i in listing.instructions
+                          if i.kind == "code" and i.mnemonic in _SLEEP_MNEMONICS)
         return f
 
     def profile(self, samples: PcSamples, *, confidence: float = 0.95,
@@ -102,9 +96,9 @@ class Profiler:
                 prof.categories["unknown"] += 1
                 prof.unknown_pcs[s.pc] += 1
                 continue
-            if s.pc in f.sleep:
-                prof.categories["sleep"] += 1
-                prof.sleep_pcs[s.pc] += 1
+            if s.pc in f.wfi:
+                prof.categories["wfi"] += 1
+                prof.wfi_pcs[s.pc] += 1
                 continue
             prof.categories["code"] += 1
             prof.function_counts[f.name] += 1
@@ -135,11 +129,11 @@ class Profile:
     instruction_meta: dict[int, tuple] = field(default_factory=dict)  # 番地 → (関数, オフセット, ファイル, 行, 命令)
     exceptions_counts: Counter = field(default_factory=Counter)       # 例外番号 → 数（例外トレースがあるとき）
     unknown_pcs: Counter = field(default_factory=Counter)
-    sleep_pcs: Counter = field(default_factory=Counter)                # 眠りとみなした番地（WFI / WFE）→ 数
+    wfi_pcs: Counter = field(default_factory=Counter)                  # WFI / WFE の番地 → 数
 
     def hit_addresses(self) -> set[int]:
-        """サンプルが当たった命令の番地（眠りの WFI / WFE を含む。関数の外は含まない）。カバレッジに使う。"""
-        return set(self.instruction_counts) | set(self.sleep_pcs)
+        """サンプルが当たった命令の番地（WFI / WFE を含む。関数の外は含まない）。カバレッジに使う。"""
+        return set(self.instruction_counts) | set(self.wfi_pcs)
 
     # --- 割合 ---------------------------------------------------------------------
 
@@ -209,7 +203,8 @@ class Profile:
         if self.unavailable:
             out.append(f"DWT_PCSR が 0xFFFFFFFF（止まっていた・サンプルできない）の {self.unavailable} 回は数えていない。")
         if self.source == "pcsr":
-            out.append("DWT_PCSR は DAP の命令の境界で読むので、周期がゆらぐ。眠りは WFI / WFE の番地で判定している。")
+            out.append("DWT_PCSR は DAP の命令の境界で読むので、周期がゆらぐ。眠りのサンプルは無い（PC が WFI / WFE の上の"
+                       "サンプルは wfi に数える。眠っていたとはみなさない）。")
         if not self.exception_trace:
             out.append("例外トレースが無いので、割り込みの中かどうかは関数の名前でしか分からない。")
         return out

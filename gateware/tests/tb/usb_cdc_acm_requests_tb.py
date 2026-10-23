@@ -88,7 +88,14 @@ async def send_break_holds_for_the_duration_or_until_cleared(dut):
     assert (await request(dut, 0x21, 0x23, value=0xFFFF))[0] == "ack"          # 止めるまで（Windows・Linux の形）
     await ClockCycles(dut.clk, 500)
     assert int(dut.brk.value) == 1
-    assert (await request(dut, 0x21, 0x23, value=0))[0] == "ack"
+    dut.req_type.value, dut.req_request.value, dut.req_value.value = 0x21, 0x23, 0      # 止める（受理の周期を直接見る）
+    dut.req_index.value, dut.req_length.value, dut.req_valid.value = 1, 0, 1
+    await RisingEdge(dut.clk)                       # 受理: 残りの長さが 0 に
+    dut.req_valid.value = 0
+    await ReadOnly()
+    assert int(dut.req_ack.value) == 1
+    assert int(dut.brk.value) == 1                  # brk はレジスタの出力: 残りの長さが 0 になった次の周期に 0
+    await RisingEdge(dut.clk)                       # （組み合わせの論理を別のクロックの同期化の前に置かない。R24）
     await ReadOnly()
     assert int(dut.brk.value) == 0
     await RisingEdge(dut.clk)

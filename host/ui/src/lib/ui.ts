@@ -12,6 +12,8 @@ export interface UiSnapshot {
   reveals: number;
   /** ほかのビュー・時間軸から頼まれた Memory の番地（seq はそのたびに増える） */
   memory: { address: number; seq: number } | null;
+  /** ほかのビュー（Activity の行）から頼まれた API パネルの呼び出し（seq はそのたびに増える） */
+  api: { method: string; params: Record<string, unknown>; seq: number; favorite?: string } | null;
 }
 
 const RECENT = 8;
@@ -27,7 +29,7 @@ function loadRecent(): string[] {
 
 export class UiState {
   private snap: UiSnapshot = { selection: null, recent: loadRecent(), dialog: null, reveals: 0,
-                                     memory: null };
+                                     memory: null, api: null };
   private listeners = new Set<(s: UiSnapshot) => void>();
 
   subscribe(fn: (s: UiSnapshot) => void): () => void {
@@ -47,6 +49,18 @@ export class UiState {
   /** 行を選んで Source をそこへ移す（ほかのビュー・時間軸から） */
   revealLine(file: string, line: number): void {
     this.set({ selection: { file, line }, reveals: this.snap.reveals + 1 });
+  }
+
+  /** API パネルをそのメソッドと引数で開く（Activity の行から。同じ呼び出しを人がやり直す） */
+  openApi(method: string, params: Record<string, unknown>, favorite?: string): void {
+    this.set({ api: { method, params, seq: (this.snap.api?.seq ?? 0) + 1, ...(favorite ? { favorite } : {}) } });
+  }
+
+  /** API パネルが依頼を受け取る（受け取ったら消す: パネルを付け直しても前の依頼がもう一度当たらない） */
+  takeApi(): UiSnapshot["api"] {
+    const api = this.snap.api;
+    if (api) this.set({ api: null });
+    return api;
   }
 
   /** Memory をその番地で開く（ほかのビュー・時間軸から） */

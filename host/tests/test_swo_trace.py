@@ -58,6 +58,9 @@ def test_plan_ports_timestamps_exceptions_counters():
     assert not ctrl_mask & (1 << 18 | 1 << 19 | 1 << 21)               # 頼まれていないカウンタには触らない
     # LSU・CPI は最悪 256 サイクルごとに 2 バイト: 16 MHz で 250 KB/s > 2 Mbaud の帯域
     assert any("イベントカウンタ" in x for x in plan.warnings)
+    # 「帯域の 50 % を超えたら」の閾値で出す・出さないを決めない: 少ない（1 MHz・CPI だけ = 帯域の 4 %）ときも数字を書く
+    low = st.plan_trace(st.TraceRequest(counters=("cpi",)), info(), core_clock_hz=1e6, swo_baud=2e6)
+    assert any("イベントカウンタ" in x and "4%" in x for x in low.warnings)
     # ITM の有効化は DWT の出どころより先（DWT のパケットを ITM が流す）
     order = [w.address for w in plan.enable]
     assert order.index(ITM_TCR) < order.index(DWT_CTRL)

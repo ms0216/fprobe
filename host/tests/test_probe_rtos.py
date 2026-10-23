@@ -214,7 +214,7 @@ def test_itm_timeline_enables_the_hook_and_reads_swo_bytes_with_device_times(pro
     dev.swo(t0 + 9500, itm_word(h["sensor"] | 0))
     dev.advance(1000)
     stopped = probe.rtos_timeline_stop()
-    assert target.write_log[-1] == (flag, 0)                               # トレースフックを止めた
+    assert (flag, 0) in target.write_log[-2:] and (dwt.DWT_CTRL, 0) in target.write_log[-2:]   # フックを止め、DWT_CTRL（同期パケット）を戻した
     assert stopped["method"] == "itm" and not stopped["lower_bound"]
     runs = probe.rtos_timeline_get()["runs"]
     assert [(r["task"], r["t0"] - t0) for r in runs] == [("sensor", 1000), ("IDLE", 5500), ("sensor", 9500)]
@@ -288,10 +288,14 @@ def test_sampled_timeline_reads_stacks_heap_and_mutex_words(probe, kernel):
     assert (ep["mutex"], ep["holder"], ep["waiter"]) == ("log_mutex", "worker", "ctrl")
     assert ep["unbounded"] and 9_990 <= ep["interference"]["sensor"] <= 10_000 and inv["duration_us"]["max"] > 0
     jobs = probe.rtos_timeline_jobs(task="worker")
-    (job,) = jobs["jobs"]                                               # sensor・ctrl に横取りされ、観測の端で終わる
-    assert (job["preemptions"], job["end_reason"]) == (1, "truncated") and jobs["tasks"]["worker"]["truncated"] == 1
-    assert jobs["tasks"]["ctrl"]["jobs"] == 1                            # ctrl は IDLE（低い）へ移った = 待った
-    assert any("優先度" in n for n in jobs["notes"])
+    # 出来事が無い（sampled）ので、ジョブを優先度から推定しない。区間の事実（回数・時間・次に動いたタスク）だけ
+    assert jobs["tasks"] == {} and jobs["jobs"] == [] and any("出来事" in n for n in jobs["notes"])
+    worker = jobs["runs"]["worker"]
+    assert worker["runs"] >= 1 and sum(worker["followed_by"].values()) == worker["runs"]
+    assert jobs["task_runs"] and jobs["task_runs"][0]["exec"] == max(r["exec"] for r in jobs["task_runs"])
+    assert not any("= 横取り" in n or "uncertain" in n for n in jobs["notes"])
+    fine = probe.rtos_timeline_load(window_us=1)          # 窓が分解能より短くても経験則の注記は出さない（分解能は事実で返す）
+    assert fine["resolution_us"] > 0 and not any("倍" in n for n in fine["notes"])
     load = probe.rtos_timeline_load(window_us=200)
     assert load["windows"][0]["tasks"]["worker"] > 0 and load["peak"]["load"] == pytest.approx(1.0)
     assert any("割り込み" in n for n in load["notes"])                  # 方法 sampled: 割り込みは見えない
@@ -409,9 +413,9 @@ def test_itm_timeline_reads_kernel_events_flow_blocking_queues_and_exact_inversi
     assert sends["total"] == 2 and [e["object"] for e in sends["events"]] == ["cmd_queue", "log_mutex"]
     assert probe.rtos_timeline_events(task="ctrl", kinds=["block"])["total"] == 1
     cost = probe.rtos_timeline_overhead()
-    assert cost["words"] == 9 + 8 + 8 and cost["swo_share"] > 0 and cost["cpu_share"] > 0
+    assert cost["words"] == 9 + 8 + 8 and cost["swo_share"] > 0 and "cpu_share" not in cost
     jobs = probe.rtos_timeline_jobs()
-    assert any("ready" in n for n in jobs["notes"])
+    assert any("ready" in n for n in jobs["notes"]) and jobs["runs"]          # ready → block のそろうタスクは無い
     probe.rtos_timeline_stop()
     kinds = {e["kind"] for e in probe.recording_events(streams=["rtos"])["events"]}
     assert {"send", "receive", "block", "ready", "prio_inherit", "blocked", "inversion"} <= kinds

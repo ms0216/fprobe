@@ -80,8 +80,8 @@ class SearchDemo:
     def recording_intervals(self, start, end):
         return self._elf.recording_intervals(start, end)
 
-    def timing_measure(self, start, end, bins=20, outliers="iqr", limit=1000):
-        return self._elf.timing_measure(start, end, bins, outliers, limit)
+    def timing_measure(self, start, end, bins=20, longest=10, limit=1000):
+        return self._elf.timing_measure(start, end, bins, longest, limit)
 
     def recording_waveform_measure(self, t0=None, t1=None, channels=None, relations=None):
         return self._elf.recording_waveform_measure(t0, t1, channels, relations)

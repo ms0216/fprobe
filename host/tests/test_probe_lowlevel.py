@@ -192,3 +192,75 @@ def test_auto_connect_identifies_the_part_and_closes_the_raw_link(monkeypatch):
     assert opened["target_override"] == "stm32f401xe" and opened["frequency"] == 4_000_000
     assert status["auto"]["part"]["name"] == "STM32F401xD/E" and status["auto"]["target"] == "stm32f401xe"
     assert links[0].closed and p._raw_link is None
+
+
+class LateTdo:
+    """TDO が 1 ビット遅れて届く線（fprobe の取り込みの遅れが csr の値 need より小さい間）。Pi 2B の 14.3 MHz 以上の形。"""
+
+    def __init__(self, wire, device, need):
+        self.wire, self.device, self.need, self.last = wire, device, need, 1
+
+    def sequence(self, cycles, tms, tdi, capture):
+        from fprobe import generated as g
+        tdo = self.wire.sequence(cycles, tms, tdi, True) or 0
+        delay = self.device.csr.get(g.DEBUG_SAMPLE_DELAY, 0) >> g.DEBUG_SAMPLE_DELAY_JTAG[0] & 7
+        if delay < self.need:
+            late = (tdo << 1 | self.last) & ((1 << cycles) - 1)
+            self.last = tdo >> (cycles - 1) & 1
+            tdo = late
+        return tdo if capture else None
+
+
+def test_jtag_sample_delay_scan_reports_facts_per_delay_and_restores(monkeypatch):
+    # R16: 遅れ 0〜7 ごとに、チェーンの IDCODE を reads 回読んで、期待値（呼び手が明示）との一致の数と見えた値を並べる。
+    # どれを使うかは決めない（終わったら元の遅れに戻す）
+    from fprobe import generated as g
+    taps = [Tap(4, 0x4BA00477)]
+    p, _ = make_probe(FakeTarget(swd=False, jtag_chain=FakeChain(taps)))
+    dev = p.session.device
+    dev.csr[g.DEBUG_SAMPLE_DELAY] = 1 | 5 << 8                          # SWD 1・JTAG 5（戻す値）
+    real = type(p)._jtag_wire
+    monkeypatch.setattr(type(p), "_jtag_wire", lambda self, f=None: LateTdo(real(self, f), dev, need=2))
+    out = p.jtag_sample_delay_scan(frequency_hz=16_700_000, expected_idcodes=[0x4BA00477], reads=3)
+    rows = {r["delay"]: r for r in out["delays"]}
+    assert sorted(rows) == list(range(8))
+    assert rows[0]["matches"] == 0 and rows[1]["matches"] == 0 and rows[2]["matches"] == 3 and rows[7]["matches"] == 3
+    assert rows[0]["observed"] == [{"idcodes": [0x974008EF], "count": 3}]
+    assert all(r["applied"] for r in rows.values())
+    assert dev.csr[g.DEBUG_SAMPLE_DELAY] == 1 | 5 << 8                  # 元に戻した（SWD の欄も触らない）
+    assert out["frequency_hz"] == 16_700_000 and out["restored_delay"] == 5
+    assert out["half_period"] == 3 and out["tck_hz"] == 100_000_000 / 7    # 実際の TCK（1 ビット = 2 × 3 + 1 周期）
+
+
+def test_jtag_sample_delay_set_keeps_the_swd_field_and_reports_readback():
+    from fprobe import generated as g
+    p, _ = make_probe()
+    dev = p.session.device
+    dev.csr[g.DEBUG_SAMPLE_DELAY] = 1
+    assert p.jtag_sample_delay_set(cycles=3) == {"cycles": 3, "readback": 3}
+    assert dev.csr[g.DEBUG_SAMPLE_DELAY] == 1 | 3 << 8
+    with pytest.raises(ValueError):
+        p.jtag_sample_delay_set(cycles=8)
+
+
+def test_jtag_sample_delay_scan_refuses_while_connected_without_touching_the_delay():
+    from fprobe import generated as g
+    p, _ = make_probe()
+    connected(p)
+    dev = p.session.device
+    dev.csr[g.DEBUG_SAMPLE_DELAY] = 1 | 5 << 8
+    writes = []
+    real = dev.write32
+    dev.write32 = lambda a, v: (writes.append(a), real(a, v))
+    with pytest.raises(NotDisconnected):
+        p.jtag_sample_delay_scan(frequency_hz=1_000_000, expected_idcodes=[1], reads=1)
+    assert g.DEBUG_SAMPLE_DELAY not in writes
+
+
+def test_jtag_sample_delay_set_switches_to_the_jtag_design_first(monkeypatch):
+    # 横断レビュー: 標準の構成（JTAG なし）で書くと、後で JTAG の構成に書き替えたときに 0 に戻る。先に切り替える
+    p, _ = make_probe()
+    calls = []
+    monkeypatch.setattr(type(p), "_ensure_design", lambda self, protocol: calls.append(protocol))
+    p.jtag_sample_delay_set(cycles=2)
+    assert calls == ["jtag"]

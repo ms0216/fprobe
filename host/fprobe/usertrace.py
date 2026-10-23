@@ -314,12 +314,12 @@ def pair_intervals(records: Iterable[UserRecord]) -> Pairing:
 
 
 def interval_stats(intervals: Iterable[Interval], timebase_hz: float | None = None, *, bins: int = 20,
-                   outliers: str = "iqr") -> dict[str, dict]:
-    """名前ごとの区間の統計（timing.measure と同じ: 最小・最大・平均・σ・分位・分布・外れ値と開始の時刻）。"""
+                   longest: int = 10) -> dict[str, dict]:
+    """名前ごとの区間の統計（timing.measure と同じ: 最小・最大・平均・σ・分位・分布・長い順の上位と開始の時刻）。"""
     per: dict[str, list[tuple[int, int]]] = {}
     for i in intervals:
         per.setdefault(i.name, []).append((i.t0, i.duration))
-    return {name: interval_report(sorted(pairs), timebase_hz, bins=bins, outliers=outliers).as_dict()
+    return {name: interval_report(sorted(pairs), timebase_hz, bins=bins, longest=longest).as_dict()
             for name, pairs in per.items()}
 
 

@@ -149,6 +149,8 @@ def _check_descriptor(desc: bytes, where: str) -> tuple[int, int, int, int, int,
     name, buf, size, wr, rd, flags = struct.unpack("<IIIIII", desc)
     if size == 0:
         return name, buf, size, wr, rd, flags
+    if buf == 0:                                          # 初期化の途中（リングがまだ置かれていない）
+        raise RttError(f"{where}: リングの番地が 0（大きさ {size}。ターゲットが RTT を初期化する前）")
     if buf + size > 1 << 32 or wr >= size or rd >= size:
         raise RttError(f"{where}: 壊れた記述子（番地 0x{buf:08X}、大きさ {size}、WrOff {wr}、RdOff {rd}）")
     return name, buf, size, wr, rd, flags
@@ -221,6 +223,7 @@ class Rtt:
         self.polls = 0
         self.empty_polls = 0                                # 何も来なかった poll
         self.hinted_polls = 0                               # WrOff を教わって記述子を読まなかった poll
+        self.reopens = 0                                    # 記述子のリングが変わっていたので開き直した回数
 
     def stats(self) -> dict:
         """読み書きの回数・バイト数と poll の数（累計）。"""
@@ -285,6 +288,15 @@ class Rtt:
         elif wanted:
             start = cb.up[0].descriptor_address
             window = self.memory.read_memory(start, self._window_length(start, len(cb.up), wanted))
+            for c in wanted:                                 # ターゲットが RTT を初期化し直した: 古い番地を読まない
+                buf, size = struct.unpack_from("<II", window, c.descriptor_address - start + 4)
+                if (buf, size) != (c.buffer_address, c.size):
+                    try:
+                        self.open()
+                        self.reopens += 1
+                    except RttError:                         # まだ初期化の途中: 次の poll でもう一度
+                        pass
+                    return {}
             positions = {c.index: struct.unpack_from("<II", window, c.descriptor_address - start + WR_OFF)
                          for c in wanted}
         else:

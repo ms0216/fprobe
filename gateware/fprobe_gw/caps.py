@@ -32,6 +32,14 @@ FEATURE_SAMPLER = 1 << 3     # DAP サンプラ（F4: 変数のライブ観測�
 FEATURE_LA_FILTER = 1 << 4   # ロジアナのグリッチフィルタ（U21。CSR la.filter）
 FEATURE_LA_PULSE = 1 << 5    # ロジアナのパルス幅のトリガ（U21。CSR la.pulse・pulse_min・pulse_max）
 FEATURE_LA_STREAM_EVENTS = 1 << 6   # ロジアナのストリームにイベントも見出し付きで流す（R1。無ければ今の形式）
+FEATURE_FPGA_OBS = 1 << 7    # 対象の FPGA の観測（CSR obs・イベント 8・9。大きい FPGA の構成だけ）
+FEATURE_OBS_MATCH = 1 << 8   # 観測の値の一致をクロストリガの源 bit4 に（CSR obs.match。観測の口とクロストリガがある構成）
+FEATURE_SAMPLER_MATCH = 1 << 10   # サンプラの値の一致をクロストリガの源 bit5 に（CSR sampler_match。R21）
+FEATURE_SYNC = 1 << 9        # ボードの間の時刻の同期（CSR sync・イベント 10・端子 sync_in / sync_out）
+SYNC_RX_LATENCY_TICKS = 2    # 子: sync_in が 1 になった周期 → 組の子の時刻（rtl/core/sync_link.vhd の RX_LATENCY_TICKS）
+SYNC_TX_LATENCY_TICKS = 1    # 親: 送る時刻を決めた周期 → sync_out が 1（同 TX_LATENCY_TICKS）
+SYNC_RX_PHASE_TICKS = 0.5    # 子: 非同期に来る辺を自分の時計で取り込む位相の平均（ロジアナの申告の遅れの 0.5 と同じ。
+                             # 2026-10-22 の実機で、これを入れないと子の出来事が約 0.5 刻み早く出た）
 TYPE_DEBUG = 14              # u32 ビットマップ（DEBUG_*。デバッグポートの構成。無い古いデバイスは全部ある）
 DEBUG_JTAG = 1 << 0          # JTAG の PHY（無ければ DAP_Connect の JTAG は失敗）
 DEBUG_INJECT = 1 << 1        # 故障注入 = 割り込み書き込み（swd_injector。xtrig の inject_*）
@@ -49,6 +57,13 @@ LA_CH_PIN = 1                # 拡張ヘッダ（デバッグコネクタ）の�
 LA_CH_INTERNAL = 2           # 内部の信号。0 = プローブが SWDIO を駆動中、1 = DAP の処理中
 LA_CH_INPUT = 3              # 専用の入力（デバッグの線と兼用しない純粋な入力）。番号 = 入力の番号
 LA_INTERNAL_PROBES = 2       # fprobe_core が外部のピンの後に置く内部の信号の数
+TYPE_LA_DELAY = 19           # ロジアナの時刻（trigger_time）がピンの変化より遅い分: u16 × 2（内蔵・深いバッファ）、
+                             # 半刻みの単位（非同期のピンの同期化の平均 0.5 刻みを含む）。無い古いデバイスは 0（直さない）
+# ロジアナの入り口から時刻の付くまでの段数（刻み。辺の直後に変わった入力について。gateware/tests の
+# la_filter・la_capture・deep_axi の試験が回路と一致することを確かめる）
+LA_FILTER_DELAY = 3          # la_filter: 2 段の同期化 + 1（LA_FILTER の構成だけ。その後の la_front の同期化も残る）
+LA_INTERNAL_DELAY = 3        # la_front → la_capture の trigger_time
+LA_DEEP_DELAY = 4            # la_front → la_encoder（la_deep_buffer）の trigger_time
 TYPE_UART_FLOW = 17          # UART の RTS/CTS（U52。CSR uart.flow）: 端子の候補 1 本に 1 バイト（ロジアナのチャンネル。
                              # flow.rts_pin・cts_pin の番号の順）。無ければフロー制御の回路が無い
 
@@ -80,11 +95,14 @@ class Capabilities:
     trig_seq: bool = True        # 多段トリガ
     aux: bool = False            # 補助マイコンの計測値（ボードに補助マイコンをつないだ構成だけ）
     sampler: bool = True         # DAP サンプラ（変数のライブ観測）
+    sampler_match: bool = True   # サンプラの値の一致 → クロストリガの源 bit5（R21。CSR sampler_match。サンプラとクロストリガが要る）
     jtag: bool = True            # JTAG の PHY（B22: 標準構成は外し、JTAG の構成が持つ）
     inject: bool = True          # 故障注入（割り込み書き込み）。クロストリガ（xtrig）の一部
     la_filter: bool = True       # ロジアナのグリッチフィルタ（ロジアナがある構成で）
     la_pulse: bool = True        # ロジアナのパルス幅のトリガ
     la_stream_events: bool = False   # ストリームにイベントも流す（R1。資源のため既定は無し、構成で有効にする）
+    fpga_obs: bool = False           # 対象の FPGA の観測の口（obs_*。大きい FPGA の構成だけ）
+    sync: bool = False               # ボードの間の時刻の同期（端子 sync_in / sync_out をつないだ構成だけ）
     # クロストリガの動作「出力の端子」: 端子の候補 j の (ロジアナのチャンネル, プルアップがある) と、同時に動かせる動作の数。
     # 候補が空なら回路が無い
     outputs: tuple[tuple[int, bool], ...] = ()
@@ -136,6 +154,12 @@ def _tlv(kind: int, value: bytes) -> bytes:
     return struct.pack("<HH", kind, len(value)) + value + bytes(-len(value) % 4)
 
 
+def la_delay_halves(caps: Capabilities) -> tuple[int, int]:
+    """ロジアナの時刻がピンの変化より遅い分（内蔵, 深いバッファ）。半刻みの単位、非同期の平均 0.5 刻みを含む。"""
+    front = LA_FILTER_DELAY if caps.la_filter else 0
+    return 2 * (front + LA_INTERNAL_DELAY) + 1, 2 * (front + LA_DEEP_DELAY) + 1
+
+
 def encode(caps: Capabilities, build: list[int] | None = None) -> bytes:
     """先頭 "FCAP" + 総バイト数（u32）、続いて TLV（4 バイト境界まで 0 詰め）、種類 0 で終端。
     build はビルドの版の語（fprobe_gw.build_info.words。None なら版なし = 全部 0）。"""
@@ -168,13 +192,18 @@ def _encode(caps: Capabilities, build: list[int] | None = None) -> tuple[bytes, 
         _tlv(TYPE_FEATURES, u32(FEATURE_XTRIG * caps.xtrig | FEATURE_TRIG_SEQ * caps.trig_seq
                                 | FEATURE_AUX * caps.aux | FEATURE_SAMPLER * caps.sampler
                                 | FEATURE_LA_FILTER * caps.la_filter | FEATURE_LA_PULSE * caps.la_pulse
-                                | FEATURE_LA_STREAM_EVENTS * caps.la_stream_events)),
+                                | FEATURE_LA_STREAM_EVENTS * caps.la_stream_events
+                                | FEATURE_FPGA_OBS * caps.fpga_obs
+                                | FEATURE_OBS_MATCH * (caps.fpga_obs and caps.xtrig)
+                                | FEATURE_SYNC * caps.sync
+                                | FEATURE_SAMPLER_MATCH * (caps.sampler_match and caps.sampler and caps.xtrig))),
         _tlv(TYPE_DEBUG, u32(DEBUG_JTAG * caps.jtag | DEBUG_INJECT * caps.inject
                              | DEBUG_SWO_MANCHESTER * caps.swo_manchester)),
         *([_tlv(TYPE_OUTPUTS, bytes([caps.output_actions,
                                      *(ch | OUTPUT_PULL_UP * pull_up for ch, pull_up in caps.outputs)]))]
           if caps.outputs else []),
         *([_tlv(TYPE_UART_FLOW, bytes(caps.uart_flow))] if caps.uart_flow else []),
+        *([_tlv(TYPE_LA_DELAY, struct.pack("<HH", *la_delay_halves(caps)))] if caps.la_channels else []),
     ])
     body = head + _tlv(TYPE_BUILD, b"".join(map(u32, build))) + _tlv(TYPE_END, b"")
     build_word = (8 + len(head) + 4) // 4                   # 先頭（magic・総バイト数）と TLV の頭の後
@@ -221,11 +250,14 @@ def render_package(package: str, caps: Capabilities) -> str:
         f"  constant TRIG_SEQ : boolean := {str(caps.trig_seq).lower()};",
         f"  constant AUX : boolean := {str(caps.aux).lower()};",
         f"  constant SAMPLER : boolean := {str(caps.sampler).lower()};",
+        f"  constant SAMPLER_MATCH : boolean := {str(caps.sampler_match and caps.sampler and caps.xtrig).lower()};",
         f"  constant HAS_JTAG : boolean := {str(caps.jtag).lower()};",
         f"  constant INJECTOR : boolean := {str(caps.inject).lower()};",
         f"  constant LA_FILTER : boolean := {str(caps.la_filter).lower()};",
         f"  constant LA_PULSE : boolean := {str(caps.la_pulse).lower()};",
         f"  constant LA_STREAM_EVENTS : boolean := {str(caps.la_stream_events).lower()};",
+        f"  constant OBS_PORT : boolean := {str(caps.fpga_obs).lower()};",
+        f"  constant SYNC : boolean := {str(caps.sync).lower()};",
         f"  constant XOUT_COUNT : natural := {caps.output_actions if caps.outputs else 0};",
         f"  constant LA_INPUTS : natural := {caps.la_inputs};",
         f"  constant SWO_MANCHESTER : boolean := {str(caps.swo_manchester).lower()};",
@@ -248,8 +280,12 @@ HOST_CONSTANTS = {
     "CAPS_MEM_TEST": TYPE_MEM_TEST, "CAPS_FEATURES": TYPE_FEATURES,
     "FEATURE_XTRIG": FEATURE_XTRIG, "FEATURE_TRIG_SEQ": FEATURE_TRIG_SEQ, "FEATURE_AUX": FEATURE_AUX, "FEATURE_SAMPLER": FEATURE_SAMPLER,
     "FEATURE_LA_FILTER": FEATURE_LA_FILTER, "FEATURE_LA_PULSE": FEATURE_LA_PULSE,
-    "FEATURE_LA_STREAM_EVENTS": FEATURE_LA_STREAM_EVENTS, "CAPS_BUILD": TYPE_BUILD,
-    "CAPS_DEBUG": TYPE_DEBUG, "DEBUG_JTAG": DEBUG_JTAG, "DEBUG_INJECT": DEBUG_INJECT,
+    "FEATURE_LA_STREAM_EVENTS": FEATURE_LA_STREAM_EVENTS, "FEATURE_FPGA_OBS": FEATURE_FPGA_OBS,
+    "FEATURE_OBS_MATCH": FEATURE_OBS_MATCH, "FEATURE_SAMPLER_MATCH": FEATURE_SAMPLER_MATCH, "FEATURE_SYNC": FEATURE_SYNC,
+    "SYNC_RX_LATENCY_TICKS": SYNC_RX_LATENCY_TICKS, "SYNC_TX_LATENCY_TICKS": SYNC_TX_LATENCY_TICKS,
+    "SYNC_RX_PHASE_TICKS": SYNC_RX_PHASE_TICKS,
+    "CAPS_BUILD": TYPE_BUILD,
+    "CAPS_DEBUG": TYPE_DEBUG, "CAPS_LA_DELAY": TYPE_LA_DELAY, "DEBUG_JTAG": DEBUG_JTAG, "DEBUG_INJECT": DEBUG_INJECT,
     "CAPS_LA_LAYOUT": TYPE_LA_LAYOUT, "LA_CH_NONE": LA_CH_NONE, "LA_CH_PIN": LA_CH_PIN,
     "LA_CH_INTERNAL": LA_CH_INTERNAL, "LA_CH_INPUT": LA_CH_INPUT,
     "DEBUG_SWO_MANCHESTER": DEBUG_SWO_MANCHESTER, "CAPS_UART_FLOW": TYPE_UART_FLOW,

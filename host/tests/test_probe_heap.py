@@ -166,12 +166,12 @@ def test_trace_records_allocations_returns_and_frees_and_finds_leaks(setup):
     stop = p.run_until_halt(timeout_s=0.5)
     assert stop["reason"] == "timeout" and not cpu.stops and not cpu.passed       # 戻り先でも全部止まった
     assert cpu.breakpoints == {malloc, free}                                       # 一時の戻り先は外した
-    report = p.heap_trace_report(min_age_s=0)
+    report = p.heap_trace_report()                                                # 既定は年齢で絞らない
     assert report["allocations"] == 12 and report["frees"] == 7 and report["live"]["count"] == 6
     assert report["peak_bytes"] == 6 * 16 + 40
     assert [i["kind"] for i in report["issues"]] == ["double_free"]
-    top = report["leak_candidates"][0]
-    assert top["caller"].startswith("sensor_task") and top["count"] == 6 and top["growing"]
+    top = report["live_by_caller"][0]
+    assert top["caller"].startswith("sensor_task") and top["count"] == 6 and top["live_counts"][-1][1] == 6
     events = p.heap_trace_events(limit=3)
     assert [e["op"] for e in events["events"]] == ["alloc", "alloc", "free"] and events["next"] == 3
     assert events["events"][0]["size"] == 16 and events["events"][0]["pointer"] == base

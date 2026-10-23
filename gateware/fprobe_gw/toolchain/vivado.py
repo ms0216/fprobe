@@ -137,6 +137,7 @@ def render_vivado_tcl(project: VivadoProject, build_dir: Path, directive: str) -
               f"route_design -directive {directive}",
               "report_timing_summary -file timing.rpt",
               "report_utilization -file util.rpt",
+              "report_utilization -hierarchical -file util_hier.rpt",   # モジュールごと（fprobe_gw resources）
               "report_io -file io.rpt",
               "write_checkpoint -force routed.dcp",
               f"write_bitstream -force {project.name}.bit"]

@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .model import Trace, TraceEvent, unwrap32
+from .model import Trace, TraceEvent, is_rtos_idle_name, unwrap32
 
 __all__ = ["CtfDecoder", "CtfError", "CtfMetadata", "HEADERS", "decode_ctf", "parse_tsdl"]
 
@@ -264,7 +264,7 @@ class CtfDecoder:
             info = self.trace.task(task)
             if fields.get("name") and fields["name"] != "unknown":
                 info.name = fields["name"]
-                if info.name == "idle":
+                if is_rtos_idle_name(info.name):
                     self.trace.idle.add(task)
             if "prio" in fields:
                 info.priority = fields["prio"]

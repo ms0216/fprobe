@@ -4,7 +4,7 @@ import html
 import re
 from dataclasses import dataclass
 
-__all__ = ["ClockTiming", "TimingReportError", "TimingSummary", "parse_timing_report"]
+__all__ = ["ClockTiming", "PathSlack", "TimingReportError", "TimingSummary", "parse_timing_report"]
 
 
 class TimingReportError(ValueError):
@@ -25,21 +25,36 @@ class ClockTiming:
 
 
 @dataclass(frozen=True)
+class PathSlack:
+    """経路の表（Setup / Hold / Recovery / Removal Paths Table）の 1 行。"""
+    kind: str
+    slack: float
+    start: str
+    end: str
+    from_clock: str
+    to_clock: str
+
+
+@dataclass(frozen=True)
 class TimingSummary:
     clocks: tuple[ClockTiming, ...]
+    # 経路の表で余裕が負の経路。TNS の要約に現れない経路（set_max_delay 等）もここで見る（R24）
+    failing_paths: tuple[PathSlack, ...] = ()
 
     @property
     def met(self) -> bool:
-        return all(c.met for c in self.clocks)
+        return all(c.met for c in self.clocks) and not self.failing_paths
 
     def describe(self) -> str:
         def mhz(v):
             return "-" if v is None else f"{v:.3f} MHz"
 
-        return "\n".join(
-            f"{'OK' if c.met else 'NG'} {c.name}: 制約 {mhz(c.constraint_mhz)}, "
-            f"Fmax {mhz(c.fmax_mhz)}, Setup TNS {c.setup_tns:.3f}, Hold TNS {c.hold_tns:.3f}"
-            for c in self.clocks)
+        return "\n".join([
+            *(f"{'OK' if c.met else 'NG'} {c.name}: 制約 {mhz(c.constraint_mhz)}, "
+              f"Fmax {mhz(c.fmax_mhz)}, Setup TNS {c.setup_tns:.3f}, Hold TNS {c.hold_tns:.3f}"
+              for c in self.clocks),
+            *(f"NG 経路 {p.kind} 余裕 {p.slack:.3f}: {p.start}（{p.from_clock}）→ {p.end}（{p.to_clock}）"
+              for p in self.failing_paths)])
 
 
 def _table_after(report: str, title: str) -> list[list[str]]:
@@ -84,10 +99,32 @@ def parse_timing_report(report: str) -> TimingSummary:
 
     if not order:
         raise TimingReportError("クロックが 1 つも報告されていない")
-    return TimingSummary(tuple(
+    failing = tuple(p for p in _path_slacks(report) if p.slack < 0)
+    return TimingSummary(failing_paths=failing, clocks=tuple(
         ClockTiming(name=n,
                     constraint_mhz=fmax.get(n, (None, None))[0],
                     fmax_mhz=fmax.get(n, (None, None))[1],
                     setup_tns=tns.get((n, "Setup"), 0.0),
                     hold_tns=tns.get((n, "Hold"), 0.0))
         for n in order))
+
+
+_PATH_TABLES = ("Setup", "Hold", "Recovery", "Removal")
+
+
+def _path_slacks(report: str) -> list[PathSlack]:
+    """経路の表の行（表の無い報告は空）。"""
+    out = []
+    for kind in _PATH_TABLES:
+        title = f"{kind} Paths Table"
+        if title not in report:
+            continue
+        for cells in _table_after(report, title):
+            if len(cells) < 6:
+                raise TimingReportError(f"経路の行の書式が想定外: {cells}")
+            try:
+                slack = float(cells[1])
+            except ValueError as e:
+                raise TimingReportError(f"経路の余裕の書式が想定外: {cells[1]!r}") from e
+            out.append(PathSlack(kind, slack, cells[2], cells[3], cells[4], cells[5]))
+    return out

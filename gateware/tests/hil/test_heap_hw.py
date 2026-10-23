@@ -41,9 +41,9 @@ def test_trace_from_the_entry_matches_the_scan(probe):
     assert scan["used_blocks"] == report["live"]["count"], (scan, report)
     assert scan["counters"]["allocations"] - scan["counters"]["frees"] == scan["used_blocks"]
     callers = {c["caller"].split("+")[0] for c in scan["callers"]} if "callers" in scan else set()
-    print("呼び出し元:", callers, "リークの候補:", [c["caller"] for c in report["leak_candidates"]])
+    print("呼び出し元:", callers, "生きている確保の呼び出し元:", [c["caller"] for c in report["live_by_caller"]])
     assert any(c.startswith(("xTaskCreate", "xQueue", "xTimer", "xStream", "prvInitialise")) for c in
-               (lc["caller"] for lc in report["leak_candidates"])), report["leak_candidates"]
+               (lc["caller"] for lc in report["live_by_caller"])), report["live_by_caller"]
 
 
 def test_scan_of_a_running_target_and_compare(probe):

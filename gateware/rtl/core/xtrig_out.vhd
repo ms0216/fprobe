@@ -24,7 +24,7 @@ entity xtrig_out is
     clk     : in  std_logic;
     rst     : in  std_logic;
     pins    : in  std_logic_vector(WIDTH - 1 downto 0);        -- 非同期でよい
-    sources : in  std_logic_vector(3 downto 0);                -- クロストリガの源（1 周期の脈）
+    sources : in  std_logic_vector(5 downto 0);                -- クロストリガの源（1 周期の脈）
     time    : in  unsigned(31 downto 0);                       -- タイムベース（脈の長さの刻み）
     -- 設定（出力 k はビット k、または k 番目の組）
     enable  : in  std_logic_vector(COUNT - 1 downto 0);
@@ -33,7 +33,7 @@ entity xtrig_out is
     any     : in  std_logic_vector(COUNT - 1 downto 0);
     mask    : in  std_logic_vector(WIDTH * COUNT - 1 downto 0);
     value   : in  std_logic_vector(WIDTH * COUNT - 1 downto 0);
-    src     : in  std_logic_vector(4 * COUNT - 1 downto 0);
+    src     : in  std_logic_vector(6 * COUNT - 1 downto 0);
     length  : in  std_logic_vector(8 * COUNT - 1 downto 0);
     unit    : in  std_logic_vector(3 * COUNT - 1 downto 0);
     -- 出力
@@ -76,7 +76,7 @@ begin
         else
           pattern := m /= (m'range => '0') and hit = m;
         end if;
-        if pattern or (sources and src(4 * k + 3 downto 4 * k)) /= "0000" then
+        if pattern or (sources and src(6 * k + 5 downto 6 * k)) /= "000000" then
           cond(k) <= '1';
         else
           cond(k) <= '0';

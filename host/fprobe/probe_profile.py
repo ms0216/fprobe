@@ -30,7 +30,7 @@ from .sampler import Sampler
 __all__ = ["PACKET_LIMIT", "ProfileTools"]
 
 PACKET_LIMIT = 1 << 22                   # 方法 itm でためるパケットの上限（超えた分は数えて捨てる）
-TIMING_LIMIT = 1000                      # timing_measure が返す生の組・外れ値の上限
+TIMING_LIMIT = 1000                      # timing_measure が返す生の組の上限
 _VECTOR_LIMIT = 16 + 240                 # ベクタ表の最大（ARMv7-M: 例外 16 + 割り込み 240）
 
 
@@ -107,7 +107,7 @@ class ProfileTools:
         run = _ProfileRun("itm", plan, core_clock_hz, exception_trace, timestamps)
         # 順序（2026-10-18 に実機で）: DWT の出力（PC サンプル・例外トレース）を止める → 受信を始めて前の受信の残りを
         # 捨てる → 設定 → DWT を最後に有効にする。逆だと受信がパケットの途中や古いバイトの継ぎ目から始まり、同期の
-        # パケット（SYNCTAP。16 MHz で十数秒に 1 回）まで解読がずれたままになる
+        # パケット（SYNCTAP。16 MHz で約 1 秒に 1 回）まで解読できない
         original = self.target.read_memory(DWT_CTRL)
         self.target.write_memory(DWT_CTRL, original & ~(_PCSAMPLENA | _EXCTRCENA))
         self.swo_start(round(plan.swo_baud))
@@ -205,12 +205,13 @@ class ProfileTools:
             out["notes"] = ["ローカルのタイムスタンプが無い（timestamps=false）ので時間は測れない（回数だけ）"]
         return out
 
-    def timing_measure(self, start: dict, end: dict, bins: int = 20, outliers: str = "iqr",
+    def timing_measure(self, start: dict, end: dict, bins: int = 20, longest: int = 10,
                        limit: int = TIMING_LIMIT) -> dict:
-        """記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・分位・分布・外れ値）。
-        start / end は recording_find と同じ条件。外れ値の t は記録・タイムラインのその時刻へ跳ぶ鍵。outliers: iqr / zscore。"""
-        out = measure(self._reading(), start, end, bins=bins, outliers=outliers).as_dict()
-        for key in ("intervals", "outliers"):
+        """記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・分位・分布・長い順の上位
+        longest 件）。start / end は recording_find と同じ条件。長い順の t は記録・タイムラインのその時刻へ跳ぶ鍵（外れ値の
+        経験則は使わない）。"""
+        out = measure(self._reading(), start, end, bins=bins, longest=longest).as_dict()
+        for key in ("intervals",):
             if key in out and len(out[key]) > limit:
                 out[f"{key}_total"] = len(out[key])
                 out[key] = out[key][:limit]
@@ -275,19 +276,19 @@ class ProfileTools:
                 out["exceptions"] = [{k: e[k] for k in ("exception", "name", "count", "total_self", "load")}
                                      for e in traced[:top]]
                 # 例外トレースの本当の負荷とサンプルの割合が食い違えば、エイリアシングを知らせる
-                out["notes"] += aliasing_notes(prof.top(1000, "exception"), traced, prof.total)
+                out["notes"] += aliasing_notes(prof.top(1000, "exception"), traced, prof.total, prof.confidence)
         else:
             with self._lock:
                 hz = self.session.device.capabilities().timebase_hz
             out["window"] = self._window_info(run.window, hz)
             out["sampling"] = sampling = self._pcsr_speed(result, hz)
             achieved = sampling["achieved_hz"]
-            if achieved is not None and achieved < 0.9 * sampling["requested_hz"]:
+            if achieved is not None and achieved < sampling["requested_hz"]:          # 閾値（9 割）で隠さない
                 swd = plan.swd or {}
                 need = swd.get("swd_hz_for_rate")
                 fix = (f"SWD を {need / 1e6:.2f} MHz 以上にする（target_connect の frequency_hz）か rate_hz を下げる"
                        if need else "rate_hz を下げる")
-                out["notes"].append(f"サンプラが追いつかない: 実際 約 {achieved:.0f} Hz（求めた {sampling['requested_hz']:g} Hz）。{fix}")
+                out["notes"].append(f"サンプルの速さ: 実際 約 {achieved:.0f} Hz（求めた {sampling['requested_hz']:g} Hz より遅い）。{fix}")
         return out
 
     @staticmethod

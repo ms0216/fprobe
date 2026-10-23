@@ -1,4 +1,5 @@
-"""止めると壊れうるターゲットの見分け（ELF のシンボルだけで。機器には触らない）。
+"""止めると壊れうるターゲットの手がかり（ELF のシンボルだけで。機器には触らない）。返すのは事実（ELF に、無線・USB・
+ウォッチドッグ・RTOS の決まった名前と合うシンボルがあるか）だけで、「このターゲットは壊れる」とは判定しない（CLAUDE.md）。
 
 コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の間も、ターゲットの外の相手は待たない:
 無線の相手（BLE の接続は監視時間で切れ、コントローラの時刻がずれて致命的エラーになる）、USB のホスト（応答しない
@@ -11,7 +12,7 @@ RTOS・スタック・ツールチェーンの共通の名前で、特定の機�
 止まっている間も動く。ELF にモニタ（host/firmware/monitor の fprobe_monitor_init）があるかも返す。
 
     assess(Symbols("app.elf").names())
-    # {"risky": True, "reasons": [{"kind": "radio", "count": 12, "symbols": ["RADIO_IRQHandler", ...]}, ...],
+    # {"matched": True, "matches": [{"kind": "radio", "count": 12, "symbols": ["RADIO_IRQHandler", ...]}, ...],
     #  "monitor_in_elf": False}
 """
 
@@ -24,7 +25,7 @@ __all__ = ["EVIDENCE", "KINDS", "assess"]
 
 EVIDENCE = 5                                   # 理由ごとに返す手がかりのシンボルの数
 
-# 種類 → 手がかりの名前の形（重い順。画面・AI はこの順に見せる）
+# 種類 → 手がかりの名前の形
 _IRQ = r"_IRQHandler$"
 KINDS: dict[str, list[re.Pattern]] = {
     # 無線: 無線の割り込み、BLE / 802.15.4 / Wi-Fi のスタックの関数
@@ -40,13 +41,13 @@ KINDS: dict[str, list[re.Pattern]] = {
 # RTOS のカーネルの大域変数（FreeRTOS・Zephyr・ThreadX・RTX5・µC/OS・embOS・NuttX）
 RTOS_GLOBALS = {"pxCurrentTCB": "FreeRTOS", "_kernel": "Zephyr", "_tx_thread_current_ptr": "ThreadX",
                 "osRtxInfo": "RTX5", "OSTCBCurPtr": "uC/OS", "OS_Global": "embOS", "g_readytorun": "NuttX"}
-ORDER = ("radio", "usb", "watchdog", "rtos")
+ORDER = ("radio", "usb", "watchdog", "rtos")                    # 返す順（決まった順。重さの順ではない）
 MONITOR = "fprobe_monitor_init"
 
 
 def assess(symbols: Iterable[Symbol]) -> dict:
-    """シンボルの並び → {"risky", "reasons": [{"kind", "count", "symbols"（手がかりの先頭）, "rtos"?}],
-    "monitor_in_elf"}。reasons は重い順（radio → usb → watchdog → rtos）。"""
+    """シンボルの並び → {"matched"（どれかの名前が合った）, "matches": [{"kind", "count", "symbols"（合ったシンボルの
+    先頭）, "rtos"?}], "monitor_in_elf"}。matches は決まった順（radio → usb → watchdog → rtos）。"""
     found: dict[str, list[str]] = {k: [] for k in ORDER}
     rtos: str | None = None
     monitor = False
@@ -64,12 +65,12 @@ def assess(symbols: Iterable[Symbol]) -> dict:
             if any(p.search(name) for p in patterns):
                 found[kind].append(name)
                 break
-    reasons = []
+    matches = []
     for kind in ORDER:
         names = sorted(set(found[kind]), key=lambda n: (not n.endswith("IRQHandler"), n))
         if names:
-            reason = {"kind": kind, "count": len(names), "symbols": names[:EVIDENCE]}
+            match = {"kind": kind, "count": len(names), "symbols": names[:EVIDENCE]}
             if kind == "rtos":
-                reason["rtos"] = rtos
-            reasons.append(reason)
-    return {"risky": bool(reasons), "reasons": reasons, "monitor_in_elf": monitor}
+                match["rtos"] = rtos
+            matches.append(match)
+    return {"matched": bool(matches), "matches": matches, "monitor_in_elf": monitor}

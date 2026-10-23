@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .la import Transitions
-from .recording import NO_DATA, ClockMap, Event, Recorder, Recording, _Chunk
+from .recording import NO_DATA, ClockMap, Event, Recorder, Recording, _Chunk, write_json
 from .recording_summary import SummaryGrid, bin_counts
 
 __all__ = ["DEFAULT_DECIMATE", "INDEX_LEVEL", "Policy", "SegmentedRecorder", "SegmentedRecording"]
@@ -142,7 +142,7 @@ class SegmentedRecorder:
     # --- Recorder と同じ口 -----------------------------------------------------------------------
 
     def _write_meta(self) -> None:
-        (self.directory / "meta.json").write_text(json.dumps(self._meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json(self.directory / "meta.json", self._meta)
 
     def update_meta(self, **items: Any) -> None:
         with self._lock:
@@ -358,7 +358,7 @@ class SegmentedRecording(Recording):
         self.grid = SummaryGrid.from_dict(self.meta["summary"])
         self.index_level = int(self.meta["summary"].get("index_level", INDEX_LEVEL))
         self._index = _connect(self.directory / "index.sqlite", _INDEX_SCHEMA)
-        self._waves = {}
+        self._init_waves()
 
     def close(self) -> None:
         self._index.close()

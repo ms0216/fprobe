@@ -162,3 +162,26 @@ def test_cycles_clock_needs_a_running_core(probe):
     probe.target.state = Target.State.HALTED
     with pytest.raises(RuntimeError, match="走って"):
         probe.cycles_clock()
+
+
+class NoCyccntMemory(DictMemory):
+    """Cortex-M0/M0+ の DWT: CYCCNT が無く、DWT_CTRL の CYCCNTENA を書いても立たない（読むと 0）。"""
+
+    def write_memory(self, address, data):
+        if address != dwt.DWT_CTRL:
+            super().write_memory(address, data)
+
+
+def test_a_core_without_cyccnt_is_refused_not_measured_as_zero(probe, monkeypatch):
+    # 測っていない 0 を測った値として返さない（2026-10-22、RP2040 で 0 サイクルと出た）
+    probe._debug.target.memory = NoCyccntMemory({dwt.DWT_CTRL: 0, st.CPUID: 0x410CC601})
+    script(probe, monkeypatch, [])
+    with pytest.raises(RuntimeError, match="CYCCNT"):
+        probe.cycles_measure("tick", "reached_milestone", counters=False)
+    assert probe.target.breakpoints == set()                          # ブレークポイントも置いていない
+
+
+def test_nocyccnt_bit_is_refused(probe, monkeypatch):
+    probe._debug.target.memory = DictMemory({dwt.DWT_CTRL: 1 << 25, st.CPUID: 0x410FC241})
+    with pytest.raises(RuntimeError, match="CYCCNT"):
+        probe.cycles_measure("tick", "reached_milestone", counters=False)

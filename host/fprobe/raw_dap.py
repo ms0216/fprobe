@@ -47,10 +47,10 @@ class Ack(StrEnum):
     PROTOCOL = "protocol_error"
 
 
-_ACK_TEXT = {Ack.WAIT: "WAIT が続いた（ターゲットが応答できない: 低消費電力・クロック停止・バスが塞がっている）",
-             Ack.FAULT: "FAULT（前の誤りの印が残っている・アクセスが拒まれた）",
-             Ack.NO_ACK: "応答が無い（配線・電源・速度・線のプロトコルの選択）",
-             Ack.PROTOCOL: "パリティ誤り・プロトコル誤り（信号品質: 速度を下げる・GND・配線長）"}
+_ACK_TEXT = {Ack.WAIT: "WAIT が続いた",                       # 事実だけ（原因の候補は並べない）
+             Ack.FAULT: "FAULT（DP の誤りの印が立っている）",
+             Ack.NO_ACK: "応答が無い",
+             Ack.PROTOCOL: "パリティ誤り・プロトコル誤り"}
 
 
 def ack_of(error: BaseException) -> Ack:
@@ -251,8 +251,28 @@ class RawDap:
 
     def read_ap(self, ap: int, register: int) -> int:
         reg = self._select_ap(ap, register)
-        return self._xfer(f"AP 0x{ap:X} の 0x{register:02X} の読み出し",
-                          lambda: self.link.read_reg(_AP_REG[reg], dap_index=self.dap_index))
+        what = f"AP 0x{ap:X} の 0x{register:02X} の読み出し"
+        if self.protocol == "jtag":
+            return self._jtag_checked(what, lambda: self.link.read_reg(_AP_REG[reg], dap_index=self.dap_index, now=False))
+        return self._xfer(what, lambda: self.link.read_reg(_AP_REG[reg], dap_index=self.dap_index))
+
+    def _jtag_checked(self, what: str, queue):
+        """JTAG-DP では AP の誤りが応答（ACK）に出ず、CTRL/STAT の STICKYERR 等にしか残らない（その後の読みは古い値を返す）。
+        読みを並べたあとに同じ往復で CTRL/STAT を読み、誤りの印があれば印を消して DapError（値は返さない）。"""
+        if (self._select or 0) & 0xF:                       # CTRL/STAT は DP の 0x4 のバンク 0
+            self._write_select((self._select or 0) & ~0xF)
+
+        def run():
+            value = queue()
+            ctrl = self.link.read_reg(_DP_REG[1], dap_index=self.dap_index, now=False)
+            self.link.flush()
+            return value(), ctrl()
+        value, ctrl = self._xfer(what, run)
+        if ctrl & _JTAG_STICKY:
+            self._xfer("CTRL/STAT の誤りの印を消す",
+                       lambda: self.link.write_reg(_DP_REG[1], ctrl | _JTAG_STICKY, dap_index=self.dap_index))
+            raise DapError(Ack.FAULT, f"{what}（JTAG の CTRL/STAT に誤りの印 0x{ctrl:08X}）")
+        return value
 
     def write_ap(self, ap: int, register: int, value: int) -> None:
         reg = self._select_ap(ap, register)
@@ -275,6 +295,18 @@ class RawDap:
     def mem_read32(self, ap: int, address: int) -> int:
         self._prepare(ap, address)
         return self.read_ap(ap, self.mem_register(AP_DRW))
+
+    def mem_read32_repeat(self, ap: int, address: int, count: int) -> list[int]:
+        """同じ番地の語を count 回読む（番地は増やさない。CMSIS-DAP の DAP_TransferBlock で、往復をまとめる）。"""
+        if count <= 0:
+            return []
+        self._prepare(ap, address)
+        reg = self._select_ap(ap, self.mem_register(AP_DRW))
+        what = f"AP 0x{ap:X} の DRW の {count} 回の読み出し"
+        if self.protocol == "jtag":
+            return list(self._jtag_checked(what, lambda: self.link.reg_read_repeat(
+                count, _AP_REG[reg], dap_index=self.dap_index, now=False)))
+        return list(self._xfer(what, lambda: self.link.reg_read_repeat(count, _AP_REG[reg], dap_index=self.dap_index)))
 
     def mem_write32(self, ap: int, address: int, value: int) -> None:
         self._prepare(ap, address)

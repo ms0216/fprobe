@@ -1,5 +1,5 @@
 // Event Log（Tracealyzer / SystemView の Events・TRACE32 のトレースリスト）の計算: 構造化された検索の条件 →
-// recording.find の query、結果の要約・CSV・時間軸の印、区間の統計（timing.measure）の分布図・外れ値、調査の印とメモ。
+// recording.find の query、結果の要約・CSV・時間軸の印、区間の統計（timing.measure）の分布図・長い順の上位、調査の印とメモ。
 // Svelte・DOM に依らない。仕様: docs/reports/2026-10-18-gap-analysis.md G07
 import type { Bar } from "./chart";
 import { formatDuration } from "./time";
@@ -133,7 +133,7 @@ export function searchMarks(events: RecEvent[]): Mark[] {
 // --- 区間の統計（timing.measure） --------------------------------------------------------------------
 
 export interface Histogram { lo: number; hi: number; count: number }
-export interface Outlier { t: number; t_end: number; duration: number; score: number }
+export interface Longest { t: number; t_end: number; duration: number }   // 長い順の上位（timing.measure の longest）
 
 /** 時間 d が入る棒の番号（無ければ -1）。棒の分け方は fprobe.profile.stats.Distribution.histogram と同じ
  *  （最小〜最大を等しい幅に、最後の棒は最大を含む。全部同じ値なら棒は 1 つ） */
@@ -145,9 +145,9 @@ export function binOf(d: number, hist: Histogram[]): number {
   return Math.min(Math.floor((d - lo) / ((hi - lo) / hist.length)), hist.length - 1);
 }
 
-/** 分布図の棒（x は秒。選んだ棒・外れ値のある棒を目立たせる） */
-export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null, outliers: Outlier[]): Bar[] {
-  const outlying = new Set(outliers.map((o) => binOf(o.duration, hist)));
+/** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒を目立たせる） */
+export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null, longest: Longest[]): Bar[] {
+  const outlying = new Set(longest.map((o) => binOf(o.duration, hist)));
   return hist.map((h, i) => ({ x0: h.lo / timebaseHz, x1: (h.hi > h.lo ? h.hi : h.lo + 1) / timebaseHz, y: h.count,
                                mark: i === picked || outlying.has(i) }));
 }
@@ -157,9 +157,9 @@ export function intervalsInBin(intervals: [number, number][], hist: Histogram[],
   return intervals.filter(([, d]) => binOf(d, hist) === i);
 }
 
-/** 外れ値 → 時間軸の印（区間、tone warn） */
-export function outlierMarks(outliers: Outlier[], timebaseHz: number): Mark[] {
-  return outliers.map((o) => ({ t: o.t, tEnd: o.t_end, label: formatDuration(o.duration / timebaseHz), tone: 3 as const }));
+/** 長い順の上位 → 時間軸の印（区間。普通の色: 異常とは言わない） */
+export function longestMarks(longest: Longest[], timebaseHz: number): Mark[] {
+  return longest.map((o) => ({ t: o.t, tEnd: o.t_end, label: formatDuration(o.duration / timebaseHz), tone: 0 as const }));
 }
 
 

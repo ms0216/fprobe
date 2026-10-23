@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { LaChannel } from "../../lib/waveform";
   // Logic Analyzer（Saleae Logic 2 の Analyzers・DSView のトリガ・PulseView の測定。G09）:
   // - Decode: 解読器（la.decoders）の選択と設定 → la.decode の表（誤りだけ・種類で絞る、件数）と、時間軸の波形の上の注釈
   //   （setMarks "decode"）。新しい捕捉では解読し直す
@@ -16,6 +17,7 @@
     patternEmpty, patternForm, patternOf, settingsOf, stageForms, stageLabel, stageState, stagesOf,
     type Annotation, type ChannelMeasure, type DecoderForm, type DecoderInfo, type PatternForm, type StageForm,
     type TriggerEvent, type TriggerSource, type WidthStats,
+    laExportParams, type LaExportFormat,
   } from "../../lib/logic";
   import { onCalls } from "../../lib/notify";
   import { load, save } from "../../lib/prefs";
@@ -53,6 +55,10 @@
   let selected = $state(-1);
   let box = $state<HTMLDivElement>();
   let captureId = $state<number | null>(null);          // 最後の捕捉（新しい捕捉で解読し直す）
+  // 捕捉の保存（la.export。PulseView の .sr・VCD。パスはデーモンの PC）
+  let exportFormat = $state<LaExportFormat>(load("logicAnalyzer.exportFormat", "sr") as LaExportFormat);
+  let exportPath = $state<string | null>(null);            // null = 形式の既定の名前
+  let exported = $state<string | null>(null);
 
   $effect(() => {
     if (!linked) return;
@@ -173,6 +179,9 @@
                                                        onWrite: true, onRead: false }));
   let toLa = $state<TriggerSource[]>(restore("logicAnalyzer.toLa", []));
   let toInject = $state<TriggerSource[]>(restore("logicAnalyzer.toInject", []));
+  // 経路の表は、書き換えていない間は機器のレジスタの事実（xtrig.status の route）に合わせる。ほかの道具
+  // （fpga_obs.trigger_set・sampler.trigger_set・ルール）が書いたビットを、表の適用で黙って消さない
+  let routeEdited = $state(false);
   let seqStatus = $state<{ stage: number; fired: boolean; time: number } | null>(null);
   let xtStatus = $state<any>(null);
   let armed = $state(false);
@@ -198,6 +207,11 @@
     try {
       [seqStatus, xtStatus] = await Promise.all([conn.call("xtrig.sequence_status", {}, { quiet: true }),
                                                  conn.call("xtrig.status", {}, { quiet: true })]);
+      const route = (xtStatus as any)?.route;
+      if (route && !routeEdited) {
+        toLa = (route.to_la ?? []).filter((s: string) => (SOURCES as readonly string[]).includes(s));
+        toInject = (route.to_inject ?? []).filter((s: string) => (SOURCES as readonly string[]).includes(s));
+      }
     } catch {
       seqStatus = xtStatus = null;
     }
@@ -249,7 +263,7 @@
   async function applyRoute() {
     keep();
     if (!(await allowed(app))) return;
-    await app.act("xtrig.route", { to_la: toLa, to_inject: toInject });
+    if ((await app.act("xtrig.route", { to_la: toLa, to_inject: toInject })) !== undefined) routeEdited = false;
   }
 
   async function fire() {
@@ -272,6 +286,7 @@
     if (!p) return;
     toLa = (p.to_la ?? []).filter((s: string) => (SOURCES as readonly string[]).includes(s));
     toInject = (p.to_inject ?? []).filter((s: string) => (SOURCES as readonly string[]).includes(s));
+    routeEdited = true;
   }
 
   const lastSequence = $derived(lastApplied($app.activity, "xtrig.set_sequence"));
@@ -283,8 +298,9 @@
 
   const EVENT_LABEL: Record<TriggerEvent, "logic.patternA" | "logic.patternB" | "logic.dapMatch" | "logic.host"> =
     { pattern_a: "logic.patternA", pattern_b: "logic.patternB", dap_match: "logic.dapMatch", host: "logic.host" };
-  const SOURCE_LABEL: Record<TriggerSource, "logic.srcTrigger" | "logic.dapMatch" | "logic.host" | "logic.srcSequence"> =
-    { la_trigger: "logic.srcTrigger", dap_match: "logic.dapMatch", host: "logic.host", sequence: "logic.srcSequence" };
+  const SOURCE_LABEL: Record<TriggerSource, "logic.srcTrigger" | "logic.dapMatch" | "logic.host" | "logic.srcSequence" | "logic.srcObsMatch" | "logic.srcSamplerMatch"> =
+    { la_trigger: "logic.srcTrigger", dap_match: "logic.dapMatch", host: "logic.host", sequence: "logic.srcSequence",
+      obs_match: "logic.srcObsMatch", sampler_match: "logic.srcSamplerMatch" };
   const recordingTo = (t: number) => (t > 0 ? { source: "recording" as const, t } : null);
 
   // --- Measure ----------------------------------------------------------------------------------
@@ -319,7 +335,7 @@
   const atLink = (t: number | undefined) => (t === undefined ? null : { source: unitSource, t });
   function nameOf(ch: number): string {
     const def = $tl.groups.find((g) => g.id === "logic")?.rows.find((r) => r.id === `wave:${ch}`);
-    return def ? rowTitle(def, $i18n) : channelName(ch);
+    return def ? rowTitle(def, $i18n, laLayout) : channelName(ch, laLayout);
   }
   const rangeText = $derived.by(() => {
     if (!range) return $i18n("logic.wholeRange");
@@ -327,6 +343,14 @@
     const at = (t: number) => formatSeconds((t - origin) * s, s, TABLE_DIGITS);
     return `${at(range[0])} – ${at(range[1])} (Δ ${formatDuration((range[1] - range[0]) * s)})`;
   });
+  const laLayout = $derived((($app.probe?.capabilities ?? {}) as { la_layout?: LaChannel[] }).la_layout ?? null);
+
+  async function exportCapture() {
+    if (!(await allowed(app))) return;
+    save("logicAnalyzer.exportFormat", exportFormat);
+    const out = await app.act("la.export", laExportParams(exportFormat, exportPath));
+    exported = out === undefined ? null : out.path ?? null;
+  }
 </script>
 
 {#snippet width(w: WidthStats | undefined)}
@@ -357,6 +381,17 @@
   <div class="pane-bar">
     <TabBar tabs={[{ id: "decode", label: $i18n("logic.decode") }, { id: "trigger", label: $i18n("logic.trigger") },
                    { id: "measure", label: $i18n("logic.measure") }]} bind:value={tab} />
+    <span class="spacer"></span>
+    <form class="export" onsubmit={(e) => { e.preventDefault(); void exportCapture(); }} title={$i18n("logic.exportTip")}>
+      <select bind:value={exportFormat} aria-label={$i18n("logic.exportFormat")} onchange={() => (exported = null)}>
+        <option value="sr">PulseView (.sr)</option><option value="vcd">VCD</option>
+      </select>
+      <input class="mono" value={exportPath ?? ""} placeholder={`capture-${$i18n("logic.exportStamp")}.${exportFormat}`}
+             aria-label={$i18n("logic.exportPath")}
+             oninput={(e) => { exportPath = e.currentTarget.value || null; exported = null; }} />
+      <button class="small">{$i18n("logic.export")}</button>
+      {#if exported}<span class="muted small mono" title={exported}>{$i18n("logic.exported")}: {exported}</span>{/if}
+    </form>
   </div>
 
   {#if tab === "decode"}
@@ -514,10 +549,10 @@
           <tbody>
             <tr><td>{$i18n("logic.toLa")}</td>
               {#each SOURCES as s (s)}<td><input type="checkbox" checked={toLa.includes(s)} disabled={s === "la_trigger"}
-                                                 onchange={() => (toLa = toggle(toLa, s))} aria-label="{$i18n('logic.toLa')} {s}" /></td>{/each}</tr>
+                                                 onchange={() => { toLa = toggle(toLa, s); routeEdited = true; }} aria-label="{$i18n('logic.toLa')} {s}" /></td>{/each}</tr>
             <tr><td title={$i18n("logic.toInjectTip")}>{$i18n("logic.toInject")}</td>
               {#each SOURCES as s (s)}<td><input type="checkbox" checked={toInject.includes(s)}
-                                                 onchange={() => (toInject = toggle(toInject, s))} aria-label="{$i18n('logic.toInject')} {s}" /></td>{/each}</tr>
+                                                 onchange={() => { toInject = toggle(toInject, s); routeEdited = true; }} aria-label="{$i18n('logic.toInject')} {s}" /></td>{/each}</tr>
           </tbody>
         </table>
         <div class="bar">
@@ -568,6 +603,8 @@
 </div>
 
 <style>
+  .export { display: flex; gap: 6px; align-items: center; }
+  .export input { width: 14em; }
   .la { display: flex; flex-direction: column; }
   .sub { position: static; }
   .rows { flex: 1; overflow: auto; min-height: 60px; }

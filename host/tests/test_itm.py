@@ -208,11 +208,13 @@ _ROUND = bytes.fromhex("0e0f10 c0e27c 0e0f20 c011 0e0030 c00a")
 
 
 def test_dropped_bytes_are_recovered_without_waiting_for_a_sync_packet():
-    """2 バイトが落ちて解読がずれても、続くパケットが正しく解ける位置から再開する（Resync で知らせる）。"""
+    """resync=True を明示したときだけ: 2 バイトが落ちて解読がずれても、続くパケットが正しく解ける位置から再開する
+    （Resync で知らせる）。既定は同期パケットを待つ（「6 パケット解ければ同期した」は推定なので既定にしない）。"""
     from fprobe.itm import ExceptionTrace, Resync
     stream = _ROUND * 4
     broken = stream[:len(_ROUND) + 12] + stream[len(_ROUND) + 14:]         # 2 巡目の 0e の後の 00 30 が落ちた（実機と同じ）
-    out = ItmDecoder().feed(broken)
+    assert not any(isinstance(p, Resync) for p in ItmDecoder().feed(broken))
+    out = ItmDecoder(resync=True).feed(broken)
     assert any(isinstance(p, Resync) for p in out)
     exceptions = [p for p in out if isinstance(p, ExceptionTrace)]
     assert len(exceptions) >= 10                                          # 落ちた分を除いて解け続ける
@@ -225,8 +227,17 @@ def test_resync_waits_for_enough_bytes_and_is_incremental():
     from fprobe.itm import Resync
     stream = _ROUND * 4
     broken = stream[:len(_ROUND) + 12] + stream[len(_ROUND) + 14:]
-    whole = ItmDecoder().feed(broken)
-    d = ItmDecoder()
+    whole = ItmDecoder(resync=True).feed(broken)
+    d = ItmDecoder(resync=True)
     pieces = [p for b in broken for p in d.feed(bytes([b]))]
     assert [type(p).__name__ for p in pieces] == [type(p).__name__ for p in whole]
     assert any(isinstance(p, Resync) for p in pieces)
+
+
+def test_bytes_dropped_while_unsynced_are_visible_before_the_sync_packet():
+    # 同期を失っている間に捨てたバイトの数を、同期パケットが来る前から読める（黙って捨てない）
+    dec = ItmDecoder(synced=False)
+    dec.feed(bytes([0x01, 0x41, 0x03, 0x05]))
+    assert not dec.synced and dec.unsynced_bytes == 4
+    dec.feed(bytes(5) + b"\x80")                                   # 同期パケット
+    assert dec.synced and dec.unsynced_bytes == 0

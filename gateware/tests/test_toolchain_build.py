@@ -210,6 +210,19 @@ def test_build_best_reports_when_no_placement_meets_timing(tmp_path, project):
     assert len(gw_sh.calls) == 3
 
 
+def test_build_best_falls_back_to_the_default_routing_when_no_placement_routes(tmp_path, project):
+    # route_option 1 は sys の余裕が出やすいが、混んだ回路では配線しきれない（2026-10-23、Primer の fprobe で 274 本が
+    # 配線できなかった）。3 版とも落ちたら、同じ配置で route_option 0 の版を試し、合否（事実）で選ぶ
+    project = dataclasses.replace(project, options=("-use_done_as_gpio 1", "-place_option 1 -route_option 1"))
+    reports = {"p1": REPORT_BAD, "p0": REPORT_BAD, "p2": REPORT_BAD, "p1r0": REPORT_BAD, "p0r0": REPORT_OK, "p2r0": REPORT_OK}
+    gw_sh = PerVariantGwSh(reports)
+    result = GowinBuilder(GowinToolchain(tmp_path / "gw"), run=gw_sh).build_best(project, tmp_path / "b")
+    assert result.bitstream.parent.name in ("p0r0", "p2r0") and result.timing.met
+    assert sorted(cwd.name for _, cwd in gw_sh.calls) == ["p0", "p0r0", "p1", "p1r0", "p2", "p2r0"]
+    tcl = (tmp_path / "b" / "p0r0" / "top.tcl").read_text()
+    assert "-place_option 0 -route_option 0" in tcl and "-use_done_as_gpio 1" in tcl
+
+
 def test_line_endings_do_not_force_a_rebuild(tmp_path, project):
     project.sources[0].write_bytes(b"-- top\nentity top is\n")
     gw_sh = FakeGwSh()

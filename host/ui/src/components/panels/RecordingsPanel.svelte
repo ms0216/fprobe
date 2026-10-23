@@ -10,6 +10,8 @@
   import { load, save } from "../../lib/prefs";
   import { defaultExportPath, exportParams, EXPORT_FORMATS, longTermParams, type ExportFormat } from "../../lib/recordings";
   import { formatDuration } from "../../lib/time";
+  import { confirmer } from "../../lib/confirm";
+  import { readSnapshots, type OpenSnapshot, type SnapshotRow } from "../../lib/snapshots";
   import TimeLink from "./TimeLink.svelte";
 
   const POLL_MS = 1000;                                   // 記録中の件数・範囲の読み直し
@@ -28,6 +30,10 @@
   let exported = $state<string | null>(null);
   let error = $state<string | null>(null);
   let chosen = $state<string | null>(null);
+  // 保存した故障の状態（snapshot.*。Fault の「状態を保存」で作る）
+  let snapshots = $state<SnapshotRow[]>([]);
+  let openSnapshot = $state<OpenSnapshot | null>(null);
+  let snapshotError = $state<string | null>(null);
 
   const linked = $derived($app.link === "open");          // つながってから読む（つなぎ直したら読み直す）
   const recording = $derived(!!status?.recording);
@@ -112,6 +118,42 @@
     dock.show("timeline");
   }
 
+  async function readSnaps() {
+    const r = await readSnapshots(conn);
+    snapshots = r.rows;
+    openSnapshot = r.open;
+    snapshotError = r.error;
+  }
+  $effect(() => {
+    if (!linked) return;
+    void readSnaps();
+    return conn.on("activity", (e: { method: string }) => {
+      if (e.method.startsWith("snapshot.")) void readSnaps();     // だれが（AI も）保存・開く・閉じても
+    });
+  });
+
+  /** 保存した状態を「止まったターゲット」として開く（デーモンの ELF とレジスタ・メモリの表示が切り替わる）ので確かめる */
+  async function openSnap(s: SnapshotRow) {
+    if (!(await allowed(app))) return;
+    if (!(await confirmer.ask($i18n("snapshots.confirmOpen", { name: s.name }), { ok: $i18n("snapshots.open") }))) return;
+    await app.act("snapshot.open", { path: s.path });
+    await readSnaps();
+  }
+
+  async function closeSnap() {
+    if (!(await allowed(app))) return;
+    await app.act("snapshot.close", {});
+    await readSnaps();
+  }
+
+  /** ターゲットの RAM・レジスタを保存した状態に書き戻す（ターゲットの今の状態を上書きする） */
+  async function restoreSnap(s: SnapshotRow) {
+    if (!(await allowed(app))) return;
+    if (!(await confirmer.ask($i18n("snapshots.confirmRestore", { name: s.name }), { ok: $i18n("snapshots.restore") }))) return;
+    await app.act("snapshot.restore", { path: s.path });
+    await readSnaps();
+  }
+
   async function exportNow() {
     save("recordings.format", format);
     const out = await app.act("recording.export", exportParams(format, target, scope === "view" ? viewRange : null));
@@ -190,6 +232,37 @@
     </section>
 
     <section>
+      <h3>{$i18n("snapshots.title")}</h3>
+      {#if openSnapshot}
+        <div class="row-open">{$i18n("snapshots.viewing", { path: openSnapshot.path })}
+          <button class="small" onclick={() => void closeSnap()}>{$i18n("snapshots.close")}</button></div>
+      {/if}
+      {#if snapshotError}<div class="error">{snapshotError}</div>{/if}
+      <div class="rows">
+        <table class="grid">
+          <thead><tr><th>{$i18n("common.name")}</th><th>{$i18n("snapshots.created")}</th><th>{$i18n("snapshots.where")}</th>
+            <th>{$i18n("snapshots.reason")}</th><th></th></tr></thead>
+          <tbody>
+            {#each snapshots as s (s.path)}
+              <tr class:current={s.path === openSnapshot?.path} title={s.note || s.path}>
+                <td class="mono">{s.name}</td>
+                {#if s.error}<td colspan="3" class="error">{s.error}</td>
+                {:else}<td class="muted">{s.created ?? ""}</td><td class="mono">{s.where ?? ""}</td><td>{s.reason ?? ""}</td>{/if}
+                <td class="actions">
+                  <button class="small" disabled={!!s.error} onclick={() => void openSnap(s)}>{$i18n("snapshots.open")}</button>
+                  <button class="small" disabled={!!s.error} title={$i18n("snapshots.restoreTip")}
+                          onclick={() => void restoreSnap(s)}>{$i18n("snapshots.restore")}</button>
+                </td>
+              </tr>
+            {:else}
+              <tr><td colspan="5" class="muted">{$i18n("snapshots.none")}</td></tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
       <h3>{$i18n("recordings.export")}</h3>
       {#if status?.name}
         <form class="export" onsubmit={(e) => { e.preventDefault(); void exportNow(); }}>
@@ -259,5 +332,7 @@
   tr.current td { font-weight: 600; }
   tr.selected td { background: var(--select); }
   .export { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row-open { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+  td.actions { white-space: nowrap; }
   .path input { width: 22em; max-width: 100%; }
 </style>

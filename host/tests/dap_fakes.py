@@ -35,6 +35,7 @@ class FakeTarget:
     dpidr: int = 0x2BA01477                         # STM32F4 の SW-DP（DPv1）
     targetid: int | None = None                     # DPv2 の TARGETID（複数ドロップなら TARGETSEL に使う）
     multidrop: bool = False
+    dlpidr: int = 0x00000001                        # DPv2 の DLPIDR（bit 31:28 = TINSTANCE）
     dormant_only: bool = False                      # JTAG→SWD（0xE79E）に応じない（休眠からの起こしだけ）
     swd: bool = True                                # SWD に応じる（False = JTAG だけのターゲット）
     max_hz: int = 50_000_000
@@ -69,6 +70,7 @@ class FakeDapLink:
         self.closed = False
         self.jtag_irlens: list[int] | None = None
         self.log: list[str] = []
+        self.last_ap = 0                                 # JTAG-DP の RDBUFF（誤りの後に読むと返る古い値）
 
     # 開閉
     def open(self):
@@ -157,7 +159,29 @@ class FakeDapLink:
     def _ap_register(self, ap, offset):
         return offset - (0xD00 if self.t.adi_v6 else 0)
 
+    def reg_read_repeat(self, num_repeats, reg_id, dap_index=0, now=True):
+        """CMSIS-DAP の DAP_TransferBlock（同じレジスタを続けて読む。1 回の往復）"""
+        self.repeat_reads = getattr(self, "repeat_reads", 0) + num_repeats
+        values = [self.read_reg(reg_id, dap_index) for _ in range(num_repeats)]
+        return values if now else (lambda: values)
+
     def read_reg(self, reg_id, dap_index=0, now=True):
+        value = self._read_reg(reg_id, dap_index)
+        return value if now else (lambda: value)
+
+    def _read_reg(self, reg_id, dap_index=0):
+        if self.port == PORT.JTAG and reg_id.value >= 4:            # JTAG-DP: AP の誤りは STICKYERR と古い値（ACK は OK）
+            self._check(dap_index)
+            if self.sticky:
+                return self.last_ap
+            try:
+                self.last_ap = self._read_reg_swd(reg_id, dap_index)
+            except DAPAccessIntf.TransferFaultError:
+                self.sticky = True
+            return self.last_ap
+        return self._read_reg_swd(reg_id, dap_index)
+
+    def _read_reg_swd(self, reg_id, dap_index=0):
         self._check(dap_index)
         t = self.t
         if reg_id.value < 4:
@@ -173,7 +197,7 @@ class FakeDapLink:
                 if bank == 2 and t.targetid is not None:
                     return t.targetid
                 if bank == 3:
-                    return 0x00000001
+                    return t.dlpidr
                 return 0
             if reg == 0x8:
                 return 0                                                  # RESEND
@@ -228,6 +252,8 @@ class FakeDapLink:
             return
         if reg_id.value >= 4:
             if self.sticky:
+                if self.port == PORT.JTAG:
+                    return                                            # JTAG-DP: 誤りの印の間の書き込みは捨てられる
                 raise DAPAccessIntf.TransferFaultError("FAULT")
             ap, key, offset = self._ap()
             if ap is None:

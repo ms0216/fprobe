@@ -93,18 +93,18 @@ export function statsFromProfile(r: any): IsrStat[] {
   }));
 }
 
-/** 分布図: 時間（含む）を bins 本の棒に。外れ値（Q3 + 1.5 IQR を超える）を含む棒に印 */
+/** 分布図: 時間（含む）を bins 本の棒に。長い順の上位 LONGEST 回を含む棒に印（外れ値の経験則は使わない） */
 export interface Histogram {
   bars: Bar[];
-  outliers: Activation[];          // 長い順
+  longest: Activation[];           // 長い順の上位 LONGEST 回
   bins: Activation[][];            // 棒ごとの回
 }
 
+const LONGEST = 10;
+
 export function histogram(acts: Activation[], bins = 24): Histogram {
-  if (!acts.length) return { bars: [], outliers: [], bins: [] };
+  if (!acts.length) return { bars: [], longest: [], bins: [] };
   const sorted = acts.map((a) => a.inclusive).sort((a, b) => a - b);
-  const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)))];
-  const fence = q(0.75) + 1.5 * (q(0.75) - q(0.25));
   const integral = sorted.every(Number.isInteger);
   // 整数（タイムベースの数）で種類が棒の数より少なければ 1 つの値に 1 本（空の棒を挟まない）
   const narrow = integral && sorted[sorted.length - 1] - sorted[0] + 1 <= bins;
@@ -113,10 +113,11 @@ export function histogram(acts: Activation[], bins = 24): Histogram {
   const width = narrow ? 1 : hi > lo ? (hi - lo) / n : 1;
   const groups: Activation[][] = Array.from({ length: n }, () => []);
   for (const a of acts) groups[Math.min(n - 1, Math.floor((a.inclusive - lo) / width))].push(a);
+  const longest = [...acts].sort((a, b) => b.inclusive - a.inclusive || a.t - b.t).slice(0, LONGEST);
+  const top = new Set(longest);
   const bars = groups.map((g, i): Bar => ({ x0: lo + i * width, x1: lo + (i + 1) * width, y: g.length,
-                                          mark: g.some((a) => a.inclusive > fence) }));
-  const outliers = acts.filter((a) => a.inclusive > fence).sort((a, b) => b.inclusive - a.inclusive);
-  return { bars, outliers, bins: groups };
+                                          mark: g.some((a) => top.has(a)) }));
+  return { bars, longest, bins: groups };
 }
 
 /** 棒の中でいちばん長い回（時間軸へ飛ぶ先） */

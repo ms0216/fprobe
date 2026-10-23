@@ -121,6 +121,14 @@ class V7DebugPort:
         self._write(ITR, instruction)
         return self._wait(DSCR_INSTRCOMPL, f"命令 0x{instruction:08X} が終わらない")
 
+    def read_dtrtx_fast(self, instruction: int, count: int) -> list[int]:
+        """速いモード（DSCR.ExtDCCmode = 2）で: ITR に instruction を書き（この時点では実行されない。実機の Cortex-A7）、
+        DTRTX を count 回まとめて読む（CMSIS-DAP のブロック転送。読むたびに今の値を返してから instruction を実行する。
+        最初の値は前の値）。"""
+        self._wait(DSCR_INSTRCOMPL, "前の命令が終わらない")
+        self._write(ITR, instruction)
+        return self.dap.mem_read32_repeat(self.ap, self.base + DTRTX, count)
+
     def to_core(self, value: int) -> None:
         self._write(DTRRX, value)
 

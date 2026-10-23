@@ -1,6 +1,7 @@
 """JTAG のチェーン（TAP 状態機械 + 装置）のピンレベル振る舞いモデル（cocotb, テスト専用）。
 
-- TAP は TCK の立ち上がりで TMS / TDI を取り込み、立ち下がりで TDO を変える。
+- TAP は TCK の立ち上がりで TMS / TDI を取り込み、立ち下がりで TDO を変える（tdo_delay_ns: 立ち下がりから TDO が変わるまでの
+  遅れ。配線の往復とターゲットの出力遅延）。
 - チェーン: TDI → devices[-1] → … → devices[0] → TDO（CMSIS-DAP の装置番号 0 が TDO 側）。
 - 装置: Bypass（任意長の IR、IDCODE か BYPASS）と JtagDp（ARM の JTAG-DP: IR 4 ビット、ABORT / DPACC / APACC /
   IDCODE）。JTAG-DP の DP・AP のレジスタは SWD モデル（swd_target）と同じ振る舞いを使い、読み値は次のスキャンで返る。
@@ -8,7 +9,8 @@
 
 from types import SimpleNamespace
 
-from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
+import cocotb
+from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge, Timer
 
 from tests.models.swd_target import SwdTarget
 
@@ -49,9 +51,15 @@ class Bypass:
 class JtagDp(Bypass):
     IR_ABORT, IR_DPACC, IR_APACC, IR_IDCODE = 0x8, 0xA, 0xB, 0xE
 
-    def __init__(self, **registers):
+    def __init__(self, wait_after_ap: int = 0, **registers):
         self.regs = SwdTarget(SimpleNamespace(target_swdio=SimpleNamespace(value=None)), **registers)
         self.result = 0                       # 直前の読みの結果（次のスキャンで返す）
+        # AP の転送を受けた後、続く wait_after_ap 回の DPACC / APACC のスキャンは WAIT を返し、そのスキャンの要求は捨てる
+        # （ADIv5: 前の転送が終わっていない。実機の Cortex-A7 の DCC の速い読みで起きる）。WAIT のスキャンの値は不定
+        self.wait_after_ap = wait_after_ap
+        self.busy = 0
+        self.waiting = False
+        self.waits = 0                        # 返した WAIT の数
         self.scans: list[tuple] = []          # (IR, RnW, A, 値)
         super().__init__(ir_len=4, idcode=JTAG_DP_IDCODE, idcode_ir=self.IR_IDCODE)
 
@@ -62,11 +70,18 @@ class JtagDp(Bypass):
 
     def capture_dr(self) -> int:
         if self.ir in (self.IR_DPACC, self.IR_APACC):
+            self.waiting = self.busy > 0
+            if self.waiting:
+                self.waits += 1
+                return 0x5A5A5A5A << 3 | ACK_WAIT        # 値は不定（前の結果ではない）
             return self.result << 3 | ACK_OK_FAULT
         return super().capture_dr()
 
     def update_dr(self, value: int):
         if self.ir not in (self.IR_ABORT, self.IR_DPACC, self.IR_APACC):
+            return
+        if self.ir != self.IR_ABORT and self.waiting:
+            self.busy -= 1                                # WAIT のスキャン: 要求は捨てる
             return
         rnw, addr, data = value & 1, (value >> 1 & 3) << 2, value >> 3 & 0xFFFFFFFF
         self.scans.append((self.ir, rnw, addr, data))
@@ -81,14 +96,16 @@ class JtagDp(Bypass):
                 self.result = 0
         elif rnw:
             self.result = regs._ap_read((regs.select >> 4 & 0xF) << 4 | addr)
+            self.busy = self.wait_after_ap
         else:
             regs._write(1, addr, data)
             self.result = 0
+            self.busy = self.wait_after_ap
 
 
 class JtagChain:
-    def __init__(self, dut, devices, *, tck="tck", tms="tms", tdi="tdi", tdo="tdo"):
-        self.dut, self.devices = dut, devices
+    def __init__(self, dut, devices, *, tck="tck", tms="tms", tdi="tdi", tdo="tdo", tdo_delay_ns: float = 0):
+        self.dut, self.devices, self.tdo_delay_ns = dut, devices, tdo_delay_ns
         self.tck, self.tms, self.tdi, self.tdo = (getattr(dut, n) for n in (tck, tms, tdi, tdo))
         self.state = RESET
         self.shift = [0] * len(devices)       # 装置ごとのシフトレジスタ
@@ -103,7 +120,14 @@ class JtagChain:
             self._edge(tms, tdi)
             await FallingEdge(self.tck)
             if self.state in (SH_DR, SH_IR):
-                self.tdo.value = self.shift[0] & 1
+                if self.tdo_delay_ns:
+                    cocotb.start_soon(self._late_tdo(self.shift[0] & 1))
+                else:
+                    self.tdo.value = self.shift[0] & 1
+
+    async def _late_tdo(self, bit: int):
+        await Timer(self.tdo_delay_ns, unit="ns")
+        self.tdo.value = bit
 
     def _edge(self, tms: int, tdi: int):
         if self.state in (SH_DR, SH_IR):                          # TDI 側から 1 ビットずつ送る

@@ -9,12 +9,21 @@
   import { i18n } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import { baseName, sourceHeat } from "../../lib/profile";
+  import { confirmer } from "../../lib/confirm";
+  import { lineSpec, measureParams } from "../../lib/cycles";
 
   const ctx = shared();
   const { app, dbg, ui, safety } = ctx;
 
   let code = $state<HTMLElement>();
   let mixed = $state(load("source.mixed", "0") === "1");
+  // 2 点の間のサイクル数（cycles.measure）: 選んだ行を始点・終点に（関数名・0x の番地も書ける）
+  let cyclesOpen = $state(false);
+  let cycStart = $state(load("cycles.start", ""));
+  let cycEnd = $state(load("cycles.end", ""));
+  let cycCount = $state(load("cycles.count", "1"));
+  let cycResult = $state<any>(null);
+  let cycError = $state<string | null>(null);
   $effect(() => save("source.mixed", mixed ? "1" : "0"));
 
   const online = $derived($app.link === "open");
@@ -68,6 +77,30 @@
   }
 
   const hex = (n: number) => n.toString(16).padStart(8, "0");
+
+  function pickLine(which: "start" | "end") {
+    if (selected === undefined || !$dbg.source) return;
+    const spec = lineSpec({ file: $dbg.source.name, line: selected });
+    if (which === "start") cycStart = spec;
+    else cycEnd = spec;
+  }
+
+  /** ターゲットを走らせ、始点から終点までを count 回測る（終わると終点で止まっている）ので確かめる */
+  async function measureCycles() {
+    const built = measureParams(cycStart, cycEnd, cycCount);
+    if ("error" in built) {
+      cycError = $i18n("cycles.badField", { field: built.error });
+      return;
+    }
+    if (!(await allowed(app))) return;
+    if (!(await confirmer.ask($i18n("cycles.confirm", built.params as never), { ok: $i18n("cycles.measure") }))) return;
+    save("cycles.start", cycStart);
+    save("cycles.end", cycEnd);
+    save("cycles.count", cycCount);
+    cycError = null;
+    const out = await app.act("cycles.measure", built.params);
+    cycResult = out ?? null;
+  }
 </script>
 
 <div class="pane source">
@@ -81,7 +114,30 @@
       <span class="muted mono path" title={$dbg.source?.path ?? ""}>{$dbg.source?.path ?? ""}</span>
       <span class="spacer"></span>
       <label title={$i18n("source.mixedTip")}><input type="checkbox" bind:checked={mixed} /> {$i18n("source.mixed")}</label>
+      <button class="small" class:on={cyclesOpen} title={$i18n("cycles.tip")} onclick={() => (cyclesOpen = !cyclesOpen)}>
+        {$i18n("cycles.title")}</button>
     </div>
+    {#if cyclesOpen}
+      <form class="pane-bar cycles" onsubmit={(e) => { e.preventDefault(); void measureCycles(); }}>
+        <input class="mono" bind:value={cycStart} placeholder={$i18n("cycles.start")} aria-label={$i18n("cycles.start")} />
+        <button type="button" class="small" disabled={selected === undefined} title={$i18n("cycles.useLineTip")}
+                onclick={() => pickLine("start")}>{$i18n("cycles.useLine")}</button>
+        <span class="muted">→</span>
+        <input class="mono" bind:value={cycEnd} placeholder={$i18n("cycles.end")} aria-label={$i18n("cycles.end")} />
+        <button type="button" class="small" disabled={selected === undefined} title={$i18n("cycles.useLineTip")}
+                onclick={() => pickLine("end")}>{$i18n("cycles.useLine")}</button>
+        <input class="mono num" bind:value={cycCount} aria-label={$i18n("cycles.count")} title={$i18n("cycles.count")} />
+        <button class="small" disabled={!online}>{$i18n("cycles.measure")}</button>
+        {#if cycError}<span class="bad">{cycError}</span>{/if}
+        {#if cycResult?.summary}
+          {@const sm = cycResult.summary}
+          <span class="mono">{$i18n("cycles.result", { count: sm.count, min: sm.min, max: sm.max, median: sm.median })}</span>
+          {#if sm.time_us}<span class="muted mono">{$i18n("cycles.resultUs", { min: sm.time_us.min.toFixed(3), max: sm.time_us.max.toFixed(3),
+            median: sm.time_us.median.toFixed(3) })}</span>{/if}
+          {#each cycResult.notes ?? [] as n, k (k)}<span class="muted note" title={n}>{n}</span>{/each}
+        {/if}
+      </form>
+    {/if}
     {#if $dbg.source}
       <div class="lines mono" bind:this={code}>
         {#each lines as text, i (i)}
@@ -140,6 +196,11 @@
 </div>
 
 <style>
+  .cycles input { width: 11em; }
+  .cycles input.num { width: 4em; }
+  .cycles .bad { color: var(--bad); }
+  .cycles .note { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30em; }
+  button.on { outline: 1px solid var(--accent); }
   .source { display: flex; flex-direction: column; }
   .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; font-size: 12px; }
   .lines { flex: 1; overflow: auto; padding: 4px 0; }

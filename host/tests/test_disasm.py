@@ -95,14 +95,11 @@ def test_around_pc_aligns_from_the_function_start(sram):
     assert listing.pc_index == 3
 
 
-def test_around_pc_without_symbols_uses_the_heuristic():
+def test_around_pc_without_symbols_starts_at_pc():
     image = ElfImage(SRAM_DEMO)
     bare = Disassembler(image)                                             # シンボル無し（生のメモリ相当）
     listing = bare.around(0x20000098, before=4, after=1)
-    assert listing.sync == "heuristic"
-    assert [i.address for i in listing.instructions] == [0x2000008E, 0x20000090, 0x20000094, 0x20000096,
-                                                         0x20000098, 0x2000009C]
-    assert listing.instructions[0].function is None
+    assert listing.sync == "start" and [i.address for i in listing.instructions] == [0x20000098, 0x2000009C]
 
 
 def test_range_stops_at_the_end_and_needs_readable_memory(sram):
@@ -186,3 +183,12 @@ def test_tbb_table_is_data_found_from_the_compare():
                      (8, "data", ".byte"), (9, "data", ".byte"), (10, "data", ".byte"), (11, "data", ".byte"),
                      (12, "code", "bx"), (14, "code", "bx")]
     assert listing.instructions[-1].flow == "return"
+
+
+def test_without_a_known_boundary_the_listing_starts_at_pc():
+    # 関数の先頭・$t の無いメモリでは、PC より前の命令の境界は分からない。「Thumb は数命令で揃う」と見込んで前を
+    # 解読しない（違う境界で読むと、もっともらしいが誤った命令を見せる）。PC から読み、そう書く
+    code = bytes.fromhex("00bf" * 16)                                       # nop × 16
+    listing = Disassembler(BytesMemory(0x1000, code)).around(0x1010, before=4, after=2)
+    assert listing.sync == "start" and listing.pc_index == 0
+    assert listing.instructions[0].address == 0x1010

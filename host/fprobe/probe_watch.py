@@ -20,6 +20,7 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session
 """
 
 import collections
+import dataclasses
 import re
 import time
 from dataclasses import dataclass, field
@@ -31,7 +32,7 @@ from .dwarf.info import FrameView
 from .dwarf.location import NotAvailable
 from .dwarf.typesys import ArrayType, BaseType, CType, EnumType, PointerType, strip, type_name
 from .dwarf.values import decode, decode_bits, encode
-from .events import KIND_INJECT, KIND_SAMPLE, EventCursor, EventLog, resolve
+from .events import INJECT_KINDS, KIND_SAMPLE, EventCursor, EventLog, resolve
 from .sampler import Sampler
 from .watch_buffer import TargetRing
 from .watch_trigger import Capture, Condition
@@ -172,14 +173,21 @@ class WatchTools:
                         chase)
 
     def watch_set(self, expressions: list[str], rate_hz: float = 1000.0, ap: int = 0, chase_rate_hz: float = 100.0,
-                  jitter: int = 0) -> dict:
+                  jitter: int = 0, names: list[str] | None = None) -> dict:
         """変数を止めずに周期的に読む（FPGA の DAP サンプラ）。expressions: 変数名・C の式・番地（"0x20000000" か
         "0x20000000:バイト数"）。決まった番地の式はサンプラが rate_hz で読む（合わせて 8 か所・各 16 語まで）。ポインタを
         たどる式はホストが chase_rate_hz ごとに番地を引き直して読む（method = host）。jitter（0〜15）: サンプラの周期に
-        ゆらぎを足し、周期的な処理との噛み合い（エイリアシング）を防ぐ（fprobe.sampler.Sampler.start）。"""
+        ゆらぎを足し、周期的な処理との噛み合い（エイリアシング）を防ぐ（fprobe.sampler.Sampler.start）。
+        names: 式ごとの名前（値・時間軸の段の名前。番地の式に「誤り」等。記録中なら記録の情報にも残す）。"""
         if not 0 < chase_rate_hz <= 10_000:
             raise ValueError("chase_rate_hz は 0 より大きく 10000 以下")
+        if names is not None and (len(names) != len(expressions) or len(set(names)) != len(names)
+                                  or not all(isinstance(n, str) and n.strip() for n in names)):
+            raise ValueError("names は式と同じ数の、重ならない空でない名前")
         watched, rejected = self._watch_targets(expressions)
+        if names is not None:
+            label = dict(zip(expressions, (n.strip() for n in names)))
+            watched = [dataclasses.replace(w, name=label.get(w.name, w.name)) for w in watched]
         sampled = [w for w in watched if not w.chase]
         slots = []
         with self._lock:
@@ -196,6 +204,9 @@ class WatchTools:
                 self._release_sampler("watch")
             self._end_watch_jobs()
             self._watched, self._watch_rate, self._chase_rate = watched, rate_hz, chase_rate_hz
+            self._watch_running = bool(watched)
+            if names is not None:                        # 記録の段の名前（観測を止めた後・後から開いた記録でも）
+                self._name_watches({w.address: w.name for w in sampled if w.address is not None})
             self._watch_rejected, self._watch_started = rejected, time.monotonic()
             if not sampled:
                 self._watch_base = None
@@ -240,6 +251,7 @@ class WatchTools:
         """周期的な読みを止める（読んだ値はイベント記録・記録に残る。条件つきの取得は打ち切る）。"""
         with self._lock:
             self._end_watch_jobs()
+            self._watch_running = False                         # 一覧は残す（値を読む）が、動いてはいない
             if self._sampler_user not in (None, "watch"):
                 return {"stopped": True}                       # サンプラはほかの道具のもの: 触らない（止めてあるものは止まっている）
             if self._sampler_user == "watch" or not any(w.chase for w in self._watched):
@@ -260,6 +272,7 @@ class WatchTools:
             status.update({k: (v - self._watch_base[k]) & 0xFFFFFFFF for k, v in device.items()}, device=device)
         trigger = self._watch_trigger
         return {"watches": [self._describe(w) for w in self._watched], "rejected": list(self._watch_rejected),
+                "running": bool(getattr(self, "_watch_running", False)),         # watch_stop の後は false（一覧は残る）
                 "since_start_s": time.monotonic() - self._watch_started if self._watched else None,
                 "rate_hz": self._watch_rate,
                 "chase_rate_hz": self._chase_rate, "chase_errors": dict(self._chase_errors),
@@ -389,7 +402,7 @@ class WatchTools:
             if e.kind == KIND_SAMPLE and e.ok:
                 for name, value in trigger.assembler.feed(e.address, e.data):
                     trigger.capture.feed(e.time, name, value)
-            elif e.kind == KIND_INJECT:
+            elif e.kind in INJECT_KINDS:
                 trigger.capture.event(e.time, "xtrig")
         trigger.capture.tick(self.session.device.time() & MASK48 if latest is None else latest)
 

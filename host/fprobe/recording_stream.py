@@ -77,9 +77,10 @@ class LaRecordingStream:
 
     def __init__(self, device: Any, rec: Any, *, rate_hz: float | None = None, rle: bool = True,
                  chunk_s: float = 1.0, lock: Any = None, on_end: Callable[[LaRecordingStream], None] | None = None,
-                 events_from: int | None = None, carry: DapEvent | None = None):
+                 events_from: int | None = None, carry: DapEvent | None = None, obs: Any = None):
         if not chunk_s > 0:
             raise ValueError("chunk_s は正の秒数")
+        self.obs = obs                                     # FPGA の観測の復号器（Collector と共有）
         self.rec = rec
         self._lock = lock if lock is not None else contextlib.nullcontext()
         self.device = LockedDevice(device, self._lock)
@@ -166,7 +167,8 @@ class LaRecordingStream:
         try:
             for chunk in s.chunks(float("inf")):
                 if chunk.events:                                  # 時刻の 48 ビットは受け取った後の時刻で直す
-                    self.carry = add_events(self.rec, list(chunk.events), self.device.time(), carry=self.carry)
+                    self.carry = add_events(self.rec, list(chunk.events), self.device.time(), carry=self.carry,
+                                            obs=self.obs)
                     self.events += len(chunk.events)
                 if not chunk.data:
                     continue

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { LaChannel } from "../../lib/waveform";
   // Timeline: 共通タイムライン（ロジアナの波形・記録の段。WebGL2 の部品 Timeline.svelte）と捕捉の設定、縮図、
   // 段の名前の列（折りたたみ・並べ替え・隠す）、段の一覧のメニュー、カーソル（選択・基準・差）の表示、時刻へ移動
   import { frequency } from "../../lib/format";
@@ -61,6 +62,7 @@
                        rise: edge === "rise" ? bit : 0, fall: edge === "fall" ? bit : 0 });
     busy = false;
   }
+  const laLayout = $derived((($app.probe?.capabilities ?? {}) as { la_layout?: LaChannel[] }).la_layout ?? null);
 </script>
 
 <div class="pane timeline">
@@ -77,7 +79,7 @@
       <label>{$i18n("timeline.trigger")}
         <select bind:value={trigCh}>
           <option value="none">{$i18n("timeline.triggerNone")}</option>
-          {#each channelChoices(caps) as ch (ch)}<option value={String(ch)}>{channelName(ch)}</option>{/each}
+          {#each channelChoices(caps) as ch (ch)}<option value={String(ch)}>{channelName(ch, laLayout)}</option>{/each}
         </select>
         <select bind:value={edge} disabled={trigCh === "none"} aria-label={$i18n("timeline.trigger")}>
           <option value="fall">{$i18n("timeline.falling")}</option><option value="rise">{$i18n("timeline.rising")}</option>
@@ -147,7 +149,7 @@
           {#each g.rows as r (r.id)}
             <label class="menu-row"><input type="checkbox" checked={isShown(r, t.config)}
                    onchange={(e) => tl.setRowShown(r.id, (e.currentTarget as HTMLInputElement).checked)} />
-              {rowTitle(r, $i18n)}</label>
+              {rowTitle(r, $i18n, laLayout)}</label>
           {/each}
         {/each}
       </div>

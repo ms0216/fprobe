@@ -27,6 +27,9 @@
   // 画面はデーモン自身が配る（開発中は Vite の代理）ので、同じ場所の /api につなぐ。トークンは #token=...
   const hash = new URLSearchParams(location.hash.slice(1));
   const token = hash.get("token") ?? undefined;
+  // #layout=system: 開いたときにその配置にする（配置ごとの URL を残せる）
+  const initialLayout = hash.get("layout") === "system" ? "system" as const
+    : hash.get("layout") === "default" ? "default" as const : null;
   const conn = new DaemonConnection(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api`, {
     name: "gui", role: "human", token, topics: ["activity", "control", "clients", "target.state"],
     optionalTopics: ["ui.state", "flash.progress", "recording"],
@@ -39,7 +42,8 @@
   // 画面の状態（視点・カーソル・段・出来事・フレーム）をデーモン（AI・別の窓）と URL にそろえる
   const screen = new ScreenSync(conn, tl, dbg, (i) => void focusFrame(dbg, ui, i));
   let dockRef: Dock | null = null;
-  const dock = { show: (id: string) => dockRef?.show(id), reset: () => dockRef?.reset() };
+  const dock = { show: (id: string) => dockRef?.show(id), reset: () => dockRef?.reset(),
+                 layout: (name: "default" | "system") => dockRef?.layout(name) };
   // ビューの行 → 時間軸のその時刻、時間軸・ビュー → ソースの行・逆アセンブル・メモリ（UI/UX の調査の規則: 1 回クリック
   // = 選ぶ、ダブルクリック = 元を開く）
   const reveal = (r: Reveal) => {
@@ -55,8 +59,12 @@
     ui.revealMemory(address);
     dock.show("memory");
   };
+  const showApi = (method: string, params: Record<string, unknown>, favorite?: string) => {
+    ui.openApi(method, params, favorite);
+    dock.show("api");
+  };
   const ctx: Shared = { conn, app, dbg, tl, ui, safety, screen, dock, reveal, showAddress: (a) => void showAddress(a),
-                        showMemory };
+                        showMemory, showApi };
   setContext(SHARED, ctx);
   const context = new Map<any, any>([[SHARED, ctx]]);
   document.documentElement.lang = getLang();
@@ -72,7 +80,7 @@
   });
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
-                                         selection: $ui.selection });
+                                         selection: $ui.selection, part: $app.target?.target });
 
   function onKey(e: KeyboardEvent) {
     if ($ui.dialog) return;
@@ -107,7 +115,7 @@
   <MenuBar {cs} />
   <DebugToolbar {cs} />
   <SafetyBar />
-  <main><DockArea {context} ready={(d) => (dockRef = d)} /></main>
+  <main><DockArea {context} ready={(d) => { dockRef = d; if (initialLayout) d.layout(initialLayout); }} /></main>
   <StatusLine />
   <Dialogs />
   <ConfirmDialog />

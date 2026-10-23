@@ -9,7 +9,7 @@
 
 IR 長の推定: Shift-IR で 0 を詰めてから 1 を詰め、1 が TDO に出るまでの数が IR の合計長。各装置の Capture-IR の値の
 下位 2 ビットは 1149.1 で "01"（LSB が 1）なので、取り出した値の "1,0" の並びが装置の境目の候補。既知の IDCODE の
-IR 長（表）と合わせて分ける。境目が一意でなければ ir_length_source = "guessed"。
+IR 長（表）と合わせて分ける。境目が一意でなければ推測せず ir_length_source = "ambiguous"（ir_candidates に候補）。
 走査は IR に 0 を入れたまま Update-IR を通らない（0 = EXTEST の装置があるため。最後は全ビット 1 = BYPASS）。
 """
 
@@ -137,12 +137,15 @@ class ChainDevice:
     index: int
     idcode: int | None                      # None = リセット後に BYPASS（IDCODE を持たない）
     ir_length: int | None
-    ir_length_source: str                   # table / measured / guessed / unknown
+    ir_length_source: str                   # table / measured / ambiguous（Capture-IR から一つに決まらない）/ unknown
     name: str | None = None
+    ir_candidates: list[int] | None = None  # ambiguous のときの IR 長の候補（Capture-IR の境目から）
 
     def as_dict(self) -> dict:
         out = {"index": self.index, "idcode": self.idcode, "name": self.name, "ir_length": self.ir_length,
                "ir_length_source": self.ir_length_source}
+        if self.ir_candidates is not None:
+            out["ir_candidates"] = self.ir_candidates
         if self.idcode is not None:
             d = decode_idcode(self.idcode)
             out.update(designer=d["designer"], partno=d["partno"], version=d["version"])
@@ -176,7 +179,7 @@ def scan_chain(wire: JtagWire, max_devices: int = 16, max_ir_bits: int = 256) ->
     dr = shift(wire, False, (1 << dr_bits) - 1, dr_bits)          # 1 を詰める: 装置の後ろから 1 が続く
     if dr == 0:
         reset_tap(wire)
-        return ChainScan([], None, None, ["TDO がずっと 0: TDO の線・ターゲットの電源・TRST を確かめる"], "stuck_low")
+        return ChainScan([], None, None, ["TDO がずっと 0"], "stuck_low")
     devices: list[ChainDevice] = []
     pos = 0
     notes: list[str] = []
@@ -197,8 +200,7 @@ def scan_chain(wire: JtagWire, max_devices: int = 16, max_ir_bits: int = 256) ->
             break
     if not devices:
         reset_tap(wire)
-        return ChainScan([], None, None, ["TDO がずっと 1: チェーンに装置が見えない（TDO が浮いてプルアップ、"
-                                          "TCK / TMS の配線、JTAG が無効のターゲット）"], "stuck_high")
+        return ChainScan([], None, None, ["TDO がずっと 1: チェーンに装置が見えない"], "stuck_high")
     # IR の合計長: 0 を max_ir_bits 詰め、続けて 1 を max_ir_bits 詰める。1 が TDO に出た位置 - max_ir_bits
     ir = shift(wire, True, ((1 << max_ir_bits) - 1) << max_ir_bits, 2 * max_ir_bits)
     first_one = next((k for k in range(max_ir_bits, 2 * max_ir_bits) if (ir >> k) & 1), None)
@@ -232,20 +234,26 @@ def _split_ir(devices: list[ChainDevice], total: int, capture: int, notes: list[
         elif all(d.ir_length is not None for d in rest):
             dev.ir_length, dev.ir_length_source = total - pos - sum(d.ir_length for d in rest), "measured"
         else:
-            nxt = min((k for k in starts if k >= pos + 2), default=None)
-            if nxt is None:
+            # 境目になれるのは、残りの装置に 1 台 2 ビット以上が残る位置だけ。候補の数が残りの台数と同じなら、
+            # いちばん近いものがこの装置の終わり（残りの装置がほかの候補を 1 つずつ使う）
+            candidates = sorted(k for k in starts if k >= pos + 2 and total - k >= 2 * len(rest))
+            if not candidates:
                 notes.append(f"装置 {i} の IR 長を分けられない")
                 break
-            candidates = [k for k in starts if k >= pos + 2]
+            nxt = candidates[0]
+            if len(candidates) > len(rest):                                  # 境目が一つに決まらない: 推測しない
+                dev.ir_length_source = "ambiguous"
+                dev.ir_candidates = [k - pos for k in candidates]
+                notes.append(f"装置 {i} の IR 長は Capture-IR から一つに決まらない（候補 {dev.ir_candidates}）。"
+                             "データシートの値で jtag_chain を与える")
+                break
             dev.ir_length = nxt - pos
-            dev.ir_length_source = "measured" if len(candidates) <= len(rest) else "guessed"
+            dev.ir_length_source = "measured"
         if dev.ir_length is not None and dev.ir_length < 2:
             notes.append(f"装置 {i} の IR 長 {dev.ir_length} は短すぎる（1149.1 は 2 以上）")
         pos += dev.ir_length
-    if pos != total and not any("入らない" in n for n in notes):
+    if pos != total and not any("入らない" in n or "決まらない" in n for n in notes):
         notes.append(f"装置の IR 長の和 {pos} が合計長 {total} と合わない")
-    if any(d.ir_length_source == "guessed" for d in devices):
-        notes.append("IR 長に推測が含まれる（guessed）: Capture-IR に境目の候補が多い。データシートの値で jtag_chain を与える")
 
 
 def bits_from_text(text: str) -> list[int]:

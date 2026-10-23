@@ -93,15 +93,21 @@ def test_coverage():
     assert [p.id for p in cov.uncovered] == [5, 6, 8, 10]
 
 
-def test_long_call_flag():
+def test_long_calls_are_marked_only_above_the_given_duration():
+    # 「いつもより長い」の経験則（平均 + 6σ 等）では印を付けない。使う側が long_s（秒）を明示したときだけ、それより
+    # 長い呼び出しに印。明示が無くても、いちばん長い呼び出しの長さと時刻は事実として返す（max_s・max_at）
     items = []
     t = 0
     for k in range(40):
         items += hits((t, 5), (t + 100 + (k % 3) - 1, 6))
         t += 1000
     items += hits((t, 5), (t + 300, 6))
-    r = analyze(items, TABLE, hz=1e6)
-    longs = [a for a in r.anomalies if a.type == "long_call"]
+    plain = analyze(items, TABLE, hz=1e6)
+    assert [a for a in plain.anomalies if a.type == "long_call"] == []
+    g = plain.functions["g"].inclusive.to_dict(1e6)
+    assert g["max_s"] == pytest.approx(300e-6) and g["max_at"] == t
+    marked = analyze(items, TABLE, hz=1e6, long_s=200e-6)
+    longs = [a for a in marked.anomalies if a.type == "long_call"]
     assert len(longs) == 1 and longs[0].t == t and longs[0].function == "g"
 
 
@@ -211,12 +217,7 @@ def test_pipeline_from_source_to_report(tmp_path):
     assert "fact" in render_calls(report.calls, report.hz)
 
 
-@pytest.mark.parametrize("bad", [1.0, 3.0])
-def test_long_call_needs_both_sigma_and_ratio(bad):
-    """ばらつきが 0 でも、平均の long_ratio 倍を超えなければ印を付けない。"""
-    items = []
-    for k in range(40):
-        items += hits((k * 1000, 5), (k * 1000 + 100, 6))
-    items += hits((50_000, 5), (50_000 + int(100 * (1 + bad / 10)), 6))
-    r = analyze(items, TABLE, hz=1.0)
-    assert [a.type for a in r.anomalies] == (["long_call"] if bad > 2 else [])
+def test_a_call_exactly_at_long_s_is_not_marked():
+    items = hits((0, 5), (100, 6), (1000, 5), (1101, 6))
+    r = analyze(items, TABLE, hz=1.0, long_s=100.0)
+    assert [(a.type, a.t) for a in r.anomalies] == [("long_call", 1000)]

@@ -39,22 +39,6 @@ export interface FaultReport {
 /** 故障の例外（IPSR 3〜7） */
 export const FAULT_EXCEPTIONS = new Set(["HardFault", "MemManage", "BusFault", "UsageFault", "SecureFault"]);
 
-const norm = (name: string) => name.toLowerCase().replace(/[_\s]/g, "");
-// CMSIS の名前（HardFault_Handler 等）、pico-sdk（isr_hardfault）、Zephyr・小文字の流儀（hard_fault_handler）
-const FAULT_HANDLERS = ["hardfault", "memmanage", "memmanagefault", "busfault", "usagefault", "securefault"];
-// 故障にも割り込みにも使われる共通のハンドラ（ベクタ表の空き。ここで止まったら target.fault で確かめる）
-const SHARED_HANDLERS = ["defaulthandler", "defaultisr", "unhandledinterrupt", "unusedhandler", "dummyhandler",
-                         "isrinvalid", "blockinghandler", "defaultirqhandler"];
-
-/** 止まった関数の名前で: "fault" = 故障のハンドラ、"maybe" = 共通のハンドラ（故障かは target.fault で確かめる）、
- *  null = ふつうの関数 */
-export function handlerKind(fn: string | undefined | null): "fault" | "maybe" | null {
-  if (!fn) return null;
-  const n = norm(fn).replace(/(irq)?handler$/, "").replace(/^isr/, "");
-  if (FAULT_HANDLERS.includes(n)) return "fault";
-  return SHARED_HANDLERS.includes(norm(fn)) ? "maybe" : null;
-}
-
 /** target.fault の結果が故障を示す（故障のビットが立っている、または故障の例外の中） */
 export function isFault(report: FaultReport | null | undefined): boolean {
   return !!report && (report.faulted || (!!report.exception && FAULT_EXCEPTIONS.has(report.exception.name)));
@@ -65,9 +49,9 @@ interface TargetSource {
   subscribe(fn: (s: { target: Record<string, any> | null }) => void): () => void;
 }
 
-/** 故障で止まったら open() を呼ぶ（IAR の Fault exception viewer の自動で開く動き）。止まった関数が故障のハンドラなら
- *  すぐに、共通のハンドラなら target.fault（quiet）で確かめてから。同じ止まり（pc と実行の番号）では 1 回だけ。
- *  やめる関数を返す */
+/** 故障で止まったら open() を呼ぶ（IAR の Fault exception viewer の自動で開く動き）。止まるたびに target.fault（quiet）で
+ *  確かめ、今いる例外（IPSR）が故障の例外なら開く。関数の名前では決めない。CFSR の故障のビットは消すまで残るので、
+ *  それだけでは開かない。同じ止まり（pc と実行の番号）では 1 回だけ。やめる関数を返す */
 export function watchFaults(call: Call, app: TargetSource, open: () => void): () => void {
   let last: string | undefined;
   return app.subscribe(({ target }) => {
@@ -78,13 +62,9 @@ export function watchFaults(call: Call, app: TargetSource, open: () => void): ()
     const key = `${target.pc}/${target.run}`;
     if (key === last) return;
     last = key;
-    const kind = handlerKind(target.function);
-    if (kind === "fault") open();
-    else if (kind === "maybe") {
-      call("target.fault", {}, { quiet: true }).then((r: FaultReport) => {
-        if (key === last && isFault(r)) open();
-      }, () => {});
-    }
+    call("target.fault", {}, { quiet: true }).then((r: FaultReport) => {
+      if (key === last && !!r?.exception && FAULT_EXCEPTIONS.has(r.exception.name)) open();
+    }, () => {});
   });
 }
 

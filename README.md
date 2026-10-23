@@ -195,7 +195,7 @@ log.start()
 ...                                                        # pyOCD でターゲットを操作する
 log.stop()
 for a in resolve(log.read()):
-    print(a.time, a.kind, hex(a.address), hex(a.value))   # ap_write / ap_read / dp_read / dp_write / fail
+    print(a.time, a.kind, hex(a.address), hex(a.value))   # ap_write / ap_read / dp_read / dp_write / inject（割り込み書き込み）/ fail
 ```
 
 ### JTAG
@@ -251,6 +251,27 @@ with Session.open("0001") as s, s.debug(target_override="stm32f401xe") as dbg_s:
 ```
 
 試験用のファームウェア `host/firmware/sram_demo`（zig cc、SRAM で動く）で実機試験する（`test_debug_hw.py`）。
+
+### MCU と FPGA が連携するシステムの解析（FPGA 観測・システム解析）
+
+対象の FPGA に観測回路（[target_ip/fprobe_obs](target_ip/fprobe_obs/README.md)。ストリーム型 `obs_core`、極小の FPGA 向けの
+スナップショット型 `obs_snap_core`）を組み込むと、fprobe がその JTAG で FPGA 内部の信号を読み、MCU（SWD）・ピン（ロジアナ）と
+同じ時間軸に並べる。UI は `#layout=system`（表示 → システム解析のレイアウト）:
+- MCU のメモリ（アドレスか ELF の変数名。1 秒あたりの増加数）と、FPGA の最新値・条件（`restart changed and state=BUSY`）の
+  成立レートを並べて表示する。
+- 「記録開始」で MCU のメモリ（名前付き）・ピン・FPGA・DAP を 1 つの記録にまとめる。「時間軸で表示」で確認する。
+- 結果の直前に多い出来事（`recording.correlate`）: 結果（`errors changed`）の直前に起きている条件を、先行率の順に並べる。
+  あわせて、記録のうち候補の後の時間窓に当たる時間の割合（coverage）も測って示す。どちらも測った事実だけで、原因の判定・
+  経験則による順位づけはしない。候補の自動探索もできる。
+  「表示」でその例の時刻へ、「頻度を表示」で条件の表へ追加する。値の継続時間（`recording.durations`）。
+- 区間ごとの集計（`recording.transactions`）: 記録をリクエスト等の区間に切り、開始時の値ごとに結果の割合・条件の回数
+  （例: B の大きい要求だけ再試行され、再試行された要求だけ誤る）。
+- まれにしか起きない不具合: 記録中に条件でマーカーを付け、記録を停止する（`recording.trigger_set`）。FPGA の信号だけの条件なら
+  ハードウェアのクロストリガで MCU を即座に停止する（`fpga_obs.trigger_set`。遅延は SWD 4 MHz で約 64 µs、1 MHz で約 0.2 ms）。
+- ターゲットを書き換えた・リセットした後: FPGA は自動で再接続、MCU は同じ設定で再接続。表と条件はデーモンが保持し、
+  別の PC（`--lan`）・AI（`ui_state` の system）と共有する。
+通して試せるデモ: [Shrike-Lite（RP2040 + ForgeFPGA）](target_ip/fprobe_obs/examples/shrike_lite/README.md)。
+設計: [docs/superpowers/specs/2026-10-21-system-analysis-design.md](docs/superpowers/specs/2026-10-21-system-analysis-design.md)。
 
 ### プラグイン（機器・用途に固有の処理）
 

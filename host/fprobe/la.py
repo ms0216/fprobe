@@ -57,6 +57,12 @@ def external_channels(caps) -> list[int]:
     return [c.channel for c in channel_layout(caps) if c.kind in ("pin", "input")]
 
 
+try:                                                          # 入っていれば波形の変化点の表を一括の計算で作る
+    import numpy as _np
+except ImportError:                                           # 無くても同じ結果（遅いだけ）
+    _np = None
+
+
 @dataclass(frozen=True)
 class Capture:
     samples: Sequence[int]       # 時間順（深いバッファでは array）
@@ -110,11 +116,22 @@ class Waveform:
     'x'（区間内で変化）。チャンネルごとの変化点の表を一度だけ作り、表示のたびには二分探索で引く（全サンプルを送らない）。"""
 
     def __init__(self, tr: Transitions):
-        self.tr = tr
+        # 変化点の表だけを持つ（元の並び tr は持たない）。サンプル番号が 32 ビットに収まれば 4 バイトの整数で
+        # （記録のかたまりは 1 秒程度。大きな記録の時間軸でデーモンのメモリが 1 GB を超えた）
+        self.length = tr.length
         first = tr.values[0] if len(tr.values) else 0
         self._initial = [first >> ch & 1 for ch in range(tr.channels)]
-        self._edges = [array("Q") for _ in range(tr.channels)]          # チャンネルが変わったサンプル番号
-        # ponytail: 変化点ごとの Python のループ（100 万変化点で 1 秒ほど、捕捉ごとに 1 回）。遅ければ numpy に
+        code = "I" if tr.length < 1 << 32 else "Q"
+        self._edges = [array(code) for _ in range(tr.channels)]         # チャンネルが変わったサンプル番号
+        if _np is not None and len(tr.values) > 1:
+            # numpy があれば一括の計算で（SWD のクロック等で数千万の変化点がある記録も数秒で開く）
+            values, starts = _np.asarray(tr.values), _np.asarray(tr.starts, dtype=_np.uint64)
+            dtype = _np.uint32 if code == "I" else _np.uint64
+            changed = values[1:] ^ values[:-1]
+            for ch, edges in enumerate(self._edges):
+                edges.frombytes(starts[_np.flatnonzero((changed >> ch) & 1) + 1].astype(dtype).tobytes())
+            return
+        # ponytail: 変化点ごとの Python のループ（100 万変化点で 1 秒ほど、捕捉ごとに 1 回）。numpy が無いとき
         previous = first
         for v, t in zip(tr.values, tr.starts):
             changed = v ^ previous
@@ -127,6 +144,11 @@ class Waveform:
     @property
     def channels(self) -> int:
         return len(self._edges)
+
+    @property
+    def nbytes(self) -> int:
+        """変化点の表の大きさ（記録の読み手が覚えておく量の上限に使う）。"""
+        return sum(len(e) * e.itemsize for e in self._edges)
 
     def level_at(self, ch: int, s: int) -> int:
         """チャンネル ch のサンプル s の値（s 自身の変化を含む）。"""
@@ -144,7 +166,7 @@ class Waveform:
 
     def view(self, start: int, end: int, width: int) -> list[str]:
         """サンプル [start, end) を width 画素に縮めた、チャンネルごとの文字列。区間は捕捉の中に切り詰める。"""
-        start, end = max(0, int(start)), min(self.tr.length, int(end))
+        start, end = max(0, int(start)), min(self.length, int(end))
         if end <= start or width < 1:
             raise ValueError(f"表示の区間が空（start={start}, end={end}, width={width}）")
         span = end - start
@@ -247,6 +269,17 @@ class Front:
         dev.write(g.LA_FILTER, list(self.words))
 
 
+def external_pattern(external_only: bool, mask: int, value: int, rise: int, fall: int,
+                     pulse) -> tuple[int, int, int, int]:
+    """external_only なら、パターンを決して成り立たない形（ch0 が 1 かつ ch0 が立ち下がった）にする: ロジアナの判定は
+    「パターン または 外からのトリガ」で、パターンが空なら真（すぐ捕捉）になるため。パターンと一緒には指定できない。"""
+    if not external_only:
+        return mask, value, rise, fall
+    if mask or value or rise or fall or pulse:
+        raise ValueError("external_only はパターン（mask・value・rise・fall・pulse）と一緒に指定できない")
+    return 1, 1, 0, 1
+
+
 class LogicAnalyzer:
     """ロジアナ（DEPTH サンプルの窓、プリトリガ指定）。内蔵バッファが無いボード（ケイパビリティの LA_DEPTH = 0、
     外部メモリあり）では、深いバッファを RAW で使って同じ結果（8192 サンプルの窓）を返す。"""
@@ -270,9 +303,11 @@ class LogicAnalyzer:
 
     def start(self, *, rate_hz: float | None = None, pretrigger: int = 0, mask: int = 0, value: int = 0,
               rise: int = 0, fall: int = 0, filter_channels: int = 0, filter_ns: float = 0.0,
-              pulse: "Pulse | dict | None" = None) -> float:
+              pulse: "Pulse | dict | None" = None, external_only: bool = False) -> float:
         """捕捉を始める。実際のサンプル周期（秒）を返す。filter_channels（外の信号の ch のビット）は filter_ns より短い変化を
-        捨てる（グリッチフィルタ）。pulse はパルス幅のトリガ（Pulse）。どちらもケイパビリティに無ければ RuntimeError。"""
+        捨てる（グリッチフィルタ）。pulse はパルス幅のトリガ（Pulse）。どちらもケイパビリティに無ければ RuntimeError。
+        external_only: クロストリガ（xtrig.route の to_la・FPGA の条件）でだけ捕捉する（パターンは使わない）。"""
+        mask, value, rise, fall = external_pattern(external_only, mask, value, rise, fall, pulse)
         if not 0 <= pretrigger < self.depth:
             raise ValueError(f"pretrigger は 0〜{self.depth - 1}")
         check_trigger_channels(self.caps, mask=mask, rise=rise, fall=fall)
@@ -316,8 +351,8 @@ class LogicAnalyzer:
         raw = self.dev.read(g.LA_MEM_BASE, self.depth)
         samples = raw[start:] + raw[:start]
         self.dev.write32(g.LA_CONTROL, 0)
-        return Capture(samples, (trigger - start) % self.depth, time_hi << 32 | time_lo, sample_period_s,
-                       self.channels)
+        return Capture(samples, (trigger - start) % self.depth,
+                       pin_time(time_hi << 32 | time_lo, self.caps.la_delay_internal), sample_period_s, self.channels)
 
     def capture(self, *, timeout_s: float = 5.0, **trigger) -> Capture:
         period = self.start(**trigger)
@@ -518,6 +553,12 @@ def split_segments(data: bytes) -> list[StreamSegment]:
     return out
 
 
+def pin_time(trigger_time: int, delay: float) -> int:
+    """FPGA がトリガのサンプルに付けた時刻を、ピンの変化の時刻に直す（delay = ケイパビリティ LA_DELAY の刻み数。
+    同期化・符号器までの段の分。半刻みは切り上げて引く = ±0.5 刻み）。"""
+    return trigger_time - math.floor(delay + 0.5)
+
+
 class DeepAnalyzer:
     """深いバッファ（外部メモリ）のロジアナ。前段の設定（rate・トリガ）は LogicAnalyzer と同じ。
 
@@ -537,9 +578,10 @@ class DeepAnalyzer:
 
     def start(self, *, rate_hz: float | None = None, mask: int = 0, value: int = 0, rise: int = 0, fall: int = 0,
               rle: bool = False, post_beats: int | None = None, pretrigger: int = 0, filter_channels: int = 0,
-              filter_ns: float = 0.0, pulse: "Pulse | dict | None" = None) -> float:
+              filter_ns: float = 0.0, pulse: "Pulse | dict | None" = None, external_only: bool = False) -> float:
         """捕捉を始める（トリガ後 post_beats 拍。既定は容量の 1/2。開始から pretrigger サンプルまではトリガを受け付けない）。
-        filter_channels・filter_ns・pulse は LogicAnalyzer.start と同じ。実際のサンプル周期（秒）を返す。"""
+        filter_channels・filter_ns・pulse・external_only は LogicAnalyzer.start と同じ。実際のサンプル周期（秒）を返す。"""
+        mask, value, rise, fall = external_pattern(external_only, mask, value, rise, fall, pulse)
         post = self.beats // 2 if post_beats is None else post_beats
         if not 0 <= post < self.beats:
             raise ValueError(f"post_beats は 0〜{self.beats - 1}")
@@ -583,11 +625,28 @@ class DeepAnalyzer:
         elif events_from is not None:
             raise RuntimeError("この構成はストリームにイベントを流せない（ケイパビリティ la_stream_events が無い）")
         self._configure(rate_hz, filter_channels=filter_channels, filter_ns=filter_ns)
+        self._discard_stream()
         if events is not None:
             self.dev.write32(g.LA_DEEP_POST_BEATS, events[0] % events[1])   # このストリームでは最初のイベントの位置
         self.dev.write32(g.LA_DEEP_CONTROL, 1 | int(rle) << g.LA_DEEP_CONTROL_RLE[0]
                          | 1 << g.LA_DEEP_CONTROL_STREAM[0])
         return LaStream(self.dev, rle, self._period, self.channels, events=events)
+
+    def _discard_stream(self, timeout_s: float = 5.0) -> None:
+        """止めた後（_configure の後）に、前の流れの残りを読み捨てる。止めると機器は未読を出し切るが、受け取り手が
+        いなければ（例外で抜けた・デーモンが落ちた）残りが受け取り口（USB の EP・リンクの ch 4 の受け取り済み）に残り、
+        次の流れの先頭として読まれる（見出しの無い所から読み始めて StreamFormatError）。出し切り（reading = 0）、
+        50 ms 何も届かなくなるまで読む。"""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            reading = self.status() >> g.LA_DEEP_STATUS_READING[0] & 1
+            try:
+                self.dev.read_stream_some(LaStream.READ_MAX, timeout_ms=50)
+            except TimeoutError:
+                if not reading:
+                    return
+            if time.monotonic() > deadline:
+                raise RuntimeError("前のストリームの残りが出し切れない（機器の status.reading が 0 にならない）")
 
     def stream_to_vcd(self, path: str | Path, duration_s: float, *, rate_hz: float | None = None, rle: bool = False,
                       names: dict[int, str] | None = None) -> "StreamStats":
@@ -604,9 +663,12 @@ class DeepAnalyzer:
 
     def wait(self, timeout_s: float = 10.0) -> None:
         deadline = time.monotonic() + timeout_s
-        while not self.status() >> g.LA_DEEP_STATUS_DONE[0] & 1:
+        while not (status := self.status()) >> g.LA_DEEP_STATUS_DONE[0] & 1:
             if time.monotonic() > deadline:
                 self.dev.write32(g.LA_DEEP_CONTROL, 0)
+                if status >> g.LA_DEEP_STATUS_TRIGGERED[0] & 1:
+                    raise TimeoutError("トリガは成立したが、トリガ後の拍がまだ埋まらない（RLE は信号の変化が少ないと"
+                                       "遅い: after_beats を減らす・rle=False・timeout_s を延ばす）")
                 raise TimeoutError("トリガが成立しない")
             time.sleep(0.001)
 
@@ -637,7 +699,8 @@ class DeepAnalyzer:
         self.dev.write(g.LA_DEEP_READ_FIRST, [first, count])
         self.dev.write32(g.LA_DEEP_COMMAND, 1 << g.LA_DEEP_COMMAND_READ[0])
         data = self.dev.read_stream(count * BEAT_BYTES, timeout_ms=5000)
-        return data, trigger_sample(data, self._rle, before, slot), time_hi << 32 | time_lo
+        return data, trigger_sample(data, self._rle, before, slot), pin_time(time_hi << 32 | time_lo,
+                                                                             self.caps.la_delay_deep)
 
     def capture(self, *, timeout_s: float = 10.0, before_beats: int | None = None, after_beats: int | None = None,
                 **trigger) -> Capture:
@@ -748,13 +811,17 @@ class LaStream:
                     self.dev.write32(g.LA_DEEP_CONTROL, 0)
                     running = False
                 available = self._available()               # status の後に読む（出し切った後なら確定値）
+                # 足りなければ前の読みから READ_INTERVAL_S まで待つ（1 ms ごとに CSR を 2 回読み直すと、UDP のリンクでは
+                # リンクと機器のロックをほぼ使い続け、ほかの道具が毎回 1 秒待った。2026-10-21 実機）。出し切りの間は短く
+                wait = (self.POLL_S if not running else
+                        max(self.POLL_S, self.READ_INTERVAL_S - (time.monotonic() - last_read)))
                 if not available:
                     if drained:
                         return
-                    time.sleep(self.POLL_S)
+                    time.sleep(wait)
                     continue
                 if running and available < self.READ_MIN and time.monotonic() - last_read < self.READ_INTERVAL_S:
-                    time.sleep(self.POLL_S)
+                    time.sleep(wait)
                     continue
                 chunk = self._take(self.dev.read_stream_some(min(available, self.READ_MAX), timeout_ms))
                 last_read = time.monotonic()

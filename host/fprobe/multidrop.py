@@ -7,7 +7,8 @@ RP2040 は 1 本の SWD の線に DP が 3 つ並ぶ（core0・core1・救済の
 - もう一方のコアを覗く・止める・再開する（CoreProbe）: pyOCD が接続中の接続口の上で、線のリセット → TARGETSEL で
   別の DP を選び、その AHB-AP で DHCSR 等を読み書きし、最後に元の DP を選び直す（DPIDR を読む）。
   DP のレジスタ（SELECT・CTRL/STAT）は DP ごとに保たれるので、pyOCD が覚えている元の DP の SELECT は食い違わない。
-  救済の DP（RP2040 は 0xF1002927）は選ばない（選ぶとチップがリセットされる）。
+  救済の DP（RP2040 は 0xF1002927）は rescue だけが選ぶ（CTRL/STAT の CDBGPWRUPREQ でチップ全体がリセットされ、
+  ブート ROM で止まる。RP2040 データシート 2.3.4.2）。
 
 機器固有の値は表に置き、手順は DPv2 の複数ドロップと ARMv6-M / v7-M の DHCSR の汎用の手順だけを使う。
 """
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 
 from .raw_dap import RawDap
 
-__all__ = ["CoreProbe", "DropCore", "MultidropPart", "PARTS", "core_state", "part_of", "resolve_target"]
+__all__ = ["CoreProbe", "DropCore", "MultidropPart", "PARTS", "RESCUE", "core_state", "part_of", "resolve_target"]
 
 DHCSR, DCRSR, DCRDR = 0xE000EDF0, 0xE000EDF4, 0xE000EDF8
 DBGKEY = 0xA05F << 16
@@ -25,6 +26,8 @@ C_DEBUGEN, C_HALT, C_MASKINTS = 1 << 0, 1 << 1, 1 << 3
 S_REGRDY, S_HALT, S_SLEEP, S_LOCKUP, S_RESET_ST = 1 << 16, 1 << 17, 1 << 18, 1 << 19, 1 << 25
 REG_PC = 15                                             # DCRSR の REGSEL（DebugReturnAddress = PC）
 AHB_AP = 0                                              # 各コアの DP の AP 0（RP2040）
+RESCUE = 0xF1002927                                     # RP2040 の救済の DP の TARGETSEL
+CDBGPWRUPREQ = 1 << 28
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class MultidropPart:
     name: str
     cores: tuple[DropCore, ...]
     default_core: int = 0
+    rescue: int | None = None                           # 救済の DP の TARGETSEL（チップ全体のリセット）。無ければ None
 
     def core(self, index: int) -> DropCore:
         for core in self.cores:
@@ -48,7 +52,8 @@ class MultidropPart:
 
 
 PARTS = (
-    MultidropPart("rp2040", (DropCore(0, 0x01002927, "rp2040_core0"), DropCore(1, 0x11002927, "rp2040_core1"))),
+    MultidropPart("rp2040", (DropCore(0, 0x01002927, "rp2040_core0"), DropCore(1, 0x11002927, "rp2040_core1")),
+                  rescue=RESCUE),
 )
 
 
@@ -120,6 +125,14 @@ class CoreProbe:
             return fn(self)
         finally:
             self.dap.select_drop(self.part.core(self.home).targetsel)
+
+    def rescue(self) -> None:
+        """救済の DP を選び、CTRL/STAT の CDBGPWRUPREQ でチップ全体をリセットする（コアはブート ROM で止まる）。
+        元の DP は選び直さない（リセットで消える）。呼んだ側が pyOCD の接続を張り直す。"""
+        if self.part.rescue is None:
+            raise ValueError(f"{self.part.name} には救済の DP が無い")
+        self.dap.select_drop(self.part.rescue)
+        self.dap.write_dp("CTRL/STAT", CDBGPWRUPREQ)
 
     # --- 選んだ DP の上で（visit の fn の中） -------------------------------------------------------
 

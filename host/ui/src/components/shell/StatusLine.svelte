@@ -3,9 +3,10 @@
   // 一時停止（fprobe 独自: 人と AI が同じプローブを使う調停）
   import { shared } from "../../lib/context";
   import { frequency } from "../../lib/format";
-  import { linkOf } from "../../lib/target";
+  import { haltReasonKey, linkOf } from "../../lib/target";
   import { i18n, type Key } from "../../lib/i18n";
   import { measuredVolts } from "../../lib/power";
+  import { isFatal } from "../../lib/safety";
 
   const { app, ui } = shared();
 
@@ -18,6 +19,7 @@
   // 線（SWD / JTAG）・速度・ターゲット名: ターゲットの状態から（デーモンがつないでいる先を毎回出す。操作の記録は
   // 上限で古い方が落ち、ほかの利用者の接続も混じるので頼らない）
   const link = $derived(linkOf($app.target));
+  const haltKey = $derived(haltReasonKey($app.target));
   const working = $derived($app.clients.some((c) => c.role === "ai"));
 </script>
 
@@ -29,8 +31,11 @@
     <span class="item" title={volts === null ? $i18n("power.notLiveTip") : ""}>{$i18n("status.voltage")}
       {volts === null ? $i18n("power.notLive") : `${volts.toFixed(2)} V`}</span>
   {/if}
-  <span class="item state">{$i18n(stateKey)}{targetState === "HALTED" && $app.target?.function ? ` · ${$app.target.function}()` : ""}
-    {#if $app.target?.fatal}<span class="fatal">· {$i18n("status.target.fatal")}</span>{/if}</span>
+  <span class="item state">{$i18n(stateKey)}{haltKey ? ` · ${$i18n(haltKey)}` : ""}{targetState === "HALTED" && $app.target?.function ? ` · ${$app.target.function}()` : ""}
+    {#if $app.target?.fatal}
+      {#if isFatal($app.target.fatal)}<span class="fatal">· {$i18n("status.target.fatal")}</span>
+      {:else}<span class="tick">· {$i18n("status.target.tickStopped")}</span>{/if}
+    {/if}</span>
   {#if link?.speed}<span class="item">{link.wire} {frequency(link.speed)}</span>{/if}
   {#if link?.cpu}<span class="item">{link.cpu}</span>{/if}
   <span class="spacer"></span>
@@ -52,6 +57,7 @@
 
 <style>
   .fatal { color: var(--bad); font-weight: 600; }
+  .tick { color: var(--warn); }
   .status { display: flex; align-items: center; gap: 2px; height: 24px; padding: 0 6px; font-size: 12px;
             background: var(--accent); color: #fff; }
   .status.running { background: color-mix(in srgb, var(--ok) 80%, #000); }

@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("pyocd")
 from tests.hil.program import program  # noqa: E402
 from fprobe import generated as g  # noqa: E402
-from fprobe.events import KIND_INJECT, EventLog, resolve  # noqa: E402
+from fprobe.events import INJECT_KINDS, EventLog, resolve  # noqa: E402
 from fprobe.la import DeepAnalyzer  # noqa: E402
 from fprobe.session import Session  # noqa: E402
 from fprobe.xtrig import DHCSR, CrossTrigger, Source  # noqa: E402
@@ -53,8 +53,9 @@ def test_host_accesses_and_injection_are_recorded(programmed):
         accesses = resolve(events)
         assert any(a.kind == "ap_write" and a.address == SRAM and a.value == 0x5A5AC3C3 for a in accesses)
         assert any(a.kind == "ap_read" and a.address == SRAM and a.value == 0x5A5AC3C3 for a in accesses)
-        injected = [e for e in events if e.kind == KIND_INJECT]
+        injected = [e for e in events if e.kind in INJECT_KINDS]
         assert len(injected) == 1 and injected[0].address == DHCSR and injected[0].ok
+        print("割り込み書き込みの転送数", injected[0].transfers)          # R20: 種類 11 の回路なら数、旧い種類 2 は None
         assert [e.time for e in events] == sorted(e.time for e in events)
         assert not la.status() >> g.LA_DEEP_STATUS_OVERRUN[0] & 1                # ロジアナも取りこぼしていない
         s.device.write32(g.LA_DEEP_CONTROL, 0)

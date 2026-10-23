@@ -50,19 +50,12 @@ def test_histogram_of_equal_values_is_one_bin():
     assert bins == [{"lo": 7, "hi": 7, "count": 3}]
 
 
-def test_outliers_iqr_and_zscore():
-    values = [100] * 20 + [101] * 20 + [99] * 20 + [500]
-    d = Distribution(values)
-    out = d.outliers("iqr")
-    assert [i for i, _ in out] == [60]
-    assert out[0][1] > 1                                             # 柵からの距離（四分位範囲の倍数）
-    many = [100 + (i % 7) for i in range(200)] + [1000]
-    assert [i for i, _ in Distribution(many).outliers("zscore")] == [200]
-    with pytest.raises(ValueError):
-        d.outliers("nope")
+def test_no_outlier_rule_of_thumb():
+    # 外れ値の経験則（Tukey の 1.5 IQR・3σ）は持たない（CLAUDE.md）。長い順は呼び手が値を並べて見る
+    assert not hasattr(Distribution([1, 2, 3]), "outliers")
 
 
 def test_empty_distribution():
     d = Distribution([])
-    assert d.count == 0 and d.histogram(5) == [] and d.outliers() == []
+    assert d.count == 0 and d.histogram(5) == []
     assert d.as_dict() == {"count": 0}

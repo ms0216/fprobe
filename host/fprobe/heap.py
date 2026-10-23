@@ -1,5 +1,5 @@
 """ヒープの解析（U27）: アロケータの管理の形を辿る走査（使用量・断片化・壊れの検出）と、malloc / free の記録からの
-リークの候補。SystemView のヒープ監視・Tracealyzer の Heap Usage・CSIDE のヒープのあふれ検出の相当。
+呼び出し元ごとの生きている確保（リークかは判定しない）。SystemView のヒープ監視・Tracealyzer の Heap Usage・CSIDE のヒープのあふれ検出の相当。
 
 走査（`scan`）: ターゲットのメモリと ELF のシンボル（番地・大きさ。DWARF は要らない: newlib は -g 無しが普通）から。
 - FreeRTOS heap_4 / heap_5（portable/MemMang）: ブロック = {pxNextFreeBlock, xBlockSize}（使用中は最上位ビット、
@@ -13,12 +13,12 @@
 - newlib（mallocr.c、dlmalloc 2.6）: かたまり = {prev_size, size（bit 0 = 前が使用中）, fd, bk}。
   __malloc_sbrk_base から top（__malloc_av_[2]）まで。使用中かは次のかたまりの PREV_INUSE。空きは双方向の箱。
 
-壊れの検出: 大きさが不正・領域の外（直前の使用中のブロックからのあふれの疑い = suspect）、空きのリストの輪・
+壊れの検出: 大きさが不正・領域の外（previous_used = 直前の使用中のブロック。壊した者は推定しない）、空きのリストの輪・
 順序・外、空きなのにリストに無い・リストにあるのに使用中、繋がれていない隣の空き、使用中の印の不整合、
 dlmalloc の fd / bk・足、カウンタ（残量・回数）との不一致。
 
 記録（`AllocationTracker`）: alloc / free の出来事（どこから呼ばれたか付き）から、生きている確保・最大・二重の解放・
-失敗・リークの候補（呼び出し元ごとに、古く・増え続ける確保）。出来事の取り方は probe_heap（ブレークポイント）。
+失敗・呼び出し元ごとの生きている確保（リークかは判定しない）。出来事の取り方は probe_heap（ブレークポイント）。
 """
 
 from __future__ import annotations
@@ -268,14 +268,14 @@ class _FreeRTOS:
                 return
             block = Block(a, size, used, a + BLOCK_HEADER if used else None)
             if used and mem.u32(a):
-                out.issue("bad_link", a, "使用中のブロックの次のポインタが NULL でない（頭が上書きされた疑い）",
-                          suspect=last_used.pointer if last_used else None)
+                out.issue("bad_link", a, "使用中のブロックの次のポインタが NULL でない（heap_4 の使用中のブロックは NULL）",
+                          previous_used=last_used.pointer if last_used else None)
             out.blocks.append(block)
             last_used = block if used else last_used
             a += size
         if mem.u32(stop + 4) & ~HEAP_ALLOCATED_BIT:
-            out.issue("bad_end", stop, "領域の終わりの印の大きさが 0 でない（上書きされた疑い）",
-                      suspect=last_used.pointer if last_used else None)
+            out.issue("bad_end", stop, "領域の終わりの印の大きさが 0 でない",
+                      previous_used=last_used.pointer if last_used else None)
 
     def _cross_check(self, out: HeapScan, listed: list[tuple[int, int]]) -> None:
         listed_set = {a for a, s in listed if s}
@@ -306,8 +306,8 @@ def _bad_size(out: HeapScan, address: int, raw: int, last_used: Block | None) ->
     out.complete = False
     detail = f"ブロックの大きさ 0x{raw:08X} が不正（ここから先は辿れない）"
     if last_used is not None:
-        detail += f"。直前の使用中のブロック 0x{last_used.pointer:08X} からのあふれの疑い"
-    out.issue("bad_size", address, detail, suspect=last_used.pointer if last_used else None)
+        detail += f"。直前の使用中のブロックは 0x{last_used.pointer:08X}"
+    out.issue("bad_size", address, detail, previous_used=last_used.pointer if last_used else None)
 
 
 # --- newlib-nano -------------------------------------------------------------------------------------
@@ -370,7 +370,7 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
             pad = pointer - (a + NANO_CHUNK_OFFSET)
             if _signed(mem.u32(a + pad)) != -pad:
                 out.issue("bad_padding", a, "揃えの詰め物の印（ptr − 4 の負の位置）が壊れている（free が誤る）",
-                          suspect=last_used.pointer if last_used else None)
+                          previous_used=last_used.pointer if last_used else None)
         block = Block(a, size, used, pointer)
         out.blocks.append(block)
         last_used = block if used else last_used
@@ -430,10 +430,10 @@ def _scan_dlmalloc(mem: Memory, sym: HeapSymbols) -> HeapScan:
                 links_ok = False
             if not links_ok:
                 out.issue("bad_links", a, "空きのかたまりの fd / bk が壊れている（双方向のリストが合わない）",
-                          suspect=last_used.pointer if last_used else None)
+                          previous_used=last_used.pointer if last_used else None)
             if mem.u32(a + size) != size:
                 out.issue("bad_footer", a, "空きのかたまりの足（次の prev_size）が大きさと合わない",
-                          suspect=last_used.pointer if last_used else None)
+                          previous_used=last_used.pointer if last_used else None)
         out.blocks.append(block)
         last_used = block if used else last_used
         a += size
@@ -457,7 +457,7 @@ class _Live:
 
 
 class AllocationTracker:
-    """alloc / free の出来事（時刻は秒）から、生きている確保・最大・誤り・リークの候補を出す。"""
+    """alloc / free の出来事（時刻は秒）から、生きている確保・最大・誤り・呼び出し元ごとの生きている確保を出す。"""
 
     SERIES_POINTS = 512
     MAX_ISSUES = 200
@@ -496,7 +496,7 @@ class AllocationTracker:
         old = self.live.pop(pointer, None)
         if old is not None:
             self._issue("reused_live_pointer", t, pointer, caller,
-                        f"解放されていない番地がまた返った（{old.caller} の確保。free を見落としたかヒープが壊れた）")
+                        f"解放されていない番地がまた返った（{old.caller} の確保。その間の free は記録に無い）")
             self.bytes -= old.size
             self._count(old.caller, t, -1)
         self.freed.discard(pointer)
@@ -524,8 +524,9 @@ class AllocationTracker:
         self.series.append((t, self.bytes))
 
     def report(self, now: float, min_age_s: float = 0.0, top: int = 20) -> dict:
-        """要約・リークの候補（呼び出し元ごと。min_age_s より古い生きている確保。growing = 記録の 4 つの時点で
-        生きている数が減らずに増えた。時点は最初と最後の出来事の間を 4 つに分ける）・使用量の推移。"""
+        """要約・呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。バイトの多い順。live_counts =
+        最初と最後の出来事の間を 4 つに分けた 5 つの時点での、その呼び出し元の生きている数。リークかは判定しない）・
+        使用量の推移。"""
         groups: dict[str, dict] = {}
         for pointer, e in self.live.items():
             if now - e.t < min_age_s:
@@ -538,24 +539,24 @@ class AllocationTracker:
             if len(g["pointers"]) < 8:
                 g["pointers"].append(pointer)
         for g in groups.values():
-            g["growing"] = self._growing(g["caller"])
-        leaks = sorted(groups.values(), key=lambda g: (not g["growing"], -g["bytes"]))[:top]
+            g["live_counts"] = self._live_counts(g["caller"])
+        callers = sorted(groups.values(), key=lambda g: (-g["bytes"], g["caller"]))[:top]
         return {"allocations": self.allocations, "frees": self.frees, "untracked_frees": self.untracked_frees,
                 "live": {"count": len(self.live), "bytes": self.bytes}, "peak_bytes": self.peak,
-                "issues": list(self.issues), "leak_candidates": leaks, "series": self._downsampled()}
+                "issues": list(self.issues), "live_by_caller": callers, "series": self._downsampled()}
 
-    def _growing(self, caller: str) -> bool:
+    def _live_counts(self, caller: str) -> list[tuple[float, int]]:
         history = self.history.get(caller, [])
-        if self.first is None or not history or self.last == self.first:
-            return False
-        marks = [self.first + (self.last - self.first) * k / 4 for k in (1, 2, 3, 4)]
-        values, i, n = [], 0, 0
+        if self.first is None:
+            return []
+        marks = [self.first + (self.last - self.first) * k / 4 for k in range(5)]
+        out, i, n = [], 0, 0
         for m in marks:
             while i < len(history) and history[i][0] <= m:
                 n = history[i][1]
                 i += 1
-            values.append(n)
-        return all(b >= a for a, b in zip(values, values[1:])) and values[-1] > values[0]
+            out.append((m, n))
+        return out
 
     def _downsampled(self) -> list[tuple[float, int]]:
         s = self.series

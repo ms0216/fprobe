@@ -15,7 +15,7 @@ from .model import StackInfo
 __all__ = ["CHUNK", "GUARD", "check_stack", "untouched_bytes"]
 
 CHUNK = 256                       # 1 回に読むバイト数
-GUARD = 16                        # 底のこのバイト数が塗りのままなら「あふれていない」（FreeRTOS の方法 2 と同じ幅）
+GUARD = 16                        # 底のこのバイト数が塗りのままかを見る（FreeRTOS の方法 2 と同じ幅）
 
 
 def _pattern(fill: int | bytes) -> bytes:
@@ -39,7 +39,8 @@ def untouched_bytes(read: Callable[[int, int], bytes], base: int, limit: int, fi
 
 def check_stack(read: Callable[[int, int], bytes], base: int, end: int | None, pointer: int | None,
                 fill: int | bytes) -> StackInfo:
-    """スタックの範囲と SP から StackInfo（塗りの残り・あふれの印）を作る。読めなければ fill = unknown。"""
+    """スタックの範囲と SP から StackInfo（塗りの残り・SP が範囲の外か）を作る。読めなければ fill = unknown。
+    底が塗りでないときは、底の少し上に塗りが残っているか（fill_above）を事実として返す（あふれたとは推定しない）。"""
     pattern = _pattern(fill)
     info = StackInfo(base, end, pointer)
     if pointer is not None and pointer < base:
@@ -51,8 +52,8 @@ def check_stack(read: Callable[[int, int], bytes], base: int, end: int | None, p
     if bottom != (pattern * GUARD)[:GUARD]:
         info.fill = "none"                          # 塗らない設定か、底まで使った（区別できない）
         needle = (pattern * 4)[:max(4, len(pattern))]
-        if pointer is not None and end is not None and needle in _sample(read, base, pointer):
-            info.overflow = True                    # 底より上に塗りが残っている = 塗る設定で底が壊れた
+        if pointer is not None and end is not None:
+            info.fill_above = needle in _sample(read, base, pointer)
         return info
     info.fill = "intact"
     limit = (pointer if pointer is not None else end if end is not None else base + CHUNK) - base

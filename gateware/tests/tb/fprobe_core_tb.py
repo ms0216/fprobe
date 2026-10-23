@@ -15,11 +15,15 @@ from tests.test_caps import TEST_CAPS
 
 async def setup(dut):
     dut.aux_rx.value = 1
+    dut.sync_in.value = 0
     dut.la_pins.value = 0
     dut.la_inputs.value = 0
     dut.uart_in_valid.value = 0
     dut.uart_in_data.value = 0
     dut.stream_out_ready.value = 1
+    dut.dap_in_valid.value = 0
+    dut.dap_out_ready.value = 1
+    dut.target_swdio.value = "Z"
     port = ControlPort(dut, request="ctrl_in", response="ctrl_out", rng=random.Random(3))
     await start_clock_and_reset(dut)
     return port
@@ -58,7 +62,8 @@ async def removed_features_answer_bus_errors(dut):
     port = await setup(dut)
     caps = await read_capabilities(port)
     for present, address in ((caps.sampler, g.SAMPLER_PERIOD), (caps.xtrig, g.XTRIG_ROUTE),
-                             (caps.trig_seq, g.TRIGSEQ_CONTROL), (caps.aux, g.AUX_TARGET)):
+                             (caps.trig_seq, g.TRIGSEQ_CONTROL), (caps.aux, g.AUX_TARGET),
+                             (caps.sync, g.SYNC_CONTROL), (caps.sampler_match, g.SAMPLER_MATCH_CONTROL)):
         status = (await port.read(address, 1))[0]
         assert status == (g.STATUS_OK if present else g.STATUS_BUS_ERROR), hex(address)
 
@@ -366,3 +371,136 @@ async def events_are_recorded_in_the_internal_ring_without_external_memory(dut):
     assert [e.kind for e in events] == [4, 4, 4]
     assert [e.data & 0xFF for e in events] == [0x41, 0x42, 0x43]
     assert events[0].time < events[1].time < events[2].time
+
+
+@cocotb.test()
+async def a_sync_frame_on_sync_in_becomes_a_pair_event(dut):
+    """子: sync_in で受けた親の時刻が、受けた時刻（子のタイムベース）と組でイベント（種類 10）になる。"""
+    from fprobe.events import KIND_SYNC, decode_events
+    from tests.tb.sync_link_tb import BIT, frame_bits
+    port = await setup(dut)
+    caps = await read_capabilities(port)
+    if not caps.sync:
+        return
+    got = bytearray()
+
+    async def collect():
+        while True:
+            await RisingEdge(dut.clk)
+            if dut.stream_out_valid.value == 1 and dut.stream_out_ready.value == 1:
+                got.append(int(dut.stream_out_data.value))
+    cocotb.start_soon(collect())
+    await port.write(g.EVENTS_CONTROL, [1])
+    await port.write(g.SYNC_CONTROL, [1 << g.SYNC_CONTROL_ENABLE[0]])
+    parent = (0x8765_4321 << 32) | 0x0FED_CBA9
+    before = (await port.read(g.TIMEBASE_TIME_LO, 1))[2][0]
+    for bit in [1, *frame_bits(parent)]:                                 # パルス → 時刻 → CRC
+        dut.sync_in.value = bit
+        await ClockCycles(dut.clk, BIT)
+    dut.sync_in.value = 0
+    await ClockCycles(dut.clk, BIT * 3)
+    status = (await port.read(g.SYNC_STATUS, 1))[2][0]
+    assert status == 1                                                   # pairs = 1、crc_errors = 0
+    await port.write(g.LA_DEEP_READ_REGION, [1])
+    await port.write(g.LA_DEEP_READ_FIRST, [0, 1])
+    await port.write(g.LA_DEEP_COMMAND, [1 << g.LA_DEEP_COMMAND_READ[0]])
+    for _ in range(2000):
+        if len(got) >= 16:
+            break
+        await RisingEdge(dut.clk)
+    (e,) = decode_events(bytes(got))
+    assert (e.kind, e.address, e.data) == (KIND_SYNC, parent & 0xFFFF_FFFF, parent >> 32)
+    assert 0 < (e.time - before) & 0xFFFF_FFFF < 2000                                    # 受けた時刻（線が 1 になった直後）
+
+
+@cocotb.test()
+async def sampler_match_fires_the_cross_trigger(dut):
+    """R21: サンプラが DHCSR を読み続け、S_HALT が立った瞬間（前の標本は 0）に源 bit5 → ロジアナ。CSR sampler_match →
+    sampler_match → クロストリガの源の並び → ロジアナの外部トリガ、の配線を端から端まで通す。"""
+    from tests.models.swd_target import SwdTarget
+    from tests.tb.dap_processor_tb import Dap
+    port = await setup(dut)
+    caps = await read_capabilities(port)
+    if not (caps.sampler and caps.xtrig and caps.sampler_match):
+        return
+    dhcsr, s_halt = 0xE000EDF0, 1 << 17
+    model = SwdTarget(dut)
+    model.memory[dhcsr] = 0
+    cocotb.start_soon(model.run())
+    dap = Dap(dut, ControlPort(dut, request="dap_in", response="dap_out", rng=random.Random(5)))
+    await port.write(g.DEBUG_SAMPLE_DELAY, [0])                       # モデルは立ち上がりと同時に SWDIO を変える
+    await dap.connect()
+    await dap.mem_setup()
+    await port.write(g.SAMPLER_SLOT_INDEX, [0, dhcsr, 1 << g.SAMPLER_SLOT_CONFIG_ENABLE[0], 1])   # か所 0 = DHCSR 1 語
+    await port.write(g.SAMPLER_MATCH_ADDR, [dhcsr, s_halt, s_halt, 1])                         # 番地・mask・value・有効
+    await port.write(g.SAMPLER_PERIOD, [2000])
+    await port.write(g.SAMPLER_CONTROL, [1])
+    await port.write(g.XTRIG_ROUTE, [1 << 5])                                                  # サンプラの一致 → ロジアナ
+    await port.write(g.LA_RATE, [0, 4, 1 << 3, 1 << 3, 0, 0])                                  # ロジアナ自身は成り立たない
+    await port.write(g.LA_CONTROL, [1])
+    for _ in range(50):
+        await ClockCycles(dut.clk, 1000)
+        if (await port.read(g.SAMPLER_MATCH_SEEN, 1))[2][0] >= 2:
+            break
+    assert (await port.read(g.SAMPLER_MATCH_SEEN, 1))[2][0] >= 2
+    assert not await la_triggered(port)
+    model.memory[dhcsr] = s_halt | 0x3                                                        # 止まった
+    for _ in range(50):
+        await ClockCycles(dut.clk, 1000)
+        if await la_triggered(port):
+            break
+    assert await la_triggered(port)
+    _, _, (ctrl, seen, count, t_lo, t_hi, p_lo, p_hi) = await port.read(g.SAMPLER_MATCH_CONTROL, 7)
+    assert ctrl >> g.SAMPLER_MATCH_CONTROL_MATCHED[0] & 1 and count == 1 and seen >= 3
+    assert (p_hi << 32 | p_lo) < (t_hi << 32 | t_lo)
+    await port.write(g.LA_CONTROL, [0])
+    await port.write(g.XTRIG_ROUTE, [0])
+    await port.write(g.SAMPLER_CONTROL, [0])
+
+
+@cocotb.test()
+async def injected_halt_is_an_event_with_its_transfer_count(dut):
+    """R20: クロストリガの割り込み書き込み（ホストの指令 → 停止）が、イベント記録に種類 11 で、停止の書き込みまでの
+    転送数（ホストの CSW・TAR の控えがあるので 4）つきで入る。"""
+    from fprobe.events import KIND_INJECT_TRANSFERS, decode_events
+    from tests.models.swd_target import SwdTarget
+    from tests.tb.dap_processor_tb import AP_TAR_W, Dap
+    port = await setup(dut)
+    caps = await read_capabilities(port)
+    capacity = (await port.read(g.EVENTS_CAPACITY, 1))[2][0]
+    if not (caps.xtrig and caps.inject and capacity):
+        return
+    model = SwdTarget(dut)
+    cocotb.start_soon(model.run())
+    dap = Dap(dut, ControlPort(dut, request="dap_in", response="dap_out", rng=random.Random(7)))
+    await port.write(g.DEBUG_SAMPLE_DELAY, [0])                       # モデルは立ち上がりと同時に SWDIO を変える
+    await dap.connect()
+    await dap.mem_setup()
+    await dap.transfer((AP_TAR_W, 0x20000000))                        # CSW・TAR の控えができる
+    got = bytearray()
+
+    async def collect():
+        while True:
+            await RisingEdge(dut.clk)
+            if dut.stream_out_valid.value == 1 and dut.stream_out_ready.value == 1:
+                got.append(int(dut.stream_out_data.value))
+    cocotb.start_soon(collect())
+    await port.write(g.EVENTS_CONTROL, [1])
+    await port.write(g.XTRIG_ROUTE, [0b100 << 8])                     # ホストの指令 → 割り込み書き込み
+    await port.write(g.XTRIG_COMMAND, [1])
+    for _ in range(100):
+        await ClockCycles(dut.clk, 500)
+        if (await port.read(g.XTRIG_INJECT_STATUS, 1))[2][0] >> g.XTRIG_INJECT_STATUS_COUNT[0]:
+            break
+    assert model.memory[0xE000EDF0] == 0xA05F0003
+    written = (await port.read(g.EVENTS_WRITTEN, 1))[2][0]
+    await port.write(g.LA_DEEP_READ_REGION, [1])
+    await port.write(g.LA_DEEP_READ_FIRST, [0, written])
+    await port.write(g.LA_DEEP_COMMAND, [1 << g.LA_DEEP_COMMAND_READ[0]])
+    for _ in range(5000):
+        if len(got) >= 16 * written:
+            break
+        await RisingEdge(dut.clk)
+    injected = [e for e in decode_events(bytes(got)) if e.kind == KIND_INJECT_TRANSFERS]
+    assert [(e.address, e.data, e.transfers) for e in injected] == [(0xE000EDF0, 0xA05F0003, 4)]
+    await port.write(g.XTRIG_ROUTE, [0])

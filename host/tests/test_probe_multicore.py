@@ -10,7 +10,7 @@ from pyocd.core.target import Target
 
 from fprobe import generated as g
 from fprobe.mcp_server import Probe
-from fprobe.multidrop import (DBGKEY, DCRDR, DCRSR, DHCSR, C_HALT, S_HALT, S_REGRDY, S_SLEEP, core_state, part_of,
+from fprobe.multidrop import (DBGKEY, DCRDR, DCRSR, DHCSR, C_HALT, RESCUE, S_HALT, S_REGRDY, S_SLEEP, core_state, part_of,
                               resolve_target)
 
 CORE0, CORE1 = 0x01002927, 0x11002927
@@ -172,3 +172,31 @@ def test_core_select_reconnects_to_the_other_core_without_halting():
     p.target_connect("cortex_m")
     with pytest.raises(ValueError, match="複数ドロップ"):
         p.target_core_select(1)
+
+
+def test_rescue_resets_the_whole_chip_then_reconnects_and_boots(monkeypatch):
+    # RP2040 の救済の DP（TARGETSEL 0xF1002927）: CTRL/STAT の CDBGPWRUPREQ でチップ全体（USB 等の周辺も）をリセットし、
+    # ブート ROM で止まる。同じ設定で attach でつなぎ直し、普通のリセット（SYSRESETREQ）で Flash から起動させる
+    bus = rp2040(CortexM0(halted=False), CortexM0(halted=False))
+    rescue = FakeDapLink(FakeTarget(dpidr=0x0BC12477, targetid=RESCUE, multidrop=True, aps={}))
+    rescue.swd_active = True
+    bus.dps.append(rescue)
+    p, _ = connected(bus, state=Target.State.RUNNING)
+    p._last_connect = {"target": "rp2040", "frequency_hz": 1_000_000, "connect_mode": "halt", "jtag_chain": None,
+                       "script": None, "core": 0}
+    calls = []
+    monkeypatch.setattr(p, "target_connect", lambda **kw: calls.append(("connect", kw)))
+    monkeypatch.setattr(Probe, "dbg", property(lambda self: SimpleNamespace(
+        reset=lambda kind, halt: calls.append(("reset", kind, halt)))))
+    monkeypatch.setattr(p, "target_status", lambda: {"state": "RUNNING"})
+    monkeypatch.setattr(p, "_flash_bp_detach", lambda: calls.append(("flash_bp_detach", rescue.ctrl_stat)))
+    out = p.target_reset(kind="rescue")
+    assert calls[0] == ("flash_bp_detach", 0)                            # チップが生きている間に BKPT を戻す
+    calls[:] = [c for c in calls if c[0] != "flash_bp_detach"]
+    assert rescue.ctrl_stat & (1 << 28)                                  # 救済の DP に CDBGPWRUPREQ
+    assert f"targetsel 0x{RESCUE:08X}" in bus.log
+    assert calls == [("connect", {**p._last_connect, "connect_mode": "attach"}), ("reset", "system", False)]
+    assert out == {"state": "RUNNING", "kind": "rescue"}
+    p2, _ = connected(None, target="stm32f401xe", core=None)
+    with pytest.raises(ValueError, match="救済"):
+        p2.target_reset(kind="rescue")

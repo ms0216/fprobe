@@ -176,3 +176,50 @@ def test_segmented_recordings_summarize_rows_from_their_segments(tmp_path):
         assert sum(data["lane.0.row_counts"]) == 3000
     finally:
         view.close()
+
+
+def test_dap_accesses_to_debug_registers_are_named_and_halt_requests_stand_out():
+    # Cortex-M のデバッグのレジスタは名前で。DHCSR の書き込みは意味（halt / step / run）も（クロストリガの停止の瞬間が読める）
+    ack = {"ack": 1}
+    events = [Event(1, "dap", "ap_write", 0xE000EDF0, 0xA05F0003, ack), Event(2, "dap", "ap_write", 0xE000EDF0, 0xA05F0001, ack),
+              Event(3, "dap", "ap_write", 0xE000EDF0, 0xA05F000D, ack), Event(4, "dap", "ap_read", 0xE000EDF0, 0x00030003, ack),
+              Event(5, "dap", "ap_write", 0xE000ED0C, 0x05FA0004, ack), Event(6, "dap", "ap_read", 0x20000000, 7, ack)]
+    c = classify("dap", events)
+    assert [c.labels[i] for i in c.label] == [
+        "W DHCSR = 0xA05F0003 (halt)", "W DHCSR = 0xA05F0001 (run)", "W DHCSR = 0xA05F000D (step)",
+        "R DHCSR = 0x00030003", "W AIRCR = 0x05FA0004", "R 0x20000000 = 0x00000007"]
+    assert c.tone[:2] == [TONES["warn"], TONES["normal"]]
+
+
+def test_injected_writes_are_marked_with_their_transfer_count():
+    # R20: クロストリガの割り込み書き込み（kind "inject"）はホストの書き込みと区別し、転送数（旧い回路は null）を出す
+    events = [Event(1, "dap", "inject", 0xE000EDF0, 0xA05F0003, {"ack": 1, "transfers": 4}),
+              Event(2, "dap", "inject", 0xE000EDF0, 0xA05F0003, {"ack": 1, "transfers": None})]
+    c = classify("dap", events)
+    assert [c.labels[i] for i in c.label] == ["xtrig W DHCSR = 0xA05F0003 (halt) [4 transfers]",
+                                              "xtrig W DHCSR = 0xA05F0003 (halt)"]
+    assert c.tone == [TONES["warn"], TONES["warn"]]
+
+
+def test_a_failed_memory_read_has_no_value_on_the_timeline(tmp_path):
+    # 読めなかった語（ACK が 1 以外）の値は意味が無い: 時間軸では値なし（次の読みまで空白）。要約の最小・最大にも入れない
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6)
+    rec.add_many([("sample", "word", 10, 0x2000, 5), ("sample", "word", 20, 0x2000, 0xDEAD, {"ack": 2}),
+                  ("sample", "word", 30, 0x2000, 7, {"ack": 1})])
+    rec.close()
+    r = Recording.open(tmp_path / "r")
+    try:
+        c = classify("sample", r.events(0, 100, ["sample"]))
+        s = summarize("sample", r.query_events(0, 64, summary_sql("sample", 0, 64, 1)), 1)
+    finally:
+        r.close()
+    assert c.value[0] == 5 and math.isnan(c.value[1]) and c.value[2] == 7
+    assert (s.low[0], s.high[0]) == (5, 7)
+
+
+def test_the_timeline_does_not_invent_gaps_between_reads():
+    # 読みの空白を「欠け」と決める閾値は経験則なので、時間軸は作らない（最後に読んだ値を次の読みまで示す）。
+    # 空白を欠けとして扱うのは、解析で使う側が gap_s を明示したときだけ（fprobe.correlate）
+    reads = [Event(t, "sample", "word", 0x2000, t) for t in (0, 10, 20, 30, 200, 210)]
+    c = classify("sample", reads)
+    assert [r for r in c.value] == [0.0, 10.0, 20.0, 30.0, 200.0, 210.0]

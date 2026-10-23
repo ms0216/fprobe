@@ -8,8 +8,9 @@
   import { allowed } from "../../lib/guard";
   import { LANGS, getLang, setLang, i18n, type Lang } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
+  import { diagnose, mhzToHz, pinsText, type DiagnoseReport, type Pins } from "../../lib/diagnose";
 
-  const { app, dbg, ui } = shared();
+  const { app, conn, dbg, ui } = shared();
 
   let path = $state(load("elf", ""));
   let device = $state(load("connect.target", "stm32f401xe"));
@@ -19,13 +20,21 @@
   let busy = $state(false);
   let picker = $state<HTMLInputElement>();
   let dialog = $state<HTMLDialogElement>();
+  // 接続の診断（失敗の理由を手順ごとの事実で）。線を動かすので、人が押したときだけ
+  let failed = $state(false);
+  let badClock = $state(false);                      // 周波数の欄が正の数でない
+  let diagnosis = $state<{ report: DiagnoseReport | null; pins: Pins | null; error: string | null } | null>(null);
 
   const kind = $derived($ui.dialog);
   const online = $derived($app.link === "open");
 
   // Connect を開くたびに覚えたターゲット名を読む（Flash のパネルの「接続に使う」が置いていく）
   $effect(() => {
-    if (kind === "connect") untrack(() => (device = load("connect.target", device)));
+    if (kind === "connect") untrack(() => {
+      device = load("connect.target", device);
+      failed = false;                                  // 前に開いたときの失敗・診断は持ち越さない
+      diagnosis = null;
+    });
   });
 
   $effect(() => {
@@ -58,13 +67,45 @@
   }
 
   async function connect() {
-    if (!(await allowed(app))) return;
+    const hz = mhzToHz(mhz);
+    badClock = hz === null;
+    if (hz === null || !(await allowed(app))) return;
     save("connect.target", device);
     save("connect.mhz", mhz);
     busy = true;
-    const done = await app.act("target.connect", { target: device, frequency_hz: Math.round(Number(mhz) * 1e6) });
+    const done = await app.act("target.connect", { target: device, frequency_hz: hz });
     busy = false;
-    if (done !== undefined) ui.close();
+    failed = done === undefined;
+    if (!failed) close();
+  }
+
+  async function runDiagnosis() {
+    const hz = mhzToHz(mhz);
+    badClock = hz === null;
+    if (hz === null || !(await allowed(app))) return;
+    busy = true;
+    diagnosis = await diagnose(conn, hz);
+    busy = false;
+  }
+
+  /** 診断の提案の引数（target・frequency_hz・jtag_chain・connect_mode）のまま接続する */
+  async function connectSuggested(args: Record<string, unknown>) {
+    if (!(await allowed(app))) return;
+    busy = true;
+    const done = await app.act("target.connect", args as never);
+    busy = false;
+    failed = done === undefined;
+    if (!failed && typeof args.target === "string") {
+      device = args.target;                          // 次に開いたときの既定（提案で接続できたターゲット名）
+      save("connect.target", device);
+    }
+    if (!failed) close();
+  }
+
+  function close() {
+    failed = false;
+    diagnosis = null;
+    ui.close();
   }
 
   async function loadSvd() {
@@ -104,8 +145,35 @@
       <label for="clk">{$i18n("dialog.clock")}</label>
       <span><input id="clk" class="num" bind:value={mhz} inputmode="decimal" /> MHz</span>
       <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
-      <span></span><span class="row"><button class="primary" disabled={!online || !device || busy}>{$i18n("cmd.connect")}</button></span>
+      <span></span><span class="row"><button class="primary" disabled={!online || !device || busy}>{$i18n("cmd.connect")}</button>
+        <button type="button" disabled={!online || busy} title={$i18n("diagnose.tip")} onclick={() => void runDiagnosis()}>
+          {$i18n("diagnose.run")}</button></span>
     </form>
+    {#if badClock}<p class="bad small">{$i18n("dialog.badClock")}</p>{/if}
+    {#if failed && !diagnosis}<p class="muted small">{$i18n("diagnose.afterFail")}</p>{/if}
+    {#if diagnosis}
+      <div class="diagnosis" aria-live="polite">
+        {#if diagnosis.report}
+          <p class:bad={!diagnosis.report.ok}><strong>{diagnosis.report.verdict}</strong></p>
+          <table class="steps">
+            <tbody>
+              {#each diagnosis.report.steps as step, i (i)}
+                <tr class={step.status}><td class="st mono">{step.status}</td><td class="mono">{step.name}</td><td>{step.message}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+          {#if diagnosis.report.suggested_connect}
+            {@const args = diagnosis.report.suggested_connect}
+            <div class="row"><span class="mono small grow">{JSON.stringify(args)}</span>
+              <button class="primary" disabled={!online || busy} onclick={() => void connectSuggested(args)}>
+                {$i18n("diagnose.connectSuggested")}</button></div>
+          {/if}
+        {:else if diagnosis.error}
+          <p class="bad">{diagnosis.error}</p>
+        {/if}
+        {#if diagnosis.pins}<p class="mono small">{$i18n("diagnose.pins")}: {pinsText(diagnosis.pins)}</p>{/if}
+      </div>
+    {/if}
   {:else if kind === "loadSvd"}
     <h2>{$i18n("dialog.loadSvd")}</h2>
     <p class="muted">{$i18n("peripherals.noSvdHint")}</p>
@@ -162,4 +230,12 @@
   .small { font-size: 12px; }
   .recent { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
   .keys td { padding: 3px 10px 3px 0; }
+  .diagnosis { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .steps { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  .steps td { padding: 2px 8px 2px 0; vertical-align: top; }
+  .steps .st { width: 3.5em; }
+  .steps tr.fail .st, .bad { color: var(--bad); }
+  .steps tr.warn .st { color: var(--warn); }
+  .steps tr.ok .st { color: var(--ok); }
+  .steps tr.skip { color: var(--muted); }
 </style>

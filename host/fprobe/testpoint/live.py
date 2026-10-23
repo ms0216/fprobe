@@ -78,7 +78,7 @@ class LiveAnalysis:
     """Hit / Loss を流しながら解析する（スレッド安全: 受け口のスレッドと道具の呼び出しが同時に触ってよい）。
 
     recorder があれば、anchor で時刻の写しを決めた後から記録に書く（決める前に feed すると誤り）。
-    options は Analyzer へ（bucket_s・silence_s・open_s・long_sigma 等）。"""
+    options は Analyzer へ（bucket_s・silence_s・open_s・long_s 等）。"""
 
     def __init__(self, table: ProbeTable, hz: float, *, recorder: Recorder | None = None,
                  calls_limit: int = CALLS_LIMIT, **options):

@@ -24,7 +24,7 @@ from .symbols import Symbols
 
 __all__ = ["Disassembler", "Instruction", "Listing", "flow_of"]
 
-_SYNC_LIMIT = 64 * 1024          # 確かな点から PC まで、これより遠ければ推定で揃える
+_SYNC_LIMIT = 64 * 1024          # 確かな点から PC まで、これより遠ければ前を読まない（読む量の上限。PC から読む）
 _LITERAL_SIZES = {"ldrb": 1, "ldrsb": 1, "ldrh": 2, "ldrsh": 2, "ldrd": 8}
 
 
@@ -79,7 +79,7 @@ class Instruction:
 @dataclass(frozen=True)
 class Listing:
     instructions: tuple[Instruction, ...]
-    sync: str                            # "function" / "mapping" / "start" / "heuristic": どこから命令の境界を揃えたか
+    sync: str                            # "function" / "mapping" / "start": どこから命令の境界を揃えたか
     pc_index: int | None = None          # around の PC の命令の位置
 
     def as_dict(self) -> dict:
@@ -189,10 +189,7 @@ class Disassembler:
             start, sync = max(anchors)
             if start == pc or (pc - start <= _SYNC_LIMIT and self._decode_to(start, pc) is not None):
                 return start, sync
-        for k in range(2 * max(count, 1) + 8, 0, -1):                    # 遠い候補から: Thumb は数命令で同期する
-            if self._decode_to(pc - 2 * k, pc, strict=True) is not None:
-                return pc - 2 * k, "heuristic"
-        return pc, "start"
+        return pc, "start"                     # 確かな境界が無い: 前の命令の境界を推定しない
 
     def _decode_to(self, start: int, pc: int, strict: bool = False) -> list[Instruction] | None:
         """start から読んで pc にちょうど着地すれば、その命令の列。strict なら解読できないバイトがあれば失敗。"""

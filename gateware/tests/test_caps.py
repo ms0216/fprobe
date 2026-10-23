@@ -252,3 +252,39 @@ def test_package_declares_the_memory_address_bits_from_mem_bytes():
     from fprobe_gw.designs import DESIGNS
     assert "constant MEM_ADDR_BITS : natural := 23;" in render_package("p", DESIGNS["fprobe"].capabilities)   # 128 MB
     assert "constant MEM_ADDR_BITS : natural := 0;" in render_package("p", DESIGNS["fprobe_pynq"].capabilities)
+
+
+def test_fpga_obs_feature_round_trips_and_defaults_to_absent():
+    # 対象の FPGA の観測（大きい FPGA の構成だけ）。古い装置・小さい構成は持たない
+    import dataclasses
+
+    from fprobe.caps import parse
+    assert parse(caps.encode(TEST_CAPS)).fpga_obs is False
+    obs = dataclasses.replace(TEST_CAPS, fpga_obs=True)
+    assert parse(caps.encode(obs)).fpga_obs is True
+    assert "constant OBS_PORT : boolean := true;" in caps.render_package("p", obs)
+    assert "constant OBS_PORT : boolean := false;" in caps.render_package("p", TEST_CAPS)
+
+
+def test_sync_feature_round_trips_and_defaults_to_absent():
+    # ボードの間の時刻の同期（端子をつないだ構成だけ）。古い装置は持たない
+    import dataclasses
+
+    from fprobe.caps import parse
+    assert parse(caps.encode(TEST_CAPS)).sync is False
+    with_sync = dataclasses.replace(TEST_CAPS, sync=True)
+    assert parse(caps.encode(with_sync)).sync is True
+    assert "constant SYNC : boolean := true;" in caps.render_package("p", with_sync)
+    assert "constant SYNC : boolean := false;" in caps.render_package("p", TEST_CAPS)
+
+
+def test_la_delays_are_declared_from_the_pipeline():
+    # ロジアナの時刻（trigger_time）がピンの変化より遅い分（半刻みの単位。非同期のピンの平均 0.5 刻みを含む）
+    import dataclasses
+
+    from fprobe.caps import parse
+    with_filter = parse(caps.encode(TEST_CAPS))
+    assert with_filter.la_delay_internal == caps.LA_FILTER_DELAY + caps.LA_INTERNAL_DELAY + 0.5 == 6.5
+    assert with_filter.la_delay_deep == caps.LA_FILTER_DELAY + caps.LA_DEEP_DELAY + 0.5 == 7.5
+    plain = parse(caps.encode(dataclasses.replace(TEST_CAPS, la_filter=False)))
+    assert (plain.la_delay_internal, plain.la_delay_deep) == (3.5, 4.5)

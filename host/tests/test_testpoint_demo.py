@@ -44,8 +44,8 @@ def test_demo_runs_on_host_and_analyzes(tmp_path):
     log = parse_log(out)
     table = result.table
     report = analyze([Hit(k * 100, i, v) for k, (i, v) in enumerate(log)], table, hz=1e6)
-    # fib は引数で仕事が 8 倍以上変わるので「いつもより長い」が付く（関数ごとの基準の性質）。ほかの異常は無い
-    assert {(a.type, a.function) for a in report.anomalies} <= {("long_call", "fib")}
+    # 経験則の「いつもより長い」の印は付けない（long_s を渡したときだけ）。ほかの異常も無い
+    assert report.anomalies == []
     assert report.functions["step"].calls == 20
     fib = report.functions["fib"]
     assert fib.calls > 20 and max(c.depth for c in report.calls if c.function == "fib") >= 6   # 再帰の深さ

@@ -30,19 +30,27 @@ def test_a_healthy_stm32_is_identified_and_a_connect_is_suggested():
     assert out["aps"][0]["rom_table"]["children"][0]["name"] == "SCS (Cortex-M4)"
 
 
-def test_no_power_is_the_first_reason():
+def test_voltage_is_reported_as_measured_without_a_threshold_verdict():
+    # 「1.0 V 未満なら電源が入っていない」と判定しない（計測の配線が外れていても 0 V になる。2026-10-18 の実機）。
+    # 測った値と fprobe の入出力の電圧を事実として出し、結論には測った値を添える
     off = dict(GOOD_VOLTS, volts=0.02)
     d = run(FakeTarget(powered=False), volts=off, pins=0b0000_0001)
-    assert not d.ok and step(d, "voltage").status == "fail"
-    assert step(d, "pins").status == "warn" and "nRESET" in step(d, "pins").message
+    v = step(d, "voltage")
+    assert not d.ok and v.status == "ok" and "0.02 V" in v.message and "3.3 V" in v.message
+    assert "電源が入っていない" not in v.message
+    assert step(d, "pins").status == "warn"
+    assert step(d, "pins").message == "nRESET = Low / SWDIO = Low"         # 原因の候補（プルアップ・短絡等）は並べない
     assert step(d, "swd").status == "fail" and step(d, "jtag").status == "fail"
-    assert d.verdict().startswith("接続できない: ターゲットの電源が入っていない")
+    assert d.verdict().startswith("接続できない: ") and "Vtarget = 0.02 V" in d.verdict()
+    for volts in (1.2, 5.0):
+        assert step(run(FakeTarget(), volts=dict(GOOD_VOLTS, volts=volts)), "voltage").status == "ok"
 
 
 def test_a_slow_link_is_found_by_lowering_the_speed():
     d = run(FakeTarget(max_hz=500_000, aps={0: FakeMemAp(words=stm32f401_words())}), frequency_hz=4_000_000)
     assert d.ok and d.frequency_hz == 400_000 and step(d, "swd").status == "warn"
-    assert "信号品質" in step(d, "swd").message and d.connect["frequency_hz"] == 400_000
+    msg = step(d, "swd").message                                   # 事実（頼んだ速さで応答しなかった）だけ。原因は推定しない
+    assert "4,000,000 Hz では応答せず" in msg and "信号品質" not in msg and d.connect["frequency_hz"] == 400_000
 
 
 def test_rp2040_is_reached_through_targetsel():
@@ -52,7 +60,11 @@ def test_rp2040_is_reached_through_targetsel():
     target = FakeTarget(dpidr=0x0BC12477, targetid=0x01002927, multidrop=True,
                         aps={0: FakeMemAp(words=words, readable=((0xE0000000, 0xE0100000),))})
     d = run(target)
-    assert d.ok and "targetsel 0x01002927" in str(step(d, "swd").data["attempts"][-1]["method"])
+    attempts = step(d, "swd").data["attempts"]
+    assert d.ok and "targetsel 0x01002927" in str(attempts[-1]["method"])
+    # 複数ドロップの部品は TARGETSEL を先に試す: TARGETSEL の無い線では DP が全部同時に応答し、書き込みが救済の DP にも
+    # 届く（2026-10-22 の実機。チップがリセットされたまま止まった）。素の JTAG→SWD より前に TARGETSEL で選ぶ
+    assert attempts[0]["method"].startswith("targetsel")
     assert d.dp["targetid"]["designer"] == "Raspberry Pi"
     assert d.part.name == "RP2040" and d.connect["target"] == "rp2040" and d.core["core"] == "Cortex-M0+"
 
@@ -124,12 +136,12 @@ def test_without_voltage_or_pins_those_steps_are_skipped():
     assert step(d, "voltage").status == "skip" and step(d, "pins").status == "skip" and d.ok
 
 
-def test_a_responding_target_with_zero_volts_blames_the_measurement():
-    """ターゲットが SWD に応答するのに電圧が約 0 V: 電源ではなく計測の配線（分圧・補助マイコン）を疑う（実機で、
-    補助の Pico の計測の線がつながっていないときに「電源が入っていない」と誤って結論した。2026-10-18）。"""
+def test_a_responding_target_with_zero_volts_is_both_facts():
+    """ターゲットが SWD に応答し、電圧の計測は約 0 V（実機で補助の Pico の計測の線が外れていた。2026-10-18）。
+    どちらも事実として並べ、どちらが正しいかは推定しない。"""
     d = run(FakeTarget(), volts=dict(GOOD_VOLTS, volts=0.08))
     step = next(s for s in d.steps if s.name == "voltage")
-    assert step.status == "warn" and "計測" in step.message, step
+    assert step.status == "ok" and "0.08 V" in step.message, step
     assert d.ok, [s.as_dict() for s in d.steps if s.status == "fail"]
 
 
@@ -141,3 +153,41 @@ def test_a_sleeping_core_is_attached_without_reset():
     d = run(FakeTarget(aps={0: FakeMemAp(words=words)}))
     assert step(d, "core").status == "ok" and "眠っている" in step(d, "core").message
     assert "connect_mode" not in d.connect
+
+
+def test_verdict_does_not_say_connectable_when_a_step_failed():
+    # 実機（2026-10-22、RP2040 に TARGETSEL なし）: DP は応答したが AP が見つからず ok = false なのに、結論が
+    # 「接続できる」だった。結論は ok と食い違わない（失敗した段があれば「接続できない」から書く）
+    d = run(FakeTarget(aps={}))
+    assert not d.ok and step(d, "aps").status == "fail"
+    assert d.verdict().startswith("接続できない: AP が見つからない")
+
+
+def test_swd_failure_messages_are_the_acks_without_guessed_causes():
+    # 「配線・GND・信号品質・低消費電力」等の原因の候補を並べない。どの ACK だったかの事実だけ
+    d = run(FakeTarget(powered=False), volts=dict(GOOD_VOLTS, volts=0.02), pins=0b0000_0001)
+    msg = step(d, "swd").message
+    assert msg.startswith("SWD に応答が無い") and not any(w in msg for w in ("配線", "GND", "電源", "信号品質"))
+    over = run(FakeTarget(), volts=dict(GOOD_VOLTS, over_range=True))
+    assert step(over, "voltage").message == "ターゲットの電圧が測れる上限を超えている"
+
+
+def test_a_rescue_dp_that_answers_without_targetsel_is_never_powered_up():
+    # 実機（2026-10-22、Shrike の RP2040）: TARGETSEL なしの JTAG→SWD で救済の DP（TARGETID 0x01002927・TINSTANCE 0xF）が
+    # 応答し、診断がその CTRL/STAT に CDBGPWRUPREQ を書いたため、チップがリセットされたまま止まった。DPv2 なら
+    # TARGETID・DLPIDR で応答した DP を確かめ、複数ドロップの部品の救済の DP なら電源を要求しない
+    rescue = FakeTarget(dpidr=0x10212927, targetid=0x01002927, dlpidr=0xF0000001, aps={})
+    link = FakeDapLink(rescue)
+    d = diagnose(RawDap(link), voltage=lambda: dict(GOOD_VOLTS), pins=lambda: link.pin_access(0, 0))
+    assert not link.ctrl_stat & (1 << 28), "救済の DP に CDBGPWRUPREQ を書いた"
+    swd = step(d, "swd")
+    assert swd.status == "fail" and "救済の DP" in swd.message and "0xF1002927" in swd.message
+    assert not d.ok
+
+
+def test_a_dp_that_ignores_targetsel_is_not_taken_for_a_multidrop_core():
+    # 複数ドロップでない DP（STM32 の DPv1）は TARGETSEL を無視して応答する。TARGETID・DLPIDR が選んだ値と合わなければ
+    # 複数ドロップのコアとはみなさず、素の JTAG→SWD で続ける
+    d = run(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))
+    attempts = step(d, "swd").data["attempts"]
+    assert d.ok and attempts[-1]["method"] == "jtag_to_swd" and "targetsel" not in d.connect

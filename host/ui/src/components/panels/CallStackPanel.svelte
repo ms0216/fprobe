@@ -30,6 +30,7 @@
             <span class="mark">{i === $dbg.frame ? "▶" : ""}</span>
             <span class="where">{f.where}</span>
             {#if f.note === "exception"}<span class="note">{$i18n("callStack.exception")}</span>{/if}
+            {#if f.note === "lr_without_cfi"}<span class="note">{$i18n("callStack.lrWithoutCfi")}</span>{/if}
             <span class="muted">{hex32(f.pc)}</span>
           </button>
         </li>

@@ -768,3 +768,38 @@ def test_the_watcher_recovers_a_lost_link_and_reports_the_target_disconnected(tm
     finally:
         gui.close()
         stop()
+
+
+def test_reading_a_recording_does_not_wait_for_a_slow_device_operation(tmp_path):
+    # 記録を読むだけの要求（offline: 時間軸のタイル・記録の検索等）は機器の作業スレッドで実行しない: 重い機器の操作の
+    # 間も返り、重い記録の読み（大きな記録のタイル）の間も機器の操作・状態の読みが止まらない
+    backend = FakeBackend()
+    backend.halt_s = 2.0
+    gate = threading.Event()
+
+    def slow_overview(width=1000, streams=None):
+        gate.wait(5)
+        return {"span": None}
+    backend.recording_overview = slow_overview
+    backend.recording_status = lambda: {"recording": False, "name": None}
+    url, app, stop = _serve(backend, tmp_path)
+    try:
+        client = DaemonClient(url, "gui", "human")
+        other = DaemonClient(url, "gui2", "human")
+        halting = threading.Thread(target=lambda: client.call("target.halt"))
+        halting.start()
+        time.sleep(0.2)
+        t = time.monotonic()
+        assert other.call("recording.status") == {"recording": False, "name": None}       # offline: 機器を待たない
+        assert time.monotonic() - t < 1.0
+        halting.join()
+        reading = threading.Thread(target=lambda: client.call("recording.overview", width=10))
+        reading.start()
+        time.sleep(0.2)
+        t = time.monotonic()
+        assert other.call("target.status")["state"] == "HALTED"                           # 重い読みの間も機器は動く
+        assert time.monotonic() - t < 1.0
+        gate.set()
+        reading.join()
+    finally:
+        stop()

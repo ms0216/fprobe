@@ -24,7 +24,7 @@ host/fprobe/probe_decode.py  la_decoders・la_decoder_load・la_export・la_load
 - 解読器は `Decoder(name, function, lower, summary, default_kinds, origin)`。`lower` が空なら `function(tr, **設定)`
   （波形を読む）、空でなければ `function(lower: Decoding, **設定)`（下の解読の結果を読む）。
 - 名前で呼ぶ（`decode`、API の `la.decode`）ときは、**下の解読の設定を下の名前のキーに入れる**:
-  `decode("modbus", tr, uart={"channel": 5, "baud": 9600, "parity": "even"}, gap_chars=2.5)`。何段でも重ねられる
+  `decode("modbus", tr, uart={"channel": 5, "baud": 9600, "parity": "even"})`。何段でも重ねられる
   （例: 利用者の解読器 → modbus → uart）。結果の `params` にも下の設定が同じキーで入る（再現できる）。
   キーを下の名前にしたのは、1 つの解読器が複数の下を受け付けられ（`lower` は列）、どれを使ったかが設定から明らかなため。
 - `la.decode` は下の解読も同じ覚え（キャッシュ）を通す: 上の解読を変えて試すとき、下は再計算しない。覚えの鍵に
@@ -47,10 +47,10 @@ host/fprobe/probe_decode.py  la_decoders・la_decoder_load・la_export・la_load
 | jtag_arm（jtag の上） | ir_bits・ir_offset・dr_offset | access・idcode | DPACC / APACC の 35 ビットを要求と応答に。読みの値は次の走査で返る（previous に元の要求）。WAIT は error="wait"。鎖の中の DP の位置を offset で |
 | i2s | sck・ws・sd・format・word_bits・signed | left・right | i2s（1 クロック遅れ、WS = 0 が左）・left_justified・right_justified。最初の途中のスロットは読まない |
 | parallel | data（列）・clock・edge・enable・enable_level・settle | word | クロックの辺の直前の値、またはクロック無しで値の変化ごと（settle より短い途中の値を捨てる） |
-| manchester | channel・bitrate・convention・word_bits・msb_first | bit・word・frame・error | 長い間（1 ビット）の両端は中央の変化。最初の長い間から逆にたどって位相を決める（無ければ最初の変化を中央） |
+| manchester | channel・bitrate・tolerance（必須）・convention・word_bits・msb_first | bit・word・frame・error | 長い間（1 ビット）の両端は中央の変化。最初の長い間から逆にたどって位相を決める（無ければ error = phase_unknown で解読しない）。区切りは 1 ビット + tolerance |
 | spiflash（spi の上） | address_bytes | command | 転送（CS）ごとに命令・アドレス（EN4B / EX4B を追う）・ダミー・データ。WEL を追い、許可の無い書き・消去は error="write_disabled" |
 | eeprom24（i2c の上） | device・address_bytes・block_bits・page_size | write・read・poll | ランダム読み（アドレスだけの書き + 読み）をまとめる。内部のアドレスを追って現在のアドレスの読みにも番地。ページをまたぐ書きは error="page_wrap"。NACK は書き込みサイクル中のポーリング |
-| modbus（uart の上） | gap_chars | request・response・exception・frame | 無音（既定 2.5 文字: 1.5 と 3.5 の中間）で区切る。CRC-16/MODBUS。要求と応答を形と直前の要求で見分け、応答に latency_s |
+| modbus（uart の上） | gap_chars・gap_s | request・response・exception・frame | 無音で区切る（既定は規格の t3.5: 19200 bps 以下は 3.5 文字 = UART の設定から、速いときは 1.75 ms。2026-10-22 に変更）。CRC-16/MODBUS。要求と応答を形と直前の要求で見分け、応答に latency_s |
 
 ## sigrok の .sr
 
@@ -82,6 +82,6 @@ host/fprobe/probe_decode.py  la_decoders・la_decoder_load・la_export・la_load
 ## 限界・今後
 
 - CAN FD の「データの最後で 5 個続いたときのダイナミックスタッフ」は 1 個入れる解釈（ISO の図に従う）。実機の CAN FD での確認は未。
-- Manchester で長い間の無いフレーム（同じビットの続き）は、最初の変化を中央とみなす（線の休止の値によっては 1 ビットずれる）。
+- Manchester で長い間の無いフレーム（同じビットの続き）は位相を決められないので、解読せず phase_unknown にする。タイミングの誤りの後も、次の長い間まで解読せず、語は誤りの位置で区切り直す（2026-10-22 に変更。以前は最初の変化・誤りの次の変化を中央とみなした）。
 - I2S の TDM・DSP 形式、LIN、USB の低層、SD カード（SPI の上）、SMBus/PMBus（I2C の上）等は未。登録簿に足すだけで載る。
 - PulseView で .sr が開けることは手で確かめる（この PC に sigrok が無い）。

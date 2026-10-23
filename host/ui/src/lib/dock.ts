@@ -44,6 +44,27 @@ function defaultLayout(api: DockviewApi, add: (id: string, position?: object) =>
   api.getPanel("timeline")?.group.api.setSize({ height: 300 });
 }
 
+/** システム解析の配置: 時間軸（MCU と FPGA が同じ時刻の上に並ぶ）を大きく、右の列はシステム解析（MCU と FPGA の今・
+ *  条件・結果の直前に多い出来事）だけで高さを全部使う。下に FPGA 観測（接続の設定）・変数の観測・ロジアナ・端末・メモリ・操作
+ *  （docs/superpowers/specs/2026-10-21-system-analysis-design.md） */
+function systemLayout(api: DockviewApi, add: (id: string, position?: object) => void): void {
+  add("timeline");
+  add("system", { direction: "right", referencePanel: "timeline" });
+  add("fpgaObs", { direction: "below", referencePanel: "timeline" });
+  add("watch", { referencePanel: "fpgaObs" });
+  add("logicAnalyzer", { referencePanel: "fpgaObs" });
+  add("terminal", { referencePanel: "fpgaObs" });
+  add("memory", { referencePanel: "fpgaObs" });
+  add("eventLog", { referencePanel: "fpgaObs" });
+  api.getPanel("system")?.api.setActive();
+  api.getPanel("fpgaObs")?.api.setActive();
+  api.getPanel("timeline")?.api.setActive();
+  api.getPanel("system")?.group.api.setSize({ width: 560 });
+  api.getPanel("fpgaObs")?.group.api.setSize({ height: 260 });
+}
+
+export type LayoutName = "default" | "system";
+
 export class Dock {
   readonly api: DockviewApi;
   private unsubscribe: () => void;
@@ -95,8 +116,13 @@ export class Dock {
 
   /** 既定の配置に戻す */
   reset(): void {
+    this.layout("default");
+  }
+
+  /** 決まった配置にする（default = デバッガの型、system = システム解析） */
+  layout(name: LayoutName): void {
     this.api.clear();
-    defaultLayout(this.api, this.add);
+    (name === "system" ? systemLayout : defaultLayout)(this.api, this.add);
   }
 
   /** パネルを前に出す（閉じていたら既定の場所の近くに開く: デバッガの窓は右の列、ほかは下の段） */

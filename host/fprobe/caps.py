@@ -94,6 +94,12 @@ class Capabilities:
     la_filter: bool = False            # ロジアナのグリッチフィルタ（U21。FEATURES に bit が無ければ無い）
     la_pulse: bool = False             # ロジアナのパルス幅のトリガ（U21）
     la_stream_events: bool = False     # 深いバッファのストリームにイベントも見出し付きで流す（R1。FEATURES に bit が無ければ無い）
+    fpga_obs: bool = False             # 対象の FPGA の観測（CSR obs・イベント 8・9。FEATURES に bit が無ければ無い）
+    obs_match: bool = False            # 観測の値の一致をクロストリガの源 bit4 に（CSR obs.match。FEATURES bit8）
+    sampler_match: bool = False        # サンプラの値の一致をクロストリガの源 bit5 に（CSR sampler_match。FEATURES bit10。構成によって無い）
+    sync: bool = False                 # ボードの間の時刻の同期（CSR sync・イベント 10。FEATURES bit9）
+    la_delay_internal: float = 0.0     # ロジアナの時刻がピンの変化より遅い刻み数（内蔵。LA_DELAY が無ければ 0 = 直さない）
+    la_delay_deep: float = 0.0         # 同（深いバッファ）
     build: Build | None = None         # ビットストリームの版（U49。BUILD が無い・版なしのビルドなら None）
     la_layout: tuple[LaChannel, ...] = ()   # ロジアナの ch の並び（la_channels 本。LA_LAYOUT が無ければ古い並び）
     swo_manchester: bool = False       # SWO の Manchester 方式（U51。DEBUG に bit が無ければ無い）
@@ -148,6 +154,10 @@ def parse(data: bytes) -> Capabilities:
             values["la_filter"] = bool(features & g.FEATURE_LA_FILTER)
             values["la_pulse"] = bool(features & g.FEATURE_LA_PULSE)
             values["la_stream_events"] = bool(features & g.FEATURE_LA_STREAM_EVENTS)
+            values["fpga_obs"] = bool(features & g.FEATURE_FPGA_OBS)
+            values["obs_match"] = bool(features & g.FEATURE_OBS_MATCH)
+            values["sampler_match"] = bool(features & g.FEATURE_SAMPLER_MATCH)
+            values["sync"] = bool(features & g.FEATURE_SYNC)
         elif kind == g.CAPS_BUILD and length >= 20:
             when, id_hi, id_lo, commit, flags = struct.unpack_from("<5I", value)
             if when:                                    # 0 は版なし（シミュレーション用の既定のまま）
@@ -159,6 +169,9 @@ def parse(data: bytes) -> Capabilities:
             values["jtag"] = bool(debug & g.DEBUG_JTAG)
             values["inject"] = bool(debug & g.DEBUG_INJECT)
             values["swo_manchester"] = bool(debug & g.DEBUG_SWO_MANCHESTER)
+        elif kind == g.CAPS_LA_DELAY and length >= 4:
+            internal, deep = struct.unpack_from("<HH", value)
+            values["la_delay_internal"], values["la_delay_deep"] = internal / 2, deep / 2
         elif kind == g.CAPS_UART_FLOW:
             values["uart_flow"] = tuple(value)
         elif kind == g.CAPS_OUTPUTS and length >= 1:

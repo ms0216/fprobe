@@ -1,7 +1,7 @@
 // Event Log: 検索の条件 → recording.find の query、要約・CSV・印、区間の統計の棒と外れ値、印とメモの置いた者
 import { describe, expect, it } from "vitest";
 import {
-  binOf, emptyCondition, eventsCsv, histogramBars, intervalsInBin, kindQuery, kindStats, notesOf, outlierMarks,
+  binOf, emptyCondition, eventsCsv, histogramBars, intervalsInBin, kindQuery, kindStats, longestMarks, notesOf,
   fieldText, parseNumber, searchMarks, summary, toQuery, type RecEvent,
 } from "../src/lib/eventlog";
 
@@ -72,17 +72,17 @@ describe("区間の統計", () => {
     expect(binOf(5, [{ lo: 5, hi: 5, count: 4 }])).toBe(0);
   });
 
-  it("棒 → その区間（生データ）。外れ値のある棒・選んだ棒を目立たせる", () => {
+  it("棒 → その区間（生データ）。長い順の上位のある棒・選んだ棒を目立たせる（外れ値の経験則は使わない）", () => {
     const intervals: [number, number][] = [[100, 3], [200, 12], [300, 20]];
     expect(intervalsInBin(intervals, hist, 1)).toEqual([[200, 12], [300, 20]]);
-    const bars = histogramBars(hist, 10, null, [{ t: 300, t_end: 320, duration: 20, score: 2 }]);
+    const bars = histogramBars(hist, 10, null, [{ t: 300, t_end: 320, duration: 20 }]);
     expect(bars.map((b) => [b.x0, b.x1, b.y, b.mark])).toEqual([[0, 1, 3, false], [1, 2, 1, true]]);
     expect(histogramBars(hist, 10, 0, [])[0].mark).toBe(true);
   });
 
-  it("外れ値は区間の印（tone warn）", () => {
-    expect(outlierMarks([{ t: 300, t_end: 320, duration: 20, score: 2 }], 10_000_000))
-      .toEqual([{ t: 300, tEnd: 320, label: "2 µs", tone: 3 }]);
+  it("長い順の上位は区間の印（普通の色。異常とは言わない）", () => {
+    expect(longestMarks([{ t: 300, t_end: 320, duration: 20 }], 10_000_000))
+      .toEqual([{ t: 300, tEnd: 320, label: "2 µs", tone: 0 }]);
   });
 });
 

@@ -159,6 +159,8 @@ def test_frame_zero_without_cfi_is_treated_as_a_leaf():
     frames = unwinder.unwind(access)
     assert names(info, frames) == [None, "reset_handler"]
     assert frames[1].pc == site + 4
+    # 葉とみなした（何も積んでいないと仮定した）ことをフレームに書く: 呼び出し元は LR の値で、CFI では確かめていない
+    assert frames[1].note == "lr_without_cfi"
 
 
 def test_unwinding_stops_when_the_stack_is_unreadable():

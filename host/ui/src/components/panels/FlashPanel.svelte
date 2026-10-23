@@ -18,6 +18,7 @@
   import { load, save } from "../../lib/prefs";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
+  import { changedFields } from "../../lib/protection";
 
   const { app, conn, dbg, ui } = shared();
 
@@ -31,6 +32,12 @@
   let readAddress = $state("");
   let readLength = $state("");
   let busy = $state<string | null>(null);
+  // 保護（オプションバイト・保護の解除）: 名前ごとの値と説明。全消去・保護をかける書き込みは、人が明示して許す
+  let ob = $state<any>(null);
+  let obEdit = $state<Record<string, string>>({});
+  let obResult = $state<any>(null);
+  let allowMassErase = $state(false);
+  let allowProtect = $state(false);
   let progress = $state<Progress | null>(null);
   let note = $state<string | null>(null);              // 送った・保存した等の一行
   let invalid = $state<string | null>(null);           // 欄の誤り
@@ -267,11 +274,77 @@
     ? $i18n("flash.sectorsOnly", { n }) : $i18n("flash.sectorsNote", { n, method: methodText(method) });
   const stageNote = (s: Stage) => s.sectors !== undefined ? sectorsNote(s.sectors, s.method)
     : s.skipped ? $i18n("flash.skippedNote", { size: size(s.skipped) }) : "";
+
+  async function readOptionBytes() {
+    const r = await run("protect", "target.option_bytes.read", {});
+    if (r) {
+      ob = r;
+      obEdit = Object.fromEntries(Object.entries(r.fields ?? {}).map(([k, v]) => [k, String(v)]));
+    }
+  }
+
+  async function writeOptionBytes() {
+    const built = changedFields(ob?.fields ?? {}, obEdit);
+    if ("error" in built) {
+      invalid = built.error === "nothing" ? t("protect.nothing") : t("protect.badField", { field: built.error });
+      return;
+    }
+    const params = { fields: built.fields, confirm_mass_erase: allowMassErase, confirm_protect: allowProtect };
+    if (!(await confirmer.ask(t("protect.confirmWrite", { params: JSON.stringify(params) }),
+                              { ok: t("protect.write"), danger: true }))) return;
+    const r = await run("protect", "target.option_bytes.write", params);
+    allowMassErase = allowProtect = false;               // 危ない変更を許す印は 1 回ごと
+    if (r) {
+      obResult = r;
+      await readOptionBytes();                            // 書いた後の値（表の値を新しく）
+    }
+  }
+
+  async function unlock() {
+    if (!(await confirmer.ask(t("protect.confirmUnlock"), { ok: t("protect.unlock"), danger: true }))) return;
+    const r = await run("protect", "target.unlock", { confirm_mass_erase: allowMassErase });
+    allowMassErase = allowProtect = false;
+    if (r) obResult = r;
+  }
 </script>
 
 <div class="pane">
+  {#snippet protection()}
+    <details>
+      <summary title={$i18n("protect.tip")}>{$i18n("protect.title")}</summary>
+      <div class="row pad">
+        <button class="small" disabled={!online || !connected || !!busy} onclick={() => void readOptionBytes()}>{$i18n("protect.read")}</button>
+        <label title={$i18n("protect.allowMassEraseTip")}><input type="checkbox" bind:checked={allowMassErase} />
+          {$i18n("protect.allowMassErase")}</label>
+        <label title={$i18n("protect.allowProtectTip")}><input type="checkbox" bind:checked={allowProtect} />
+          {$i18n("protect.allowProtect")}</label>
+        <button class="small danger" disabled={!online || !!busy} title={$i18n("protect.unlockTip")}
+                onclick={() => void unlock()}>{$i18n("protect.unlock")}</button>
+      </div>
+      {#if ob}
+        <div class="line mono">{ob.part?.name ?? ""} {ob.family ?? ""} · RDP {ob.rdp_level ?? "?"} · {hex32(ob.address ?? 0)} = {ob.raw != null ? hex32(ob.raw) : ""}</div>
+        <table class="grid">
+          <thead><tr><th>{$i18n("common.name")}</th><th>{$i18n("protect.value")}</th><th>{$i18n("protect.description")}</th></tr></thead>
+          <tbody>
+            {#each Object.keys(ob.fields ?? {}) as name (name)}
+              <tr>
+                <td class="mono">{name}</td>
+                <td><input class="mono num" bind:value={obEdit[name]} aria-label={name} /></td>
+                <td class="muted">{ob.descriptions?.[name] ?? ""}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+        <div class="row pad">
+          <button class="small danger" disabled={!online || !connected || !!busy} onclick={() => void writeOptionBytes()}>{$i18n("protect.write")}</button>
+        </div>
+      {/if}
+      {#if obResult}<pre class="mono line">{JSON.stringify(obResult, null, 2)}</pre>{/if}
+    </details>
+  {/snippet}
   {#if !connected}
     <Empty need="connected" />
+    <div class="form">{@render protection()}</div>
   {:else}
     <div class="form">
       <label for="flash-path">{$i18n("flash.file")}</label>
@@ -448,6 +521,9 @@
           {$i18n("common.add")}</button>
       </form>
     </details>
+
+
+    {@render protection()}
 
     <details ontoggle={(e) => (e.currentTarget as HTMLDetailsElement).open && loadPacks()}>
       <summary title={$i18n("flash.packsTip")}>{$i18n("flash.packs")}</summary>

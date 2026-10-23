@@ -1,63 +1,34 @@
-"""UART の解読とボーレートの推定。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md"""
+"""UART の解読。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md
+
+ボーレートは使う側が渡す（波形から推定しない: 雑音とみなす割合・1 ビットとみなす幅・標準値に寄せる等の経験則が要るため。
+CLAUDE.md の「本体にヒューリスティックを入れない」。1 ビットの長さは la.measure 等でパルスの幅を測れる）。"""
 
 import math
 
 from ..la import Transitions
 from .core import Annotation, ChannelLevels, Decoding
 
-__all__ = ["STANDARD_BAUDS", "decode_uart", "estimate_baud"]
+__all__ = ["decode_uart"]
 
-STANDARD_BAUDS = (300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400, 57600, 76800, 115200, 128000,
-                  230400, 250000, 256000, 460800, 500000, 576000, 921600, 1_000_000, 1_152_000, 1_500_000,
-                  2_000_000, 2_500_000, 3_000_000, 3_500_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000, 12_000_000)
-SNAP = 0.03                     # 標準のボーレートとこの比率以内なら標準値に寄せる
 PARITIES = ("none", "even", "odd", "mark", "space")
-
-
-def estimate_baud(tr: Transitions, channel: int, *, snap: bool = True) -> float | None:
-    """同じ値が続いた長さから 1 ビットの長さを推定する。変化が足りなければ None。
-    最短の 1 ビットの並びが 1 つも無いデータ（例: 2 ビットずつしか変わらない）では倍の長さを 1 ビットと見る。"""
-    edges = ChannelLevels(tr, channel).edges
-    runs = sorted(edges[i + 1] - edges[i] for i in range(len(edges) - 1))   # 両端の切れた区間は使わない
-    if len(runs) < 2:
-        return None
-    k = max(2, math.ceil(0.01 * len(runs)))           # これより少ない短い区間は雑音とみなす
-    if len(runs) < k:
-        return None
-    rough = runs[k - 1]
-    ones = [r for r in runs if 0.5 * rough <= r <= 1.5 * rough]
-    unit = sum(ones) / len(ones)                      # 1 ビットの区間の平均
-    total, bits = 0, 0
-    for r in runs:                                    # 整数ビットに近い区間だけを、ビット数の合計で割る（精度を上げる）
-        n = round(r / unit)                           # 半端な長さ（停止ビット 1.5・フレームの間の休止）は除く
-        if 1 <= n <= 10 and abs(r / unit - n) <= 0.2:
-            total += r
-            bits += n
-    baud = bits / (total * tr.sample_period_s)
-    if snap:
-        nearest = min(STANDARD_BAUDS, key=lambda b: abs(b - baud))
-        if abs(nearest - baud) <= SNAP * nearest:
-            return nearest
-    return baud
 
 
 def decode_uart(tr: Transitions, channel: int, *, baud: float | None = None, data_bits: int = 8,
                 parity: str = "none", stop_bits: float = 1, invert: bool = False, lsb_first: bool = True) -> Decoding:
-    """1 本の UART の線を解読する。baud を省くと推定する。"""
+    """1 本の UART の線を、渡したボーレートで解読する。"""
     if not 5 <= data_bits <= 9:
         raise ValueError(f"データビットは 5〜9（{data_bits}）")
     if parity not in PARITIES:
         raise ValueError(f"パリティは {PARITIES} のどれか（{parity!r}）")
     if stop_bits not in (1, 1.5, 2):
         raise ValueError(f"停止ビットは 1 / 1.5 / 2（{stop_bits}）")
-    if baud is not None and baud <= 0:
+    if baud is None:
+        raise ValueError("baud（ボーレート）を渡す（波形から推定しない。1 ビットの長さは la.measure でパルスの幅を測れる）")
+    if baud <= 0:
         raise ValueError(f"ボーレートが正でない（{baud}）")
-    estimated = baud is None
-    if estimated:
-        baud = estimate_baud(tr, channel)
-    params = {"channel": channel, "baud": baud, "baud_estimated": estimated, "data_bits": data_bits,
+    params = {"channel": channel, "baud": baud, "data_bits": data_bits,
               "parity": parity, "stop_bits": stop_bits, "invert": invert, "lsb_first": lsb_first}
-    anns = [] if baud is None else _frames(tr, ChannelLevels(tr, channel), 1 / (baud * tr.sample_period_s),
+    anns = _frames(tr, ChannelLevels(tr, channel), 1 / (baud * tr.sample_period_s),
                                             data_bits, parity, stop_bits, int(invert), lsb_first)
     return Decoding("uart", tuple(anns), tr.sample_period_s, tr.trigger, tr.length, params)
 

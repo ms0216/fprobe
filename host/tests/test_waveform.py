@@ -78,3 +78,61 @@ def test_the_edge_tables_are_built_only_when_the_screen_asks(monkeypatch):
     p.la_view(width=6)
     p.la_view(width=3)
     assert len(built) == 1
+
+
+def test_the_fast_edge_tables_match_the_plain_ones(monkeypatch):
+    # numpy があれば変化点の表を一括の計算で作る（SWD のクロック等で数千万の変化点の記録を数秒で開く）。無くても同じ結果
+    pytest.importorskip("numpy")
+    import random
+
+    from fprobe import la
+    rng = random.Random(3)
+    values, starts, v, s = array("H"), array("Q"), 0, 0
+    for _ in range(20_000):
+        values.append(v)
+        starts.append(s)
+        v ^= rng.choice([1, 2, 3, 0x8000, 0x0400 | 1, rng.randrange(1 << 16)])
+        s += rng.randint(1, 50)
+    tr = Transitions(values, starts, s + 10, 0, 0, 1e-8, 16)
+    fast = Waveform(tr)
+    monkeypatch.setattr(la, "_np", None)
+    plain = Waveform(tr)
+    assert fast._initial == plain._initial
+    assert [list(e) for e in fast._edges] == [list(e) for e in plain._edges]
+    assert [e.typecode for e in fast._edges] == [e.typecode for e in plain._edges]
+
+
+def test_the_capture_tile_does_not_wait_for_a_long_device_operation():
+    # 時間軸の捕捉のタイルは読みのスレッドで: 機器の長い操作（Probe._lock を持つ la_collect 等）を待たない
+    import threading
+
+    from fprobe.mcp_server import Probe
+    p = Probe("unused")
+    tr = Transitions(array("H", [0, 1]), array("Q", [0, 5]), 10, 0, 0, 1e-8, 2)
+    p._keep_capture(tr, "test")
+    held, release = threading.Event(), threading.Event()
+
+    def long_operation():
+        with p._lock:
+            held.set()
+            release.wait(5)
+    worker = threading.Thread(target=long_operation)
+    worker.start()
+    held.wait(5)
+    t = time.monotonic()
+    try:
+        wave, info = p._capture_wave()
+        assert time.monotonic() - t < 1.0 and info["length"] == 10 and wave.level_at(0, 6) == 1
+    finally:
+        release.set()
+        worker.join()
+
+
+def test_the_edge_tables_are_compact():
+    # 変化点の表だけを持ち（元の並びは持たない）、サンプル番号が 32 ビットに収まれば 4 バイトの整数で（大きな記録の
+    # 時間軸でデーモンのメモリが 1 GB を超えた）
+    tr = Transitions(array("H", [0, 1, 0]), array("Q", [0, 5, 7]), 10, 0, 0, 1e-8, 2)
+    w = Waveform(tr)
+    assert not hasattr(w, "tr") and w.length == 10
+    assert all(e.typecode == "I" for e in w._edges) and w.nbytes == 2 * 4
+    assert w.view(0, 10, 2) == ["0x", "00"] and list(w.edges_between(0, 0, 10)) == [5, 7]

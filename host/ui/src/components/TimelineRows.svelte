@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { LaChannel } from "../lib/waveform";
+  import { shared } from "../lib/context";
   // 時間軸の段の名前の列: まとまりの見出し（クリックで折りたたみ・展開、件数）と段の名前（マウスの縦線の値: 波形は
   // フレームから、値・状態の段はタイルへの問い合わせで。lib/timeline/cursor.ts）。
   // 名前をドラッグして並べ替え（段はまとまりの中、見出しはまとまりごと）、× で段を隠す。高さは描画と同じ（rows.ts）。
@@ -45,6 +47,8 @@
       tl.moveRow(from.def.id, first);
     }
   }
+  const { app } = shared();
+  const laLayout = $derived((($app.probe?.capabilities ?? {}) as { la_layout?: LaChannel[] }).la_layout ?? null);
 </script>
 
 <div class="names" style:padding-top="{RULER}px">
@@ -64,7 +68,7 @@
         <span class="mono muted">{r.def.group === "logic" ? r.count : visibleCount(r.def.id).toLocaleString()}</span>
       {:else}
         <span class="swatch" style:background={CATEGORICAL[r.def.color]} class:none={r.def.type === "logic"}></span>
-        <span class="title" title={`${rowTitle(r.def, $i18n)} (${r.def.id})`}>{rowTitle(r.def, $i18n)}</span>
+        <span class="title" title={`${rowTitle(r.def, $i18n, laLayout)} (${r.def.id})`}>{rowTitle(r.def, $i18n, laLayout)}</span>
         <span class="mono v" title={value(r)}>{value(r)}</span>
         <button class="hide" title={$i18n("timeline.hideRow")} aria-label={$i18n("timeline.hideRow")}
                 onclick={() => tl.setRowShown(r.def.id, false)}>×</button>

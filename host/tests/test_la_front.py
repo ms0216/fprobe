@@ -94,6 +94,34 @@ def test_analyzer_writes_the_front_after_the_trigger_and_before_starting():
     assert set(la.front_info) == {"filter", "pulse"}
 
 
+def test_external_only_waits_for_the_cross_trigger_alone():
+    # クロストリガ（FPGA の条件等）だけで捕捉する: パターンは決して成り立たない形（ch0 が 1 かつ ch0 が立ち下がった）に
+    # して、パターンが空のとき「真」= すぐ捕捉、にならないようにする。パターンと一緒には指定できない
+    from fprobe.la import LogicAnalyzer
+
+    class Dev:
+        def __init__(self):
+            self.writes = []
+
+        def capabilities(self):
+            return SimpleNamespace(la_channels=16, la_depth=64, la_sample_hz=CLOCK, mem_bytes=0, sys_clock_hz=CLOCK,
+                                   la_filter=False, la_pulse=False)
+
+        def write32(self, address, value):
+            self.writes.append((address, [value]))
+
+        def write(self, address, words):
+            self.writes.append((address, list(words)))
+
+    dev = Dev()
+    LogicAnalyzer(dev).start(pretrigger=8, external_only=True)
+    rate = dict(dev.writes)[g.LA_RATE]
+    mask, value, rise, fall = rate[2:6]
+    assert (mask, value, rise, fall) == (1, 1, 0, 1)
+    with pytest.raises(ValueError):
+        LogicAnalyzer(Dev()).start(external_only=True, mask=4, value=4)
+
+
 def layout_with_inputs(count=6):
     from fprobe.caps import LaChannel
     return (*(LaChannel(i, "pin", i) for i in range(8)), LaChannel(8, "internal", 0), LaChannel(9, "internal", 1),

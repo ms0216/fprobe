@@ -51,6 +51,22 @@ class GhdlToolchain:
         env["PATH"] = os.pathsep.join([*map(str, prepend), *([rest] if rest else [])])
         return env
 
+    def to_verilog(self, sources: "list[Path]", top: str, out: Path, generics: Mapping[str, object] = {}) -> Path:
+        """VHDL を GHDL の合成で 1 つの Verilog にする（Verilog だけを読むベンダーの道具向け。ForgeFPGA 等）。"""
+        import subprocess
+        work = out.parent / f"{out.stem}_ghdl"
+        work.mkdir(parents=True, exist_ok=True)
+        common = ["--std=08", f"--workdir={work}"]
+        r = subprocess.run([str(self.ghdl), "-a", *common, *map(str, sources)], capture_output=True, text=True)
+        if r.returncode == 0:
+            gen = [f"-g{k}={v}" for k, v in generics.items()]
+            r = subprocess.run([str(self.ghdl), "synth", *common, *gen, "--out=verilog", top],
+                               capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"GHDL の合成に失敗: {r.stderr[-2000:]}")
+        out.write_text(r.stdout, encoding="utf-8")
+        return out
+
     @classmethod
     def locate(cls, env: Mapping[str, str] = os.environ) -> "GhdlToolchain":
         candidates: list[Path] = []

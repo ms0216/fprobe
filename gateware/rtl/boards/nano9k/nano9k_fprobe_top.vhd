@@ -63,7 +63,7 @@ begin
     generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => 0,
                  MEM_TEST => work.design_caps_pkg.MEM_TEST,
                  XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
                  HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
                  UART_FLOW => work.design_caps_pkg.UART_FLOW,

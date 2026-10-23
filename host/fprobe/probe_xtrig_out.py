@@ -60,7 +60,7 @@ class XtrigOutputTools:
                          enable: bool = False) -> dict:
         """出力の端子（channel = その端子のロジアナの ch）の動作を設定する。条件 = pattern（端子の並び。ロジアナの
         ch 0〜7 のビット {"mask", "value", "any"}。any = true は見る ch のどれかが一致で成立）or sources（源の名前
-        "la_trigger" / "dap_match" / "host" / "sequence"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈）/
+        "la_trigger" / "dap_match" / "host" / "sequence" / "obs_match" / "sampler_match"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈）/
         "hold"（立ち上がりから無効にするまで）/ "while"（条件の間。遅れ 40 ns 程度）。level: 動いている間に出す値。
         設定するとその端子の普段の機能（UART・SWO）を止めて出力に使う（戻すのは xtrig_output_release）。
         enable = true で続けて有効にする。"""
@@ -76,7 +76,7 @@ class XtrigOutputTools:
             try:
                 flags |= Source[name.upper()]
             except KeyError:
-                raise ValueError(f"源 {name!r} は無い（la_trigger / dap_match / host / sequence）") from None
+                raise ValueError(f"源 {name!r} は無い（la_trigger / dap_match / host / sequence / obs_match / sampler_match）") from None
         mask = int(pattern.get("mask", 0))
         if not mask and not flags:
             raise ValueError("条件が無い: pattern の mask か sources を指定する")

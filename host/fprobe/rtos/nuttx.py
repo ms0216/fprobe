@@ -242,7 +242,7 @@ class NuttX(KernelAwareness):
             notes.append("TSTATE_TASK_RUNNING だが g_running_tasks のタスクではない")
         stack = self._stack(handle, running)
         if stack.overflow:
-            notes.append("スタックの底（stack_base_ptr）が塗り（0xdeadbeef）のままでないか、SP が底より下")
+            notes.append("SP がスタックの底（stack_base_ptr）より下")
         base = self._field(handle, "base_priority") if self.tcb.has("base_priority") else None
         return Task(handle, self.task_name(handle), self._field(handle, "sched_priority"), state, stack, wait, base,
                     self._field(handle, "pid", signed=True), notes=notes)

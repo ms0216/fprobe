@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { LaChannel } from "../../lib/waveform";
+  import { shared } from "../../lib/context";
   // 解読器の設定の欄（la.decoders の params から）: チャンネルの設定は ch の選択、ほかは文字（空 = 既定）。
   // 積み重ねる解読器（Modbus・SPI Flash 等）は下の解読の選択と、その欄を入れ子に（このコンポーネント自身）
   import { i18n } from "../../lib/i18n";
@@ -9,6 +11,8 @@
   let { form = $bindable(), decoders, channels }: { form: DecoderForm; decoders: DecoderInfo[]; channels: number[] } = $props();
   const info = $derived(decoders.find((d) => d.name === form.protocol));
   const shown = (v: unknown) => (v === null || v === undefined ? "" : String(v));
+  const { app } = shared();
+  const laLayout = $derived((($app.probe?.capabilities ?? {}) as { la_layout?: LaChannel[] }).la_layout ?? null);
 </script>
 
 <span class="fields">
@@ -18,7 +22,7 @@
       {#if isChannelParam(p.name)}
         <select bind:value={form.values[p.name]}>
           {#if !p.required}<option value="">—</option>{/if}
-          {#each channels as ch (ch)}<option value={String(ch)}>{channelName(ch)}</option>{/each}
+          {#each channels as ch (ch)}<option value={String(ch)}>{channelName(ch, laLayout)}</option>{/each}
         </select>
       {:else}
         <input class="mono" bind:value={form.values[p.name]} placeholder={shown(p.default)} size="8" />

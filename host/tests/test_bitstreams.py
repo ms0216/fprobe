@@ -256,6 +256,7 @@ def test_the_version_tells_for_sure_whether_the_probe_came_back_with_another_bit
         assert out["version"] == {"before": developed.describe(), "after": flashed.describe(), "changed": True,
                                   "latest_build": False}
         assert "版が変わった" in out["message"] and "fprobe_gw program" in out["message"]
+        assert "電源が落ちて" not in out["message"]
         assert "build" not in out["changed"]             # 版は changed（機能の違い）とは別に返す
         board.unplug(build=flashed)                      # 同じ版でつながり直しただけ
         out = p.recover_link(lost(p))
@@ -275,7 +276,8 @@ def test_without_versions_the_features_are_the_only_hint(board, tmp_path):
         board.unplug(sampler=False, jtag=True)
         out = p.recover_link(lost(p))
         assert out["version"] == {"before": None, "after": None, "changed": None, "latest_build": None}
-        assert "かもしれない" in out["message"]
+        # 原因（電源が落ちて Flash の版で立ち上がった等）は推測しない: 変わった機能だけ
+        assert "機能が前と変わった" in out["message"] and "かもしれない" not in out["message"]
     finally:
         p.close()
 

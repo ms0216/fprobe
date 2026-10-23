@@ -180,7 +180,7 @@ def test_timing_between_two_kinds_of_recorded_events(probe):
         rec.add("uart", "tx", 10_000 * (k + 1) + duration)
     out = probe.timing_measure({"stream": "uart", "kind": "rx"}, {"stream": "uart", "kind": "tx"}, limit=3)
     assert out["count"] == 5 and out["min"] == 90 and out["max"] == 1000 and out["max_at"] == 50_000
-    assert out["outliers"][0]["duration"] == 1000 and out["seconds"]["max"] == pytest.approx(1000 / 1e8)
+    assert out["longest"][0]["duration"] == 1000 and out["seconds"]["max"] == pytest.approx(1000 / 1e8)
     assert len(out["intervals"]) == 3 and out["intervals_total"] == 5
 
 
@@ -219,7 +219,7 @@ def test_pcsr_plan_tells_the_swd_speed_and_the_summary_the_achieved_rate(probe):
     sampling = stopped["sampling"]
     assert sampling["requested_hz"] == 50_000 and sampling["achieved_hz"] == pytest.approx(10_000)
     assert sampling["swd_hz"] == 4_000_000 and sampling["samples"] == 11
-    assert any("追いつかない" in n for n in stopped["notes"])
+    assert any("サンプルの速さ" in n and "より遅い" in n for n in stopped["notes"])
 
 
 def test_pcsr_plan_without_a_known_swd_speed_says_so(probe):

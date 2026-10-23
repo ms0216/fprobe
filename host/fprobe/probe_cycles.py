@@ -28,6 +28,7 @@ __all__ = ["CyclesTools"]
 
 INTERVAL_LIMIT = 10_000
 _CYCCNTENA = 1
+_NOCYCCNT = 1 << 25                                     # DWT_CTRL（読み出し専用）: CYCCNT が無い（ARMv7-M）
 _ENABLE = [RegisterWrite(DEMCR, DEMCR_TRCENA, DEMCR_TRCENA, "DEMCR.TRCENA: DWT を使う"),
            RegisterWrite(DWT_CTRL, _CYCCNTENA, _CYCCNTENA, "DWT_CTRL.CYCCNTENA: サイクルを数える")]
 
@@ -64,7 +65,12 @@ class CyclesTools:
             ctrl = target.read_memory(DWT_CTRL)
             if counters and ctrl & NOPRFCNT:
                 raise RuntimeError("このコアの DWT にはイベントカウンタが無い（counters=false で CYCCNT だけ）")
+            if ctrl & _NOCYCCNT:
+                raise RuntimeError("このコアには CYCCNT（サイクルのカウンタ）が無い（DWT_CTRL.NOCYCCNT）")
             write_registers(target, _ENABLE)
+            if not target.read_memory(DWT_CTRL) & _CYCCNTENA:    # ARMv6-M（Cortex-M0/M0+）は書いても立たず、読むと 0
+                raise RuntimeError("このコアには CYCCNT（サイクルのカウンタ）が無い（DWT_CTRL.CYCCNTENA を書いても立たない。"
+                                   "Cortex-M0/M0+ 等）")
             locations = {"start": dbg.breakpoint_address(start), "end": dbg.breakpoint_address(end)}
             added = []
             for location, address in ((start, locations["start"]), (end, locations["end"])):

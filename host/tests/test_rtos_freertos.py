@@ -190,9 +190,11 @@ def test_stack_overflow_marks(kernel):
     plain = k.task("plain", 2, 64, fill=False)
     k.put_state(plain, k.ready(2))
     t = by_name(rtos_of(k).tasks())
-    assert t["smashed"].stack.overflow and t["smashed"].stack.fill == "none"
+    # 「底が塗りでなく、その上に塗りが残る → あふれた」と推定しない。事実（底は塗りでない・上に塗りがある）を返す
+    assert not t["smashed"].stack.overflow and t["smashed"].stack.fill == "none" and t["smashed"].stack.fill_above
     assert t["under"].stack.overflow
     assert t["plain"].stack.fill == "none" and not t["plain"].stack.overflow and t["plain"].stack.peak_used is None
+    assert not t["plain"].stack.fill_above
 
 
 def test_snapshot(kernel):

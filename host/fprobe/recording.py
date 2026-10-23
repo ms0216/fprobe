@@ -8,12 +8,15 @@
 """
 
 import csv
+import heapq
 import json
+import os
 import re
 import sqlite3
 import statistics
 import threading
 from array import array
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -32,11 +35,20 @@ CREATE TABLE IF NOT EXISTS events (
     a INTEGER NOT NULL DEFAULT 0, b INTEGER NOT NULL DEFAULT 0, body TEXT, unc REAL);
 CREATE INDEX IF NOT EXISTS events_t ON events (t);
 CREATE INDEX IF NOT EXISTS events_stream_t ON events (stream, t);
+CREATE INDEX IF NOT EXISTS events_stream_kind_t ON events (stream, kind, t);
+CREATE INDEX IF NOT EXISTS events_t_end ON events (t_end) WHERE t_end IS NOT NULL;
 CREATE TABLE IF NOT EXISTS chunks (
     t0 INTEGER NOT NULL, t1 INTEGER NOT NULL, path TEXT NOT NULL, ticks_per_sample REAL NOT NULL,
     channels INTEGER NOT NULL, length INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS chunks_t ON chunks (t0, t1);
 """
+
+
+def write_json(path: Path, obj: Any) -> None:
+    """JSON を一時ファイルに書いてから置き換える（途中で失敗しても元のファイルは壊れない）。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class ClockMap:
@@ -113,7 +125,7 @@ class Recorder:
         self._closed = False
 
     def _write_meta(self) -> None:
-        (self.directory / "meta.json").write_text(json.dumps(self._meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json(self.directory / "meta.json", self._meta)
 
     def update_meta(self, **items: Any) -> None:
         self._meta.update(items)
@@ -179,6 +191,18 @@ class Recorder:
         self._closed = True
 
 
+def _vcd_id(i: int) -> str:
+    """VCD の識別子（印字できる ASCII 94 字の並び）。"""
+    out = chr(33 + i % 94)
+    while i >= 94:
+        i = i // 94 - 1
+        out = chr(33 + i % 94) + out
+    return out
+
+
+WAVE_CACHE_BYTES = 256 << 20          # 記録の読み手が覚えておく変化点の表の大きさの上限（使った順に捨てる）
+
+
 class Recording:
     """記録の読み手（記録中でも読める）。時刻はタイムベース、t1 は含まない。"""
 
@@ -186,7 +210,22 @@ class Recording:
         self.directory = Path(directory)
         self.meta = json.loads((self.directory / "meta.json").read_text(encoding="utf-8"))
         self._db = _connect(self.directory / "recording.sqlite")
-        self._waves: dict[str, Waveform] = {}
+        self._init_waves()
+
+    def _init_waves(self) -> None:
+        """かたまりの変化点の表を使った順に覚える（WAVE_CACHE_BYTES まで。超えたら古いものから捨てる）。"""
+        self._waves: OrderedDict[str, Waveform] = OrderedDict()
+        self._distinct: dict = {}                                       # distinct の答え（rowid の最大と）
+        self._wave_bytes = 0
+        self._wave_lock = threading.Lock()
+
+    def update_meta(self, **items) -> None:
+        """記録の情報を書き換える（終わった記録でも。例: FPGA の信号の定義 fpga.signals を後から直す）。"""
+        path = self.directory / "meta.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta.update(items)
+        write_json(path, meta)
+        self.meta.update(items)
 
     @classmethod
     def open(cls, directory: Path) -> "Recording":
@@ -268,8 +307,16 @@ class Recording:
         """欄（stream / kind / a / b）の異なる値の一覧（例: サンプラが読んだ番地 = distinct("a", ["sample"])）。"""
         if column not in ("stream", "kind", "a", "b"):
             raise ValueError(f"欄 {column!r} は stream / kind / a / b")
+        # 記録が増えていなければ前の答え（全件を読むので。増えたかは rowid の最大 = 索引で一瞬）
+        newest, = self._db.execute("SELECT MAX(rowid) FROM events").fetchone()
+        key = (column, tuple(streams or ()), newest)
+        cached = self._distinct.get(key[:2])
+        if cached is not None and cached[0] == newest:
+            return list(cached[1])
         where, args = self._where(None, None, streams, None)
-        return [v for v, in self._db.execute(f"SELECT DISTINCT {column} FROM events {where} ORDER BY {column}", args)]
+        values = [v for v, in self._db.execute(f"SELECT DISTINCT {column} FROM events {where} ORDER BY {column}", args)]
+        self._distinct[key[:2]] = (newest, values)
+        return list(values)
 
     def find(self, query: dict) -> list[Event]:
         """構造化した条件に一致する出来事。query: stream / kind（文字列か列）、t0 / t1、a / b（値か {"eq"|"ne"|"lt"|"le"|
@@ -391,9 +438,21 @@ class Recording:
         return [row for sql, args in queries for row in self._db.execute(sql, args)]
 
     def _wave(self, chunk: _Chunk) -> Waveform:
-        if chunk.path not in self._waves:
-            self._waves[chunk.path] = Waveform(self._transitions(chunk))
-        return self._waves[chunk.path]
+        with self._wave_lock:
+            wave = self._waves.get(chunk.path)
+            if wave is not None:
+                self._waves.move_to_end(chunk.path)
+                return wave
+        wave = Waveform(self._transitions(chunk))                     # 作るのはロックの外で（数百 ms かかる）
+        with self._wave_lock:
+            if chunk.path in self._waves:                              # ほかのスレッドが先に作った
+                return self._waves[chunk.path]
+            self._waves[chunk.path] = wave
+            self._wave_bytes += wave.nbytes
+            while len(self._waves) > 1 and self._wave_bytes > WAVE_CACHE_BYTES:
+                _, old = self._waves.popitem(last=False)
+                self._wave_bytes -= old.nbytes
+        return wave
 
     def waveform_view(self, t0: int, t1: int, width: int) -> list[str]:
         """範囲の波形を画素ごとに '0' / '1' / 'x'（変化）/ '-'（波形が無い）。かたまりをまたぐ。"""
@@ -429,7 +488,11 @@ class Recording:
 
     def span(self) -> tuple[int, int] | None:
         """記録の最初と最後の時刻（波形のかたまりと出来事）。"""
-        lo, hi = self._db.execute("SELECT MIN(t), MAX(COALESCE(t_end, t)) FROM events").fetchone()
+        # 索引で（MAX(COALESCE(t_end, t)) は全件を読む: 114 万件で 0.2 秒、タイルごとに何度も呼ばれる）
+        lo, = self._db.execute("SELECT MIN(t) FROM events").fetchone()      # 1 文に 1 つ（並べると索引を使わない）
+        hi, = self._db.execute("SELECT MAX(t) FROM events").fetchone()
+        hi_end, = self._db.execute("SELECT MAX(t_end) FROM events WHERE t_end IS NOT NULL").fetchone()
+        hi = hi_end if hi is None or (hi_end is not None and hi_end > hi) else hi
         clo, chi = self._db.execute("SELECT MIN(t0), MAX(t1) FROM chunks").fetchone()
         values_lo = [v for v in (lo, clo) if v is not None]
         values_hi = [v for v in (hi, chi) if v is not None]
@@ -438,25 +501,81 @@ class Recording:
     # --- 書き出し --------------------------------------------------------------------
 
     def export_vcd(self, path: Path, channels: list[int] | None = None) -> None:
-        """波形を VCD に（時刻は ns。タイムベースは 10 の冪とは限らないため）。"""
+        """波形と FPGA の観測の信号を VCD に（時刻は ns。タイムベースは 10 の冪とは限らないため）。FPGA の信号は記録の
+        信号の定義（fpga.signals）で信号ごとに `fpga_<組>_<名前>`、定義の無い組は 16 ビットの `fpga_<組>`。
+        変化は波形と FPGA の出来事を時刻順に流しながら合わせて書く（長い記録でも全部をメモリに載せない）。"""
+        from .timeline_fpga import _lanes, signals_of           # timeline_fpga はこのモジュールを読む
+
         hz = self.meta["timebase_hz"]
         chunks = self._chunks()
         count = max((c.channels for c in chunks), default=0)
         wanted = channels if channels is not None else list(range(count))
-        ids = {ch: chr(33 + i) for i, ch in enumerate(wanted)}
+        ids = {ch: _vcd_id(i) for i, ch in enumerate(wanted)}
         lines = ["$timescale 1 ns $end", "$scope module fprobe $end"]
         lines += [f"$var wire 1 {ids[ch]} ch{ch} $end" for ch in wanted]
+        groups = sorted({e.a for e in self.iter_events(streams=["fpga"], kinds=["value"])})
+        plan: dict[int, list[tuple[str, int, Any]]] = {}
+        if groups:
+            signals = signals_of(self)
+            used_names = {f"ch{ch}" for ch in wanted}
+            for g in groups:
+                plan[g] = []
+                for _kind, row, _title, sig in _lanes(signals, g):
+                    # VCD は ASCII: 英数字と _ だけにし、置き換えて同じになった名前は _2・_3… で分ける
+                    base = name = "fpga_" + re.sub(r"[^A-Za-z0-9_]", "_", row.replace(".", "_"))
+                    k = 2
+                    while name in used_names:
+                        name, k = f"{base}_{k}", k + 1
+                    used_names.add(name)
+                    ident = _vcd_id(len(ids) + sum(map(len, plan.values())))
+                    width = sig.width if sig is not None else 16
+                    lines.append(f"$var wire {width} {ident} {name} $end")
+                    plan[g].append((ident, width, sig))
         lines += ["$upscope $end", "$enddefinitions $end"]
-        previous: dict[int, int] = {}
-        for c in chunks:
-            tr = self._transitions(c)
-            for value, start in zip(tr.values, tr.starts):
-                changes = [(ch, value >> ch & 1) for ch in wanted if previous.get(ch) != value >> ch & 1]
-                if changes:
-                    lines.append(f"#{round((c.t0 + start * c.ticks_per_sample) * 1e9 / hz)}")
-                    lines += [f"{bit}{ids[ch]}" for ch, bit in changes]
-                    previous.update(changes)
-        Path(path).write_text("\n".join(lines) + "\n", encoding="ascii")
+
+        def wave() -> Iterator[tuple[int, str]]:
+            previous: dict[int, int] = {}
+            for c in chunks:
+                tr = self._transitions(c)
+                for value, start in zip(tr.values, tr.starts):
+                    bits = [(ch, value >> ch & 1) for ch in wanted if previous.get(ch) != value >> ch & 1]
+                    if bits:
+                        t = round((c.t0 + start * c.ticks_per_sample) * 1e9 / hz)
+                        for ch, bit in bits:
+                            yield t, f"{bit}{ids[ch]}"
+                        previous.update(bits)
+
+        def fpga() -> Iterator[tuple[int, str]]:
+            if not plan:
+                return
+            last: dict[str, int] = {}
+            for e in self.iter_events(streams=["fpga"]):
+                untimed = e.kind.endswith("_untimed")              # 時刻の決まらない記録の間も不明
+                if e.kind in ("group", "gap") or untimed:          # 観測していない信号は不明（x）
+                    for g, items in plan.items():
+                        for ident, width, _sig in items:
+                            if (e.kind == "gap" or untimed or g != e.a) and ident in last:
+                                del last[ident]
+                                yield round(e.t * 1e9 / hz), (f"x{ident}" if width == 1 else f"bx {ident}")
+                    continue
+                if e.kind != "value":
+                    continue
+                for ident, width, sig in plan[e.a]:
+                    v = sig.extract(e.b) if sig is not None else e.b
+                    if last.get(ident) == v:
+                        continue
+                    last[ident] = v
+                    yield round(e.t * 1e9 / hz), (f"{v}{ident}" if width == 1 else f"b{v:0{width}b} {ident}")
+
+        with Path(path).open("w", encoding="ascii") as f:     # 改行は OS の既定（前の write_text と同じ）
+            f.write("\n".join(lines) + "\n")
+            current = None
+            # 同じ時刻では波形の変化が先、FPGA の変化が後（heapq.merge は同じ鍵で前の並びを先に出す）
+            for t, text in heapq.merge(wave(), fpga(), key=lambda x: x[0]):
+                if t != current:
+                    f.write(f"#{t}\n")
+                    current = t
+                f.write(text + "\n")
 
     def export_csv(self, path: Path, **filters: Any) -> None:
         with Path(path).open("w", newline="", encoding="utf-8") as f:

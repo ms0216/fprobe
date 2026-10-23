@@ -171,3 +171,62 @@ def test_distinct_values_of_a_column(tmp_path):
             r.distinct("body")
     finally:
         r.close()
+
+
+def test_the_waveform_cache_is_bounded(tmp_path, monkeypatch):
+    # 記録のかたまりの変化点の表は使った順に覚え、上限を超えたら古いものから捨てる（捨てても同じ結果）
+    from array import array
+
+    from fprobe import recording as recording_mod
+    from fprobe.la import Transitions
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6)
+    for k in range(6):
+        values = array("H", [i & 1 for i in range(200)])
+        starts = array("Q", range(200))
+        rec.add_waveform(Transitions(values, starts, 200, 0, 0, 1e-6, 1), start_ticks=k * 1000)
+    rec.close()
+    view = Recording.open(tmp_path / "r")
+    expected = view.waveform_view(0, 6000, 60)
+    monkeypatch.setattr(recording_mod, "WAVE_CACHE_BYTES", 2 * 199 * 4)          # かたまり 2 つ分
+    small = Recording.open(tmp_path / "r")
+    assert small.waveform_view(0, 6000, 60) == expected
+    assert small.waveform_view(0, 6000, 60) == expected
+    assert len(small._waves) <= 2
+
+
+def test_span_and_distinct_use_the_indexes_and_follow_new_events(tmp_path):
+    # 範囲は区間の終わり（t_end）も含める。stream の一覧は記録が増えたら読み直す（増えていなければ前の答え）
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6)
+    rec.add("dap", "ap_read", 100)
+    rec.add("rtos", "run", 50, t_end=900)
+    rec.flush()
+    view = Recording.open(tmp_path / "r")
+    assert view.span() == (50, 900) and view.distinct("stream") == ["dap", "rtos"]
+    rec.add("uart", "rx", 1200)
+    rec.flush()
+    assert view.span() == (50, 1200) and view.distinct("stream") == ["dap", "rtos", "uart"]
+    plans = " ".join(str(r) for r in view._db.execute(
+        "EXPLAIN QUERY PLAN SELECT a, t FROM events WHERE stream = 'fpga' AND kind = 'group' AND t < 5 "
+        "ORDER BY t DESC LIMIT 1"))
+    assert "events_stream_kind_t" in plans
+    rec.close()
+
+
+def test_meta_is_replaced_whole_so_a_failed_write_keeps_the_old_one(tmp_path, monkeypatch):
+    # 書く途中で失敗しても meta.json が半分にならない（一時ファイルに書いてから置き換える。R17）
+    from pathlib import Path
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6)
+    rec.close()
+    view = Recording(tmp_path / "r")
+    before = (tmp_path / "r" / "meta.json").read_text(encoding="utf-8")
+    real = Path.write_text
+
+    def half(self, data, *a, **kw):
+        real(self, data[: len(data) // 2], *a, **kw)
+        raise OSError("disk full")
+    monkeypatch.setattr(Path, "write_text", half)
+    with pytest.raises(OSError):
+        view.update_meta(note="x" * 1000)
+    monkeypatch.undo()
+    assert (tmp_path / "r" / "meta.json").read_text(encoding="utf-8") == before
+    assert json.loads(before)

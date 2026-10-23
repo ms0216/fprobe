@@ -1,5 +1,5 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
--- CSR ブロック xtrig（0x00000500, 64 バイト）: クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）
+-- CSR ブロック xtrig（0x00000500, 64 バイト）: クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）、bit4 = FPGA の観測の値の一致（obs.match）、bit5 = サンプラの値の一致（sampler_match。構成によって無い）
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
 -- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
 library ieee;
@@ -18,8 +18,8 @@ entity csr_xtrig is
     bus_ack   : out std_logic;
     bus_err   : out std_logic;
     bus_rdata : out csr_word_t;
-    route_to_la : out std_logic_vector(3 downto 0);   -- route.to_la（RW）
-    route_to_inject : out std_logic_vector(3 downto 0);   -- route.to_inject（RW）
+    route_to_la : out std_logic_vector(5 downto 0);   -- route.to_la（RW）
+    route_to_inject : out std_logic_vector(5 downto 0);   -- route.to_inject（RW）
     command_fire : out std_logic;   -- command.fire（PULSE: 1 を書いた次の周期に 1）
     inject_ap : out std_logic_vector(7 downto 0);   -- inject_ap（RW）
     inject_addr : out std_logic_vector(31 downto 0);   -- inject_addr（RW）
@@ -48,8 +48,8 @@ architecture rtl of csr_xtrig is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal route_to_la_r : std_logic_vector(3 downto 0) := "0000";
-  signal route_to_inject_r : std_logic_vector(3 downto 0) := "0000";
+  signal route_to_la_r : std_logic_vector(5 downto 0) := "000000";
+  signal route_to_inject_r : std_logic_vector(5 downto 0) := "000000";
   signal command_fire_r : std_logic := '0';
   signal inject_ap_r : std_logic_vector(7 downto 0) := "00000000";
   signal inject_addr_r : std_logic_vector(31 downto 0) := "11100000000000001110110111110000";
@@ -72,8 +72,8 @@ begin
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       command_fire_r <= '0';
       if rst = '1' then
-        route_to_la_r <= "0000";
-        route_to_inject_r <= "0000";
+        route_to_la_r <= "000000";
+        route_to_inject_r <= "000000";
         inject_ap_r <= "00000000";
         inject_addr_r <= "11100000000000001110110111110000";
         inject_value_r <= "10100000010111110000000000000011";
@@ -87,11 +87,11 @@ begin
         ack   <= '1';
         case index is
           when 0 =>   -- route
-            rdata(3 downto 0) <= route_to_la_r;
-            rdata(11 downto 8) <= route_to_inject_r;
+            rdata(5 downto 0) <= route_to_la_r;
+            rdata(13 downto 8) <= route_to_inject_r;
             if bus_we = '1' then
-              route_to_la_r <= bus_wdata(3 downto 0);
-              route_to_inject_r <= bus_wdata(11 downto 8);
+              route_to_la_r <= bus_wdata(5 downto 0);
+              route_to_inject_r <= bus_wdata(13 downto 8);
             end if;
           when 1 =>   -- command
             if bus_we = '1' then

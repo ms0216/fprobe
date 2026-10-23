@@ -32,8 +32,9 @@ class SafetyTools:
     # --- 止める前の見分け --------------------------------------------------------------------------
 
     def halt_risk(self) -> dict:
-        """コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）で壊れうるか（ELF だけ。機器には
-        触らない）: risky、reasons（重い順。kind = radio / usb / watchdog / rtos、count、symbols = 手がかりの
+        """コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の手がかり（ELF だけ。機器には
+        触らない。判定はしない）: matched（どれかの名前が合った）、matches（決まった順。kind = radio / usb / watchdog / rtos、
+        count、symbols = 合った
         シンボルの先頭、rtos = RTOS の名前）、monitor_in_elf（止めずにデバッグするモニタがあるか。あれば
         target_debug_mode_set の mode="monitor" へ）。"""
         symbols = self._symbols

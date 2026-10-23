@@ -127,15 +127,15 @@ class TestpointTools:
                         rle: bool = True, trigger: bool = True, after_beats: int = DEEP_AFTER_BEATS,
                         port: int = 1, swo_baud: int | None = None, core_clock_hz: float | None = None,
                         rtt_channel: int = 1, duration_s: float | None = None, bucket_s: float = 1.0,
-                        silence_s: float | None = None, open_s: float | None = None, long_sigma: float = 6.0,
-                        long_min_calls: int = 30, long_ratio: float = 1.2) -> dict:
+                        silence_s: float | None = None, open_s: float | None = None,
+                        long_s: float | None = None) -> dict:
         """テストポイントの受け取りを始める（すぐ戻る。結果は testpoint_report / testpoint_stop）。method:
         gpio_serial（clock_channel・data_channel）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。
         strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから
         after_beats 拍。stop で読む）か stream（流し続ける。長時間向け）。itm は SWO（port のスティミュラス・ポート。
         swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定する）。rtt は RTT の上りの rtt_channel（core_clock_hz =
         CYCCNT の速さが要る。RTT の受信が無ければ始める）。duration_s を渡すと stop はそこまで待つ（stream は自分で終わる）。
-        bucket_s・silence_s・open_s・long_* は異常の印の設定。記録中なら stream "testpoint" に書く。"""
+        bucket_s・silence_s・open_s・long_s は印の設定（どれも明示したときだけ。long_s = これより長い呼び出しに印）。記録中なら stream "testpoint" に書く。"""
         if method not in METHODS:
             raise ValueError(f"method は {' / '.join(METHODS)}")
         if method.startswith("gpio") and capture not in CAPTURES:
@@ -146,8 +146,7 @@ class TestpointTools:
         if table_path is None:
             raise RuntimeError("対応表が無い（testpoint_instrument の後か、map_path で testpoints.json を指定する）")
         table = ProbeTable.load(table_path)
-        options = {"bucket_s": bucket_s, "silence_s": silence_s, "open_s": open_s, "long_sigma": long_sigma,
-                   "long_min_calls": long_min_calls, "long_ratio": long_ratio}
+        options = {"bucket_s": bucket_s, "silence_s": silence_s, "open_s": open_s, "long_s": long_s}
         with self._lock:
             if self._tp_run is not None:
                 raise RuntimeError("テストポイントを受け取っている（testpoint_stop を先に）")

@@ -25,7 +25,7 @@ def test_halt_risk_of_the_demo_elf():
     p = Probe("unused")
     p._symbols = Symbols(DEMO)
     r = p.halt_risk()
-    assert r["risky"] is False and r["reasons"] == [] and r["elf"].endswith("sram_demo.elf")
+    assert r["matched"] is False and r["matches"] == [] and r["elf"].endswith("sram_demo.elf")
 
 
 def test_halt_risk_reports_radio_and_rtos():
@@ -34,8 +34,8 @@ def test_halt_risk_reports_radio_and_rtos():
         SimpleNamespace(name="RADIO_IRQHandler", kind="function"),
         SimpleNamespace(name="_kernel", kind="object")])
     r = p.halt_risk()
-    assert r["risky"] and [x["kind"] for x in r["reasons"]] == ["radio", "rtos"]
-    assert r["reasons"][1]["rtos"] == "Zephyr"
+    assert r["matched"] and [x["kind"] for x in r["matches"]] == ["radio", "rtos"]
+    assert r["matches"][1]["rtos"] == "Zephyr"
 
 
 # --- 致命的エラーの見張り（target_status の fatal） ------------------------------------------------------
@@ -66,7 +66,7 @@ def test_running_normally_has_no_fatal(running):
 
 def test_staying_in_the_default_handler_is_reported_as_a_fault_loop(running):
     p, memory, target, at = running
-    assert "fatal" not in at("default_handler", 0)
+    assert at("default_handler", 0)["fatal"]["kind"] == "fault_loop"      # 待たずに事実として（経験則の秒数を置かない）
     status = at("default_handler", 2)
     assert status["state"] == "RUNNING"
     assert status["fatal"]["kind"] == "fault_loop" and status["fatal"]["function"] == "default_handler"

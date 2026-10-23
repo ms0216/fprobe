@@ -22,7 +22,7 @@ def test_set_merges_and_reports_what_changed():
     h = Holder()
     assert h.ui_state_get() == {"rev": 0, "view": None, "cursors": {"selection": None, "mouse": None, "reference": None},
                                 "rows": None, "event": None, "frame": 0, "sampling": None, "dashboard": None,
-                                "pointers": []}
+                                "fpga_signals": None, "system": None, "pointers": []}
     out = h.ui_state_set(view={"source": "recording", "t0": 10, "t1": 20}, cursors={"selection": 12}, origin="w1")
     assert out["changed"] == ["view", "cursors"] and out["rev"] == 1
     out = h.ui_state_set(cursors={"reference": 11})
@@ -157,3 +157,59 @@ def test_mcp_has_the_screen_state_tools():
     tools = {t.name: t for t in asyncio.run(build_client_server(FakeClient(), load_spec()).list_tools())}
     assert {"ui_state_get", "ui_state_set"} <= set(tools)
     assert "origin" not in tools["ui_state_set"].input_schema["properties"]             # 窓の印は AI に出さない
+
+
+def test_system_analysis_watches_and_conditions_are_shared():
+    # システム解析の MCU のメモリの表と FPGA の条件: 別のウィンドウ・別の PC（--lan）・AI が同じものを見る
+    h = Holder()
+    system = {"watches": [{"name": " errors ", "address": 0x20040808}, {"name": "requests", "address": 0x20040804}],
+              "conditions": [{"name": "retry while BUSY", "expr": "restart changed and state=BUSY"},
+                             {"name": "", "expr": " in0 rose "}]}
+    out = h.ui_state_set(system=system, origin="w1")
+    assert out["changed"] == ["system"]
+    assert h.ui_state_get()["system"] == {
+        "watches": [{"name": "errors", "address": 0x20040808}, {"name": "requests", "address": 0x20040804}],
+        "conditions": [{"name": "retry while BUSY", "expr": "restart changed and state=BUSY"},
+                       {"name": "in0 rose", "expr": "in0 rose"}]}                # 名前が空なら式
+    assert h.sent[-1][1]["state"]["system"]["watches"][0]["name"] == "errors"
+    for bad in ({"watches": [{"name": "a", "address": 2}]},                         # 4 の倍数でない
+                {"watches": [{"name": "a", "address": 0}, {"name": "a", "address": 4}]},   # 名前の重複
+                {"conditions": [{"name": "x", "expr": ""}]}):
+        with pytest.raises(ValueError):
+            h.ui_state_set(system=bad)
+    assert h.ui_state_set(clear=["system"])["system"] is None
+
+
+def test_lasting_items_survive_a_restart_when_persisted(tmp_path):
+    # デーモンの再起動で、信号の定義・システム解析の表・データ サンプリング・操作パネルを失わない（視点・カーソル等の
+    # その場のものは残さない）。保存はデーモンが有効にしたときだけ（試験等の Probe は書かない）
+    path = tmp_path / "ui_state.json"
+    h = Holder()
+    h.ui_state_persist(path)
+    system = {"watches": [{"name": "errors", "address": 0x20040808}], "conditions": []}
+    h.ui_state_set(system=system, view={"source": "capture", "t0": 0, "t1": 10},
+                   fpga_signals={"groups": {"0": [{"name": "state", "lsb": 0, "width": 2}]}})
+    again = Holder()
+    again.ui_state_persist(path)
+    st = again.ui_state_get()
+    assert st["system"] == system and st["fpga_signals"]["groups"]["0"][0]["name"] == "state"
+    assert st["view"] is None
+    path.write_text("{broken", encoding="utf-8")                    # 壊れたファイルは無視して既定で始める
+    broken = Holder()
+    broken.ui_state_persist(path)
+    assert broken.ui_state_get()["system"] is None
+    assert not (tmp_path / "other.json").exists() and Holder().ui_state_set(system=system)  # 有効にしなければ書かない
+
+
+def test_one_bad_saved_item_does_not_drop_the_others(tmp_path):
+    # 保存の 1 項目が今の検査に通らなくても（形が変わった等）、ほかの項目は読み戻し、ファイルからも消さない
+    import json
+    path = tmp_path / "ui_state.json"
+    good = {"groups": {"0": [{"name": "state", "lsb": 0, "width": 2}]}}
+    path.write_text(json.dumps({"fpga_signals": good, "system": {"watches": [{"name": "a", "address": 2}]},
+                                "sampling": None, "dashboard": None}), encoding="utf-8")
+    h = Holder()
+    h.ui_state_persist(path)
+    assert h.ui_state_get()["fpga_signals"]["groups"]["0"][0]["name"] == "state"
+    h.ui_state_set(sampling={"expressions": [{"expr": "x"}], "rate_hz": 10})
+    assert json.loads(path.read_text(encoding="utf-8"))["fpga_signals"]["groups"]["0"][0]["name"] == "state"

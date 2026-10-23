@@ -45,6 +45,9 @@ entity fprobe_core is
     -- ボードの構成で付く機能
     AUX           : boolean := false;      -- 補助マイコン（Pico）の計測値の受け口（aux_rx、CSR aux、イベント 6）
     SAMPLER       : boolean := false;      -- DAP サンプラ（F4: 変数のライブ観測。CSR sampler、イベント 7）
+    SAMPLER_MATCH : boolean := false;      -- サンプラの値の一致 → クロストリガの源 bit5（R21。CSR sampler_match）
+    OBS_PORT      : boolean := false;      -- 対象の FPGA の観測（obs_jtag_engine、obs_* の口、CSR obs、イベント 8・9）
+    SYNC          : boolean := false;      -- ボードの間の時刻の同期（sync_link、sync_in / sync_out、CSR sync、イベント 10）
     -- Primer の構成（B22: 標準 = JTAG なし、JTAG の構成 = サンプラ・故障注入なし）で外す機能。ケイパビリティ DEBUG と一致させる
     HAS_JTAG      : boolean := true;       -- JTAG の PHY と経路（無ければ DAP_Connect の JTAG は失敗）
     HAS_SWO_MANCHESTER : boolean := true;  -- SWO の Manchester 方式の受信（U51。ケイパビリティ DEBUG と DAP_Info に出す）
@@ -161,7 +164,16 @@ entity fprobe_core is
     stream_out_ready : in  std_logic := '1';
     stream_out_data  : out std_logic_vector(7 downto 0);
     -- 補助マイコン（AUX のときだけ使う）
-    aux_rx           : in  std_logic := '1'
+    aux_rx           : in  std_logic := '1';
+    -- 対象の FPGA の観測の JTAG（OBS_PORT のときだけ使う。obs_oe = 1 の間だけ駆動する）
+    obs_tck          : out std_logic;
+    obs_tms          : out std_logic;
+    obs_tdi          : out std_logic;
+    obs_tdo          : in  std_logic := '0';
+    obs_oe           : out std_logic;
+    -- ボードの間の時刻の同期（SYNC のときだけ使う）
+    sync_in          : in  std_logic := '0';
+    sync_out         : out std_logic
   );
 end entity;
 
@@ -183,6 +195,7 @@ architecture rtl of fprobe_core is
   signal swd_turnaround  : natural range 1 to 4;
   signal swd_idle_cycles : natural range 0 to 255;
   signal swd_sample_delay : std_logic_vector(1 downto 0);
+  signal jtag_sample_delay : std_logic_vector(2 downto 0);
   signal swd_cmd_op      : std_logic_vector(1 downto 0);
   signal swd_cmd_count   : natural range 1 to 64;
   signal swd_cmd_request : std_logic_vector(3 downto 0);
@@ -252,6 +265,14 @@ architecture rtl of fprobe_core is
   signal aux_value : unsigned(13 downto 0);
   signal aux_word : std_logic_vector(31 downto 0) := (others => '0');
   signal aux_time : std_logic_vector(47 downto 0) := (others => '0');
+  -- 対象の FPGA の観測（イベント 8・9 として 1 件保持）
+  signal obs_valid, obs_sync, obs_held, obs_held_sync : std_logic := '0';
+  signal obs_data, obs_addr, obs_word, obs_word_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal obs_time, obs_word_time : std_logic_vector(47 downto 0) := (others => '0');
+  -- ボードの間の時刻の同期の組（イベント 10 として 1 件保持）
+  signal sync_valid, sync_held : std_logic := '0';
+  signal sync_local, sync_word_time : std_logic_vector(47 downto 0) := (others => '0');
+  signal sync_parent, sync_word : std_logic_vector(63 downto 0) := (others => '0');
   signal events_enable_prev : std_logic := '0';
   signal mem_base, mem_count, mem_seed : std_logic_vector(31 downto 0);
   signal mem_errors, mem_first, mem_wc, mem_rc : std_logic_vector(31 downto 0) := (others => '0');
@@ -283,13 +304,16 @@ architecture rtl of fprobe_core is
   signal inj_result : std_logic_vector(1 downto 0);
   signal inj_ack : std_logic_vector(2 downto 0);
   signal inj_count : unsigned(15 downto 0);
+  signal inj_transfers : unsigned(7 downto 0);         -- 停止の書き込みまでの転送数（イベント 11。R20）
   signal match_addr, match_addr_mask, match_data, match_data_mask : std_logic_vector(31 downto 0);
   signal match_on_write, match_on_read, match : std_logic;
   signal ev_valid, ev_parity : std_logic;
   signal ev_request : std_logic_vector(3 downto 0);
   signal ev_ack : std_logic_vector(2 downto 0);
   signal ev_addr, ev_data : std_logic_vector(31 downto 0);
-  signal route_to_la, route_to_inject, sources : std_logic_vector(3 downto 0);
+  signal route_to_la, route_to_inject, sources : std_logic_vector(5 downto 0);
+  signal smp_match : std_logic;                     -- サンプラの値の一致（クロストリガの源 bit5。R21）
+  signal obs_match : std_logic;                     -- FPGA の観測の値の一致（クロストリガの源 bit4）
   -- 多段トリガ
   signal seq_enable, seq_fire, seq_fired : std_logic;
   signal seq_stages : std_logic_vector(2 downto 0);
@@ -411,7 +435,7 @@ begin
               select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
               shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy, written => inj_written, result => inj_result, last_ack => inj_ack,
-              count => inj_count,
+              count => inj_count, transfers => inj_transfers,
               dap_cmd_valid => swd_cmd_valid, dap_cmd_ready => swd_cmd_ready, dap_cmd_op => swd_cmd_op,
               dap_cmd_count => swd_cmd_count, dap_cmd_req => swd_cmd_request, dap_cmd_data => swd_cmd_data,
               dap_rsp_valid => dap_rsp_valid,
@@ -435,6 +459,7 @@ begin
     inj_result      <= "11";
     inj_ack         <= (others => '0');
     inj_count       <= (others => '0');
+    inj_transfers   <= (others => '0');
   end generate;
 
   -- DAP サンプラ: 上流（dap_processor・swd_injector）の命令の境界で線を借り、周期的にメモリを読む
@@ -480,6 +505,37 @@ begin
                 status_held => held);
   end generate;
 
+  -- サンプラの値の一致（R21）: サンプラの標本が条件に入った瞬間 → クロストリガの源 bit5
+  smatch_g : if SAMPLER and SAMPLER_MATCH generate
+    signal m_addr, m_mask, m_value : std_logic_vector(31 downto 0);
+    signal m_enable, m_matched, m_any : std_logic;
+    signal m_seen, m_count : unsigned(31 downto 0);
+    signal m_time, m_prev : unsigned(47 downto 0);
+  begin
+    smp_match_i : entity work.sampler_match
+      port map (clk => clk, rst => rst, time_count => time_count, enable => m_enable,
+                match_addr => m_addr, match_mask => m_mask, match_value => m_value,
+                sample_valid => smp_valid, sample_addr => smp_addr, sample_data => smp_data, sample_ack => smp_ack,
+                fire => smp_match, matched => m_matched, seen_any => m_any, seen => m_seen, count => m_count,
+                fire_time => m_time, prev_time => m_prev);
+    csr_smatch_i : entity work.csr_sampler_match
+      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SAMPLER_MATCH), bus_we => bus_we, bus_addr => bus_addr,
+                bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SAMPLER_MATCH), bus_err => s_err(CSR_WIN_SAMPLER_MATCH),
+                bus_rdata => s_rdata(CSR_WIN_SAMPLER_MATCH),
+                addr => m_addr, mask => m_mask, value => m_value, control_enable => m_enable,
+                control_matched => m_matched, control_seen_any => m_any,
+                seen => std_logic_vector(m_seen), count => std_logic_vector(m_count),
+                time_lo => std_logic_vector(m_time(31 downto 0)), time_hi => x"0000" & std_logic_vector(m_time(47 downto 32)),
+                prev_lo => std_logic_vector(m_prev(31 downto 0)), prev_hi => x"0000" & std_logic_vector(m_prev(47 downto 32)));
+  end generate;
+
+  no_smatch_g : if not (SAMPLER and SAMPLER_MATCH) generate
+    smp_match <= '0';
+    smatch_absent_i : entity work.csr_absent
+      port map (clk => clk, bus_req => s_req(CSR_WIN_SAMPLER_MATCH), bus_ack => s_ack(CSR_WIN_SAMPLER_MATCH),
+                bus_err => s_err(CSR_WIN_SAMPLER_MATCH), bus_rdata => s_rdata(CSR_WIN_SAMPLER_MATCH));
+  end generate;
+
   -- DAP サンプラが無い: 上流の命令はそのまま PHY へ、サンプラの窓は読むとエラー
   no_sampler_g : if not SAMPLER generate
     port_cmd_valid   <= phy_cmd_valid;
@@ -513,6 +569,7 @@ begin
     port map (clk => clk, rst => rst, enable => swd_enable, jtag => jtag, half_period => swd_half_period,
               turnaround => swd_turnaround, data_phase => swd_data_phase, idle_cycles => swd_idle_cycles,
               sample_delay => to_integer(unsigned(swd_sample_delay)),
+              jtag_sample_delay => to_integer(unsigned(jtag_sample_delay)),
               jtag_dr_before => jtag_dr_before, jtag_dr_after => jtag_dr_after,
               jtag_ir_before => jtag_ir_before, jtag_ir_after => jtag_ir_after, jtag_ir_len => jtag_ir_len,
               cmd_valid => port_cmd_valid, cmd_ready => port_cmd_ready, cmd_op => port_cmd_op,
@@ -735,8 +792,9 @@ begin
                 bus_err => s_err(CSR_WIN_TRIGSEQ), bus_rdata => s_rdata(CSR_WIN_TRIGSEQ));
   end generate;
 
-  -- クロストリガ: 源（bit0 ロジアナのトリガ、bit1 番地一致、bit2 ホストの指令、bit3 多段トリガ）→ 動作。1 周期で届く
-  sources <= seq_fire & host_fire & match & ((la_triggered and not la_triggered_prev) or
+  -- クロストリガ: 源（bit0 ロジアナのトリガ、bit1 番地一致、bit2 ホストの指令、bit3 多段トリガ、bit4 FPGA の観測の
+  -- 値の一致、bit5 サンプラの値の一致）→ 動作。1 周期で届く
+  sources <= smp_match & obs_match & seq_fire & host_fire & match & ((la_triggered and not la_triggered_prev) or
                                     (deep_triggered and not deep_triggered_prev));
   process (clk)
   begin
@@ -786,7 +844,7 @@ begin
     port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_DEBUG), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_DEBUG),
               bus_err => s_err(CSR_WIN_DEBUG), bus_rdata => s_rdata(CSR_WIN_DEBUG),
-              sample_delay_swd => swd_sample_delay);
+              sample_delay_swd => swd_sample_delay, sample_delay_jtag => jtag_sample_delay);
 
   -- 補助マイコン（Pico）の計測値: ch 0（ターゲット電圧）の最新値を CSR に、全チャンネルの値をイベント 6 に
   aux_g : if AUX generate
@@ -826,6 +884,106 @@ begin
                 bus_err => s_err(CSR_WIN_AUX), bus_rdata => s_rdata(CSR_WIN_AUX));
   end generate;
 
+  -- ボードの間の時刻の同期: 親として sync_out に出し、子として sync_in の組をイベント 10 に
+  sync_g : if SYNC generate
+    signal enable, master : std_logic;
+    signal period : std_logic_vector(31 downto 0);
+    signal local, parent : unsigned(63 downto 0);
+    signal crc_errors, pairs : unsigned(15 downto 0);
+  begin
+    link_i : entity work.sync_link
+      port map (clk => clk, rst => rst, time_count => time_count, enable => enable, master => master,
+                period => unsigned(period), sync_in => sync_in, sync_out => sync_out, pair_valid => sync_valid,
+                pair_local => local, pair_parent => parent, crc_errors => crc_errors);
+    sync_local  <= std_logic_vector(local(47 downto 0));
+    sync_parent <= std_logic_vector(parent);
+    process (clk)
+    begin
+      if rising_edge(clk) then
+        if rst = '1' or enable = '0' then
+          pairs <= (others => '0');
+        elsif sync_valid = '1' then
+          pairs <= pairs + 1;
+        end if;
+      end if;
+    end process;
+    sync_csr_i : entity work.csr_sync
+      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SYNC), bus_we => bus_we,
+                bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SYNC),
+                bus_err => s_err(CSR_WIN_SYNC), bus_rdata => s_rdata(CSR_WIN_SYNC),
+                control_enable => enable, control_master => master, period => period,
+                status_pairs => std_logic_vector(pairs), status_crc_errors => std_logic_vector(crc_errors));
+  end generate;
+  no_sync_g : if not SYNC generate
+    sync_out    <= '0';
+    sync_valid  <= '0';
+    sync_local  <= (others => '0');
+    sync_parent <= (others => '0');
+    sync_absent_i : entity work.csr_absent
+      port map (clk => clk, bus_req => s_req(CSR_WIN_SYNC), bus_ack => s_ack(CSR_WIN_SYNC),
+                bus_err => s_err(CSR_WIN_SYNC), bus_rdata => s_rdata(CSR_WIN_SYNC));
+  end generate;
+
+  -- 対象の FPGA の観測: 対象の JTAG の観測の回路をスキャンし続け、記録をイベント 8、時刻合わせをイベント 9 に
+  obs_g : if OBS_PORT generate
+    signal enable, free_pins, push : std_logic;
+    signal half_period, sync_period : std_logic_vector(15 downto 0);
+    signal ir_len, ir_before, ir_after : std_logic_vector(5 downto 0);
+    signal dr_before, dr_after : std_logic_vector(2 downto 0);
+    signal user_ir, read_value, id : std_logic_vector(31 downto 0);
+    signal cmd : std_logic_vector(15 downto 0);
+    signal words : std_logic_vector(8 downto 0);
+    signal running, id_ok, stuck, pending, overflow_seen, dropped, target_running, driving : std_logic;
+    signal scans : unsigned(31 downto 0);
+    signal m_mask, m_value, m_change : std_logic_vector(15 downto 0);
+    signal m_on : std_logic;
+    signal m_count : unsigned(31 downto 0);
+  begin
+    obs_i : entity work.obs_jtag_engine
+      port map (clk => clk, rst => rst, time_count => time_count(47 downto 0), enable => enable,
+                free_pins => free_pins, half_period => unsigned(half_period),
+                sample_delay => 0, ir_len => unsigned(ir_len),   -- ponytail: 観測の口の TDO の遅れは High 相の終わり。遅れて届く対象が出たら CSR に
+                ir_before => unsigned(ir_before), ir_after => unsigned(ir_after), dr_before => unsigned(dr_before),
+                dr_after => unsigned(dr_after), user_ir => user_ir, words => unsigned(words),
+                sync_period => unsigned(sync_period), cmd_push => push, cmd_data => cmd,
+                match_mask => m_mask, match_value => m_value, match_change => m_change, match_on => m_on,
+                match => obs_match, match_count => m_count,
+                running => running, target_running => target_running, driving => driving, id_ok => id_ok,
+                stuck => stuck, cmd_pending => pending,
+                overflow_seen => overflow_seen, cmd_dropped => dropped, scans => scans, read_value => read_value,
+                id => id, ev_valid => obs_valid, ev_sync => obs_sync, ev_data => obs_data, ev_addr => obs_addr,
+                ev_time => obs_time, tck => obs_tck, tms => obs_tms, tdi => obs_tdi, tdo => obs_tdo, oe => obs_oe);
+    obs_csr_i : entity work.csr_obs
+      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_OBS), bus_we => bus_we,
+                bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_OBS),
+                bus_err => s_err(CSR_WIN_OBS), bus_rdata => s_rdata(CSR_WIN_OBS),
+                control_enable => enable, control_release => free_pins, half_period => half_period,
+                chain_ir_len => ir_len, chain_ir_before => ir_before, chain_ir_after => ir_after,
+                chain_dr_before => dr_before, chain_dr_after => dr_after, user_ir => user_ir, words => words,
+                sync_period => sync_period, cmd => cmd, cmd_push => push,
+                status_running => running, status_id_ok => id_ok, status_stuck => stuck,
+                status_cmd_pending => pending, status_overflow_seen => overflow_seen, status_cmd_dropped => dropped,
+                status_target_running => target_running, status_driving => driving,
+                scans => std_logic_vector(scans), read_value => read_value, id => id,
+                match_mask => m_mask, match_value => m_value, match_change_change => m_change,
+                match_change_enable => m_on, match_count => std_logic_vector(m_count));
+  end generate;
+  no_obs_g : if not OBS_PORT generate
+    obs_valid <= '0';
+    obs_sync  <= '0';
+    obs_data  <= (others => '0');
+    obs_addr  <= (others => '0');
+    obs_time  <= (others => '0');
+    obs_tck   <= '1';
+    obs_tms   <= '1';
+    obs_tdi   <= '1';
+    obs_oe    <= '0';
+    obs_match <= '0';
+    obs_absent_i : entity work.csr_absent
+      port map (clk => clk, bus_req => s_req(CSR_WIN_OBS), bus_ack => s_ack(CSR_WIN_OBS),
+                bus_err => s_err(CSR_WIN_OBS), bus_rdata => s_rdata(CSR_WIN_OBS));
+  end generate;
+
   events_csr_i : entity work.csr_events
     port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_EVENTS), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_EVENTS),
@@ -834,8 +992,9 @@ begin
               capacity => events_capacity);
 
   -- イベント（1 件 128 ビット）: [47:0] 時刻、[79:48] 番地、[111:80] データ、[114:112] ACK、[118:115] 要求、
-  -- [119] パリティ異常、[127:120] 種類（1 = ホストの転送、2 = 割り込み書き込み、3 = UART 受信（ターゲット → PC）、
-  -- 4 = UART 送信（PC → ターゲット）、5 = SWO、6 = 補助マイコンの計測値、7 = DAP サンプラの 1 語（番地・値・ACK））。3〜5 はデータの下位 8 ビットがバイトで、
+  -- [119] パリティ異常、[127:120] 種類（1 = ホストの転送、2 = 割り込み書き込み（旧い形。今は 11）、3 = UART 受信（ターゲット → PC）、
+  -- 4 = UART 送信（PC → ターゲット）、5 = SWO、6 = 補助マイコンの計測値、7 = DAP サンプラの 1 語（番地・値・ACK）、8・9 = FPGA の観測、10 = 時刻の同期の組、
+  -- 11 = 割り込み書き込み（[119:112] = 停止の書き込みまでの転送数。R20））。3〜5 はデータの下位 8 ビットがバイトで、
   -- 6 はデータ = ch << 16 | 値（mV）。時刻はブリッジ / 受信器との
   -- 受け渡しの周期。バイトは源ごとに 1 件保持し、DAP・割り込みのイベントが無い周期に出す（1 周期に 1 件）。
   -- 保持がまだ出ていないうちに次のバイトが来たら捨てて byte_lost に数える（events.lost に足す）
@@ -852,9 +1011,11 @@ begin
   process (clk)
     variable served : boolean;
     variable taken  : std_logic_vector(2 downto 0);
-    variable lost_n : natural range 0 to 4;
+    variable lost_n : natural range 0 to 7;               -- 同じ周期に落ちうる源の数（サンプラ・補助・観測・同期・バイト 3）
     variable aux_taken : boolean;
+    variable obs_taken : boolean;
     variable smp_taken : boolean;
+    variable sync_taken : boolean;
   begin
     if rising_edge(clk) then
       event_valid <= '0';
@@ -867,7 +1028,8 @@ begin
         served := true;
       elsif inj_written = '1' then
         event_valid <= '1';
-        event_data  <= x"02" & '0' & "1101" & "001" & inj_value & inj_addr & std_logic_vector(time_count(47 downto 0));
+        -- 種類 11（R20）: 要求・ACK の欄の代わりに転送数（書き込みは常に AP の DRW・OK。旧い種類 2 は転送数なし）
+        event_data  <= x"0B" & std_logic_vector(inj_transfers) & inj_value & inj_addr & std_logic_vector(time_count(47 downto 0));
         served := true;
       end if;
       smp_taken := false;
@@ -917,6 +1079,50 @@ begin
       elsif aux_taken then
         aux_held <= '0';
       end if;
+      -- 対象の FPGA の観測（記録 8・時刻合わせ 9。時刻はエンジンが付けたもの）
+      obs_taken := false;
+      if not served and obs_held = '1' then
+        event_valid <= '1';
+        if obs_held_sync = '1' then
+          event_data <= x"09" & x"00" & obs_word & obs_word_addr & obs_word_time;
+        else
+          event_data <= x"08" & x"00" & obs_word & obs_word_addr & obs_word_time;
+        end if;
+        served    := true;
+        obs_taken := true;
+      end if;
+      if obs_valid = '1' and events_enable = '1' then
+        if obs_held = '1' and not obs_taken then
+          lost_n := lost_n + 1;                                -- 前の語がまだ出ていない（語の間隔は TCK の 32 周期）
+        else
+          obs_held      <= '1';
+          obs_held_sync <= obs_sync;
+          obs_word      <= obs_data;
+          obs_word_addr <= obs_addr;
+          obs_word_time <= obs_time;
+        end if;
+      elsif obs_taken then
+        obs_held <= '0';
+      end if;
+      -- ボードの間の時刻の同期の組（10。時刻 = 子の時刻、番地 = 親の時刻の下位 32、データ = 上位 32）
+      sync_taken := false;
+      if not served and sync_held = '1' then
+        event_valid <= '1';
+        event_data  <= x"0A" & x"00" & sync_word(63 downto 32) & sync_word(31 downto 0) & sync_word_time;
+        served     := true;
+        sync_taken := true;
+      end if;
+      if sync_valid = '1' and events_enable = '1' then
+        if sync_held = '1' and not sync_taken then
+          lost_n := lost_n + 1;                                -- 前の組がまだ出ていない（組の間隔は 730 周期以上）
+        else
+          sync_held      <= '1';
+          sync_word      <= sync_parent;
+          sync_word_time <= sync_local;
+        end if;
+      elsif sync_taken then
+        sync_held <= '0';
+      end if;
       for k in 0 to 2 loop
         if byte_fire(k) = '1' and events_enable = '1' then
           if byte_held(k) = '1' and taken(k) = '0' then
@@ -934,6 +1140,8 @@ begin
         byte_held <= (others => '0');
         aux_held  <= '0';
         smp_held  <= '0';
+        obs_held  <= '0';
+        sync_held <= '0';
       end if;
       if rst = '1' or (events_enable = '1' and events_enable_prev = '0') then
         byte_lost <= (others => '0');
@@ -1081,16 +1289,16 @@ begin
   xout_g : if XOUT_COUNT > 0 generate
     constant N : positive := XOUT_COUNT;
     type cfg8_t is array (0 to 1) of std_logic_vector(7 downto 0);
-    type cfg4_t is array (0 to 1) of std_logic_vector(3 downto 0);
+    type cfg6_t is array (0 to 1) of std_logic_vector(5 downto 0);
     type cfg3_t is array (0 to 1) of std_logic_vector(2 downto 0);
     type cfg2_t is array (0 to 1) of std_logic_vector(1 downto 0);
     signal w_mask, w_value, c_length : cfg8_t;
-    signal w_sources : cfg4_t;
+    signal w_sources : cfg6_t;
     signal c_unit : cfg3_t;
     signal c_mode, c_pin : cfg2_t;
     signal w_any, c_enable, c_level, c_claim : std_logic_vector(1 downto 0);
     signal f_mask, f_value, f_length : std_logic_vector(8 * N - 1 downto 0);
-    signal f_src : std_logic_vector(4 * N - 1 downto 0);
+    signal f_src : std_logic_vector(6 * N - 1 downto 0);
     signal f_unit : std_logic_vector(3 * N - 1 downto 0);
     signal f_mode : std_logic_vector(2 * N - 1 downto 0);
     signal out_o, out_oe : std_logic_vector(N - 1 downto 0);
@@ -1113,7 +1321,7 @@ begin
       f_mask(8 * k + 7 downto 8 * k)   <= w_mask(k);
       f_value(8 * k + 7 downto 8 * k)  <= w_value(k);
       f_length(8 * k + 7 downto 8 * k) <= c_length(k);
-      f_src(4 * k + 3 downto 4 * k)    <= w_sources(k);
+      f_src(6 * k + 5 downto 6 * k)    <= w_sources(k);
       f_unit(3 * k + 2 downto 3 * k)   <= c_unit(k);
       f_mode(2 * k + 1 downto 2 * k)   <= c_mode(k);
     end generate;

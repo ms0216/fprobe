@@ -19,7 +19,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from .model import Trace, TraceEvent, unwrap32
+from .model import Trace, TraceEvent, is_rtos_idle_name, unwrap32
 from .scvd import Scvd, ScvdContext
 
 __all__ = ["INFO_SIZE", "INFO_SYMBOL", "RECORD_SIZE", "STATUS_SIZE", "EventRecorderError", "decode_event_recorder",
@@ -220,7 +220,7 @@ def _event(trace: Trace, event_id: int, irq: bool, ts: int, values: list[int], d
         info = trace.task(handle)
         if out.get("name"):
             info.name = out["name"]
-            if "idle" in info.name.lower():
+            if is_rtos_idle_name(info.name):
                 trace.idle.add(handle)
     if out.get("state"):
         args["state"] = out["state"]

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Event Log（Tracealyzer / SystemView の Events・TRACE32 のトレースリスト。G07）: 記録の出来事の構造化された検索
-  // （recording.find）と結果の表・時間軸の印、区間の統計（timing.measure: 分布図・外れ値 ↔ 生データ）、調査の印とメモ
+  // （recording.find）と結果の表・時間軸の印、区間の統計（timing.measure: 分布図・長い順の上位 ↔ 生データ）、調査の印とメモ
   // （annotation.mark・recording.mark）、記録の概要（stream・kind ごとの件数・割合・1 秒あたり・最初・最後 → 検索へ）。
   // 行のダブルクリック・時刻のリンクで時間軸へ、時間軸の選択で近い行を選ぶ。
   // 計算は lib/eventlog.ts
@@ -10,7 +10,7 @@
   import { shared } from "../../lib/context";
   import {
     describeCondition, emptyCondition, eventsCsv, fieldText, histogramBars, intervalsInBin, kindQuery, kindStats, notesOf,
-    outlierMarks, searchMarks, summary, toQuery, type Condition, type Histogram, type KindStat, type Note, type Outlier,
+    longestMarks, searchMarks, summary, toQuery, type Condition, type Histogram, type KindStat, type Note, type Longest,
     type RecEvent,
   } from "../../lib/eventlog";
   import { allowed } from "../../lib/guard";
@@ -26,7 +26,7 @@
 
   type Tab = "overview" | "search" | "stats" | "notes";
   type Scope = "all" | "view" | "range";
-  const SEARCH_OWNER = "eventLog", OUTLIER_OWNER = "eventLog.outliers";
+  const SEARCH_OWNER = "eventLog", LONGEST_OWNER = "eventLog.longest";
   // 印を置く操作（ほかの利用者のものも）: 印を読み直す（記録を開いた・始めた・止めたは通知 recording）
   const MARKING = ["recording.mark"];
 
@@ -102,7 +102,7 @@
   // 閉じたら印を消す
   $effect(() => () => {
     tl.setMarks(SEARCH_OWNER, "recording", []);
-    tl.setMarks(OUTLIER_OWNER, "recording", []);
+    tl.setMarks(LONGEST_OWNER, "recording", []);
   });
   // 時間軸で選んだ時刻の行を選ぶ（記録の時間軸のとき）
   $effect(() => onTimeline({
@@ -206,12 +206,12 @@
       statsError = errorText(e);
     }
     picked = null;
-    tl.setMarks(OUTLIER_OWNER, "recording", stats?.outliers && hz ? outlierMarks(stats.outliers, hz) : []);
+    tl.setMarks(LONGEST_OWNER, "recording", stats?.longest && hz ? longestMarks(stats.longest, hz) : []);
   }
 
   const hist = $derived<Histogram[]>(stats?.histogram ?? []);
-  const outliers = $derived<Outlier[]>(stats?.outliers ?? []);
-  const bars = $derived(hz ? histogramBars(hist, hz, picked, outliers) : []);
+  const longest = $derived<Longest[]>(stats?.longest ?? []);
+  const bars = $derived(hz ? histogramBars(hist, hz, picked, longest) : []);
   const inBin = $derived<[number, number][]>(picked === null ? [] : intervalsInBin(stats?.intervals ?? [], hist, picked)
     .slice(0, 500));
   const dur = (ticks: number) => (hz ? formatDuration(ticks / hz) : String(ticks));
@@ -435,19 +435,18 @@
             </table>
           </div>
           <div>
-            <div class="muted head">{$i18n("eventLog.outliers", { n: outliers.length })}</div>
+            <div class="muted head">{$i18n("eventLog.longest", { n: longest.length })}</div>
             <table class="grid">
               <tbody>
-                {#each outliers.slice(0, 500) as o, i (i)}
+                {#each longest as o, i (i)}
                   <tr ondblclick={() => reveal({ source: "recording", t: o.t, tEnd: o.t_end })}>
                     <td><TimeLink to={{ source: "recording", t: o.t, tEnd: o.t_end }} /></td>
-                    <td class="mono warn">{dur(o.duration)}</td>
-                    <td class="mono muted" title={$i18n("eventLog.scoreTip")}>{o.score.toFixed(1)}</td>
+                    <td class="mono">{dur(o.duration)}</td>
                     <td><button class="small" onclick={() => showInterval(o.t, o.duration)} title={$i18n("eventLog.eventsTip")}>
                       {$i18n("eventLog.events")}</button></td>
                   </tr>
                 {:else}
-                  <tr><td class="muted">{$i18n("eventLog.noOutliers")}</td></tr>
+                  <tr><td class="muted">{$i18n("eventLog.noLongest")}</td></tr>
                 {/each}
               </tbody>
             </table>

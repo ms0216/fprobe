@@ -1,6 +1,7 @@
 // つないでいるターゲット: ステータス バーの線・速さ・名前（target.state から）と、コア クロックの既定
 // （Code Profile の ITM の間隔・SWO の分周に使う）。Svelte に依らない。
 import type { DaemonConnection } from "./api";
+import type { Key } from "./i18n";
 
 type Conn = Pick<DaemonConnection, "call">;
 
@@ -20,44 +21,24 @@ export function linkOf(target: Record<string, any> | null | undefined): TargetLi
   };
 }
 
-/** ターゲット名（pyOCD の名前）→ ファームがふつう使うコア クロック（MHz）。リセット直後の値ではない */
-const TYPICAL: [RegExp, number][] = [
-  [/^nrf51/i, 16],
-  [/^nrf52|^nrf53|^nrf91/i, 64],
-  [/^rp2040/i, 125],
-  [/^rp2350/i, 150],
-  [/^stm32f0/i, 48],
-  [/^stm32f1/i, 72],
-  [/^stm32f3/i, 72],
-  [/^stm32f401/i, 84],
-  [/^stm32f41[01]/i, 100],
-  [/^stm32f4[01][57]/i, 168],
-  [/^stm32f4[2-7]/i, 180],
-  [/^stm32f7/i, 216],
-  [/^stm32g0/i, 64],
-  [/^stm32g4/i, 170],
-  [/^stm32h7/i, 480],
-  [/^stm32l0/i, 32],
-  [/^stm32l4/i, 80],
-  [/^stm32wb/i, 64],
-];
-
-export function typicalCoreClockMhz(target: string | undefined | null): number | null {
-  if (!target) return null;
-  return TYPICAL.find(([re]) => re.test(target))?.[1] ?? null;
-}
-
-/** コア クロックの既定: ELF に CMSIS の SystemCoreClock があればターゲットのその値（走行中でも読める）、
- *  無い・まだ初期化前（0 等）ならターゲット名から。どちらも無ければ null */
-export async function coreClock(conn: Conn, target: string | undefined | null)
-  : Promise<{ mhz: number; source: "SystemCoreClock" | "target" } | null> {
+/** コア クロックの既定: ELF に CMSIS の SystemCoreClock があればターゲットのその値（走行中でも読める）。無い・
+ *  まだ初期化前（0 等）なら null（品種名から典型の値を推測しない。CLAUDE.md。使う側が入れる） */
+export async function coreClock(conn: Conn, _target?: string | undefined | null)
+  : Promise<{ mhz: number; source: "SystemCoreClock" } | null> {
   try {
     const r = await conn.call("debug.variable.read", { name: "SystemCoreClock" }, { quiet: true });
     const hz = Number(r?.value);
     if (hz >= 1e6 && hz <= 2e9) return { mhz: Math.round(hz / 1e4) / 100, source: "SystemCoreClock" };
   } catch {
-    /* ELF に無い・読めない: ターゲット名から */
+    /* ELF に無い・読めない */
   }
-  const mhz = typicalCoreClockMhz(target);
-  return mhz === null ? null : { mhz, source: "target" };
+  return null;
+}
+
+const HALT_REASONS = ["request", "breakpoint", "bkpt_instruction", "watchpoint", "vector_catch", "external"] as const;
+
+/** 止まった理由（target.status の halt_reason。fprobe.fault.halt_reason）の文言のキー。停止中でない・知らない理由は null */
+export function haltReasonKey(target: Record<string, any> | null | undefined): Key | null {
+  const r = target?.state === "HALTED" ? target.halt_reason : undefined;
+  return (HALT_REASONS as readonly string[]).includes(r) ? (`halt.${r}` as Key) : null;
 }

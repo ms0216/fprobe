@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .callgraph import CallGraph, CallSite
-from .rtos.stackcheck import GUARD, untouched_bytes
+from .rtos.stackcheck import untouched_bytes
 
 __all__ = ["BASIC_FRAME", "EXTENDED_FRAME", "SuEntry", "analyze_stack", "load_su", "measure_stack", "paint_range",
            "parse_su"]
@@ -323,22 +323,27 @@ def paint_range(bottom: int, top: int, *, sp: int | None, margin: int = 64) -> t
         raise ValueError(f"範囲が空: 0x{bottom:08X}〜0x{top:08X}")
     end = top if sp is None or sp >= top else min(top, (sp - margin) & ~3)
     if end <= bottom:
-        raise ValueError(f"SP 0x{sp:08X} が下端 0x{bottom:08X} に近すぎて塗れない（すでにあふれている？）")
+        raise ValueError(f"SP 0x{sp:08X} が下端 0x{bottom:08X} に近すぎて塗れない")
     return bottom, end
 
 
 def measure_stack(read: Callable[[int, int], bytes], bottom: int, top: int, fill: int, *, sp: int | None = None,
-                  threshold: float = 0.9) -> dict:
-    """底から塗りの値が続くバイト数（= まだ一度も使っていない深さ）から、使った最大の深さ・割合。底まで使っていたら
-    （または SP が下端より下なら）overflow。threshold 以上の割合なら warning。"""
+                  threshold: float | None = None) -> dict:
+    """底から塗りの値が続くバイト数（= まだ一度も使っていない深さ）から、使った最大の深さ・割合（事実）。
+    reached_bottom = 塗りが 1 バイトも残っていない、overflow = SP が下端より下。warning は threshold を明示したとき
+    だけ（割合が threshold 以上。経験則の既定の閾値は持たない）。"""
     size = top - bottom
     untouched = untouched_bytes(read, bottom, size, fill)
     used = size - untouched
-    overflow = untouched < GUARD or (sp is not None and sp < bottom)
+    overflow = sp is not None and sp < bottom
+    reached_bottom = untouched == 0
     fraction = used / size if size else 0.0
     notes = ["塗りの値と同じ値を書いた所は使っていないと数える（実際の最大はわずかに大きいことがある）"]
+    if reached_bottom:
+        notes.append("塗りが下端まで 1 バイトも残っていない（下端より下まで書いたかは、ここからは分からない）")
     if overflow:
-        notes.append("底（下端）まで使った: あふれの疑い（下端より下の変数・ヒープが壊れているかもしれない）")
+        notes.append("SP が下端より下")
     return {"bottom": bottom, "top": top, "size": size, "fill": fill, "untouched": untouched, "used": used,
             "fraction": fraction, "sp": sp, "current": None if sp is None else top - sp, "overflow": overflow,
-            "warning": fraction >= threshold or overflow, "threshold": threshold, "notes": notes}
+            "reached_bottom": reached_bottom, "warning": None if threshold is None else fraction >= threshold,
+            "threshold": threshold, "notes": notes}

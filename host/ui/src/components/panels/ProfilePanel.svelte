@@ -175,8 +175,7 @@
           {#each [1000, 2000, 5000, 10000, 20000, 50000] as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
         </select></label>
       {#if method === "itm"}
-        <label title={clockAuto === "SystemCoreClock" ? $i18n("profile.clockFromElf")
-                      : clockAuto === "target" ? $i18n("profile.clockFromTarget", { target: targetName ?? "" }) : ""}>
+        <label title={clockAuto === "SystemCoreClock" ? $i18n("profile.clockFromElf") : ""}>
           {$i18n("profile.coreClock")}<input class="num" type="number" min="1" value={clockMhz ?? ""}
                                              onchange={(e) => setClock(Number(e.currentTarget.value))} /></label>
       {/if}
@@ -185,7 +184,7 @@
     {/if}
     {#if summary}
       <span class="muted">{$i18n("profile.total", { n: summary.total })} ·
-        {$i18n("profile.categories", { sleep: cat("sleep"), unknown: cat("unknown") })}</span>
+        {$i18n("profile.categories", { sleep: cat("sleep"), wfi: cat("wfi"), unknown: cat("unknown") })}</span>
     {/if}
     <span class="spacer"></span>
     <label title={"t0" in range ? $i18n("profile.selectedTip") : rangeReason}>{$i18n("profile.range")}

@@ -20,8 +20,9 @@ from pyocd.probe.cmsis_dap_probe import CMSISDAPProbe
 from pyocd.probe.debug_probe import DebugProbe
 
 from . import diagnose as diag
+from . import generated as g
 from .aux_mcu import Aux
-from .jtag_chain import bits_from_text, clock, dap_link_wire, reset_tap, scan_chain, shift_device
+from .jtag_chain import bits_from_text, clock, dap_link_wire, reset_tap, scan_chain, shift, shift_device
 from .raw_dap import DapError, RawDap, dp_address
 from .stm32_option_bytes import protection_status
 
@@ -31,6 +32,13 @@ PIN_BITS = {"swclk": 0, "swdio": 1, "nreset": 7}              # CMSIS-DAP の DA
 NOT_REPORTED = ["tdi", "tdo", "ntrst"]
 SPEED_TEST_LIMIT = 16 << 20
 DEFAULT_HZ = 1_000_000
+
+
+def jtag_half_period(sys_clock_hz: int, requested_hz: float) -> int:
+    """要求した速さ（DAP_SWJ_Clock）で jtag_phy が使う半周期（sys の周期数）。dap_cmd_config.vhd と同じ整数の計算
+    （fprobe.sampler.swclk_hz と同じ）。JTAG の 1 ビットは 2 × 半周期 + 1 周期（High 相の後に 1 周期の区切り）。"""
+    tolerated = sys_clock_hz // 2 // 101 * 100
+    return min(max(-(-tolerated // max(1, int(requested_hz))), 2), 65535)
 
 
 class NotDisconnected(RuntimeError):
@@ -205,7 +213,7 @@ class LowLevelTools:
         return dap_link_wire(dap.link)
 
     def jtag_scan(self, frequency_hz: int = DEFAULT_HZ, max_devices: int = 16) -> dict:
-        """JTAG のチェーンを走査する（未接続のときだけ）: 装置の数・IDCODE・IR 長（表・Capture-IR から推定）。
+        """JTAG のチェーンを走査する（未接続のときだけ）: 装置の数・IDCODE・IR 長（表・Capture-IR から。一つに決まらなければ ambiguous と候補）。
         返る jtag_chain は target_connect にそのまま渡せる。TAP はリセットして IDCODE を選んだ状態で終える。
         Primer の構成に JTAG が無ければ書き替えてから（probe_design_get）。"""
         self._ensure_design("jtag")
@@ -213,6 +221,63 @@ class LowLevelTools:
             scan = scan_chain(self._jtag_wire(frequency_hz), max_devices=max_devices)
             self._jtag_scan = scan
             return scan.as_dict()
+
+    # --- TDO の取り込みの遅れ（R16。docs/superpowers/specs/2026-10-23-jtag-tdo-sample-design.md）------------------
+
+    def _write_jtag_delay(self, cycles: int) -> int:
+        """CSR debug.sample_delay の jtag の欄だけを書き、読み返した値を返す（_lock の中で。古い回路は欄が無く 0 が返る）。"""
+        dev = self.session.device
+        shift_, width = g.DEBUG_SAMPLE_DELAY_JTAG
+        mask = ((1 << width) - 1) << shift_
+        dev.write32(g.DEBUG_SAMPLE_DELAY, dev.read32(g.DEBUG_SAMPLE_DELAY) & ~mask | cycles << shift_)
+        return (dev.read32(g.DEBUG_SAMPLE_DELAY) & mask) >> shift_
+
+    def jtag_sample_delay_set(self, cycles: int) -> dict:
+        """JTAG の TDO の取り込みを、次の TCK の立ち下がりの直前から cycles 周期（sys、0〜7）遅らせる。
+        TDO が立ち下がりから 2 × half_period 周期（sys）より遅れて届くとき（Pi 2B の 14.3 MHz 以上で見た。1 ビットずれて読める）に使う。
+        どの値がよいかは jtag_sample_delay_scan の事実で決める。readback = 読み返した値（古い回路は欄が無く 0）。
+        Primer の構成に JTAG が無ければ書き替えてから書く。値は構成を書き替える（FPGA を書き直す）と 0 に戻る。"""
+        if not 0 <= cycles <= 7:
+            raise ValueError(f"cycles は 0〜7（{cycles}）")
+        self._ensure_design("jtag")                     # 先に JTAG の構成へ（後で書き替えると 0 に戻る）
+        with self._lock:
+            return {"cycles": cycles, "readback": self._write_jtag_delay(cycles)}
+
+    def jtag_sample_delay_scan(self, frequency_hz: int, expected_idcodes: list[int], reads: int) -> dict:
+        """TCK frequency_hz で、取り込みの遅れ 0〜7 のそれぞれについて、チェーンの IDCODE（TAP をリセットして DR を
+        32 × len(expected_idcodes) ビット）を reads 回読み、expected_idcodes（TDO 側から。呼び手が明示）と一致した回数
+        matches と、見えた値の並び observed（値の組と回数）を返す。applied = 遅れの欄を書いて読み返せた。
+        どれを使うかは決めない（終わったら元の遅れに戻す。使うには jtag_sample_delay_set）。未接続のときだけ。
+        実際の TCK: half_period（SWJ_Clock と同じ整数の計算）と tck_hz = sys / (2 × half_period + 1)。"""
+        if not expected_idcodes or reads < 1:
+            raise ValueError("expected_idcodes は 1 つ以上、reads は 1 以上")
+        self._ensure_design("jtag")
+        n = len(expected_idcodes)
+        expected = [v & 0xFFFFFFFF for v in expected_idcodes]
+        with self._lock:
+            self._require_disconnected("TDO の取り込みの遅れの走査")      # 遅れの欄を書く前に（接続中の転送を乱さない）
+            original = (self.session.device.read32(g.DEBUG_SAMPLE_DELAY) >> g.DEBUG_SAMPLE_DELAY_JTAG[0]
+                        & (1 << g.DEBUG_SAMPLE_DELAY_JTAG[1]) - 1)
+            rows = []
+            try:
+                for delay in range(8):
+                    applied = self._write_jtag_delay(delay) == delay
+                    wire = self._jtag_wire(frequency_hz)
+                    seen: dict[tuple[int, ...], int] = {}
+                    for _ in range(reads):
+                        reset_tap(wire)
+                        value = shift(wire, ir=False, value=(1 << 32 * n) - 1, length=32 * n)
+                        words = tuple(value >> 32 * k & 0xFFFFFFFF for k in range(n))
+                        seen[words] = seen.get(words, 0) + 1
+                    rows.append({"delay": delay, "applied": applied, "reads": reads,
+                                 "matches": seen.get(tuple(expected), 0),
+                                 "observed": [{"idcodes": list(k), "count": c} for k, c in seen.items()]})
+            finally:
+                self._write_jtag_delay(original)
+            sys_hz = self.session.device.capabilities().sys_clock_hz
+            half = jtag_half_period(sys_hz, frequency_hz)
+            return {"frequency_hz": frequency_hz, "half_period": half, "tck_hz": sys_hz / (2 * half + 1),
+                    "expected_idcodes": expected, "delays": rows, "restored_delay": original}
 
     def jtag_reset(self) -> dict:
         """すべての TAP を Test-Logic-Reset に（TMS = 1 を 6 回）して Run-Test/Idle へ。"""

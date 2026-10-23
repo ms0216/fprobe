@@ -707,7 +707,8 @@ class ObserveTools:
         どちらか一方で読む）。packets は先頭 limit 件（例外トレース・PC サンプル・スティミュラス等）、text はポートごとの
         printf の行（呼び出しをまたいで行を組み立てる）。"""
         received, packets = self._swo_receive(timeout_s)
-        return {"bytes": received, "synced": self._itm.synced, "packets": packets[:limit],
+        return {"bytes": received, "synced": self._itm.synced, "unsynced_bytes": self._itm.unsynced_bytes,
+                "packets": packets[:limit],
                 "dropped": max(0, len(packets) - limit), "text": self._take_lines(None),
                 "overflows": self._swo_overflows, "errors": self._swo_errors}
 

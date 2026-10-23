@@ -43,12 +43,16 @@ architecture rtl of mem_reader is
   signal to_issue  : unsigned(ADDR_BITS downto 0) := (others => '0');   -- まだ出していないコマンド
   signal to_output : unsigned(ADDR_BITS downto 0) := (others => '0');   -- まだ出力していない拍
   signal in_flight : natural range 0 to LANDING := 0;                   -- 発行済みで受け皿から出していない
+  -- to_issue /= 0 と in_flight < LANDING をレジスタに持つ（cmd_valid は受け渡しの 152 ビットの CE に広がるので、
+  -- 幅の広い比べを組み合わせのまま出さない。値は数と同じ周期に更新する）
+  signal more      : boolean := false;
+  signal room      : boolean := true;
   signal issue     : boolean;
   signal pop       : boolean;
   signal fifo_valid : std_logic;
 begin
-  issue     <= to_issue /= 0 and in_flight < LANDING and cmd_ready = '1';
-  cmd_valid <= '1' when to_issue /= 0 and in_flight < LANDING else '0';
+  issue     <= more and room and cmd_ready = '1';
+  cmd_valid <= '1' when more and room else '0';
   cmd_write <= '0';
   cmd_addr  <= addr;
   cmd_data  <= (others => '0');
@@ -62,12 +66,15 @@ begin
   pop       <= fifo_valid = '1' and out_ready = '1';
 
   process (clk)
+    variable flight : natural range 0 to LANDING;
   begin
     if rising_edge(clk) then
       if rst = '1' then
         to_issue  <= (others => '0');
         to_output <= (others => '0');
         in_flight <= 0;
+        more      <= false;
+        room      <= true;
       elsif start = '1' then
         base      <= region_base;
         size      <= region_size;
@@ -76,6 +83,8 @@ begin
         to_issue  <= count;
         to_output <= count;
         in_flight <= 0;
+        more      <= count /= 0;
+        room      <= true;
       else
         if issue then
           if offset + 1 = size then                          -- 領域の終わり → 先頭へ
@@ -86,12 +95,16 @@ begin
             addr   <= addr + 1;
           end if;
           to_issue <= to_issue - 1;
+          more     <= to_issue /= 1;
         end if;
+        flight := in_flight;
         if issue and not pop then
-          in_flight <= in_flight + 1;
+          flight := in_flight + 1;
         elsif pop and not issue then
-          in_flight <= in_flight - 1;
+          flight := in_flight - 1;
         end if;
+        in_flight <= flight;
+        room      <= flight < LANDING;
         if pop then
           to_output <= to_output - 1;
         end if;

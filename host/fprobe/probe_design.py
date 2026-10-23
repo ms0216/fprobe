@@ -11,10 +11,10 @@ _port・_eth）を使う。構成の対応と書き込みは fprobe.bitstreams�
 書き替え: Probe を閉じる（FPGA が入れ替わるのでターゲット・ロジアナ・流れはすべて切れる）→ fprobe_gw program →
 USB の再列挙を待って開き直す → ケイパビリティの design を確かめる。
 
-- recover_link(error): USB が切れた誤り（電源が落ちた・抜き挿し等で Primer がつながり直した）なら、Probe を閉じて
-  開き直し、利用者に返す説明を返す（B28）。デーモンが機器の誤りのたびに呼ぶ。ビットストリームの版（ケイパビリティの
-  build。U49）が前と違えば、別の版（電源が落ちて Flash の版で立ち上がった等）と確実に言い、ビルド済みの最新
-  （<ビットストリームの置き場所>/<デザイン>/inputs.sha256）かも書く。版の無い古い構成では機能の違いから推測する。
+- recover_link(error): USB が切れた誤り（Primer がつながり直した）なら、Probe を閉じて開き直し、利用者に返す説明を
+  返す（B28）。デーモンが機器の誤りのたびに呼ぶ。ビットストリームの版（ケイパビリティの build。U49）が前と違えば
+  別の版と言い、ビルド済みの最新（<ビットストリームの置き場所>/<デザイン>/inputs.sha256）かも書く。版の無い古い構成
+  では変わった機能（事実）だけを書き、原因は推測しない。
 """
 
 import contextlib
@@ -157,7 +157,7 @@ class DesignTools:
             self._session = None
         self._debug = None                     # ponytail: 切れた口の pyOCD のセッションは捨てる（閉じられない）
         after = self._reopen("USB が切れた後")
-        note = ("Primer の USB が切れたので、つなぎ直した（電源が落ちた・抜き挿し等）。ターゲットの接続・ロジアナ・流れは"
+        note = ("Primer の USB が切れたので、つなぎ直した。ターゲットの接続・ロジアナ・流れは"
                 "切れたので、target_connect からやり直す。")
         outputs = self._restore_outputs()       # 端子が普段の機能でターゲットを駆動する前に取り戻す（B29）
         if outputs["failed"]:
@@ -165,15 +165,14 @@ class DesignTools:
         changed = _changes(before, after)
         version = self._version_change(before, after)
         if version["changed"]:
-            note += f" FPGA の版が変わった（前 {version['before']} → 今 {version['after']}）: 別のビットストリームで立ち上がった"
-            note += ("（電源が落ちて Flash の版になった等）。" if not version["latest_build"] else "。")
+            note += f" FPGA の版が変わった（前 {version['before']} → 今 {version['after']}）: 別のビットストリームで立ち上がった。"
             if version["latest_build"]:
                 note += "今の版はビルド済みの最新と同じ。"
             else:
                 note += "開発中の版なら python -m fprobe_gw program で書き直す。"
         elif version["changed"] is None and changed:
             listed = ", ".join(f"{k}: {a} → {b}" for k, (a, b) in changed.items())
-            note += (f" FPGA の機能が前と変わった（{listed}）: 電源が落ちて Flash の版で立ち上がったかもしれない。"
+            note += (f" FPGA の機能が前と変わった（{listed}）。版を読めないので、どのビットストリームかは分からない。"
                      "開発中の版なら python -m fprobe_gw program で書き直す。")
         return {"message": note, "changed": changed, "version": version, "outputs": outputs}
 

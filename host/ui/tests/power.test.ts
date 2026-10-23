@@ -51,12 +51,13 @@ describe("記録の電圧と低下", () => {
   it("中央値より drop 以上下がった区間と、いちばん低い点", () => {
     const xs = [0, 1, 2, 3, 4, 5, 6, 7];
     const ys = [3.3, 3.3, 3.0, 2.9, 3.3, 3.3, 3.1, 3.3];
-    expect(findDips(xs, ys, 0.1)).toEqual([
-      { t: 2, tEnd: 4, at: 3, min: 2.9, drop: expect.closeTo(0.4) },
-      { t: 6, tEnd: 7, at: 6, min: 3.1, drop: expect.closeTo(0.2) },
+    // 使う人が指定した電圧以下の区間（中央値を正常の水準とみなす基準は使わない）。under = 指定より下の深さ
+    expect(findDips(xs, ys, 3.2)).toEqual([
+      { t: 2, tEnd: 4, at: 3, min: 2.9, under: expect.closeTo(0.3) },
+      { t: 6, tEnd: 7, at: 6, min: 3.1, under: expect.closeTo(0.1) },
     ]);
-    expect(findDips(xs, ys, 1)).toEqual([]);
-    expect(findDips([], [], 0.1)).toEqual([]);
+    expect(findDips(xs, ys, 2.5)).toEqual([]);
+    expect(findDips([], [], 3)).toEqual([]);
     expect(minIndex(ys)).toBe(3);
     expect(minIndex([NaN])).toBe(-1);
     expect(formatVolts(3.2954)).toBe("3.295 V");
