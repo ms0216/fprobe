@@ -338,3 +338,80 @@ def test_disasm_before_pc_falls_back_to_pc_when_nothing_lands():
     mem = BytesMemory(0x1000, code)
     out = h.disasm_before_pc(memory_api(mem), 0x1028, before=2, after=1)
     assert out["sync"] == "start" and out["pc_index"] == 0 and out["instructions"][0]["address"] == 0x1028
+
+
+# --- 2 回目に外した判断（2026-10-22 以降） --------------------------------------------------------------
+
+def test_aliasing_suspects_old_rules():
+    result = {"by": "exception", "total": 1000, "rows": [{"exception": 15, "name": "SysTick", "samples": 8},
+                                      {"exception": 16, "name": "IRQ0", "samples": 50}],
+              "exceptions": [{"exception": 15, "name": "SysTick", "load": 0.001},     # 8 回 vs 期待 1 回: 外れ
+                             {"exception": 16, "name": "IRQ0", "load": 0.05},        # 50 回 vs 50 回: 合う
+                             {"exception": 17, "name": "IRQ1", "load": 0.01}]}       # 0 回 vs 期待 10 回 ≥ 4.6
+    out = tagged(h.aliasing_suspects(result))
+    assert [s["exception"] for s in out["suspects"]] == [15, 17]
+    assert out["suspects"][1]["reason"] == "zero_samples"
+    with pytest.raises(ValueError):                                         # by="exception" の全件でないと 0 回を作る
+        h.aliasing_suspects({**result, "by": "function"})
+    few = h.aliasing_suspects({**result, "exceptions": [{"exception": 17, "name": "IRQ1", "load": 0.004}]})
+    assert few["suspects"] == []                                            # 期待 4 回 < 4.6 は言わない
+
+
+def test_heap_overflow_suspects_name_previous_used():
+    scan = {"issues": [{"kind": "bad_size", "address": 0x2000_0100, "previous_used": 0x2000_00C8},
+                       {"kind": "bad_end", "address": 0x2000_0F00, "previous_used": None},
+                       {"kind": "free_not_listed", "address": 0x2000_0200}]}
+    out = tagged(h.heap_overflow_suspects(scan))
+    assert out["suspects"] == [{"kind": "bad_size", "address": 0x2000_0100, "suspect": 0x2000_00C8}]
+
+
+def test_sampler_falling_behind_ratio():
+    slow = {"sampling": {"requested_hz": 10_000, "achieved_hz": 8_500}}
+    assert tagged(h.sampler_falling_behind(slow))["falling_behind"] is True
+    assert h.sampler_falling_behind({"sampling": {"requested_hz": 10_000, "achieved_hz": 9_500}})["falling_behind"] is False
+    assert h.sampler_falling_behind({"sampling": {"requested_hz": 10_000, "achieved_hz": None}})["falling_behind"] is None
+
+
+def test_counter_overflow_risk_half_bandwidth():
+    # 2 個 × 16 MHz / 256 × 2 バイト = 250 kB/s、SWO 2 Mbaud = 200 kB/s → 125 %
+    out = tagged(h.counter_overflow_risk(2, 16e6, 2_000_000))
+    assert out["share"] == pytest.approx(1.25) and out["risky"] is True
+    assert h.counter_overflow_risk(1, 16e6, 6_000_000)["risky"] is False    # 125 kB/s / 600 kB/s ≈ 21 %
+    assert h.SWO_HEADROOM == 0.75
+
+
+def test_jtag_guess_ir_takes_shortest_candidate():
+    from fprobe.jtag_chain import ChainDevice, ChainScan, _split_ir
+    # 表に無い 2 台・合計 12 ビット・境目の候補 0, 4, 8: 本体は装置 0 を ambiguous（候補 4, 8）で止め、装置 1 は unknown
+    devices = [ChainDevice(0, 0x1, None, "unknown"), ChainDevice(1, 0x3, None, "unknown")]
+    capture = 0b0001_0001_0001
+    _split_ir(devices, 12, capture, [])
+    scan = ChainScan(devices, 12, capture).as_dict()
+    assert scan["devices"][0]["ir_length_source"] == "ambiguous" and scan["jtag_chain"] is None
+    out = tagged(h.jtag_guess_ir(scan))
+    assert out["jtag_chain"] == [4, 8] and out["guessed"] == [0]
+    known = ChainScan([ChainDevice(0, 0x1, 4, "table"), ChainDevice(1, 0x3, None, "unknown")], 12, capture).as_dict()
+    assert h.jtag_guess_ir(known) == {**h.jtag_guess_ir(known), "jtag_chain": [4, 8], "guessed": []}
+    assert h.jtag_guess_ir({**scan, "ir_capture": None})["jtag_chain"] is None
+
+
+def test_link_cause_hints():
+    assert "低消費電力" in " ".join(tagged(h.link_cause_hints(ack="WAIT"))["causes"])
+    assert "プルアップ" in " ".join(h.link_cause_hints(tdo="stuck_high")["causes"])
+    assert h.link_cause_hints(tdo="ok")["causes"] == []
+
+
+def test_wait_failed_as_timeout():
+    stats = {"count": 3, "failed": 1}
+    out = tagged(h.wait_failed_as_timeout(stats))
+    assert out["timeouts"] == 1
+
+
+def test_aliasing_suspects_cut_rows_are_unknown_not_zero():
+    result = {"by": "exception", "total": 1000, "rows": [{"exception": 16, "name": "IRQ0", "samples": 50}],
+              "exceptions": [{"exception": 16, "name": "IRQ0", "load": 0.05},
+                             {"exception": 17, "name": "IRQ1", "load": 0.01}]}
+    out = h.aliasing_suspects(result, top=1)                                # rows が 1 件で切られた: IRQ1 の回数は不明
+    assert out["suspects"] == [] and out["unknown"] == [17]
+    api = FakeApi(profile_result=lambda by, top: {**result, "top_seen": top})
+    assert h.aliasing_suspects_from_api(api)["unknown"] == [] and api.calls == [("profile.result", {"by": "exception", "top": 1000})]
