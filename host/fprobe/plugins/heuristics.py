@@ -32,6 +32,8 @@ __all__ = [
     "decode_uart_with_estimated_baud", "diagnose_hints", "disasm_before_pc", "estimate_baud", "fault_hints",
     "heap_growing", "heap_growing_from_api", "infer_jobs", "infer_jobs_from_api", "outliers", "outliers_of_intervals",
     "rank_causes", "stack_warning", "trace_cpu_share", "typical_core_clock",
+    "SWO_HEADROOM", "aliasing_suspects", "aliasing_suspects_from_api", "counter_overflow_risk", "heap_overflow_suspects", "jtag_guess_ir",
+    "link_cause_hints", "sampler_falling_behind", "wait_failed_as_timeout",
 ]
 
 
@@ -574,3 +576,135 @@ def disasm_before_pc(caller: ApiCaller, pc: int, before: int = 8, after: int = 8
     listing = prior + instructions[at:at + after + 1]
     return _tag("thumb_self_sync", "Thumb の命令の境界は、違う所から読んでも数命令で揃う",
                 sync=sync, pc=pc, pc_index=len(prior), instructions=[i.as_dict() for i in listing])
+
+
+# --- 2 回目に外した判断（2026-10-22 以降。台帳 .superpowers/sdd/heuristics-ledger.md） ----------------------
+
+def aliasing_suspects(result: Mapping, min_expected: float = 4.6, top: int | None = None) -> dict:
+    """profile.result（method=itm・by="exception"）の結果から、PC サンプルと例外トレースの負荷が「噛み合い（エイリアシング）で
+    ずれている」と見る例外を挙げる（4e2138e より前の本体の判定）。本体は信頼区間の外という事実だけを notes に書く。
+
+    経験則:
+    - サンプル 0 回でも、期待回数 load × total が min_expected（4.6 = 0 回になる確率が約 1 %）以上なら噛み合いと見る。
+    - 1 回以上なら信頼区間に余裕 2/√total × √load を足し、その外なら噛み合いと見る。余裕の幅は経験則。
+    外れる場合: 例外の負荷が測る間に本当に変わった（記録の窓とサンプルの窓が違う）とき、ずれは噛み合いではない。
+    rows は上位 top 件で切られる。top（求めた件数）を渡し、rows がその件数に達していれば、rows に無い例外は 0 回と
+    みなさず unknown に入れる（aliasing_suspects_from_api は全件を取る）。"""
+    from fprobe.profile.stats import wilson_interval
+    if result.get("by") != "exception":
+        raise ValueError('profile.result を by="exception" で取った結果を渡す（ほかの表では例外ごとの回数が無い）')
+    total, confidence = result["total"], result.get("confidence", 0.95)
+    rows = result.get("rows", [])
+    hits = {r["exception"]: r["samples"] for r in rows}
+    ci = {r["exception"]: r["ci"] for r in rows if r.get("ci")}
+    cut = top is not None and len(rows) >= top
+    suspects, unknown = [], []
+    for e in result.get("exceptions", []):
+        load, n = e["load"], hits.get(e["exception"], 0)
+        if e["exception"] not in hits and cut:
+            unknown.append(e["exception"])
+            continue
+        if n == 0:
+            if load * total >= min_expected:
+                suspects.append({"exception": e["exception"], "name": e.get("name"), "load": load, "samples": 0,
+                                 "reason": "zero_samples"})
+            continue
+        low, high = ci.get(e["exception"]) or wilson_interval(n, total, confidence)
+        slack = 2 / math.sqrt(total) * math.sqrt(max(load, 1e-9))
+        if load < low - slack or load > high + slack:
+            suspects.append({"exception": e["exception"], "name": e.get("name"), "load": load, "samples": n,
+                             "reason": "outside_interval"})
+    return _tag("aliasing", "サンプルの割合と例外トレースの負荷のずれは、サンプルの間隔と割り込みの周期の噛み合いによる。"
+                "負荷は例外トレースの値を使い、rate_hz を少し変えると偏りが変わる",
+                suspects=suspects, unknown=unknown, min_expected=min_expected)
+
+
+def aliasing_suspects_from_api(caller: ApiCaller, min_expected: float = 4.6, top: int = 1000) -> dict:
+    """profile.result(by="exception", top=top) を取り、aliasing_suspects に渡す。"""
+    return aliasing_suspects(caller.call("profile.result", by="exception", top=top), min_expected, top)
+
+
+def heap_overflow_suspects(scan: Mapping) -> dict:
+    """heap.scan の壊れ（bad_size / bad_link / bad_end）ごとに、直前の使用中のブロック（previous_used）を「あふれさせた
+    疑い」とする（1744653 より前の本体の表示）。外れる場合: 解放後の書き込み・別の領域からの迷った書き込み。"""
+    suspects = [{"kind": i["kind"], "address": i["address"], "suspect": i["previous_used"]}
+                for i in scan.get("issues", []) if i.get("previous_used") is not None]
+    return _tag("heap_overflow_from_previous", "ヘッダの壊れは、すぐ前の使用中のブロックの書き込みのあふれによる",
+                suspects=suspects)
+
+
+def sampler_falling_behind(result: Mapping, ratio: float = 0.9) -> dict:
+    """profile（method=pcsr）の sampling で、実際の速さが求めた速さの ratio 未満なら「サンプラが追いつかない」と見る
+    （7f98b11 より前の本体の閾値 9 割）。本体は求めたより遅いという事実を常に書く。"""
+    s = result["sampling"]
+    achieved = s.get("achieved_hz")
+    behind = None if achieved is None else achieved < ratio * s["requested_hz"]
+    return _tag("sampler_ratio", f"求めた速さの {ratio:.0%} 未満は追いつかない、それ以上は時刻のばらつきの内",
+                falling_behind=behind, ratio=ratio, achieved_hz=achieved, requested_hz=s["requested_hz"])
+
+
+SWO_HEADROOM = 0.75                    # 7f98b11 より前の plan_itm_sampling の既定（profile の headroom に渡す）
+
+
+def counter_overflow_risk(counters: int, core_clock_hz: float, swo_baud: float, share: float = 0.5) -> dict:
+    """DWT のイベントカウンタの溢れのパケットが最悪で SWO の帯域の share を超えるなら「忙しい区間で溢れて数え落とす」と
+    見る（7f98b11 より前の本体の閾値 5 割）。最悪 = 個数 × クロック / 256 × 2 バイト、帯域 = baud / 10。"""
+    worst = counters * core_clock_hz / 256 * 2
+    used = worst / (swo_baud / 10)
+    return _tag("counter_overflow_share", f"最悪の量が帯域の {share:.0%} を超えると、ほかのパケットと重なる区間で溢れる",
+                worst_bytes_per_s=worst, share=used, risky=used > share)
+
+
+_ACK_CAUSES = {"WAIT": ["低消費電力", "クロック停止", "バスが塞がっている"],
+               "FAULT": ["前の誤りの印が残っている", "アクセスが拒まれた"],
+               "NO_ACK": ["配線", "電源", "速度", "線のプロトコルの選択"],
+               "PROTOCOL": ["信号品質: 速度を下げる・GND・配線長"]}
+_TDO_CAUSES = {"stuck_low": ["TDO の線", "ターゲットの電源", "TRST"],
+               "stuck_high": ["TDO が浮いてプルアップ", "TCK / TMS の配線", "JTAG が無効のターゲット"]}
+
+
+def link_cause_hints(ack: str | None = None, tdo: str | None = None) -> dict:
+    """SWD/JTAG の ACK（WAIT / FAULT / NO_ACK / PROTOCOL）や jtag.scan の tdo（stuck_low / stuck_high）に、よくある原因を
+    並べる（27cdb7e より前の本体の文）。順に確かめる候補で、どれかである保証は無い。"""
+    causes = _ACK_CAUSES.get(ack or "", []) + _TDO_CAUSES.get(tdo or "", [])
+    return _tag("link_causes", "よくある原因の一覧。ほかの原因もありうる", ack=ack, tdo=tdo, causes=causes)
+
+
+def jtag_guess_ir(scan: Mapping) -> dict:
+    """jtag.scan の Capture-IR（ir_capture・total_ir_length）を、境目が一つに決まらない装置では最短の候補を取って
+    装置に分け直し、jtag_chain を作る（27cdb7e より前の本体の推測）。表の IR 長（ir_length_source="table"）は使う。
+    guessed = 最短の候補を取った装置。外れる場合: IR の Capture 値に境目と同じ形（…01）が並ぶ装置。データシートの値が
+    あればそちらを jtag_chain に与える。"""
+    total, capture = scan.get("total_ir_length"), scan.get("ir_capture")
+    chain, guessed = [], []
+    if total is not None and capture is not None:
+        starts = sorted(k for k in range(total) if (capture >> k) & 1 and not (capture >> (k + 1)) & 1)
+        devices = scan["devices"]
+        known = [d["ir_length"] if d.get("ir_length_source") == "table" else None for d in devices]
+        pos = 0
+        for i, n in enumerate(known):
+            rest = known[i + 1:]
+            if n is None:
+                if not rest or None not in rest:
+                    n = total - pos - sum(rest)
+                else:
+                    candidates = [k for k in starts if k >= pos + 2]
+                    if not candidates:
+                        break
+                    n = candidates[0] - pos
+                    if len(candidates) > len(rest):
+                        guessed.append(devices[i]["index"])
+            chain.append(n)
+            pos += n
+        if len(chain) != len(devices) or pos != total or min(chain, default=2) < 2:
+            chain = None
+    else:
+        chain = None
+    return _tag("ir_shortest", "Capture-IR の境目の候補のうち、最短が本当の IR 長",
+                jtag_chain=chain, guessed=guessed)
+
+
+def wait_failed_as_timeout(stats: Mapping) -> dict:
+    """rtos の待ちの統計（failed = 起きた後の操作が失敗）を「時間切れ」と読む（715c29a より前の本体の outcome="timeout"）。
+    外れる場合: 待ちの中断（xTaskAbortDelay）・削除されたオブジェクト。"""
+    return _tag("failed_is_timeout", "待ちの後の操作の失敗は、時間切れによる", timeouts=stats.get("failed", 0))
