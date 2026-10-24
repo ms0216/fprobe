@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from dwarf_stack import StackBuilder
+from value_kinds import ints, varray, venum, vfloat, vint, vptr, vstruct
 
 from fprobe.dwarf.cexpr import ExpressionError
 from fprobe.dwarf.info import DebugInfo
@@ -45,14 +46,14 @@ def test_backtrace_names_lines_and_arguments_of_every_frame(o0):
     assert trace[0]["line"] == line_of("sink = marker;") and trace[0]["file"] == "dwarf_demo.c"
     assert trace[1]["line"] == line_of("probe_point(total + corner.x);")
     assert trace[1]["offset"] == trace[1]["pc"] - insp.symbols.symbol("leaf_sum").address
-    assert values(trace[0]["arguments"]) == {"marker": 1234}
-    assert values(trace[1]["arguments"]) == {"s": {"pointer": sensors + 80, "to": "const Sensor",
-                                                   "symbol": "sensors+80"}, "depth": 0}
-    assert [values(f["arguments"])["depth"] for f in trace[2:6]] == [0, 1, 2, 3]
+    assert values(trace[0]["arguments"]) == {"marker": vint(1234)}
+    assert values(trace[1]["arguments"]) == {"s": vptr(sensors + 80, "const Sensor", symbol="sensors+80"),
+                                             "depth": vint(0)}
+    assert [values(f["arguments"])["depth"] for f in trace[2:6]] == ints(0, 1, 2, 3)
     assert values(trace[5]["arguments"])["s"]["symbol"] == "sensors"
     assert [v["name"] for v in trace[1]["locals"]] == ["total", "corner", "ratio"]   # i は for の外では見えない
     assert trace[2]["locals"] == []                                   # deeper のブロックの外（leaf_sum を呼ぶ所）
-    assert trace[3]["locals"][0]["name"] == "deeper" and "unavailable" in trace[3]["locals"][0]["value"]
+    assert trace[3]["locals"][0]["name"] == "deeper" and trace[3]["locals"][0]["value"]["kind"] == "unavailable"
     assert all(f["cfa"] for f in trace) and trace[0]["note"] == ""
 
 
@@ -63,40 +64,40 @@ def test_locals_can_be_written_and_read_in_a_caller_frame(o0):
     insp.write("corner.x", -3, frame=1)
     insp.write("corner.y", 4, frame=1)
     local = values(insp.frame_variables(1)["locals"])
-    assert local == {"total": 600, "corner": {"x": -3, "y": 4}, "ratio": 1.5}
-    assert insp.read("total + corner.x", frame=1)["value"] == 597
+    assert local == {"total": vint(600), "corner": vstruct(x=vint(-3), y=vint(4)), "ratio": vfloat(1.5)}
+    assert insp.read("total + corner.x", frame=1)["value"] == vint(597)
     assert insp.read("s->name", frame=1)["value"]["string"] == "beta"
-    assert insp.read("depth + 1", frame=5)["value"] == 4
+    assert insp.read("depth + 1", frame=5)["value"] == vint(4)
     assert insp.read("visits", frame=2)["type"] == "int"                              # 関数の中の static
-    assert "unavailable" in insp.read("visits", frame=2)["value"]                     # .bss は ELF に無い
+    assert insp.read("visits", frame=2)["value"]["kind"] == "unavailable"             # .bss は ELF に無い
 
 
 @pytest.mark.parametrize("expression, expected", [
-    ("head->samples[1][2]", -6),
-    ("sensors[1].name", {"string": "beta", "values": [98, 101, 116, 97, 0, 0, 0, 0]}),
-    ("head->next->pos.y", 2),
-    ("sensors[0].flags.level", -3),
-    ("sensors[0].flags.wide", 0x123),
-    ("(unsigned char)sensors[0].pos.y", 236),
-    ("*(struct Point *)&sensors[1].pos", {"x": -1, "y": 2}),
-    ("matrix[2][3]", 23),
-    ("matrix[1]", [10, 11, 12, 13]),
-    ("greeting[4]", ord("o")),
-    ("*message", ord("h")),
-    ("message[7]", ord("f")),
-    ("&sensors[1] - &sensors[0]", 1),
-    ("-negative", 5),
-    ("~0", -1),
-    ("!enabled", 0),
-    ("(int)sensors[0].gain", 1),
-    ("(float)3", 3.0),
-    ("sensors[0].mode", {"enum": "MODE_RUN", "value": 1}),
-    ("sensors[0].raw16", 0xBEEF),
-    ("sensors[0].pair[1]", -66),
-    ("sensors[0].word.f", 1.0),
-    ("s_ticks", 7),
-    ("'A' + 1", 66),
-    ("0x10 - 0b11", 13),
+    ("head->samples[1][2]", vint(-6)),
+    ("sensors[1].name", varray(ints(98, 101, 116, 97, 0, 0, 0, 0), string="beta")),
+    ("head->next->pos.y", vint(2)),
+    ("sensors[0].flags.level", vint(-3)),
+    ("sensors[0].flags.wide", vint(0x123)),
+    ("(unsigned char)sensors[0].pos.y", vint(236)),
+    ("*(struct Point *)&sensors[1].pos", vstruct(x=vint(-1), y=vint(2))),
+    ("matrix[2][3]", vint(23)),
+    ("matrix[1]", varray(ints(10, 11, 12, 13))),
+    ("greeting[4]", vint(ord("o"))),
+    ("*message", vint(ord("h"))),
+    ("message[7]", vint(ord("f"))),
+    ("&sensors[1] - &sensors[0]", vint(1)),
+    ("-negative", vint(5)),
+    ("~0", vint(-1)),
+    ("!enabled", vint(0)),
+    ("(int)sensors[0].gain", vint(1)),
+    ("(float)3", vfloat(3.0)),                                       # 浮動小数は型で float（JSON の 3 でも）
+    ("sensors[0].mode", venum("MODE_RUN", 1)),
+    ("sensors[0].raw16", vint(0xBEEF)),
+    ("sensors[0].pair[1]", vint(-66)),
+    ("sensors[0].word.f", vfloat(1.0)),
+    ("s_ticks", vint(7)),
+    ("'A' + 1", vint(66)),
+    ("0x10 - 0b11", vint(13)),
 ])
 def test_expressions(o0, expression, expected):
     insp, _ = o0
@@ -106,16 +107,17 @@ def test_expressions(o0, expression, expected):
 def test_expression_types_addresses_and_pointers(o0):
     insp, sensors = o0
     head = insp.read("*head")
-    assert head["type"] == "Sensor" and head["address"] == sensors and head["value"]["name"]["string"] == "alpha"
+    assert head["type"] == "Sensor" and head["address"] == sensors
+    assert head["value"]["members"]["name"]["string"] == "alpha"
     pointer = insp.read("&sensors[1]")
-    assert pointer["type"] == "Sensor *" and pointer["value"]["pointer"] == sensors + 80
+    assert pointer["type"] == "Sensor *" and pointer["value"]["address"] == sensors + 80
     assert "address" not in pointer
-    assert insp.read("head + 1")["value"] == {"pointer": sensors + 80, "to": "Sensor", "symbol": "sensors+80"}
+    assert insp.read("head + 1")["value"] == vptr(sensors + 80, "Sensor", symbol="sensors+80")
     assert insp.read("callback")["value"]["symbol"] == "square"
     assert insp.read("message")["value"]["string"] == "hello, fprobe"
     assert insp.read("walk::visits")["type"] == "int"
     assert insp.read("sensors[0].samples")["type"] == "int32_t[2][3]"
-    assert insp.read("ramp", max_elements=3)["value"] == {"length": 100, "head": [1, 2, 0]}
+    assert insp.read("ramp", max_elements=3)["value"] == varray(ints(1, 2, 0), length=100)
 
 
 @pytest.mark.parametrize("expression", [
@@ -134,10 +136,11 @@ def test_writes_to_globals_including_enums_and_bitfields(o0):
     insp.write("sensors[0].mode", "MODE_FAULT")
     insp.write("sensors[0].flags.level", -8)
     insp.write("head->samples[0][1]", 42)
-    assert insp.read("sensors[0].gain")["value"] == 2.5
-    assert insp.read("sensors[0].mode")["value"] == {"enum": "MODE_FAULT", "value": -2}
-    assert insp.read("sensors[0].flags")["value"] == {"ready": 1, "mode": 5, "level": -8, "wide": 0x123, "raw": 0xAB}
-    assert insp.read("sensors[0].samples[0]")["value"] == [1, 42, 3]
+    assert insp.read("sensors[0].gain")["value"] == vfloat(2.5)
+    assert insp.read("sensors[0].mode")["value"] == venum("MODE_FAULT", -2)
+    assert insp.read("sensors[0].flags")["value"] == vstruct(ready=vint(1), mode=vint(5), level=vint(-8),
+                                                             wide=vint(0x123), raw=vint(0xAB))
+    assert insp.read("sensors[0].samples[0]")["value"] == varray(ints(1, 42, 3))
     with pytest.raises(ValueError):
         insp.write("sensors[0].flags.level", 8)                     # 4 ビットの符号付きは -8〜7
     with pytest.raises(ValueError):
@@ -169,9 +172,9 @@ def test_o1_variables_in_registers_pieces_and_entry_values(name):
     frame = insp.frame_variables(1)
     assert frame["function"] == "leaf_sum"
     arguments, local = values(frame["arguments"]), values(frame["locals"])
-    assert arguments["depth"] == 2 and "entry value" in arguments["s"]["unavailable"]
-    assert local == {"total": 600, "corner": {"x": 2, "y": -2}, "ratio": 3.0}
-    assert values(insp.frame_variables(0)["arguments"]) == {"marker": 602}
-    assert insp.read("depth", frame=1)["value"] == 2
+    assert arguments["depth"] == vint(2) and "entry value" in arguments["s"]["reason"]
+    assert local == {"total": vint(600), "corner": vstruct(x=vint(2), y=vint(-2)), "ratio": vfloat(3.0)}
+    assert values(insp.frame_variables(0)["arguments"]) == {"marker": vint(602)}
+    assert insp.read("depth", frame=1)["value"] == vint(2)
     with pytest.raises(ExpressionError):
         insp.read("&depth", frame=1)                                 # レジスタの値に番地は無い

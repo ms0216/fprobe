@@ -35,6 +35,20 @@ def tx(image, registers=None, **options) -> tuple[ThreadX, ImageAccess]:
     return ThreadX(info, access, symbols, **options), access
 
 
+def test_kernel_variables_are_the_kernel_s_own_names_not_a_prefix(image, monkeypatch):
+    """オブジェクトの別名から除くのは ThreadX が定める変数だけ。「_tx_」で始まるアプリの変数は除かない。"""
+    from types import SimpleNamespace
+
+    from fprobe.rtos.threadx_objects import ThreadXObjects
+    rtos, _ = tx(image)
+    real = rtos.info.global_variables
+    monkeypatch.setattr(rtos.info, "global_variables",
+                        lambda: [*real(), SimpleNamespace(name="_tx_app_queue")])
+    kernel = ThreadXObjects(rtos).kernel_variables()
+    assert "_tx_app_queue" not in kernel
+    assert {"_tx_thread_current_ptr", "_tx_queue_created_ptr", "_tx_timer_list"} <= kernel
+
+
 def by_name(items):
     return {x.name: x for x in items}
 
@@ -126,7 +140,8 @@ def test_stacks(image):
     assert (s.base, s.end, s.size, s.pointer) == (base, base + STACK, STACK, base + STACK - 128)
     assert s.fill == "intact" and s.untouched == STACK - 128 and s.peak_used == 128 and not s.overflow
     gone = tasks["gone"]
-    assert not gone.stack.overflow and gone.stack.fill == "none" and gone.stack.fill_above and gone.notes == []
+    assert not gone.stack.overflow and gone.stack.fill == "none" and gone.stack.fill_run_above is not None \
+        and gone.notes == []
     assert tasks["main"].stack.pointer is None               # 実行中: レジスタが読めない
 
 
@@ -216,7 +231,7 @@ def test_backtrace_of_waiting_thread(image):
     frames = rtos.backtrace("sensor", variables=True)
     assert [f["function"] for f in frames][:3] == ["_txe_semaphore_get", "sensor_entry", "_tx_thread_shell_entry"]
     assert len(frames) == 3
-    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["semaphore_ptr"]["pointer"] == sem
+    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["semaphore_ptr"]["address"] == sem
     assert rtos.saved_context("main") is None
 
 

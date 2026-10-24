@@ -138,3 +138,16 @@ def test_notices_are_attached_to_the_next_dict_result_of_a_tool():
     assert backtrace() == [1]                              # 辞書でない結果は形を変えない
     assert status() == {"ok": True, "notices": [{"topic": "elf.changed", "message": "app.elf が更新された"}]}
     assert status() == {"ok": True}                        # 添えたら消える
+
+
+def test_dropped_notices_are_counted():
+    # 溜めるのは最新 NOTICE_LIMIT 件。古いものを捨てたら、捨てた数と上限を添える（黙って捨てない。?33）
+    from fprobe.mcp_server import NOTICE_LIMIT
+    notices = Notices()
+    for i in range(NOTICE_LIMIT + 3):
+        notices.add("t", {"n": i})
+    out = notices.attach({})
+    assert len(out["notices"]) == NOTICE_LIMIT and out["notices"][0]["n"] == 3
+    assert out["notices_dropped"] == 3 and out["notices_limit"] == NOTICE_LIMIT
+    notices.add("t", {"n": 0})
+    assert "notices_dropped" not in notices.attach({})

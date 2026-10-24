@@ -1,6 +1,5 @@
-// Power（J-Link の Power・Ozone の Power Graph に当たる）の計算。Svelte に依らない。
-// いまのターゲットの電圧（probe.voltage を周期的に読む）の窓と統計（最小・最大・平均）、記録の電圧（stream aux、
-// kind mv）の列、電圧の低下（基準より下がった区間）の検出。
+// Power（J-Link の Power・Ozone の Power Graph に当たる）の見せ方。Svelte に依らない。統計・いちばん低い点・
+// 指定した電圧以下の区間はデーモン（probe.voltage_history・recording.voltage）が出す。ここは描く系列・CSV・書式だけ。
 import type { Series } from "./chart";
 
 export interface VoltageReading {
@@ -11,83 +10,26 @@ export interface VoltageReading {
   errors?: number;
 }
 
-export interface WindowStats {
-  count: number;                     // 値のある読みの数
-  min: number;
-  max: number;
-  mean: number;
-  overRange: number;                 // 測れる上限を超えた読み
-  notLive: number;                   // 補助マイコンが送っていなかった読み
-}
-
 export const SPANS_S = [10, 60, 300, 1800];                 // 窓の長さ（秒）
 
-/** 読みの窓（時刻は ms。古い読みは窓の長さで捨てる） */
-export class VoltageWindow {
-  private t: number[] = [];
-  private v: (number | null)[] = [];
-  private flags: { over: boolean; live: boolean }[] = [];
+export interface HistoryReading {
+  time: number;                      // デーモンが読んだ時刻（UNIX 秒）
+  volts: number | null;
+  over_range: boolean;
+  live: boolean;
+}
 
-  constructor(public spanS = 60) {}
+/** probe.voltage_history の読みを描く系列（x = 最初の読みからの秒。測れなかった読みで線を切る） */
+export function historySeries(readings: HistoryReading[], name: string): Series {
+  const t0 = readings.length ? readings[0].time : 0;
+  return { name, x: readings.map((r) => r.time - t0), y: readings.map((r) => measuredVolts(r) ?? NaN), unit: "V" };
+}
 
-  add(tMs: number, r: VoltageReading): void {
-    this.t.push(tMs);
-    this.v.push(r.live && !r.over_range && typeof r.volts === "number" ? r.volts : null);
-    this.flags.push({ over: Boolean(r.over_range), live: Boolean(r.live) });
-    this.trim(tMs);
-  }
-
-  setSpan(spanS: number): void {
-    this.spanS = spanS;
-    if (this.t.length) this.trim(this.t[this.t.length - 1]);
-  }
-
-  private trim(now: number): void {
-    let cut = 0;
-    while (cut < this.t.length && this.t[cut] < now - this.spanS * 1000) cut++;
-    if (cut) {
-      this.t.splice(0, cut);
-      this.v.splice(0, cut);
-      this.flags.splice(0, cut);
-    }
-  }
-
-  clear(): void {
-    this.t = [];
-    this.v = [];
-    this.flags = [];
-  }
-
-  get length(): number {
-    return this.t.length;
-  }
-
-  stats(): WindowStats {
-    let count = 0, min = Infinity, max = -Infinity, sum = 0, overRange = 0, notLive = 0;
-    this.v.forEach((x, i) => {
-      if (this.flags[i].over) overRange++;
-      if (!this.flags[i].live) notLive++;
-      if (x === null) return;
-      count++;
-      sum += x;
-      if (x < min) min = x;
-      if (x > max) max = x;
-    });
-    return count ? { count, min, max, mean: sum / count, overRange, notLive }
-      : { count, min: NaN, max: NaN, mean: NaN, overRange, notLive };
-  }
-
-  /** グラフの系列（x = 最初の読みからの秒。値の無い読みで線を切る） */
-  series(name: string, originMs: number): Series {
-    return { name, x: this.t.map((t) => (t - originMs) / 1000), y: this.v.map((v) => (v === null ? NaN : v)), unit: "V" };
-  }
-
-  /** CSV（時刻は ISO、電圧 V。測れなかった読みは空） */
-  csv(): string {
-    const lines = ["time,volts,over_range,live"];
-    this.t.forEach((t, i) => lines.push(`${new Date(t).toISOString()},${this.v[i] ?? ""},${this.flags[i].over},${this.flags[i].live}`));
-    return `${lines.join("\n")}\n`;
-  }
+/** CSV（時刻は ISO、電圧 V。測れなかった読みは空） */
+export function historyCsv(readings: HistoryReading[]): string {
+  const lines = ["time,volts,over_range,live"];
+  for (const r of readings) lines.push(`${new Date(r.time * 1000).toISOString()},${measuredVolts(r) ?? ""},${r.over_range},${r.live}`);
+  return `${lines.join("\n")}\n`;
 }
 
 /** 記録の電圧の出来事（recording.find の stream aux・kind mv。b = mV）を時刻（タイムベース）と V の列に */
@@ -96,50 +38,33 @@ export function recordingVolts(events: { t: number; b: number; kind?: string }[]
   return { x: rows.map((e) => e.t), y: rows.map((e) => e.b / 1000) };
 }
 
-/** いちばん低い点の位置（無ければ -1） */
-export function minIndex(ys: ArrayLike<number>): number {
-  let k = -1;
-  for (let i = 0; i < ys.length; i++) if (Number.isFinite(ys[i]) && (k < 0 || ys[i] < ys[k])) k = i;
-  return k;
-}
-
-export interface Dip {
-  t: number;                         // 下がり始め（x の単位）
-  tEnd: number;                      // 戻ったところ
-  at: number;                        // いちばん低い点の時刻
-  min: number;                       // いちばん低い値
-  under: number;                     // 指定した電圧より下の深さ（指定 − いちばん低い値）
-}
-
-/** 電圧の低下: 使う人が指定した電圧 below 以下の区間（連続する点をまとめる）。基準の水準（中央値等）は推定しない。
- *  低い順ではなく時刻の順 */
-export function findDips(xs: ArrayLike<number>, ys: ArrayLike<number>, below: number): Dip[] {
-  const out: Dip[] = [];
-  let cur: Dip | null = null;
-  for (let i = 0; i < xs.length; i++) {
-    const y = ys[i];
-    const low = Number.isFinite(y) && y <= below;
-    if (low) {
-      if (!cur) cur = { t: xs[i], tEnd: xs[i], at: xs[i], min: y, under: below - y };
-      cur.tEnd = xs[i];
-      if (y < cur.min) Object.assign(cur, { min: y, at: xs[i], under: below - y });
-    } else if (cur) {
-      cur.tEnd = xs[i];
-      out.push(cur);
-      cur = null;
-    }
-  }
-  if (cur) out.push(cur);
-  return out;
-}
-
-/** 電圧の表し方（3 桁の V） */
 /** いまの電圧（補助マイコンが計測値を送っていて、範囲の中のときだけ。ほかは null = 「データなし」。
  *  補助の Pico が無いと volts = 0・live = false が返る。0 V と見せない） */
 export function measuredVolts(r: Pick<VoltageReading, "volts" | "over_range" | "live"> | null | undefined): number | null {
   return r && r.live && !r.over_range && typeof r.volts === "number" ? r.volts : null;
 }
 
-export function formatVolts(v: number): string {
-  return Number.isFinite(v) ? `${v.toFixed(3)} V` : "—";
+/** 電圧の表し方（3 桁の V） */
+export function formatVolts(v: number | null): string {
+  return v !== null && Number.isFinite(v) ? `${v.toFixed(3)} V` : "—";
+}
+
+type Call = (method: string, params: Record<string, unknown>, opts?: { quiet?: boolean }) => Promise<any>;
+
+/** recording.find を t0 で読み足す。API の count（条件に合う数）を読み終えるまで、maxPages ページまで。
+ *  total = 最初の count、complete = 全部読んだ（ページの上限で止めたら false） */
+export async function findPages(call: Call, query: Record<string, unknown>, maxPages: number):
+  Promise<{ events: { t: number; b: number; kind: string }[]; total: number; complete: boolean }> {
+  const events: { t: number; b: number; kind: string }[] = [];
+  let total = 0, t0: number | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const r = await call("recording.find", { query: { ...query, ...(t0 !== undefined ? { t0 } : {}) } }, { quiet: true });
+    const count = Number(r?.count ?? 0);
+    if (page === 0) total = count;
+    const got = r?.events ?? [];
+    events.push(...got);
+    if (!got.length || got.length >= count) return { events, total, complete: true };
+    t0 = got[got.length - 1].t + 1;
+  }
+  return { events, total, complete: false };
 }

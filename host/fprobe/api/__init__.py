@@ -1,6 +1,6 @@
 """fprobe の API（デーモンと利用者の約束）。仕様の正は host/api/fprobe_api.json。"""
 
-API_VERSION = 1
+API_VERSION = 2
 
 # 誤りのコード（JSON-RPC の error.code。-32000〜-32099 はアプリケーション定義）
 E_PARSE = -32700

@@ -23,7 +23,6 @@ DESIGN_FOR_LA_STREAM_EVENTS に出す）:
 """
 
 import os
-import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -44,9 +43,6 @@ DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "gateware" / "build"
 ENV_ROOT = "FPROBE_BITSTREAMS"
 ENV_AUTO = "FPROBE_AUTO_SWITCH"
 PROGRAM_TIMEOUT_S = 600                    # fprobe_gw program（programmer_cli の上限 300 秒 × IDCODE と書き込み）
-
-# JTAG でしかつながらないターゲット（pyOCD のターゲット名・部品名）: Cortex-A・ARM11（Raspberry Pi 2 / Zero 等）
-_JTAG_ONLY = re.compile(r"cortex[_-]?a\d*|arm11|arm1176|bcm283\d|raspberry|\brpi", re.IGNORECASE)
 
 
 class DesignSwitchError(RuntimeError):
@@ -91,8 +87,10 @@ def protocols_of(design: str) -> list[str]:
 
 
 def protocol_for_target(target: str | None, jtag_chain=None) -> str:
-    """target_connect が要る線: jtag_chain がある・JTAG でしかつながらないターゲット（Cortex-A・ARM11）なら JTAG。"""
-    if jtag_chain is not None or (target and _JTAG_ONLY.search(target)):
+    """target_connect が要る線: jtag_chain がある、または target が JTAG で直接つなぐ部品の表
+    （fprobe.arm_a_target.ARM_A_PARTS。Cortex-A・ARM11）の名前と同じなら JTAG。名前の部分一致では推さない。"""
+    from .arm_a_target import arm_a_part
+    if jtag_chain is not None or arm_a_part(target) is not None:
         return "jtag"
     return "swd"
 

@@ -70,6 +70,18 @@ def test_rules_check_marks_violations_and_compares_with_a_baseline(probe, tmp_pa
         probe.rules_check(rules=LATENCY, baseline="none")
 
 
+def test_rules_last_keeps_the_last_check_with_when_and_who(probe, tmp_path):
+    """最後の rules_check を、応答のまま・時刻・呼び出し元とともに読める（画面と AI が同じものを見る）"""
+    assert probe.rules_last() == {"rules": None, "inject": None}
+    _recording(tmp_path, "slow", [tp("enter", 0), tp("exit", 100 * 100)])
+    probe.recording_open("slow")
+    ai = {"id": 3, "name": "claude", "role": "ai"}
+    result = probe.rules_check(rules=LATENCY, caller=ai)
+    last = probe.rules_last()
+    assert last["rules"]["result"] == result and last["rules"]["caller"] == ai and last["rules"]["at"] > 0
+    assert last["inject"] is None
+
+
 def test_rules_load_from_a_yaml_file_and_bad_rules_are_errors(probe, tmp_path):
     _recording(tmp_path, "r", [tp("enter", 0), tp("exit", 100)])
     probe.recording_open("r")
@@ -115,7 +127,7 @@ def test_inject_run_writes_through_the_cross_trigger_and_restores_the_default(pr
     dev = _connect(probe, memory)
     dev.csr[g.XTRIG_ROUTE] = int(Source.LA_TRIGGER) << g.XTRIG_ROUTE_TO_LA[0]   # ロジアナへのつなぎは保つ
     script = {"name": "s", "trials": [{"id": "t", "requirement": "REQ-9", "when": {"host": {"delay_s": 0}},
-                                       "write": {"address": 0x20000010, "flip": 0x100}, "observe_s": 0,
+                                       "write": {"address": 0x20000010, "flip": 0x100}, "timeout_s": 2.0, "observe_s": 0,
                                        "expect": [{"memory": {"address": 0x20000010}, "equals": 0x105},
                                                   {"state": "running"}]}]}
     result = probe.inject_run(script=script)
@@ -136,7 +148,7 @@ def test_inject_run_arms_the_sequencer_for_a_pin_pattern_and_times_out(probe):
         writes.append((address, value))
         original(address, value)
     dev.write32 = spy
-    result = probe.inject_run(script={"trials": [{"id": "p", "when": {"pattern": {"rise": 8}}, "timeout_s": 0.02,
+    result = probe.inject_run(script={"trials": [{"id": "p", "when": {"pattern": {"rise": 8}}, "timeout_s": 0.02, "observe_s": 0,
                                                   "write": {"address": 0x20000000, "value": 1}}]})
     assert result["trials"][0]["verdict"] == "not_triggered"
     routes = [v >> g.XTRIG_ROUTE_TO_INJECT[0] & 0xF for a, v in writes if a == g.XTRIG_ROUTE]

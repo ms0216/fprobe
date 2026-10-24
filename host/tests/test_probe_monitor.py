@@ -67,7 +67,8 @@ def test_switching_to_monitor_keeps_the_stop(probe, chip):
     out = probe.debug_mode_set("monitor", priority=0x90)
     assert out["mode"] == "monitor" and out["state"] == "stopped" and out["priority"] == 0x90
     status = probe.target_status()
-    assert status == {"state": "HALTED", "pc": LOOP, "where": status["where"], "debug_mode": "monitor"}
+    assert status == {"state": "HALTED", "pc": LOOP, "where": status["where"], "debug_mode": "monitor",
+                      "halt_bits": []}                                       # DFSR に立っていたビットは無い（事実）
     assert not chip.debugen
 
 

@@ -98,8 +98,9 @@ class Capabilities:
     obs_match: bool = False            # 観測の値の一致をクロストリガの源 bit4 に（CSR obs.match。FEATURES bit8）
     sampler_match: bool = False        # サンプラの値の一致をクロストリガの源 bit5 に（CSR sampler_match。FEATURES bit10。構成によって無い）
     sync: bool = False                 # ボードの間の時刻の同期（CSR sync・イベント 10。FEATURES bit9）
-    la_delay_internal: float = 0.0     # ロジアナの時刻がピンの変化より遅い刻み数（内蔵。LA_DELAY が無ければ 0 = 直さない）
-    la_delay_deep: float = 0.0         # 同（深いバッファ）
+    la_delay_internal: int = 0         # ロジアナの時刻がピンの変化より遅い段数（刻み。内蔵。LA_DELAY が無ければ 0 = 直さない）
+    la_delay_deep: int = 0             # 同（深いバッファ）
+    la_phase_span: int = 0             # 非同期のピンを取り込む位相の幅（刻み）: ピンの変化は段数の分より 0 以上この幅未満前
     build: Build | None = None         # ビットストリームの版（U49。BUILD が無い・版なしのビルドなら None）
     la_layout: tuple[LaChannel, ...] = ()   # ロジアナの ch の並び（la_channels 本。LA_LAYOUT が無ければ古い並び）
     swo_manchester: bool = False       # SWO の Manchester 方式（U51。DEBUG に bit が無ければ無い）
@@ -169,9 +170,8 @@ def parse(data: bytes) -> Capabilities:
             values["jtag"] = bool(debug & g.DEBUG_JTAG)
             values["inject"] = bool(debug & g.DEBUG_INJECT)
             values["swo_manchester"] = bool(debug & g.DEBUG_SWO_MANCHESTER)
-        elif kind == g.CAPS_LA_DELAY and length >= 4:
-            internal, deep = struct.unpack_from("<HH", value)
-            values["la_delay_internal"], values["la_delay_deep"] = internal / 2, deep / 2
+        elif kind == g.CAPS_LA_DELAY and length >= 6:
+            values["la_delay_internal"], values["la_delay_deep"], values["la_phase_span"] = struct.unpack_from("<HHH", value)
         elif kind == g.CAPS_UART_FLOW:
             values["uart_flow"] = tuple(value)
         elif kind == g.CAPS_OUTPUTS and length >= 1:

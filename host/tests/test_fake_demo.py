@@ -3,6 +3,7 @@
 import pytest
 
 from fake_demo import DemoProbe
+from value_kinds import vint
 
 
 @pytest.fixture(scope="module")
@@ -46,14 +47,16 @@ def test_watch_and_locals_have_structs_arrays_and_pointers():
     # 画面の変数の木（構造体・配列・ポインタの展開）と書き込みを機器なしで試せる。式は本物の C の式の評価（cexpr）
     demo = DemoProbe()
     sensors = demo.evaluate("sensors")
-    assert sensors["type"] == "struct Sensor[3]" and sensors["value"][0]["name"]["string"] == "accel"
+    assert sensors["type"] == "struct Sensor[3]"
+    assert sensors["value"]["items"][0]["members"]["name"]["string"] == "accel"
     assert demo.evaluate("active")["value"]["symbol"] == "sensors+32"
     assert demo.evaluate("active->next->name")["value"]["string"] == "temp"
-    assert demo.evaluate("log_buffer", max_elements=64)["value"]["length"] == 100         # 多い配列は先頭だけ
+    log = demo.evaluate("log_buffer", max_elements=64)["value"]
+    assert log["length"] == 100 and len(log["items"]) == 64                                # 多い配列は先頭だけ
     assert demo.evaluate("config.label")["value"]["string"] == "fprobe demo v1.0"
     assert [m["name"] for m in demo.type_info("struct Sensor")["members"]][:3] == ["id", "mode", "gain"]
-    assert demo.write_expression("sensors[0].mode", "MODE_FAULT")["value"]["enum"] == "MODE_FAULT"
-    assert demo.write_expression("sensors[2].channel", 5)["value"] == 5                    # ビットフィールド
+    assert demo.write_expression("sensors[0].mode", "MODE_FAULT")["value"]["name"] == "MODE_FAULT"
+    assert demo.write_expression("sensors[2].channel", 5)["value"] == vint(5)              # ビットフィールド
     demo.write_expression("counter", 300)
     assert demo.counter == 300
 
@@ -61,7 +64,7 @@ def test_watch_and_locals_have_structs_arrays_and_pointers():
 def test_live_watch_reads_globals_while_running_and_checks_expressions_from_the_elf():
     demo = DemoProbe()
     demo.state = "RUNNING"
-    assert demo.evaluate("counter", live=True)["value"] == demo.counter
+    assert demo.evaluate("counter", live=True)["value"] == vint(demo.counter)
     assert demo.evaluate("active->next->name", live=True)["value"]["string"] == "temp"
     with pytest.raises(ValueError, match="止まっているとき"):
         demo.evaluate("p", live=True)                                    # ローカル変数
@@ -89,7 +92,7 @@ def test_memory_is_shared_with_variables_and_writable():
     demo = DemoProbe()
     base = demo.evaluate("sensors")["address"]
     demo.write_memory(base, "09")
-    assert demo.evaluate("sensors[0].id")["value"] == 9
+    assert demo.evaluate("sensors[0].id")["value"] == vint(9)
     view = demo.memory_view(base, 16, compare=True)
     assert view["rows"][0]["values"][0] == 9 and {"address": base, "name": "sensors"} in view["names"]
     demo.write_expression("sensors[0].id", 7)

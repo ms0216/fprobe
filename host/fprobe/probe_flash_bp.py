@@ -52,7 +52,7 @@ class FlashBreakpointTools:
         settings = self._flash_bp_settings
         self._flash_bp = FlashBreakpoints(raw, journal=self._flash_bp_journal(), persistent=self._flash_bp_persistent,
                                           scratch=settings["scratch"], enabled=settings["enabled"],
-                                          dormant_limit=settings["dormant_limit"])
+                                          dormant_limit=settings["dormant_limit"], guards=self._flash_guards())
         return self._flash_bp
 
     def _flash_bp_persistent(self, address: int) -> bool:

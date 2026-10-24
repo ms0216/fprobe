@@ -34,9 +34,12 @@ def helper(x):
     check = cs.check_script(path)
     assert check.ok and [h["name"] for h in check.hooks] == ["will_connect", "will_reset"]
     assert check.commands == ["hello"] and check.hooks[1]["line"] == 5
+    assert check.functions == [{"name": "helper", "line": 12}]                 # pyOCD が呼ばない関数（事実）
 
 
-def test_typos_and_wrong_parameters_are_problems(tmp_path):
+def test_wrong_parameters_are_problems_and_other_names_are_listed_as_facts(tmp_path):
+    # 名前の似ている度合い（0.8）・will_ / did_ の接頭辞で「誤り」と決めない。pyOCD の手順の名前でない関数は
+    # functions（pyOCD は呼ばない）に並べるだけ。名前の候補の提示はプラグイン（heuristics.connect_script_name_hints）
     path = write(tmp_path, '''
 def will_conect(board):
     pass
@@ -50,7 +53,10 @@ def will_reset(core, kind):
     check = cs.check_script(path)
     assert not check.ok
     text = " ".join(check.problems)
-    assert "will_connect のつもり" in text and "did_something" in text and "kind" in text
+    assert "kind" in text and "will_conect" not in text and "did_something" not in text
+    assert check.functions == [{"name": "will_conect", "line": 2}, {"name": "did_something", "line": 5}]
+    assert check.as_dict()["functions"] == check.functions
+    assert cs.check_script(write(tmp_path, "def will_conect(board):\n    pass\n")).ok
 
 
 def test_syntax_errors_are_reported_with_the_line(tmp_path):

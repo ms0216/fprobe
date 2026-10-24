@@ -19,7 +19,8 @@ import { NO_LABEL, TONE, type RawLane, type RowEvents, type Tile } from "./tile"
 export const MODE = { none: 0, logic: 1, density: 2, intervals: 3, points: 4, values: 5, header: 6, bus: 7, state: 8 };
 export const FLAG = { start: 1, end: 2, mixed: 4, mark: 8 };
 /** パレット: 0..11 = 段の色、12 = good、13 = bad、14 = warn、15 = 控えめ（layout.ts の PALETTE） */
-export const TONE_COLOR: Record<number, number> = { [TONE.good]: 12, [TONE.bad]: 13, [TONE.warn]: 14 };
+export const TONE_COLOR: Record<number, number> = {
+  [TONE.running]: 12, [TONE.failure]: 13, [TONE.stop]: 14, [TONE.mark]: 14, [TONE.other]: 14 };
 export const BOX_LABEL_PX = 24;       // 区間・箱にラベルを付ける最小の幅（デバイスの画素）
 export const POINT_LABEL_PX = 48;     // 印にラベルを付ける、次の印までの最小の間（デバイスの画素）
 const MAX_LABELS = 4000;
@@ -51,7 +52,23 @@ export interface TimelineFrame {
   max: number[];                      // density の段の画素の件数の最大（棒の目盛り）
   scales: ([number, number] | null)[];  // values の段の目盛り [下, 上]
   labels: FrameLabel[];
+  unknown: UnknownSpan[];             // 始めの値を探していない所（状態・値の段。無ければ空）
   decimateMs: number;                 // 間引きにかかった時間（Worker の中）
+}
+
+/** 状態・値の段で、範囲の始めの値を探していない所（レーンの carry_complete = false）: 見えている始め（記録の始めより
+ *  前は除く）から段の最初の出来事まで。探した始めは carryFrom（それより前は探していない。無いのではない）。
+ *  画面は判断しない: API の carry_complete・carry_from と出来事の時刻をそのまま画素にしたもの */
+export interface UnknownSpan {
+  id: string;                         // 段の名前
+  x0: number;                         // 画素（デバイス）[x0, x1)
+  x1: number;
+  carryFrom: number | null;
+}
+
+/** フレームの段 id の画素 x（デバイス）が、始めの値を探していない所なら、その区間（ホバーの説明に） */
+export function unknownAt(frame: TimelineFrame, id: string, x: number): UnknownSpan | null {
+  return frame.unknown.find((u) => u.id === id && u.x0 <= x && x < u.x1) ?? null;
 }
 
 /** 視点 [v0, v1)（整数）を width 画素に。ranges は値の段の目盛り（無ければタイルの値の範囲）。seq は要求の番号 */
@@ -64,6 +81,7 @@ export function composeFrame(tile: Tile, v0: number, v1: number, width: number, 
   const visible = new Array<number>(n).fill(0), max = new Array<number>(n).fill(0);
   const scales: ([number, number] | null)[] = new Array(n).fill(null);
   const labels: FrameLabel[] = [];
+  const unknown: UnknownSpan[] = [];
   const counts = new Uint32Array(W), low = new Float64Array(W), high = new Float64Array(W);
   // 波形はまとめて 1 回（チャンネル × 画素の状態）
   const wanted = specs.some((s) => s.type === "logic");
@@ -135,6 +153,10 @@ export function composeFrame(tile: Tile, v0: number, v1: number, width: number, 
       return;
     }
     const ev = lane.byRow[at.row];
+    if ((spec.type === "state" || spec.type === "values") && !lane.carryComplete) {
+      const span = unknownSpan(tile, ev, px, spec.id, lane.carryFrom);
+      if (span) unknown.push(span);
+    }
     if (spec.type === "values") {
       valueEnvelope(tile, ev, px, low, high);
       scales[r] = ranges?.get(spec.id) ?? [ev.lo, ev.hi];
@@ -157,8 +179,18 @@ export function composeFrame(tile: Tile, v0: number, v1: number, width: number, 
     modes[r] = spec.type === "points" ? MODE.points : spec.type === "bus" ? MODE.bus
       : spec.type === "state" ? MODE.state : MODE.intervals;
   });
-  return { seq, v0, v1, width, rows: n, ids: specs.map((s) => s.id), data, modes, visible, max, scales, labels,
+  return { seq, v0, v1, width, rows: n, ids: specs.map((s) => s.id), data, modes, visible, max, scales, labels, unknown,
            decimateMs: performance.now() - started };
+}
+
+/** 段の始めの値を探していない所: [見えている始め（記録の始めより前は除く）, 段の最初の出来事（無ければ記録の終わり）) */
+function unknownSpan(tile: Tile, ev: RowEvents, px: Pixels, id: string, carryFrom: number | null): UnknownSpan | null {
+  const [start, end] = tile.header.extent ?? [tile.t0, tile.t1];
+  const a = Math.max(px.v0, start), b = Math.min(px.v1, ev.t.length ? ev.t[0] : end, end);
+  if (!(b > a)) return null;
+  const k = px.width / px.span;
+  const x0 = Math.max(0, Math.floor((a - px.v0) * k)), x1 = Math.min(px.width, Math.max(x0 + 1, Math.ceil((b - px.v0) * k)));
+  return { id, x0, x1, carryFrom };
 }
 
 function colorOf(lane: RawLane, i: number, row: number): number {

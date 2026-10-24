@@ -1,4 +1,11 @@
 // 偽の接続: call は responders で答える（関数なら引数を渡して呼ぶ）。試験から通知と接続の状態を起こす
+import { RpcError } from "../src/lib/api";
+
+/** デーモンが返す機器の誤り（E_DEVICE。data に例外の型と文） */
+export function deviceError(detail: string, exception = "RuntimeError"): RpcError {
+  return new RpcError(-32020, `${exception}: ${detail}`, { exception, detail });
+}
+
 export class FakeConn {
   topics = new Map<string, Set<(d: any) => void>>();
   link: ((s: any, h?: any) => void) | null = null;

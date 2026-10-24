@@ -171,9 +171,11 @@ def enter_monitor(raw, box: int, timeout_s: float = 0.5, poll_s: float = 0.0005)
                            "いる）。target_debug_mode_get の priority を確かめる")
 
 
-def leave_monitor(monitor: "MonitorTarget", raw) -> None:
+def leave_monitor(monitor: "MonitorTarget", raw) -> dict:
     """モニタ方式 → 停止方式。止まっていれば、割り込まれた処理の PC に一時のブレークポイントを置いて GO し、戻った処理を
-    停止方式で止める（同じ PC で止まったまま）。走っていれば走ったまま。"""
+    停止方式で止める（同じ PC で止まったまま）。走っていれば走ったまま。どう止めたかを返す: stop = running（走ったまま）/
+    breakpoint_at_pc（PC のブレークポイントで止まった）/ halt_request（置けなかった・戻らなかったので停止要求で止めた。
+    PC は近くだが同じとは限らない）と、pc_before・pc_after。"""
     stopped = monitor.get_state() == Target.State.HALTED
     pc = monitor.read_core_register_raw("pc") if stopped else None
     raw.write32(DEMCR, raw.read32(DEMCR) & ~(MON_EN | MON_PEND | MON_STEP))
@@ -181,19 +183,22 @@ def leave_monitor(monitor: "MonitorTarget", raw) -> None:
     raw.flush()
     if not stopped:
         monitor.forget()
-        return
+        return {"stop": "running"}
     existing = raw.find_breakpoint(pc) is not None             # 利用者のブレークポイントがあれば、それで止まる
     placed = not existing and bool(raw.set_breakpoint(pc, Target.BreakpointType.AUTO))
     if placed:
         _flush_breakpoints(raw)
     monitor.command(CMD_GO, 0)
     monitor.forget()
+    how = "breakpoint_at_pc"
     if not (existing or placed) or not _wait(lambda: raw.get_state() == Target.State.HALTED,
                                               monitor.timeout_s, monitor.poll_s):
-        raw.halt()                                             # 置けなかった・戻らない: すぐ近くで止める
+        raw.halt()                                             # 置けなかった・戻らない: すぐ近くで止める（結果に出す）
+        how = "halt_request"
     if placed:
         raw.remove_breakpoint(pc)
         _flush_breakpoints(raw)
+    return {"stop": how, "pc_before": pc, "pc_after": raw.read_core_register("pc")}
 
 
 def _flush_breakpoints(target) -> None:
@@ -305,7 +310,10 @@ class MonitorTarget:
         for bit, value in _REASONS:
             if reason & bit:
                 return value
-        return Target.HaltReason.USER                          # MON_PEND（ホストの停止の要求）
+        # DFSR のビットが 1 つも無い入口は MON_PEND（ホストの停止の要求）だけ: DebugMonitor の入口で DFSR に印が残るのは
+        # BKPT・DWTTRAP・HALTED（MON_STEP）・EXTERNAL・VCATCH で、MON_PEND は印を残さない（ARMv7-M ARM C1.6.1・C1.7.3）。
+        # モニタ（host/firmware/monitor）は入るたびに DFSR を箱に写して消すので、前の停止の印は混ざらない
+        return Target.HaltReason.USER
 
     # --- 実行 -------------------------------------------------------------------------------------
 

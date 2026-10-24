@@ -23,7 +23,8 @@ from .recording import Recorder
 __all__ = ["Collector", "add_capture", "add_events", "sample_clock", "unwrap48"]
 
 MASK48 = (1 << 48) - 1
-_STREAMS = {"ap_read": "dap", "ap_write": "dap", "inject": "dap", "dp_read": "dap", "dp_write": "dap", "fail": "dap",
+_STREAMS = {"ap_read": "dap", "ap_write": "dap", "drw_read": "dap", "drw_write": "dap", "inject": "dap", "dp_read": "dap",
+            "dp_write": "dap", "fail": "dap",
             "uart_rx": "uart", "uart_tx": "uart", "swo": "swo", "aux": "aux", "sample": "sample",
             "sync_pair": "sync"}
 _KINDS = {"uart_rx": "rx", "uart_tx": "tx", "swo": "byte", "aux": "mv", "sample": "word", "sync_pair": "pair"}

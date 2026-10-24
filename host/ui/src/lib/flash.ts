@@ -1,4 +1,4 @@
-// Flash のパネル（J-Flash Lite の型）の計算（Svelte に依らない）: 書き込みの設定と target.flash の引数、ファイルの形式と
+// Flash のパネル（J-Flash Lite の型）の計算（Svelte に依らない）: 書き込みの設定と target.flash の引数と
 // 番地、進捗の通知（flash.progress）、結果の段ごとの時間・速度の表、Flash の領域のセクタの並び。
 import { formatDuration } from "./time";
 
@@ -29,14 +29,6 @@ export function loadOptions(text: string): FlashOptions {
   }
 }
 
-/** ファイルの形式（拡張子で。デーモンは中身でも決める）。BIN は番地が要る */
-export function formatOf(path: string): "elf" | "hex" | "bin" {
-  const ext = /\.([^.\\/]+)$/.exec(path)?.[1]?.toLowerCase() ?? "";
-  if (["elf", "axf", "out"].includes(ext)) return "elf";
-  if (["hex", "ihex", "ihx"].includes(ext)) return "hex";
-  return ext === "bin" ? "bin" : "elf";
-}
-
 /** 番地・長さの欄: 0x… と数字だけの並びは 16 進（Memory の番地と同じ）、末尾 K / M はバイト数の倍。空・誤りは null */
 export function parseNumber(text: string): number | null {
   const s = text.trim().replace(/_/g, "");
@@ -47,19 +39,23 @@ export function parseNumber(text: string): number | null {
   return null;
 }
 
-/** target.flash の引数。BIN で番地が無ければ投げる（BIN 以外は番地を渡さない: ファイルが持つ） */
-export function programParams(path: string, address: string, o: FlashOptions) {
-  const at = formatOf(path) === "bin" ? parseNumber(address) : null;
-  if (formatOf(path) === "bin" && at === null) throw new RangeError("address");
-  return { path, ...(at !== null ? { address: at } : {}), erase: o.erase, verify: o.verify, smart: o.smart,
-           reset: o.reset };
+/** 番地の欄 → 送る番地。空なら送らない（undefined）、読めなければ投げる。形式（BIN か）は画面で決めない:
+ *  デーモンが中身で決め、BIN に番地が無い・ELF / HEX に番地がある、は誤りで返す */
+function addressParam(address: string): { address?: number } {
+  if (!address.trim()) return {};
+  const at = parseNumber(address);
+  if (at === null) throw new RangeError("address");
+  return { address: at };
 }
 
-/** target.flash.verify の引数 */
+/** target.flash の引数（番地は入れたときだけ） */
+export function programParams(path: string, address: string, o: FlashOptions) {
+  return { path, ...addressParam(address), erase: o.erase, verify: o.verify, smart: o.smart, reset: o.reset };
+}
+
+/** target.flash.verify の引数（番地は入れたときだけ） */
 export function verifyParams(path: string, address: string) {
-  const at = formatOf(path) === "bin" ? parseNumber(address) : null;
-  if (formatOf(path) === "bin" && at === null) throw new RangeError("address");
-  return { path, ...(at !== null ? { address: at } : {}) };
+  return { path, ...addressParam(address) };
 }
 
 /** バイト数の表示（1.5 KB・2.0 MB） */
@@ -114,27 +110,14 @@ export function programStages(result: any): Stage[] {
   ];
 }
 
-/** 進捗の通知（flash.progress）: operation = program / erase / verify / read、phase = erase / program / verify / read */
+/** 進捗の通知（flash.progress）: operation = program / erase / verify / read、phase = erase / program / verify / read。
+ *  画面は段（phase）と段の中の進み（fraction）・経過（elapsed_s）をそのまま描く（段を等分して 1 本に合成しない・残りの
+ *  時間を見積もらない: 消去・書き込み・検証は速さが違い、速さが一定という仮定は外れる） */
 export interface Progress {
   operation: string;
   phase: string;
   fraction: number;
   elapsed_s: number;
-}
-
-/** 進捗の帯の値（0..1）。program は段（erase → program → verify）の続きとして 1 本で見せる */
-export function overall(p: Progress, verify = true): number {
-  if (p.operation !== "program") return p.fraction;
-  const phases = verify ? ["erase", "program", "verify"] : ["erase", "program"];
-  const i = Math.max(0, phases.indexOf(p.phase));
-  return Math.min(1, (i + p.fraction) / phases.length);
-}
-
-/** 残りの時間の見積もり（秒）: 経過 × (1 − 進み) / 進み。段ごとの速さの違いは見ない目安。まだ進んでいなければ null */
-export function remaining(p: Progress, verify = true): number | null {
-  const f = overall(p, verify);
-  if (f >= 1) return 0;
-  return f > 0 ? (p.elapsed_s * (1 - f)) / f : null;
 }
 
 /** 消去の方法（sector / chip / mass）の文言のキー。知らない方法は null（そのまま出す） */

@@ -10,8 +10,8 @@ Zephyr のオブジェクトは静的な変数（K_SEM_DEFINE 等）なので、
 from __future__ import annotations
 
 from ..dwarf.access import AccessError
+from ..dwarf.typesys import PointerType, strip
 from .model import HeapInfo, KernelObject, Task, Waiter
-from .objects import typed_variables
 from .structs import StructLayout
 
 __all__ = ["KINDS", "ZephyrObjects"]
@@ -42,7 +42,7 @@ class ZephyrObjects:
     def objects(self, tasks: list[Task]) -> list[KernelObject]:
         self._tasks = {t.handle: t for t in tasks}
         found: dict[int, tuple[str, list[str]]] = {}
-        for f in sorted(typed_variables(self.rtos.info, self.mem, {k: k for k in self.layouts}),
+        for f in sorted(self.rtos.typed_objects({k: k for k in self.layouts}),
                         key=lambda f: f.pointer):                     # 変数そのものの名前を先に
             found.setdefault(f.address, (f.family, []))[1].append(f.expression)
         objects = []
@@ -66,6 +66,7 @@ class ZephyrObjects:
 
     def _read(self, handle: int, kind: str) -> KernelObject:
         layout = self.layouts[kind]
+        self._notes: list[str] = []                                  # 読みの途中の事実（上限で止めた 等）
         fields = getattr(self, f"_{kind}")(layout, handle)
         path = _WAIT_Q.get(kind, "wait_q")
         wait_lists: tuple[int, ...] = ()
@@ -74,7 +75,7 @@ class ZephyrObjects:
             wait_q = handle + layout.offset(path)
             wait_lists = (wait_q,)
             waiters = self._waiters(wait_q, list(self._tasks.values()))
-        return KernelObject(handle, kind, "", "", fields, waiters, wait_lists=wait_lists)
+        return KernelObject(handle, kind, "", "", fields, waiters, wait_lists=wait_lists, notes=self._notes)
 
     # --- 読み ------------------------------------------------------------------------------------
 
@@ -118,9 +119,13 @@ class ZephyrObjects:
         active = bool(self.mem.u32(node + self._next_offset())) if self.dnode is not None else False
         fields["active"] = active
         if active:
-            remaining = self._remaining(node)
+            remaining, stopped = self._remaining(node)
             if remaining is not None:
                 fields["remaining_ticks"] = remaining
+            elif stopped:                                             # 上限で止めた: 残りは分からない（無いのではない）
+                fields["remaining_truncated"] = True
+                self._notes.append(f"timeout_list を辿る上限 {MAX_ITEMS} 個に達したので止めた（この節まで届かず、"
+                                   "残りのティックは読んでいない）")
         if s.has("status"):
             fields["expiry_count"] = self._u(s, h, "status")
         if s.has("expiry_fn"):
@@ -132,20 +137,23 @@ class ZephyrObjects:
     def _next_offset(self) -> int:
         return self.dnode.offset("next" if self.dnode.has("next") else "head")
 
-    def _remaining(self, target: int) -> int | None:
-        """timeout_list（期限の差分の列）を先頭から足して、target の節までの残りのティック（最後の告知からの経過は含まない）。"""
+    def _remaining(self, target: int) -> tuple[int | None, bool]:
+        """timeout_list（期限の差分の列）を先頭から足して、target の節までの残りのティック（最後の告知からの経過は含まない）。
+        (残り, 辿る上限 MAX_ITEMS で止めたか)。列の終わりまで見て無い・列が無いときは (None, False)。"""
         head = self.rtos.optional_address("timeout_list")
         if head is None or self.timeout is None or not self.timeout.has("dticks"):
-            return None
+            return None, False
         node_offset = self.timeout.offset("node")
         total, node, steps = 0, self.mem.u32(head + self._next_offset()), 0
-        while node and node != head and steps < MAX_ITEMS:
+        while node and node != head:
+            if steps >= MAX_ITEMS:
+                return None, True
             total += self.mem.uint(node - node_offset + self.timeout.offset("dticks"),
                                    self.timeout.member_size("dticks"), True)
             if node == target:
-                return total
+                return total, False
             node, steps = self.mem.u32(node + self._next_offset()), steps + 1
-        return None
+        return None, False
 
     def _k_queue(self, s: StructLayout, h: int, prefix: str = "") -> dict:
         path = f"{prefix}data_q.head"
@@ -155,6 +163,9 @@ class ZephyrObjects:
         while node and count < MAX_ITEMS:
             count += 1
             node = self.mem.u32(node) & ~3                           # sys_sfnode_t.next_and_flags（下位 2 ビットは印）
+        if node:                                                     # 続きがあるのに上限で止めた: 数は全部ではない
+            self._notes.append(f"データの列を辿る上限 {MAX_ITEMS} 個に達したので止めた（続きは数えていない）")
+            return {"items": count, "items_truncated": True}
         return {"items": count}
 
     def _k_fifo(self, s: StructLayout, h: int) -> dict:
@@ -165,8 +176,13 @@ class ZephyrObjects:
     def _k_stack(self, s: StructLayout, h: int) -> dict:
         if not all(s.has(m) for m in ("base", "next", "top")):
             return {}
+        pointer = strip(s.member_type("base"))                     # stack_data_t *（要素の大きさは DWARF から）
+        entry = pointer.target.size if isinstance(pointer, PointerType) else None
+        if not entry:
+            self._notes.append("k_stack の要素（stack_data_t）の大きさが DWARF から分からない: 数を出さない")
+            return {}
         base, nxt, top = (self._u(s, h, m) for m in ("base", "next", "top"))
-        return {"size": (top - base) // 4, "used": (nxt - base) // 4}
+        return {"size": (top - base) // entry, "used": (nxt - base) // entry}
 
     def _k_mem_slab(self, s: StructLayout, h: int) -> dict:
         names = {f"info.{m}": m for m in ("num_blocks", "block_size", "num_used", "max_used")}

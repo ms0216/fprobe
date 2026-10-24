@@ -18,6 +18,8 @@ import collections
 import operator
 from dataclasses import dataclass, field
 
+from .dwarf.values import scalar
+
 __all__ = ["Capture", "Condition", "OPS", "number_of"]
 
 OPS = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le, "==": operator.eq,
@@ -25,15 +27,16 @@ OPS = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le,
 EVENTS = ("xtrig",)
 
 
-def number_of(value: object) -> int | float | None:
-    """比べられる数（整数・浮動小数・真偽、列挙・ビットフィールドの {"value": …}）。比べられなければ None。"""
+def number_of(value: dict) -> int | float | None:
+    """観測した値（fprobe.dwarf.values の形）の比べられる数（int・float・enum の value、bool は 0 / 1）。NaN・無限大
+    （value が文字列）とほかの種類は None。"""
+    return _number(scalar(value))
+
+
+def _number(value: object) -> int | float | None:
     if isinstance(value, bool):
         return int(value)
-    if isinstance(value, (int, float)):
-        return value
-    if isinstance(value, dict) and isinstance(value.get("value"), (int, float)):
-        return value["value"]
-    return None
+    return value if isinstance(value, (int, float)) else None
 
 
 @dataclass(frozen=True)
@@ -59,9 +62,9 @@ class Condition:
             raise ValueError(f"{spec['variable']!r} は観測していない（watch_set の式の名前: {sorted(names)}）")
         if spec["op"] not in OPS:
             raise ValueError(f"op は {' '.join(OPS)}（{spec['op']!r}）")
-        if number_of(spec["value"]) is None:
+        if _number(spec["value"]) is None:
             raise ValueError(f"value は数（{spec['value']!r}）")
-        return cls(spec["variable"], spec["op"], number_of(spec["value"]), bool(spec.get("edge", False)))
+        return cls(spec["variable"], spec["op"], _number(spec["value"]), bool(spec.get("edge", False)))
 
     def describe(self) -> dict:
         if self.event is not None:
@@ -75,7 +78,7 @@ class _Tracker:
     condition: Condition
     last: bool | None = None
 
-    def update(self, name: str, value: object) -> bool:
+    def update(self, name: str, value: dict) -> bool:
         c = self.condition
         if c.event is not None or name != c.variable:
             return False

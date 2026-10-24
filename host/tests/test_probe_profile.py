@@ -97,9 +97,12 @@ def test_itm_profile_shares_the_swo_receive_and_restores_dwt(probe):
     assert live["running"] and live["total"] == 5
     rows = {r["function"]: r for r in live["rows"]}
     assert rows["tick"]["samples"] == 3 and rows["reached_milestone"]["samples"] == 1
-    assert live["categories"]["sleep"]["samples"] == 1 and len(rows["tick"]["ci"]) == 2
+    assert live["categories"]["sleep"]["samples"] == 1 and "ci" not in rows["tick"] and "confidence" not in live
+    cut = probe.profile_result(top=1)                                    # 切る前の行の数も返す（切ったことが分かる）
+    assert len(cut["rows"]) == 1 and cut["rows_total"] == len(live["rows"]) == live["rows_total"] >= 2
     stopped = probe.profile_stop()
     assert not stopped["running"] and stopped["exceptions"][0]["name"] == "SysTick"
+    assert stopped["exceptions_total"] >= len(stopped["exceptions"])          # 切る前の数（?44）
     assert [v for a, v in target.write_log if a == dwt.DWT_CTRL][-1] == DWT_CTRL_RESET    # 元に戻した
     assert probe._swo_listeners == []
     exceptions = probe.profile_exceptions()
@@ -182,11 +185,13 @@ def test_timing_between_two_kinds_of_recorded_events(probe):
     assert out["count"] == 5 and out["min"] == 90 and out["max"] == 1000 and out["max_at"] == 50_000
     assert out["longest"][0]["duration"] == 1000 and out["seconds"]["max"] == pytest.approx(1000 / 1e8)
     assert len(out["intervals"]) == 3 and out["intervals_total"] == 5
+    assert len(out["interval_bins"]) == 3                             # 区間と同じだけに切る（並びが揃う）
 
 
 # --- ベクタ表の名前 ---------------------------------------------------------------------------
 
-def test_interrupt_names_come_from_the_vector_table_variable(probe):
+def test_interrupt_names_come_only_from_the_vector_table_the_user_gave(probe):
+    # 最初の区画の先頭をベクタ表と仮定しない（点検 2 回目 H3）: 使う側が渡した表（番地, 大きさ）からだけ名前を付ける
     table = bytearray(4 * 20)
     table[4 * 17:4 * 18] = (0x100 | 1).to_bytes(4, "little")           # IRQ1 → usart_irq
     table[4 * 18:4 * 19] = (0x200).to_bytes(4, "little")               # Thumb でない: 名前を付けない
@@ -195,7 +200,17 @@ def test_interrupt_names_come_from_the_vector_table_variable(probe):
         segments=[SimpleNamespace(address=0, data=bytes(table) + b"\x01\x01\x00\x00")],
         symbol_at=lambda a: (Symbol("vectors", 0, len(table), "object"), 0) if a == 0 else None,
         describe=lambda a: Location(a, funcs.get(a), 0 if a in funcs else None))
-    assert probe._vector_names() == {17: "IRQ1 (usart_irq)"}
+    assert probe._vector_names(None) == {}                              # 渡さなければ名前を付けない
+    assert probe._vector_names((0, len(table))) == {17: "IRQ1 (usart_irq)"}
+
+
+def test_profile_start_keeps_the_vector_table_the_user_gave(probe):
+    vectors = address_of(probe, "vectors")
+    probe.profile_start(method="itm", core_clock_hz=16e6, vector_table=vectors)
+    assert probe._profile_run.vector_table == (vectors, 64)             # 大きさは ELF のその番地の変数から
+    probe.profile_stop()
+    with pytest.raises(ValueError, match="vector_table_size"):
+        probe.profile_start(method="itm", core_clock_hz=16e6, vector_table=vectors + 4)
 
 
 # --- 方法 pcsr の速さ（B9） ---------------------------------------------------------------------

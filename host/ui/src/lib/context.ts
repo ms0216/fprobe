@@ -2,14 +2,17 @@
 // 根になるので、同じ context の Map を mount の引数で渡す（lib/dock.ts）。
 import { getContext } from "svelte";
 import type { DaemonConnection } from "./api";
+import type { CodeAtLink } from "./codeat";
 import type { CommandContext } from "./commands";
 import type { ScreenSync } from "./screen";
 import type { Reveal } from "./timeline/state";
 
 export interface Shared extends CommandContext {
   conn: Pick<DaemonConnection, "call" | "on" | "onLink">;
-  dock: { show(panel: string): void; reset(): void; layout(name: "default" | "system"): void };
+  dock: { show(panel: string): void; reset(): void; layout(name: "analysis" | "debug" | "system"): void };
   screen: ScreenSync;
+  /** 時間軸の選択カーソル（記録の時刻）の recording.code_at（ソース・呼び出し履歴・ローカル変数・スレッドの窓が使う） */
+  codeAt: CodeAtLink;
   /** ビューの行から時間軸のその時刻へ飛ぶ（Timeline のパネルを前に出し、選択カーソルを置く） */
   reveal(r: Reveal): void;
   /** 番地の場所を開く（Source のその行・Disassembly のその命令。時間軸のダブルクリック・ビューの関数名から） */

@@ -8,23 +8,38 @@
 
 from __future__ import annotations
 
-__all__ = ["ZeroDelimited", "cobs_decode", "cobs_encode", "rzcobs_decode", "rzcobs_encode", "tcobs_decode"]
+from dataclasses import dataclass
+
+__all__ = ["FRAME_LIMIT", "Dropped", "ZeroDelimited", "dropped_text", "cobs_decode", "cobs_encode", "rzcobs_decode", "rzcobs_encode", "tcobs_decode"]
+
+
+FRAME_LIMIT = 1 << 16                # ZeroDelimited の limit の既定（捨てたときは Dropped に使った上限）
+
+
+@dataclass(frozen=True)
+class Dropped:
+    """区切りの来ないまま上限を超えたので捨てたバイト（size）と、使った上限（limit）。"""
+    size: int
+    limit: int
 
 
 class ZeroDelimited:
-    """0x00 で区切られた流れからかたまりを切り出す（空のかたまりは捨てる）。"""
+    """0x00 で区切られた流れからかたまりを切り出す（空のかたまりは捨てる）。区切りの来ないまま limit バイトを
+    超えたら（同期を失った流れ）そこまでを捨て、feed の結果のその位置に Dropped を入れる。"""
 
-    def __init__(self, limit: int = 1 << 16):
+    def __init__(self, limit: int = FRAME_LIMIT):
+        if limit < 1:
+            raise ValueError("limit は 1 以上")
         self._buf = bytearray()
-        self.limit = limit               # 区切りの来ない長さの上限（超えたら捨てる。同期を失った流れのため）
-        self.dropped = 0
+        self.limit = limit
+        self.dropped = 0                 # 捨てたバイトの合計
 
     @property
     def pending(self) -> int:
         return len(self._buf)
 
-    def feed(self, data: bytes) -> list[bytes]:
-        out = []
+    def feed(self, data: bytes) -> list[bytes | Dropped]:
+        out: list[bytes | Dropped] = []
         for b in data:
             if b == 0:
                 if self._buf:
@@ -34,8 +49,13 @@ class ZeroDelimited:
                 self._buf.append(b)
                 if len(self._buf) > self.limit:
                     self.dropped += len(self._buf)
+                    out.append(Dropped(len(self._buf), self.limit))
                     self._buf.clear()
         return out
+
+
+def dropped_text(d: Dropped) -> str:
+    return f"区切り（0x00）の来ないまま上限 {d.limit} バイトを超えた {d.size} バイトを捨てた"
 
 
 def rzcobs_encode(data: bytes) -> bytes:

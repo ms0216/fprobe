@@ -18,11 +18,11 @@ _reading と、ObserveTools（SWO の受信 `_swo_receive` とパケットの受
 from dataclasses import dataclass, field
 
 from .api import NoData
+from .callgraph import vector_table as _checked_vector_table
 from .itm import Packet, Timestamper
 from .probe_window import EventWindow, write_registers
 from .profile import (ExceptionProfile, PcSamples, Profile, Profiler, SamplingPlan, coverage, exception_profile,
-                      measure, plan_itm_sampling, plan_pcsr_sampling)
-from .profile.aliasing import aliasing_notes
+                      limit_intervals, measure, plan_itm_sampling, plan_pcsr_sampling)
 from .profile.dwt import _EXCTRCENA, _PCSAMPLENA, DWT_CTRL, DWT_PCSR
 from .recording import Event
 from .sampler import Sampler
@@ -48,6 +48,7 @@ class _ProfileRun:
     drained: int = 0                                             # itm: 始める前に捨てた前の受信の残り（バイト）
     jitter: int = 0                                              # pcsr: サンプラの周期のゆらぎ（2^jitter 周期の幅）
     built: "tuple[tuple, _ProfileResult] | None" = None          # 最後に組んだ結果と、そのときのサンプルの印
+    vector_table: tuple[int, int] | None = None                  # 使う側が渡したベクタ表（番地, 大きさ）。割り込みの名前に使う
 
     def take(self, packets: list[Packet]) -> None:
         room = PACKET_LIMIT - len(self.packets)
@@ -75,11 +76,15 @@ class ProfileTools:
 
     def profile_start(self, method: str = "itm", rate_hz: float = 10_000.0, core_clock_hz: float | None = None,
                       swo_baud: int = 2_000_000, exception_trace: bool = True, exception_rate_hz: float = 1000.0,
-                      timestamps: bool | None = None, ap: int = 0) -> dict:
+                      timestamps: bool | None = None, ap: int = 0, vector_table: int | None = None,
+                      vector_table_size: int | None = None, caller: dict | None = None) -> dict:
         """PC サンプリングを始める。method: itm（DWT の PC サンプリング → SWO。core_clock_hz が要る。例外トレース・
         ローカルのタイムスタンプで割り込みの時間も。TPIU も設定するが、SWO のピンの設定はチップ固有なのでファームか
         target_peripheral_write で）/ pcsr（DAP サンプラで DWT_PCSR を読む。SWO 不要・Cortex-M0+ も可・遅い）。
-        timestamps は省略で exception_trace と同じ（割り込みの時間に要る）。計画（実際のサンプル率・SWO の使用率・警告）を返す。"""
+        timestamps は省略で exception_trace と同じ（割り込みの時間に要る）。計画（実際のサンプル率・SWO の使用率・警告）を返す。
+        vector_table: ベクタ表の番地（使う側が明示する。大きさは vector_table_size か ELF のその番地の変数）。渡せば
+        割り込みに処理の関数の名前を付ける（"IRQ1 (usart_irq)"）。渡さなければ番号の名前だけ（表の場所を推定しない）。
+        caller: デーモンが渡す呼び出し元 {id, name, role}（引数の仕様には出ない。sampler_status の client に残す）。"""
         if method not in ("itm", "pcsr"):
             raise ValueError("method は itm か pcsr")
         if method == "itm" and core_clock_hz is None:
@@ -92,11 +97,13 @@ class ProfileTools:
                 raise RuntimeError("swo_configure が DWT・ITM を設定している（swo_unconfigure を先に）")
             if self._symbols is None:
                 raise RuntimeError("ELF が読み込まれていない（debug_elf_load）: PC を関数・行に割り当てられない")
+            table = self._vector_table_arg(vector_table, vector_table_size)
             if method == "itm":
                 run = self._start_itm_sampling(rate_hz, core_clock_hz, swo_baud, exception_trace, exception_rate_hz,
                                                exception_trace if timestamps is None else timestamps)
             else:
-                run = self._start_pcsr_sampling(rate_hz, ap)
+                run = self._start_pcsr_sampling(rate_hz, ap, caller)
+            run.vector_table = table
             self._profile_run, self._profile_last = run, None
             return {"running": True, "method": method, "plan": run.plan.as_dict()}
 
@@ -118,13 +125,13 @@ class ProfileTools:
         run.restore = {DWT_CTRL: original}
         return run
 
-    def _start_pcsr_sampling(self, rate_hz: float, ap: int) -> _ProfileRun:
+    def _start_pcsr_sampling(self, rate_hz: float, ap: int, caller: dict | None = None) -> _ProfileRun:
         sampler = Sampler(self.session.device)
         link = self._link or {}
         swd_hz = link.get("frequency_hz") if link.get("wire") == "swd" else None
         plan = plan_pcsr_sampling(rate_hz, sampler.sys_clock_hz, swd_hz)
         run = _ProfileRun("pcsr", plan)
-        self._claim_sampler("profile")
+        self._claim_sampler("profile", caller)
         try:
             write_registers(self.target, plan.writes)
             sampler.configure(plan.sampler_ranges, plan.period_s, ap)
@@ -184,7 +191,8 @@ class ProfileTools:
 
     def profile_result(self, by: str = "function", top: int = 20, function: str | None = None) -> dict:
         """プロファイルの上位 top（取っている最中ならいままでの分）。by: function / line / instruction / exception。
-        line・instruction は function で絞れる。割合には信頼区間（ci）が付く（サンプル数による誤差だけ）。"""
+        line・instruction は function で絞れる。行はサンプル数 samples と割合 fraction（信頼区間は付けない）。
+        rows_total = top で切る前の行の数。"""
         return self._profile_summary(self._current_profile(), by, top, function)
 
     def profile_coverage(self, functions: list[str] | None = None, all_functions: bool = False) -> dict:
@@ -209,19 +217,16 @@ class ProfileTools:
                        limit: int = TIMING_LIMIT) -> dict:
         """記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・分位・分布・長い順の上位
         longest 件）。start / end は recording_find と同じ条件。長い順の t は記録・タイムラインのその時刻へ跳ぶ鍵（外れ値の
-        経験則は使わない）。"""
+        経験則は使わない）。長い順の各 bin と interval_bins（intervals と同じ並び）は histogram の箱の番号。"""
         out = measure(self._reading(), start, end, bins=bins, longest=longest).as_dict()
-        for key in ("intervals",):
-            if key in out and len(out[key]) > limit:
-                out[f"{key}_total"] = len(out[key])
-                out[key] = out[key][:limit]
+        limit_intervals(out, limit)
         return out
 
     # --- 計算 ----------------------------------------------------------------------------------
 
     def _build_profile(self, run: _ProfileRun, events: list[tuple[int, int, int]] | None = None) -> _ProfileResult:
         """events: pcsr の窓の出来事（読んであれば。省くと窓から読む）。"""
-        names = self._vector_names()
+        names = self._vector_names(run.vector_table)
         exceptions = None
         reads = None
         if run.method == "itm":
@@ -241,20 +246,28 @@ class ProfileTools:
         profile = Profiler(self._symbols, disassembler).profile(samples, names=names)
         return _ProfileResult(run, samples, profile, exceptions, reads)
 
-    def _vector_names(self) -> dict[int, str]:
-        """ELF のベクタ表から、割り込み（例外 16 以上）の処理の関数名。ベクタ表は最初の区画の先頭にある変数
-        （大きさで表の長さが分かるもの）。無ければ名前を付けない（コードを表と取り違えない）。"""
+    def _vector_table_arg(self, address: int | None, size: int | None) -> tuple[int, int] | None:
+        """使う側が渡したベクタ表の番地（と大きさ）を確かめて (番地, 大きさ)。渡さなければ None（表を探さない）。"""
+        if address is None:
+            if size is not None:
+                raise ValueError("vector_table_size だけでは表の場所が分からない（vector_table も渡す）")
+            return None
+        return _checked_vector_table(self._elf_image(), address, size)
+
+    def _vector_names(self, table: tuple[int, int] | None) -> dict[int, str]:
+        """使う側が渡したベクタ表（番地, 大きさ）の、割り込み（例外 16 以上）の処理の関数名。表を渡されなければ
+        名前を付けない（最初の区画の先頭等を表と仮定しない。点検 2 回目）。表の語は ELF の中身から読む。"""
         syms = self._symbols
-        if syms is None or not syms.segments:
+        if syms is None or table is None:
             return {}
-        segment = min(syms.segments, key=lambda s: s.address)
-        hit = syms.symbol_at(segment.address)
-        if hit is None or hit[1] != 0 or hit[0].kind != "object" or not hit[0].size:
+        address, size = table
+        segment = next((s for s in syms.segments if s.address <= address < s.address + len(s.data)), None)
+        if segment is None:
             return {}
-        count = min(hit[0].size, len(segment.data)) // 4
+        data = segment.data[address - segment.address:address - segment.address + size]
         names = {}
-        for n in range(16, min(count, _VECTOR_LIMIT)):
-            handler = int.from_bytes(segment.data[4 * n:4 * n + 4], "little")
+        for n in range(16, min(len(data) // 4, _VECTOR_LIMIT)):
+            handler = int.from_bytes(data[4 * n:4 * n + 4], "little")
             if not handler & 1:                                   # Thumb の関数の番地でない（空き・予約）
                 continue
             where = syms.describe(handler & ~1)
@@ -267,16 +280,17 @@ class ProfileTools:
         plan = run.plan
         out = {"running": run is self._profile_run, "method": run.method, "rate_hz": plan.rate_hz,
                "total": prof.total, "active": prof.active, "unavailable": prof.unavailable,
-               "overflows": prof.overflows, "confidence": prof.confidence, "categories": prof.category_table(),
-               "by": by, "rows": prof.top(top, by, function), "notes": prof.notes() + list(plan.warnings)}
+               "overflows": prof.overflows, "categories": prof.category_table(),
+               "by": by, "notes": prof.notes() + list(plan.warnings)}
+        table = prof.table(by, function)
+        out.update(rows=table[:top], rows_total=len(table))                 # 切る前の行の数（切ったことが分かる）
         if run.method == "itm":
             out.update(swo_utilization=plan.utilization, dropped_packets=run.dropped)
             if result.exceptions is not None:
                 traced = result.exceptions.exceptions()
                 out["exceptions"] = [{k: e[k] for k in ("exception", "name", "count", "total_self", "load")}
                                      for e in traced[:top]]
-                # 例外トレースの本当の負荷とサンプルの割合が食い違えば、エイリアシングを知らせる
-                out["notes"] += aliasing_notes(prof.top(1000, "exception"), traced, prof.total, prof.confidence)
+                out["exceptions_total"] = len(traced)                         # 切る前の数（切ったことが分かる）
         else:
             with self._lock:
                 hz = self.session.device.capabilities().timebase_hz

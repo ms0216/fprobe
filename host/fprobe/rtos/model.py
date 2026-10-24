@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 
-__all__ = ["HeapInfo", "KernelObject", "StackInfo", "Task", "TaskState", "WaitInfo", "Waiter"]
+__all__ = ["HeapInfo", "KernelObject", "StackInfo", "Task", "TaskState", "WaitInfo", "Waiter", "field_location"]
 
 
 class TaskState(str, Enum):
@@ -25,7 +25,9 @@ class StackInfo:
     untouched: int | None = None  # base から上へ、塗りつぶしの値が残っていたバイト数（塗られていなければ None）
     fill: str = "unknown"         # intact（底が塗りのまま）/ none（底が塗られていない）/ unknown（読めない）
     overflow: bool = False        # SP が base より下（RTOS 自身の印: RTX5 のマジックワードが壊れた、も）
-    fill_above: bool | None = None  # 底が塗りでないとき、底の少し上に塗りの並びが残っているか（事実。あふれと推定しない）
+    # 底が塗りでないとき、底から上（SP の下、CHUNK まで）で最も長い塗りの続き {"offset": 底からの位置, "length": バイト数,
+    # "searched": 見たバイト数}。無ければ None（閾値で「残っている」と決めない。あふれとも推定しない）
+    fill_run_above: dict | None = None
 
     @property
     def size(self) -> int | None:
@@ -72,6 +74,9 @@ class Task:
     base_priority: int | None = None
     number: int | None = None     # RTOS の通し番号（FreeRTOS の uxTCBNumber）
     notes: list[str] = field(default_factory=list)
+    # 値をそのまま読んだメモリの場所（欄の名前 → {address, size, member}）。書く側（画面・AI）が target.memory.write で
+    # その値を書けるように、読んだ番地と大きさの事実を返す。読んだ値でないもの（状態・スタックの使用量）は入れない
+    locations: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         out = {"handle": self.handle, "name": self.name, "priority": self.priority, "state": self.state.value,
@@ -84,7 +89,14 @@ class Task:
             out["wait"] = self.wait.to_dict()
         if self.notes:
             out["notes"] = list(self.notes)
+        if self.locations:
+            out["locations"] = {k: dict(v) for k, v in self.locations.items()}
         return out
+
+
+def field_location(layout, handle: int, path: str) -> dict:
+    """構造体（DWARF の配置 layout）の番地 handle のメンバー path の場所: {address, size, member}。"""
+    return {"address": handle + layout.offset(path), "size": layout.member_size(path), "member": path}
 
 
 # --- カーネルオブジェクト（U08） ---------------------------------------------------------------------
@@ -140,9 +152,11 @@ class KernelObject:
 
 @dataclass
 class HeapInfo:
-    """RTOS のヒープの要約。scheme: heap_1 / heap_2 / heap_4 / heap_5（FreeRTOS）/ sys_heap（Zephyr）。
-    分からない値は None。free_blocks・largest_free_block は空きのリストを辿った結果（断片化の目安）。"""
-    scheme: str
+    """RTOS のヒープの要約。scheme: FreeRTOS はヒープの変数を定めた源のファイルの名前（DWARF の decl_file の
+    heap_1.c 等から拡張子を除いたもの。source がそのファイル名。分からなければ None）、Zephyr は sys_heap。
+    分からない値は None。free_blocks・largest_free_block は空きのリストを辿った結果（断片化の目安）。
+    handed_out: 切り出した量（解放しない heap_1 の xNextFreeByte。残量の変数が無いとき used はこれ）。"""
+    scheme: str | None
     total: int | None = None
     free: int | None = None
     min_free: int | None = None           # これまでの最小の残量
@@ -152,10 +166,14 @@ class HeapInfo:
     largest_free_block: int | None = None
     address: int | None = None
     notes: list[str] = field(default_factory=list)
+    source: str | None = None
+    handed_out: int | None = None
 
     @property
     def used(self) -> int | None:
-        return None if self.total is None or self.free is None else self.total - self.free
+        if self.free is None:
+            return self.handed_out
+        return None if self.total is None else self.total - self.free
 
     @property
     def peak_used(self) -> int | None:

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 __all__ = ["FileCoverage", "FunctionRecord", "callgrind_from_profile", "callgrind_from_tree", "coverage_from_profile",
+           "dwarf_declarations",
            "coverage_from_testpoint", "dot_from_profile", "dot_from_tree", "gmon_bytes", "render_gcov", "render_lcov",
            "tree_edges", "write_gcov"]
 
@@ -160,19 +161,39 @@ class FileCoverage:
     branches: dict[int, list[tuple[int, int, int | None]]] = field(default_factory=dict)  # 行 → [(組, 枝, 回数)]
 
 
-def coverage_from_profile(cov, profile) -> list[FileCoverage]:
+Declarations = Callable[[int], tuple[str | None, int | None]]
+
+
+def dwarf_declarations(info) -> Declarations:
+    """関数の先頭の番地 → DWARF の関数（DW_TAG_subprogram）の (DW_AT_decl_file, DW_AT_decl_line)。info は
+    fprobe.dwarf.info.DebugInfo。その番地から始まる関数が無い・属性が無ければ None。ファイルは行の表と同じ
+    ファイル名（ディレクトリを除く）。"""
+    def declared(address: int) -> tuple[str | None, int | None]:
+        function = info.function_at(address)
+        if function is None or function.low != address:
+            return None, None
+        return function.decl_file, function.decl_line
+    return declared
+
+
+def coverage_from_profile(cov, profile, declarations: Declarations) -> tuple[list[FileCoverage], list[str]]:
     """PC サンプリングの近似のカバレッジ（fprobe.profile.coverage の結果）と、行ごとのサンプル数。サンプルが無い行は 0
-    （通らなかったとは限らない）。"""
+    （通らなかったとは限らない）。関数の記録（FN）は declarations（関数の番地 → (DW_AT_decl_file, DW_AT_decl_line)。
+    dwarf_declarations）のファイル・行に置く（行の多いファイルを所在とみなさない）。宣言の分からない関数は FN を
+    書かず、その名前の一覧を 2 つ目に返す。"""
     files: dict[str, FileCoverage] = {}
+    undeclared: list[str] = []
     for f in cov.functions:
         for file, line in f.lines:
             fc = files.setdefault(file, FileCoverage(file))
             fc.lines[line] = fc.lines.get(line, 0) + profile.line_counts.get((f.function, file, line), 0)
-        if f.lines:
-            home = Counter(file for file, _ in f.lines).most_common(1)[0][0]
-            first = min(line for file, line in f.lines if file == home)
-            files[home].functions[f.function] = FunctionRecord(first, profile.function_counts.get(f.function, 0))
-    return [files[k] for k in sorted(files)]
+        file, line = declarations(f.address)
+        if file is None or line is None:
+            undeclared.append(f.function)
+            continue
+        files.setdefault(file, FileCoverage(file)).functions[f.function] = FunctionRecord(
+            line, profile.function_counts.get(f.function, 0))
+    return [files[k] for k in sorted(files)], undeclared
 
 
 def coverage_from_testpoint(report, table) -> list[FileCoverage]:

@@ -2,16 +2,21 @@
   // FPGA 観測（対象の FPGA の中を JTAG で観測する。Vivado の ILA・Signal Tap に当たるが、内蔵メモリの窓ではなく
   // 値の変化を流し続け、MCU・ロジアナと同じ時間軸に並べる）: 接続（鎖の位置・USER の命令・TCK）→ 観測の回路の申告と
   // 状態 → 組の選択と記録 → 信号の定義（名前・ビット・書式・列挙。後から付けた名前も過去の記録に効く）。
+  // 観測の回路のレジスタ CONTROL・SELECT は fpga_obs.register_read で読んで描き、値のダブルクリックで
+  // fpga_obs.register_write で書く（記録型だけ。標本型にはレジスタが無い）。
   // 仕様: docs/superpowers/specs/2026-10-20-fpga-observation-ui-design.md §4
   import { errorText } from "../../lib/api";
   import { shared } from "../../lib/context";
   import {
-    configToFields, editableGroups, FORMATS, formatBits, formatEnum, parseBits, parseEnum, PRESETS, signalsChanged,
-    statusKey, tckToHalfPeriod, validateSignals, type Groups, type ObsStatus, type OpenConfig, type PresetName,
+    configToFields, editableGroups, FORMATS, openParams, formatBits, formatEnum, OBS_REGISTERS, parseBits, parseEnum, PRESETS,
+    registerWriteCall, signalsChanged,
+    statusKeys, tckToHalfPeriod, type Groups, type ObsStatus, type OpenConfig, type PresetName,
     type SignalDef,
   } from "../../lib/fpgaobs";
   import { i18n } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
+  import { writeBuilt } from "../../lib/valuewrite";
+  import EditValue from "./EditValue.svelte";
 
   const POLL_MS = 500;
   const { app, conn } = shared();
@@ -22,21 +27,28 @@
 
   const caps = $derived($app.probe?.capabilities);
   const available = $derived(Boolean(caps?.fpga_obs));
-  const sysHz = $derived(Number(caps?.sys_clock_hz) || 100e6);
+  // プローブが申告したシステムのクロック。無ければ null（仮定しない: TCK を MHz で入れられず、半周期を直接入れる）
+  const sysHz = $derived(Number(caps?.sys_clock_hz) > 0 ? Number(caps!.sys_clock_hz) : null);
   const linkOpen = $derived($app.link === "open");
 
   const saved = JSON.parse(load("fpgaObs.connection", "{}") || "{}");
-  let irLen = $state<number>(saved.irLen ?? 4);
-  let irBefore = $state<number>(saved.irBefore ?? 0);
-  let irAfter = $state<number>(saved.irAfter ?? 0);
-  let drBefore = $state<number>(saved.drBefore ?? 0);
-  let drAfter = $state<number>(saved.drAfter ?? 0);
-  let userIr = $state<string>(saved.userIr ?? "0x2");
-  let tckMhz = $state<number>(saved.tckMhz ?? 10);
-  let words = $state<number>(saved.words ?? 64);
-  let syncPeriod = $state<number>(saved.syncPeriod ?? 20);
+  // チェーンの欄は空から（空 = 送らない）
+  let irLen = $state<number | null>(saved.irLen ?? null);
+  let irBefore = $state<number | null>(saved.irBefore ?? null);
+  let irAfter = $state<number | null>(saved.irAfter ?? null);
+  let drBefore = $state<number | null>(saved.drBefore ?? null);
+  let drAfter = $state<number | null>(saved.drAfter ?? null);
+  // User IR・TCK・語数・印の周期も空から（画面の既定を持たない。回路の型の設定はボタンで入れる）
+  let userIr = $state<string>(saved.userIr ?? "");
+  let tckMhz = $state<number | null>(saved.tckMhz ?? null);
+  let halfPeriod = $state<number | null>(saved.halfPeriod ?? null);
+  let words = $state<number | null>(saved.words ?? null);
+  let syncPeriod = $state<number | null>(saved.syncPeriod ?? null);
+  let idScans = $state<number | null>(saved.idScans ?? null);           // 空 = 送らない（上限なし）
   let autoReopen = $state<boolean>(saved.autoReopen ?? false);     // 止まったら（対象の FPGA を書き直した等）自動で開き直す
-  const tck = $derived(tckToHalfPeriod(tckMhz, sysHz));
+  const tck = $derived(sysHz ? tckToHalfPeriod(tckMhz ?? NaN, sysHz) : null);
+  const params = $derived(openParams({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, halfPeriod, words,
+                                       syncPeriod, idScans, autoReopen }, sysHz));
 
   let declared = $state<Declared | null>(null);
   let status = $state<(ObsStatus & { scans: number; id: number; config?: OpenConfig | null;
@@ -50,8 +62,8 @@
   let rowErrors = $state<string[]>([]);
 
   $effect(() => {
-    save("fpgaObs.connection", JSON.stringify({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, words,
-                                                syncPeriod, autoReopen }));
+    save("fpgaObs.connection", JSON.stringify({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, halfPeriod,
+                                                words, syncPeriod, idScans, autoReopen }));
   });
 
   // 状態を周期的に読む（つながっていて、観測の口のある構成のとき）
@@ -68,7 +80,7 @@
       // 開いた設定（別の窓・AI・前の画面が開いたものも）を欄と申告に写す: 見えている設定 = 動いている設定
       const key = JSON.stringify(status?.config ?? null);
       if (status?.config && key !== shownConfig) {
-        ({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, words, syncPeriod } =
+        ({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, halfPeriod, words, syncPeriod, idScans } =
           configToFields(status.config, sysHz));
         declared = status.declared ?? declared;
         autoReopen = Boolean(status.auto_reopen);
@@ -109,15 +121,11 @@
 
   async function connect() {
     error = null;
-    const ir = Number(userIr);
-    if (!Number.isInteger(ir) || ir < 0) {
+    if (!params) {
       error = $i18n("fpgaObs.userIr");
       return;
     }
-    const r = await app.act("fpga_obs.open", {
-      chain: { ir_len: irLen, ir_before: irBefore, ir_after: irAfter, dr_before: drBefore, dr_after: drAfter },
-      user_ir: ir, half_period: tck!.half, words, sync_period: syncPeriod, auto_reopen: autoReopen,
-    });
+    const r = await app.act("fpga_obs.open", params);
     declared = r ?? null;
     await readStatus();
   }
@@ -130,9 +138,35 @@
 
   // 標本型（obs_snap_core）はレジスタを持たず、いつも組 0 を標本にする
   const snapshot = $derived(declared?.mode === "snapshot");
-  const select = () => app.act("fpga_obs.select", { group: observeGroup });
-  const record = () => app.act("fpga_obs.start", {});
-  const stopRecord = () => app.act("fpga_obs.stop", {});
+  const select = () => app.act("fpga_obs.select", { group: observeGroup }).then(readRegisters);
+  const record = () => app.act("fpga_obs.start", {}).then(readRegisters);
+  const stopRecord = () => app.act("fpga_obs.stop", {}).then(readRegisters);
+
+  // 観測の回路のレジスタ（CONTROL・SELECT）: 動かしている間、記録型なら読む（開いた・選んだ・書いた後）
+  let registers = $state<Record<number, { value?: number; error?: string }>>({});
+  const hasRegisters = $derived(Boolean(status?.driving) && !snapshot);
+  $effect(() => {
+    if (hasRegisters) void readRegisters();
+    else registers = {};
+  });
+  async function readRegisters() {
+    if (!hasRegisters) return;
+    const next: typeof registers = {};
+    for (const r of OBS_REGISTERS) {
+      try {
+        next[r.addr] = { value: (await conn.call("fpga_obs.register_read", { addr: r.addr }, { quiet: true }))?.value };
+      } catch (e) {
+        next[r.addr] = { error: errorText(e) };
+      }
+    }
+    registers = next;
+  }
+  async function writeRegister(addr: number, input: string): Promise<string | null> {
+    const failed = await writeBuilt(app, registerWriteCall(addr, input), $i18n);
+    if (!failed) await readRegisters();
+    return failed;
+  }
+  const hex16 = (v: number) => `0x${v.toString(16).toUpperCase().padStart(4, "0")}`;
 
   // 信号の表の編集（編集する組）
   const rows = $derived(groups[String(editGroup)] ?? []);
@@ -161,7 +195,6 @@
         defs[g].push({ name: r.name.trim(), ...bits, format: r.format, enum: e });
       }
     }
-    rowErrors.push(...validateSignals(defs).map((x) => $i18n(x.key, x.params)));
     if (rowErrors.length) return;
     await app.act("fpga_obs.signals_set", { signals: { groups: defs } });
     await readSignals();
@@ -175,13 +208,14 @@
     <div class="pane-bar">
       <strong>{$i18n("fpgaObs.connection")}</strong>
       {#if status}
-        <span class="badge" class:bad={status.stuck} class:warn={status.overflow_seen} class:ok={status.running && !status.overflow_seen}>
-          {$i18n(statusKey(status))}
-        </span>
+        {#each statusKeys(status) as k (k)}
+          <span class="badge" class:bad={k === "fpgaObs.state.stuck"} class:warn={k === "fpgaObs.state.overflow"}
+                class:ok={k === "fpgaObs.state.running"}>{$i18n(k)}</span>
+        {/each}
         <span class="muted mono">{$i18n("fpgaObs.scans")} {status.scans}</span>
       {/if}
       <span class="spacer"></span>
-      <button disabled={!linkOpen || status?.driving || !tck} onclick={connect}>{$i18n("fpgaObs.connect")}</button>
+      <button disabled={!linkOpen || status?.driving || !params} onclick={connect}>{$i18n("fpgaObs.connect")}</button>
       <button disabled={!linkOpen || !status?.driving} onclick={disconnect}>{$i18n("fpgaObs.disconnect")}</button>
     </div>
     {#if error}<div class="note bad">{error}</div>{/if}
@@ -200,12 +234,24 @@
       <label>{$i18n("fpgaObs.irAfter")}<input type="number" min="0" max="63" bind:value={irAfter} /></label>
       <label>{$i18n("fpgaObs.drBefore")}<input type="number" min="0" max="7" bind:value={drBefore} /></label>
       <label>{$i18n("fpgaObs.drAfter")}<input type="number" min="0" max="7" bind:value={drAfter} /></label>
-      <label>{$i18n("fpgaObs.userIr")}<input class="mono" bind:value={userIr} /></label>
-      <label title={$i18n("fpgaObs.tckTip")}>{$i18n("fpgaObs.tck")}
-        <input type="number" min="0.001" step="0.5" bind:value={tckMhz} />
-        <span class="muted">{tck ? $i18n("fpgaObs.tckActual", { mhz: tck.mhz.toFixed(3) }) : "—"}</span></label>
-      <label>{$i18n("fpgaObs.words")}<input type="number" min="1" max="256" bind:value={words} /></label>
-      <label>{$i18n("fpgaObs.syncPeriod")}<input type="number" min="0" max="65535" bind:value={syncPeriod} /></label>
+      <label>{$i18n("fpgaObs.userIr")}<span class="req" aria-hidden="true">*</span><input class="mono" aria-required="true"
+             bind:value={userIr} /></label>
+      {#if sysHz}
+        <label title={$i18n("fpgaObs.tckTip")}>{$i18n("fpgaObs.tck")}<span class="req" aria-hidden="true">*</span>
+          <input type="number" min="0.001" step="0.5" aria-required="true" bind:value={tckMhz} />
+          <span class="muted">{tck ? $i18n("fpgaObs.tckActual", { mhz: tck.mhz.toFixed(3) }) : "—"}</span></label>
+      {:else}
+        <!-- プローブがシステムのクロックを申告しない: MHz に換算できないので、半周期（sys の周期数）を直接 -->
+        <label title={$i18n("fpgaObs.halfPeriodTip")}>{$i18n("fpgaObs.halfPeriod")}<span class="req" aria-hidden="true">*</span>
+          <input type="number" min="2" max="65535" step="1" aria-required="true" bind:value={halfPeriod} /></label>
+      {/if}
+      <label>{$i18n("fpgaObs.words")}<span class="req" aria-hidden="true">*</span><input type="number" min="1" max="256"
+             aria-required="true" bind:value={words} /></label>
+      <label>{$i18n("fpgaObs.syncPeriod")}<span class="req" aria-hidden="true">*</span><input type="number" min="0" max="65535"
+             aria-required="true" bind:value={syncPeriod} /></label>
+      <label title={$i18n("fpgaObs.idScansTip")}>{$i18n("fpgaObs.idScans")}<input type="number" min="0" max="255"
+             placeholder="—" bind:value={idScans} /></label>
+      {#if status?.stuck && status.id_timeout}<span class="bad">{$i18n("fpgaObs.idTimeout")}</span>{/if}
       <label title={$i18n("fpgaObs.autoReopenTip")}><input type="checkbox" class="check" bind:checked={autoReopen} />
         {$i18n("fpgaObs.autoReopen")}{#if status?.reopened}<span class="muted"> {$i18n("fpgaObs.reopened", { n: status.reopened })}</span>{/if}</label>
     </div>
@@ -220,6 +266,22 @@
         <span>{$i18n("fpgaObs.fifo")} {declared.fifo_depth}</span>
         <span>{$i18n("fpgaObs.clock")} {declared.clock_hz ? `${(declared.clock_hz / 1e6).toFixed(3)} MHz` : "—"}</span>
         <span>{$i18n("fpgaObs.delays")} {declared.sync_delay} / {declared.sample_delay}</span>
+      </div>
+    {/if}
+
+    {#if hasRegisters}
+      <div class="pane-bar sub">
+        <strong title={$i18n("fpgaObs.registersTip")}>{$i18n("fpgaObs.registers")}</strong>
+        {#each OBS_REGISTERS as r (r.addr)}
+          {@const reg = registers[r.addr]}
+          <span class="mono"><span class="muted">{r.name} ({r.addr})</span>
+            {#if reg?.error}<span class="bad" title={reg.error}>!</span>
+            {:else}<EditValue text={reg?.value === undefined ? "—" : hex16(reg.value)}
+                              via={reg?.value === undefined ? null : "fpga_obs.register_write"}
+                              onwrite={(input) => writeRegister(r.addr, input)} />{/if}</span>
+        {/each}
+        <span class="spacer"></span>
+        <button class="small" onclick={readRegisters}>{$i18n("common.refresh")}</button>
       </div>
     {/if}
 

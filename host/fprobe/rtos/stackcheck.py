@@ -12,10 +12,9 @@ from collections.abc import Callable
 from ..dwarf.access import AccessError
 from .model import StackInfo
 
-__all__ = ["CHUNK", "GUARD", "check_stack", "untouched_bytes"]
+__all__ = ["CHUNK", "check_stack", "untouched_bytes"]
 
 CHUNK = 256                       # 1 回に読むバイト数
-GUARD = 16                        # 底のこのバイト数が塗りのままかを見る（FreeRTOS の方法 2 と同じ幅）
 
 
 def _pattern(fill: int | bytes) -> bytes:
@@ -40,36 +39,49 @@ def untouched_bytes(read: Callable[[int, int], bytes], base: int, limit: int, fi
 def check_stack(read: Callable[[int, int], bytes], base: int, end: int | None, pointer: int | None,
                 fill: int | bytes) -> StackInfo:
     """スタックの範囲と SP から StackInfo（塗りの残り・SP が範囲の外か）を作る。読めなければ fill = unknown。
-    底が塗りでないときは、底の少し上に塗りが残っているか（fill_above）を事実として返す（あふれたとは推定しない）。"""
+    untouched = 底から上へ塗りの値が続くバイト数（SP まで。事実）。底のバイトが塗りなら fill = intact（底の何バイトが
+    塗りなら「塗りのまま」とするかの幅は持たない。塗りと同じ値を書いた所も塗りに数える）。底が塗りでないときは
+    fill = none（塗らない設定か、底まで使った。区別できない）で、底から上（SP の下、CHUNK バイトまで）で最も長い
+    塗りの続き（fill_run_above）を事実として返す（あふれたとは推定しない）。"""
     pattern = _pattern(fill)
     info = StackInfo(base, end, pointer)
     if pointer is not None and pointer < base:
         info.overflow = True
-    try:
-        bottom = read(base, GUARD)
-    except AccessError:
-        return info
-    if bottom != (pattern * GUARD)[:GUARD]:
-        info.fill = "none"                          # 塗らない設定か、底まで使った（区別できない）
-        needle = (pattern * 4)[:max(4, len(pattern))]
-        if pointer is not None and end is not None:
-            info.fill_above = needle in _sample(read, base, pointer)
-        return info
-    info.fill = "intact"
     limit = (pointer if pointer is not None else end if end is not None else base + CHUNK) - base
     try:
-        info.untouched = untouched_bytes(read, base, max(limit, 0), pattern)
+        untouched = untouched_bytes(read, base, max(limit, 1), pattern)
     except AccessError:
-        info.fill = "unknown"
+        return info
+    if untouched == 0:
+        info.fill = "none"
+        if pointer is not None and end is not None:
+            info.fill_run_above = _longest_run(_sample(read, base, pointer), pattern)
+        return info
+    info.fill = "intact"
+    info.untouched = min(untouched, max(limit, 0))
     return info
 
 
 def _sample(read: Callable[[int, int], bytes], base: int, pointer: int) -> bytes:
-    """底の少し上（GUARD から CHUNK まで、SP より下）を読む。"""
+    """底から上（CHUNK まで、SP より下）を読む。"""
     hi = min(pointer, base + CHUNK)
-    if hi <= base + GUARD:
+    if hi <= base:
         return b""
     try:
-        return read(base + GUARD, hi - base - GUARD)
+        return read(base, hi - base)
     except AccessError:
         return b""
+
+
+def _longest_run(data: bytes, pattern: bytes) -> dict | None:
+    """data（底から）の中で、底からの位置で塗りと一致するバイトが最も長く続く所。無ければ None。"""
+    best = (0, 0)
+    start = None
+    for i, b in enumerate(data):
+        if b == pattern[i % len(pattern)]:
+            start = i if start is None else start
+            if i + 1 - start > best[1]:
+                best = (start, i + 1 - start)
+        else:
+            start = None
+    return None if best[1] == 0 else {"offset": best[0], "length": best[1], "searched": len(data)}

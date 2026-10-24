@@ -88,6 +88,15 @@ def test_events_count_span_and_find_match_the_plain_recording(pair):
     assert long.distinct("stream") == plain.distinct("stream")
 
 
+def test_kind_counts_cover_every_segment_and_match_the_plain_recording(pair):
+    plain, long, _ = pair
+    whole = plain.kind_counts()
+    assert sum(n for _, _, n, _, _ in whole) == plain.count()                     # 全部の出来事（行の上限で欠けない）
+    assert long.kind_counts() == whole
+    t0, t1 = 3000 * HZ, 9000 * HZ
+    assert long.kind_counts(t0, t1) == plain.kind_counts(t0, t1)
+
+
 @pytest.mark.parametrize("seed", range(6))
 def test_density_is_exact(pair, seed):
     plain, long, _ = pair
@@ -172,6 +181,10 @@ def test_decimation_drops_bulky_streams_but_keeps_the_minimap(tmp_path):
     assert not cov["complete"] and cov["gaps"][0]["dropped"] == ["sample", "waveform"]
     view = r.waveform_view(first["t0"], first["t1"], 5)                    # 波形は要約から（画素が大きければ同じ）
     assert all(len(row) == 5 for row in view)
+    # 間引いたかたまりが画素より長いと、その画素の中で変わったかは分からない: 'x'（画素の中で変化）と分けて '?'（?58）
+    c0, c1 = r._wave_rows(first["t0"], first["t1"], kept_only=False)[0][:2]   # 間引いたかたまり 1 つの範囲
+    fine = r.waveform_view(c0, c1, 64)
+    assert any("?" in row for row in fine) and set("".join(fine)) <= set("01x?-")
     assert not list(r.waveforms(first["t0"], first["t1"]))
 
 
@@ -223,3 +236,27 @@ def test_policy_is_saved_and_validated(tmp_path):
     rec.close()
     meta = json.loads((tmp_path / "r" / "meta.json").read_text(encoding="utf-8"))
     assert meta["layout"] == "segmented" and meta["policy"]["max_bytes"] == 10 ** 9
+
+
+def test_density_does_not_apportion_a_thinned_bin_and_says_which_pixels_are_unknown(tmp_path):
+    # 間引いた stream の件数を「段 0 の bin の件数を幅で按分」して推定しない（点検 2 回目 H9）: 残っている出来事だけを
+    # 数え（下限）、端が間引いた bin にかかる画素は inexact に、その bin の件数を足した上限を添える
+    clock = Clock()
+    rec = SegmentedRecorder(tmp_path / "r", HZ, clock=clock,
+                            policy=Policy(segment_s=3600, decimate_after_s=2 * 3600, decimate_streams=("sample",)))
+    for i in range(10):
+        rec.add("sample", "k", 4100 + i)                                    # 段 0 の bin [4096, 5120) の前半
+    rec.add("uart", "k", 4200)
+    for h in range(4):
+        clock.now += 3600
+        rec.add("uart", "k", (h + 1) * 3600 * HZ)
+        rec.flush()
+    rec.close()
+    r = Recording.open(tmp_path / "r")
+    assert r.segments()[0]["dropped"] == ["sample"]
+    out = r.density_bounds(4096, 4096 + 512, 1)                            # bin の半分
+    assert out["counts"] == [1]                                             # 残っている uart だけ（按分の 5 を足さない）
+    assert out["inexact"] == [{"pixel": 0, "max": 11}]                       # 間引いた 10 件は分からない: 上限
+    assert r.density(4096, 4096 + 512, 1) == [1]
+    whole = r.density_bounds(4096, 4096 + 1024, 1)                          # bin にそろえば縮図の件数（正確）
+    assert whole == {"counts": [11], "inexact": []}

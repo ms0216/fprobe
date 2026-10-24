@@ -124,6 +124,23 @@ def test_raw_recording_tile_decimates_to_waveform_view_and_density(recorded):
             assert lane_counts(lane, data, i, v0, v1, width) == recorded.density(v0, v1, width, [lane["stream"]])
 
 
+def test_held_rows_tell_from_when_the_values_before_the_range_were_searched(tmp_path):
+    # 黙って打ち切らない（総点検）: 値の段の、範囲の前を探した始め（carry_from）と記録の始めまで探したか
+    rec = Recorder(tmp_path / "s", HZ)
+    rec.add("sample", "word", 1000, a=1, b=7)
+    rec.add("sample", "word", 15_000, a=2, b=9)
+    rec.close()
+    view = Recording(tmp_path / "s")
+    try:
+        lane = recording_tile(view, 15_500, 15_900, streams=["sample"]).result["lanes"][0]
+        assert lane["carry_from"] == 15_500 - 400 * 16 and lane["carry_complete"] is False
+        assert [r["title"] for r in lane["rows"]] == ["0x00000002"]          # 1 は探した範囲の外（分からない）
+        lane = recording_tile(view, 2000, 16_000, streams=["sample"]).result["lanes"][0]
+        assert lane["carry_from"] == 1000 and lane["carry_complete"] is True
+    finally:
+        view.close()
+
+
 def test_raw_events_include_those_overlapping_the_start(recorded):
     tile = recording_tile(recorded, 5000, 6000, streams=["uart"])
     lane, data = tile.result["lanes"][0], tile.sections

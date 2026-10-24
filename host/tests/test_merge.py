@@ -6,7 +6,7 @@ from fprobe.merge import merge
 from fprobe.recording import Recorder, Recording
 
 HZ = 100_000_000
-RX, TX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_TICKS, g.SYNC_TX_LATENCY_TICKS
+RX, TX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_SPAN_TICKS, g.SYNC_TX_LATENCY_TICKS
 OFFSET = 5_000                                  # 子の時刻 = 親の時刻 + OFFSET（同じ速さ）
 
 

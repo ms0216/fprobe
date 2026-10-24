@@ -57,6 +57,20 @@ def test_flash_programs_verifies_reports_speed_and_runs(probe, tmp_path):
     assert phases[0] == "erase" and "program" in phases and phases[-1] == "verify" and sent[-1][1]["fraction"] == 1.0
 
 
+def test_an_algorithm_guard_is_given_by_the_caller(probe):
+    # 書き込みアルゴリズムの間のレジスタの手順（機器固有の守り）は使う側が渡す（プラグイン stm32_flash_clock 等）
+    from fprobe.plugins import stm32_flash_clock
+    assert probe.flash_algorithm_guard_get() == {"guard": None}
+    guard = stm32_flash_clock.guard("f4")
+    assert probe.flash_algorithm_guard_set(guard) == {"guard": guard}
+    connect(probe)
+    assert len(probe._flash_memory().guards) == 1
+    assert probe.flash_algorithm_guard_set(None) == {"guard": None} and probe._flash_memory().guards == []
+    import pytest
+    with pytest.raises(ValueError):
+        probe.flash_algorithm_guard_set({"enter": [{"op": "poke"}], "exit": []})
+
+
 def test_flash_can_leave_the_target_halted_and_skip_verify(probe, tmp_path):
     chip = connect(probe)
     (tmp_path / "fw.bin").write_bytes(b"\x01\x02")

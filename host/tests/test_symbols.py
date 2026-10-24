@@ -100,6 +100,18 @@ def test_breakpoints_by_function_name_go_after_the_prologue():
     assert syms.after_prologue(0x12345678) == 0x12345678                     # 関数の外はそのまま
 
 
+def test_without_prologue_end_the_function_entry_is_kept():
+    # 行表に prologue_end が無い関数で「次の行の始まり」を前置きの終わりと推定しない（点検 2 回目 H10。GDB 流の経験則は
+    # プラグインの after_first_line）: 関数の入口のまま
+    elf = Path(__file__).resolve().parents[1] / "firmware" / "etm_demo" / "etm_demo.elf"
+    syms = Symbols(elf)
+    leaf = syms.resolve("leaf")
+    assert syms.after_prologue(leaf) == leaf
+    assert syms.has_prologue_end(leaf) is False
+    o0 = Symbols(Path(__file__).resolve().parents[1] / "firmware" / "dwarf_demo" / "dwarf_demo_O0.elf")
+    assert o0.has_prologue_end(o0.resolve("leaf_sum")) is True
+
+
 def test_line_entries_give_the_statement_that_contains_an_address():
     """行単位のステップの土台: 番地を含む文（行表の is_stmt の行）の始まり・ファイル・行。関数の外の行は使わない。"""
     elf = Path(__file__).resolve().parents[1] / "firmware" / "dwarf_demo" / "dwarf_demo_O0.elf"
@@ -153,5 +165,6 @@ def test_sources_moved_with_the_elf_are_found_next_to_it(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda self: False if self == built else real_exists(self))
     moved = Symbols(tmp_path / ELF.name)
     assert moved.sources()["sram_demo.c"] == tmp_path / "sram_demo.c"
+    assert moved.relocated() == {"sram_demo.c": {"built": built, "used": tmp_path / "sram_demo.c"}}   # 置き換えた印（?68）
     assert moved.lines_of("sram_demo.c")                                 # 行も新しい場所で引ける
     assert moved.sources()["stdint.h"].name == "stdint.h"                # 隣に無いものは元の場所のまま

@@ -78,7 +78,7 @@ class FakeHost:
         return self.state_value
 
     def evaluate(self, expression):
-        return {"g_mode": self.memory[0x20000004]}[expression]
+        return {"g_mode": {"kind": "int", "value": self.memory[0x20000004]}}[expression]   # fprobe.dwarf.values の形
 
     def reset(self, kind):
         self.log.append(("reset", kind))
@@ -102,7 +102,7 @@ class FakeHost:
 
 def _script(**trial):
     base = {"id": "t1", "when": {"host": {"delay_s": 0.01}}, "write": {"address": "g_mode", "value": 7},
-            "expect": [{"expression": "g_mode", "equals": 7}]}
+            "expect": [{"expression": "g_mode", "equals": 7}], "timeout_s": 2.0, "observe_s": 0.2}
     return InjectScript.parse({"name": "s", "requirements": {"REQ-30": "壊れても止まらない"},
                                "trials": [{**base, **trial}]})
 
@@ -127,7 +127,8 @@ def test_scripts_are_validated():
     with pytest.raises(ScriptError, match="規則"):
         _script(expect=[{"rules": [{"id": "x", "kind": "never"}]}])
     with pytest.raises(ScriptError, match="重複"):
-        InjectScript.parse({"trials": [{"id": "a", "when": {"host": {}}, "write": {"address": 0, "value": 0}}] * 2})
+        InjectScript.parse({"trials": [{"id": "a", "when": {"host": {}}, "write": {"address": 0, "value": 0},
+                                       "timeout_s": 1, "observe_s": 0.1}] * 2})
 
 
 def test_a_host_triggered_trial_writes_judges_and_records_at_the_hardware_time():
@@ -208,3 +209,15 @@ def test_unaligned_addresses_are_refused_before_arming():
     host = FakeHost()
     result = run_script(host, _script(write={"address": 0x20000002, "value": 1}))
     assert result["trials"][0]["verdict"] == "error" and not any(x[0] == "arm" for x in host.log)
+
+
+
+def test_waits_that_decide_the_verdict_are_explicit_and_reported():
+    # 総点検 A1: timeout_s（not_triggered の判定）と observe_s（pass / fail の判定）は暗黙の既定にしない。使った値を結果に
+    for key in ("timeout_s", "observe_s"):
+        trial = {"id": "t1", "when": {"host": {}}, "write": {"address": "g_mode", "value": 7}, "timeout_s": 1, "observe_s": 0.1}
+        del trial[key]
+        with pytest.raises(ScriptError, match=key):
+            InjectScript.parse({"name": "s", "trials": [trial]})
+    trial = run_script(FakeHost(result="swd_error"), _script(timeout_s=1.5, observe_s=0.3))["trials"][0]
+    assert (trial["timeout_s"], trial["observe_s"]) == (1.5, 0.3)

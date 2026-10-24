@@ -12,7 +12,7 @@ ELF があれば、マッピングシンボル（$t / $d）でリテラルプー
 仕様: docs/superpowers/specs/2026-10-17-f2-disasm-svd-design.md
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -24,7 +24,7 @@ from .symbols import Symbols
 
 __all__ = ["Disassembler", "Instruction", "Listing", "flow_of"]
 
-_SYNC_LIMIT = 64 * 1024          # 確かな点から PC まで、これより遠ければ前を読まない（読む量の上限。PC から読む）
+SYNC_LIMIT = 64 * 1024           # 確かな点から PC まで読む量の既定の上限（遠ければ前を読まず PC から。sync_skipped）
 _LITERAL_SIZES = {"ldrb": 1, "ldrsb": 1, "ldrh": 2, "ldrsh": 2, "ldrd": 8}
 
 
@@ -48,6 +48,10 @@ class Instruction:
     file: str | None = None
     line: int | None = None
     new_line: bool = False               # 直前の命令とファイル:行が変わった（混在表示でソースの行を挟む所）
+    # データ（kind="data"）として区切った根拠（コードは None）:
+    #   "mapping" = ELF の $d（ARM ELF の規格の印）/ "branch_table" = 使う側が渡した tbb / tbh の表の大きさ /
+    #   "given" = 使う側が渡したデータの区間（data_ranges。$t・$d の無い所だけ）/ "undecodable" = 命令として解読できない
+    data_basis: str | None = None
 
     @property
     def size(self) -> int:
@@ -62,8 +66,8 @@ class Instruction:
         if self.literal_value is not None and self.kind == "code":
             name = f" <{self.literal_name}>" if self.literal_name else ""
             return f"=0x{self.literal_value:08x}{name}"
-        if self.kind == "data" and self.literal_name:
-            return f"<{self.literal_name}>"
+        if self.kind == "data":
+            return f"<{self.literal_name}>" if self.literal_name else ""
         if self.target_name:
             return f"<{self.target_name}>"
         if self.literal is not None:
@@ -81,9 +85,13 @@ class Listing:
     instructions: tuple[Instruction, ...]
     sync: str                            # "function" / "mapping" / "start": どこから命令の境界を揃えたか
     pc_index: int | None = None          # around の PC の命令の位置
+    # around で確かな境界があったのにそこから揃えなかったとき: {from, kind, reason（too_far = 読む量の上限 limit を
+    # 超えた / not_aligned = そこから読むと PC に着地しない / unreadable = 読めない / pc_in_data = PC がデータの区間）,
+    # distance（PC − from）, limit}
+    sync_skipped: dict | None = None
 
     def as_dict(self) -> dict:
-        return {"sync": self.sync, "pc_index": self.pc_index,
+        return {"sync": self.sync, "sync_skipped": self.sync_skipped, "pc_index": self.pc_index,
                 "instructions": [i.as_dict() for i in self.instructions]}
 
     def text(self, *, source: Callable[[str, int], str | None] | None = None) -> str:
@@ -124,10 +132,21 @@ def flow_of(insn) -> tuple[str, bool]:
 
 
 class Disassembler:
-    def __init__(self, memory: MemoryReader, symbols: Symbols | None = None, image: ElfImage | None = None):
+    def __init__(self, memory: MemoryReader, symbols: Symbols | None = None, image: ElfImage | None = None,
+                 branch_tables: Mapping[int, int] | None = None,
+                 data_ranges: Sequence[tuple[int, int]] | None = None):
         """memory: 中身の読み手。symbols: 関数名・ファイル:行。image: マッピングシンボル（$t/$d）と変数名
-        （省略時、symbols があれば同じ ELF から読む）。どちらも無ければ番地だけで読み、リテラルは推定する。"""
+        （省略時、symbols があれば同じ ELF から読む）。どちらも無ければ番地だけで読む。
+        branch_tables: tbb / tbh の命令の番地 → 表の項目の数（使う側が明示する。表は命令の直後）。無い表の大きさは
+        分からないので、直後のバイトはデータとして区切らない（直前の cmp から推すのはプラグイン
+        fprobe.plugins.heuristics.tbb_table_sizes）。
+        data_ranges: データとして区切る区間 [(番地, バイト数)]（使う側が明示する。data_basis = "given"）。$t・$d の
+        無い所のリテラルプールを、ldr [pc, #n] の読む先から推すのはプラグイン fprobe.plugins.heuristics
+        .literal_pool_ranges（本体は推さない。ldr の読む先 literal と値 literal_value は事実として返す）。
+        $t・$d がある所はその印に従い、渡された区間で上書きしない。"""
         self.memory = memory
+        self.branch_tables = dict(branch_tables or {})
+        self.data_ranges = [(int(a), int(n)) for a, n in data_ranges or []]
         self.symbols = symbols
         self.image = image if image is not None or symbols is None else ElfImage(symbols.path)
         self.code_map: CodeMap | None = self.image.code_map if self.image is not None else None
@@ -159,9 +178,12 @@ class Disassembler:
         data = self.memory.read_memory(start, size)
         return Listing(tuple(self._relink(self._decode(start, data, start + size))), "function")
 
-    def around(self, pc: int, before: int = 8, after: int = 8) -> Listing:
-        """PC の前 before 命令・PC・後ろ after 命令。前は確かな境界（関数の先頭・$t）から PC まで読んで揃える。"""
-        start, sync = self._sync_start(pc, before)
+    def around(self, pc: int, before: int = 8, after: int = 8, sync_limit: int = SYNC_LIMIT) -> Listing:
+        """PC の前 before 命令・PC・後ろ after 命令。前は確かな境界（関数の先頭・$t）から PC まで読んで揃える
+        （PC まで sync_limit バイトより遠ければ読まない）。揃えなかった理由は sync_skipped。"""
+        if sync_limit < 0:
+            raise ValueError("sync_limit は 0 以上")
+        start, sync, skipped = self._sync_start(pc, sync_limit)
         tail = self._read_upto(pc, 4 * (after + 1) + 2)
         if not tail:
             raise MemoryReadError(f"0x{pc:08X} が読めない")
@@ -170,32 +192,53 @@ class Disassembler:
         decoded = self._decode(start, head + tail, pc + len(tail))
         at = next((n for n, i in enumerate(decoded) if i.address == pc), None)
         if at is None:                                           # PC がデータの区間の中など: PC から読む
+            if sync != "start":
+                skipped = {"from": start, "kind": sync, "reason": "pc_in_data", "distance": pc - start,
+                           "limit": sync_limit}
             start, sync, at = pc, "start", 0
             decoded = self._decode(pc, tail, pc + len(tail))
         prior = decoded[:at][-before:] if before > 0 else []
-        return Listing(tuple(self._relink(prior + decoded[at:at + after + 1])), sync, len(prior))
+        return Listing(tuple(self._relink(prior + decoded[at:at + after + 1])), sync, len(prior), skipped)
 
     # --- 揃え ---------------------------------------------------------------------------
 
-    def _sync_start(self, pc: int, count: int) -> tuple[int, str]:
-        """PC の前を読み始める確かな命令の境界と、その種類（before = 0 でも、IT ブロックの条件のために揃える）。"""
+    def _sync_start(self, pc: int, limit: int) -> tuple[int, str, dict | None]:
+        """PC の前を読み始める確かな命令の境界と、その種類（before = 0 でも、IT ブロックの条件のために揃える）と、
+        境界があったのに揃えなかった理由（Listing.sync_skipped）。"""
         anchors = []
         function = self._function_at(pc)
         if function is not None:
             anchors.append((function[0], "function"))
         if self.code_map is not None and (start := self.code_map.last_code_start(pc)) is not None:
             anchors.append((start, "mapping"))
-        if anchors:
-            start, sync = max(anchors)
-            if start == pc or (pc - start <= _SYNC_LIMIT and self._decode_to(start, pc) is not None):
-                return start, sync
-        return pc, "start"                     # 確かな境界が無い: 前の命令の境界を推定しない
+        if not anchors:
+            return pc, "start", None           # 確かな境界が無い: 前の命令の境界を推定しない
+        start, sync = max(anchors)
+        if start == pc:
+            return start, sync, None
+        reason = None
+        if pc - start > limit:
+            reason = "too_far"
+        else:
+            try:
+                landed = self._decode_to(start, pc, unreadable=True)
+            except MemoryReadError:
+                reason = "unreadable"
+            else:
+                if landed is None:
+                    reason = "not_aligned"
+        if reason is None:
+            return start, sync, None
+        return pc, "start", {"from": start, "kind": sync, "reason": reason, "distance": pc - start, "limit": limit}
 
-    def _decode_to(self, start: int, pc: int, strict: bool = False) -> list[Instruction] | None:
-        """start から読んで pc にちょうど着地すれば、その命令の列。strict なら解読できないバイトがあれば失敗。"""
+    def _decode_to(self, start: int, pc: int, strict: bool = False, unreadable: bool = False) -> list[Instruction] | None:
+        """start から読んで pc にちょうど着地すれば、その命令の列。strict なら解読できないバイトがあれば失敗。
+        読めなければ None（unreadable なら MemoryReadError を投げる）。"""
         try:
             data = self.memory.read_memory(start, pc - start)
         except MemoryReadError:
+            if unreadable:
+                raise
             return None
         decoded = self._decode(start, data, pc)
         if not decoded or decoded[-1].address + decoded[-1].size != pc:
@@ -272,14 +315,16 @@ class Disassembler:
     def _decode(self, start: int, data: bytes, end: int) -> list[Instruction]:
         """data（start から）を end まで読む。data は end より長くてよい（end をまたぐ最後の命令の分）。"""
         out: list[Instruction] = []
-        literals: dict[int, tuple[int, int]] = {}                 # 推定したデータ: 始まり → (終わり, 単位のバイト)
+        # データの区間: 始まり → (終わり, 単位のバイト, 根拠 "given"（渡された区間。印のある所は除く）/ "branch_table")
+        literals: dict[int, tuple[int, int, str]] = {a: (a + n, 4, "given") for a, n in self.data_ranges
+                                                     if not self._marked(a)}
         stop = start + len(data)
         address = start
         while address < end and address < stop:
             kind = self._kind(address)
-            data_end, unit = self._data_end(address, kind, literals)
+            data_end, unit, basis = self._data_end(address, kind, literals)
             if data_end is not None:
-                out.append(self._data(address, data[address - start:min(data_end, stop) - start], unit))
+                out.append(self._data(address, data[address - start:min(data_end, stop) - start], unit, basis))
                 address += out[-1].size
                 continue
             # コードの区間をまとめて capstone に渡す（IT ブロックの条件は続けて読むときだけ分かる）
@@ -287,32 +332,42 @@ class Disassembler:
             if self.code_map is not None and self.code_map.kind_at(address) is not None:
                 run_end = min(stop, self.code_map.region_end(address))
             cs = self._arm if kind == "a" else self._thumb
-            progressed = False
+            progressed, blocked = False, None
             for insn in cs.disasm(data[address - start:run_end - start], address):
-                if insn.address >= end or self._overlaps(insn.address, insn.size, literals):
+                if insn.address >= end:
                     break
-                out.append(self._instruction(insn, out, literals))
+                if (blocked := self._overlap(insn.address, insn.size, literals)) is not None:
+                    break
+                out.append(self._instruction(insn, literals))
                 address = insn.address + insn.size
                 progressed = True
             if not progressed and address < end:                  # 解読できない・データに掛かる: 2 バイトのデータ
-                out.append(self._data(address, data[address - start:min(address + 2, stop) - start]))
+                out.append(self._data(address, data[address - start:min(address + 2, stop) - start],
+                                      basis=blocked or "undecodable"))
                 address += out[-1].size
         return out
 
     @staticmethod
-    def _overlaps(address: int, size: int, literals: dict[int, tuple[int, int]]) -> bool:
-        return any(begin < address + size and address < finish for begin, (finish, _) in literals.items())
+    def _overlap(address: int, size: int, literals: dict[int, tuple[int, int, str]]) -> str | None:
+        """[address, address + size) が命令から分かったデータに掛かれば、そのデータの根拠。"""
+        return next((basis for begin, (finish, _, basis) in literals.items()
+                     if begin < address + size and address < finish), None)
 
-    def _data_end(self, address: int, kind: str, literals: dict[int, tuple[int, int]]) -> tuple[int | None, int]:
-        """address がデータなら (その区間の終わり, 単位のバイト)。コードなら (None, 0)。"""
+    def _data_end(self, address: int, kind: str,
+                  literals: dict[int, tuple[int, int, str]]) -> tuple[int | None, int, str | None]:
+        """address がデータなら (その区間の終わり, 単位のバイト, 根拠)。コードなら (None, 0, None)。"""
         if kind == "d":
-            return self.code_map.region_end(address), 4
-        for begin, (finish, unit) in literals.items():
+            return self.code_map.region_end(address), 4, "mapping"
+        for begin, (finish, unit, basis) in literals.items():
             if begin <= address < finish:
-                return finish, unit
-        return None, 0
+                return finish, unit, basis
+        return None, 0, None
 
-    def _data(self, address: int, chunk: bytes, unit: int = 4) -> Instruction:
+    def _marked(self, address: int) -> bool:
+        """ELF の $t / $a / $d の印が address に届いている。"""
+        return self.code_map is not None and self.code_map.kind_at(address) is not None
+
+    def _data(self, address: int, chunk: bytes, unit: int = 4, basis: str | None = None) -> Instruction:
         """データの 1 単位（unit 以下で、揃っていて入るなら .word、次に .short、.byte）。"""
         if unit >= 4 and address % 4 == 0 and len(chunk) >= 4:
             size, mnemonic = 4, ".word"
@@ -324,9 +379,9 @@ class Disassembler:
         value = int.from_bytes(raw, "little")
         name = self.image.name_of(value) if self.image is not None and size == 4 else None
         return Instruction(address, raw, mnemonic, f"0x{value:0{2 * size}x}", "data", literal_value=value,
-                           literal_name=name)
+                           literal_name=name, data_basis=basis)
 
-    def _instruction(self, insn, previous: list[Instruction], literals: dict[int, tuple[int, int]]) -> Instruction:
+    def _instruction(self, insn, literals: dict[int, tuple[int, int, str]]) -> Instruction:
         address = insn.address
         target = literal = value = name = None
         flow, conditional = self._flow(insn)
@@ -338,15 +393,13 @@ class Disassembler:
             if op.type == arm.ARM_OP_MEM and op.mem.base == arm.ARM_REG_PC:
                 if op.mem.index == 0 and insn.mnemonic.startswith(("ldr", "vldr")):
                     literal = ((address + 4) & ~3) + op.mem.disp
-                    size = self._literal_size(insn)
-                    literals[literal] = (literal + size, 4)
-                    value = self._read_value(literal, min(size, 4))
+                    value = self._read_value(literal, min(self._literal_size(insn), 4))
                 elif op.mem.index != 0 and insn.mnemonic in ("tbb", "tbh"):
-                    entries = self._table_entries(op.mem.index, previous)
+                    entries = self.branch_tables.get(address)
                     if entries:
                         width = 1 if insn.mnemonic == "tbb" else 2
                         begin = address + 4
-                        literals[begin] = (begin + (entries * width + 1) // 2 * 2, width)
+                        literals[begin] = (begin + (entries * width + 1) // 2 * 2, width, "branch_table")
         if insn.mnemonic.startswith("adr") and insn.operands and insn.operands[-1].type == arm.ARM_OP_IMM:
             literal = ((address + 4) & ~3) + insn.operands[-1].imm
         if value is not None and self.image is not None:
@@ -367,16 +420,6 @@ class Disassembler:
             if base.startswith(prefix):
                 return size
         return 4
-
-    def _table_entries(self, index_reg: int, previous: list[Instruction]) -> int | None:
-        """tbb/tbh の表の項目数: 直前（数命令）の "cmp 添字, #n" から n + 1。"""
-        name = self._thumb.reg_name(index_reg)
-        for i in reversed(previous[-4:]):
-            if i.mnemonic.startswith("cmp"):
-                reg, _, imm = i.operands.partition(", #")
-                if reg == name and imm:
-                    return int(imm, 0) + 1
-        return None
 
     def _read_value(self, address: int, size: int) -> int | None:
         try:

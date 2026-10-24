@@ -4,6 +4,7 @@ import type { DaemonConnection } from "./api";
 
 export interface FaultCause {
   bit: string;
+  register?: string;               // そのビットのレジスタ（MMFSR・BFSR・UFSR・HFSR・DFSR。ARMv6-M の HardFault は無し）
   meaning: string;
   hint?: string;
 }
@@ -19,6 +20,7 @@ export interface FaultFrame {
   exc_return: number;
   fp_context: boolean;
   registers: Record<string, number>;     // r0〜r3・r12・lr・pc・xpsr（例外に入ったときに積まれた値）
+  locations?: Record<string, { address: number; size: number }>;   // 積まれた値の番地（target.memory.write で書ける）
   caller_sp: number;
   pc: FaultPlace;
   lr: FaultPlace;
@@ -32,6 +34,8 @@ export interface FaultReport {
   faulted: boolean;
   halt_reasons?: FaultCause[];
   registers?: Record<string, number | null>;   // CFSR・HFSR・DFSR・MMFAR・BFAR・CPACR（ARMv7-M / v8-M Mainline）
+  locations?: Record<string, { address: number; size: number }>;   // それらの番地（target.memory.write で書ける）
+  write_one_to_clear?: string[];               // 1 を書いたビットが消えるレジスタ（CFSR・HFSR・DFSR）
   fault_address?: FaultPlace;
   frame?: FaultFrame | null;
 }
@@ -68,29 +72,17 @@ export function watchFaults(call: Call, app: TargetSource, open: () => void): ()
   });
 }
 
-/** 原因のビットが属するレジスタ（HFSR・MMFSR・BFSR・UFSR。CFSR は 3 つに分かれる） */
-export function causeRegister(bit: string): string {
-  if (["VECTTBL", "FORCED", "DEBUGEVT"].includes(bit)) return "HFSR";
-  if (["IACCVIOL", "DACCVIOL", "MUNSTKERR", "MSTKERR", "MLSPERR", "MMARVALID"].includes(bit)) return "MMFSR";
-  if (["IBUSERR", "PRECISERR", "IMPRECISERR", "UNSTKERR", "STKERR", "LSPERR", "BFARVALID"].includes(bit)) return "BFSR";
-  if (["UNDEFINSTR", "INVSTATE", "INVPC", "NOCP", "STKOF", "UNALIGNED", "DIVBYZERO"].includes(bit)) return "UFSR";
-  return "";
-}
-
-/** 故障の番地が入っていることを示すだけのビット（MMARVALID・BFARVALID）は原因の一覧では控えめに出す */
-export const VALID_BITS = new Set(["MMARVALID", "BFARVALID"]);
-
 /** 積まれたレジスタの並び（例外のフレームの順） */
 export const STACKED = ["r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"] as const;
 
 const hex = (v: number | null | undefined) => (v == null ? "-" : `0x${(v >>> 0).toString(16).toUpperCase().padStart(8, "0")}`);
 
-/** 見出し: 例外の名前と主な原因（"HardFault: PRECISERR"）。故障でなければ null */
+/** 見出し: 例外の名前と立っているビット（API の順のまま全部。画面が「主な原因」を選ばない）。故障でなければ null */
 export function headline(report: FaultReport): string | null {
   if (!isFault(report)) return null;
-  const main = report.causes.filter((c) => !VALID_BITS.has(c.bit) && c.bit !== "FORCED").map((c) => c.bit);
+  const bits = report.causes.map((c) => c.bit);
   const name = report.exception?.name ?? "Fault";
-  return main.length ? `${name}: ${main.join(", ")}` : name;
+  return bits.length ? `${name}: ${bits.join(", ")}` : name;
 }
 
 /** 文字の要約（コピー用。IAR の「PC・LR をコピー」に加え、原因・番地・レジスタ。AI やチケットに貼る） */

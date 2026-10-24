@@ -26,6 +26,7 @@ export interface OverlayInput {
   units: (string | null)[];          // 段ごとの値の単位（values の段の目盛り）
   marks?: OverlayMark[];             // ビューが置いた印（t の昇順。今の源のものだけ）
   pointers?: { t: number; label: string; role: string }[];   // ほかの窓・AI のマウスのカーソル（今の源のものだけ）
+  unknownLabel?: string;             // 始めの値を探していない所（frame.unknown）に書く文字（例「不明」）
 }
 
 export interface OverlayMark {
@@ -36,6 +37,33 @@ export interface OverlayMark {
 }
 
 const MARK_LINES = 50;               // 見えている印がこれ以下なら、印の時刻に縦の点線も引く
+
+// 印の並び（t の昇順）ごとの、先頭からの終わり（tEnd ?? t）の最大（増えるだけ）。見えている範囲の始めに届く最初の印を
+// 二分探索で引く
+const reachCache = new WeakMap<readonly { t: number; tEnd?: number }[], Float64Array>();
+
+/** 見えている印（t の昇順の marks のうち、[start, end) に掛かるもの）。区間の印は始まりがどれだけ前でも、終わりが
+ *  見えていれば入れる */
+export function visibleMarks<M extends { t: number; tEnd?: number }>(marks: readonly M[], view: { start: number; end: number }): M[] {
+  let reach = reachCache.get(marks);
+  if (!reach || reach.length !== marks.length) {
+    reach = new Float64Array(marks.length);
+    let max = -Infinity;
+    marks.forEach((m, i) => (reach![i] = max = Math.max(max, m.tEnd ?? m.t)));
+    reachCache.set(marks, reach);
+  }
+  let lo = 0, hi = marks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (reach[mid] < view.start) lo = mid + 1;
+    else hi = mid;
+  }
+  const out: M[] = [];
+  for (let i = lo; i < marks.length && marks[i].t < view.end; i++) {
+    if ((marks[i].tEnd ?? marks[i].t) >= view.start) out.push(marks[i]);
+  }
+  return out;
+}
 
 const FONT = "11px ui-monospace, Consolas, monospace";
 let charWidth = 0;
@@ -112,6 +140,32 @@ export function drawOverlay(canvas: HTMLCanvasElement, layout: Layout, colors: C
         g.fillText(text, 5, y);
       }
     });
+    // 始めの値を探していない所（API の carry_complete = false。段の最初の出来事まで）: 斜線と文字
+    for (const u of f.unknown ?? []) {
+      const r = rowIndex.get(u.id);
+      if (r === undefined) continue;
+      const top = layout.tops[r] / dpr, h = layout.heights[r] / dpr, x0 = u.x0 * k, x1 = u.x1 * k;
+      g.save();
+      g.beginPath();
+      g.rect(x0, top, x1 - x0, h);
+      g.clip();
+      g.fillStyle = cssColor([...colors.panel.slice(0, 3), 0.6] as typeof colors.panel);
+      g.fillRect(x0, top, x1 - x0, h);
+      g.strokeStyle = cssColor([...colors.muted.slice(0, 3), 0.7] as typeof colors.muted);
+      g.beginPath();
+      for (let x = x0 - h; x < x1; x += 6) {
+        g.moveTo(x, top + h);
+        g.lineTo(x + h, top);
+      }
+      g.stroke();
+      const text = input.unknownLabel ? fit(g, input.unknownLabel, x1 - x0) : null;
+      if (text) {
+        g.fillStyle = cssColor(colors.muted);
+        g.textBaseline = "middle";
+        g.fillText(text, x0 + 3, top + h / 2 + 1);
+      }
+      g.restore();
+    }
   }
 
   if (input.marks?.length) drawMarks(g, input.marks, view, cssW, cssH, ruler, colors);
@@ -189,19 +243,8 @@ function drawMarks(g: CanvasRenderingContext2D, marks: OverlayMark[], view: View
                    ruler: number, colors: Colors): void {
   const span = view.end - view.start;
   const xOf = (t: number) => ((t - view.start) / span) * cssW;
-  // 見えている範囲（区間は始まりが前でも終わりが見えていれば）: 始まりの二分探索で、前の 64 件まで区間を見る
-  let lo = 0, hi = marks.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (marks[mid].t < view.start) lo = mid + 1;
-    else hi = mid;
-  }
-  const first = Math.max(0, lo - 64);
-  const visible: OverlayMark[] = [];
-  for (let i = first; i < marks.length && marks[i].t < view.end; i++) {
-    const m = marks[i];
-    if ((m.tEnd ?? m.t) >= view.start) visible.push(m);
-  }
+  // 見えている範囲（区間は始まりがどれだけ前でも終わりが見えていれば）
+  const visible = visibleMarks(marks, view);
   if (!visible.length) return;
   const tone = (m: OverlayMark) => cssColor(m.tone === 1 ? colors.palette[13] : m.tone === 2 ? colors.palette[12]
     : m.tone === 3 ? colors.palette[14] : colors.selection);

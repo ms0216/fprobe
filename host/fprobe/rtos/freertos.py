@@ -16,10 +16,10 @@ from __future__ import annotations
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.typesys import ArrayType, strip
-from .base import KernelAwareness
+from .base import NAME_LIMIT, KernelAwareness, stopped_note
 from .cortexm import LAYOUTS, SavedContext, read_saved_context
 from .freertos_objects import FreeRTOSObjects
-from .model import HeapInfo, KernelObject, StackInfo, Task, TaskState, WaitInfo
+from .model import HeapInfo, KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .stackcheck import check_stack
 from .structs import StructLayout
 
@@ -37,8 +37,13 @@ _REQUIRED = ("pxCurrentTCB", "pxReadyTasksLists")
 class FreeRTOS(KernelAwareness):
     name = "FreeRTOS"
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, port: str = "auto"):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, port: str | None = None,
+                 name_limit: int = NAME_LIMIT):
+        """port: 保存された文脈の積み方（"armv7m" = ARM_CM3 等、"armv7m_fp" = ARM_CM4F・ARM_CM7）。省けば ELF の事実
+        だけで決める: ARM_CM4F・ARM_CM7 の port だけが定める関数 vPortEnableVFP があれば armv7m_fp（port_basis =
+        "vPortEnableVFP"）。無いことからは決めない（port = None。一覧・状態・スタックは読め、保存された文脈は
+        誤りで port を渡すよう言う）。明示すれば port_basis = "explicit"。"""
+        super().__init__(info, access, symbols, name_limit)
         self.tcb = StructLayout.of(info, "TCB_t", "struct tskTaskControlBlock")
         self.list = StructLayout.of(info, "List_t", "struct xLIST")
         self.item = StructLayout.of(info, "ListItem_t", "struct xLIST_ITEM")
@@ -48,9 +53,12 @@ class FreeRTOS(KernelAwareness):
             self.queue = None                        # queue.c が無い（キューを使わない）
         for name in _REQUIRED:
             self.address(name)                       # 無ければ KeyError（分かりやすい誤り）
-        self.port = self._detect_port() if port == "auto" else port
-        if self.port not in LAYOUTS:
-            raise ValueError(f"port の積み方 {port!r} は扱わない（{', '.join(LAYOUTS)}）")
+        if port is None:
+            self.port, self.port_basis = self._port_from_elf()
+        else:
+            if port not in LAYOUTS:
+                raise ValueError(f"port の積み方 {port!r} は扱わない（{', '.join(LAYOUTS)}）")
+            self.port, self.port_basis = port, "explicit"
         self.tick_mask = (1 << (8 * self.item.member_size("xItemValue"))) - 1
 
     @staticmethod
@@ -63,9 +71,12 @@ class FreeRTOS(KernelAwareness):
             return False
         return True
 
-    def _detect_port(self) -> str:
-        """ARM_CM4F・ARM_CM7 の port にだけ vPortEnableVFP がある（FP の文脈を EXC_RETURN と一緒に積む）。"""
-        return "armv7m_fp" if self.function_address("vPortEnableVFP") is not None else "armv7m"
+    def _port_from_elf(self) -> tuple[str | None, str | None]:
+        """(port, 根拠)。ARM_CM4F・ARM_CM7 の port にだけ vPortEnableVFP がある（FP の文脈を EXC_RETURN と一緒に積む）。
+        無いことは ARM_CM3 の証拠にならない（別の port・名前の違う実装もある）ので (None, None)。"""
+        if self.function_address("vPortEnableVFP") is not None:
+            return "armv7m_fp", "vPortEnableVFP"
+        return None, None
 
     # --- カーネルの変数 -----------------------------------------------------------------------
 
@@ -106,7 +117,10 @@ class FreeRTOS(KernelAwareness):
         item = self.mem.u32(end + self.item.offset("pxNext"))
         while item != end:
             if item in seen or len(out) >= min(count, MAX_LIST_ITEMS) or item == 0:
-                self.warnings.append(f"リスト 0x{lst:08X} が壊れている（{len(out)} 項目で止めた。数は {count}）")
+                reason = ("cycle" if item in seen else "null" if item == 0
+                          else "over_count" if len(out) >= count else "limit")
+                self.warnings.append(stopped_note(f"リスト 0x{lst:08X}", len(out), reason,
+                                                  count if reason == "over_count" else MAX_LIST_ITEMS))
                 break
             seen.add(item)
             out.append((item, self.mem.u32(item + self.item.offset("pvOwner"))))
@@ -157,7 +171,7 @@ class FreeRTOS(KernelAwareness):
         return self._field(handle, path) if self.tcb.has(path) else None
 
     def task_name(self, handle: int) -> str:
-        return self.mem.cstring(handle + self.tcb.offset("pcTaskName"), self.tcb.member_size("pcTaskName"))
+        return self.mem.cstring(handle + self.tcb.offset("pcTaskName"), self.tcb.member_size("pcTaskName"), whole=True)
 
     handle_name = task_name
 
@@ -181,8 +195,12 @@ class FreeRTOS(KernelAwareness):
         wait = None
         if state is TaskState.BLOCKED:
             wait = self._wait(handle, place, event_list, waiting_notification, tick)
-        return Task(handle, name, self._field(handle, "uxPriority"), state, self._stack(handle, running), wait,
+        task = Task(handle, name, self._field(handle, "uxPriority"), state, self._stack(handle, running), wait,
                     self._optional_field(handle, "uxBasePriority"), self._optional_field(handle, "uxTCBNumber"), notes)
+        task.locations["priority"] = field_location(self.tcb, handle, "uxPriority")
+        if self.tcb.has("uxBasePriority"):
+            task.locations["base_priority"] = field_location(self.tcb, handle, "uxBasePriority")
+        return task
 
     def _notification_waiting(self, handle: int) -> bool:
         if not self.tcb.has("ucNotifyState"):
@@ -223,7 +241,7 @@ class FreeRTOS(KernelAwareness):
             name_ptr = self.mem.u32(at + entry.offset("pcQueueName"))
             if handle and name_ptr:
                 try:
-                    out.append((self.mem.cstring(name_ptr, 32), handle))
+                    out.append((self.mem.cstring(name_ptr, self.name_limit), handle))
                 except AccessError:
                     out.append((f"0x{handle:08X}", handle))
         return out
@@ -285,6 +303,9 @@ class FreeRTOS(KernelAwareness):
         task = self.task(key)
         if task.state is TaskState.RUNNING:
             return None
+        if self.port is None:
+            raise ValueError("FreeRTOS の port の積み方が ELF から決まらない（ARM_CM4F・ARM_CM7 の port の関数 "
+                             "vPortEnableVFP が無い）。port を渡す（armv7m = ARM_CM3 等 / armv7m_fp = ARM_CM4F・ARM_CM7）")
         return read_saved_context(self.access.read_memory, self._field(task.handle, "pxTopOfStack"), self.port)
 
     def stop_pcs(self) -> list[int]:
@@ -345,5 +366,6 @@ class FreeRTOS(KernelAwareness):
         tasks = self.tasks()
         current = self.current()
         return {"rtos": self.name, "scheduler": self.scheduler_state(), "tick": self.tick_count(),
-                "current": self._names.get(current), "port": self.port, "tasks": [t.to_dict() for t in tasks],
+                "current": self._names.get(current), "port": self.port, "port_basis": self.port_basis,
+                "tasks": [t.to_dict() for t in tasks],
                 "warnings": list(self.warnings)}

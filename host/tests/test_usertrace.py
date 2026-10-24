@@ -120,7 +120,8 @@ def test_intervals_pair_last_in_first_out_per_name():
     assert [(i.name, i.t0, i.t1, i.depth) for i in found.intervals] == [("adc", 20, 30, 1), ("adc", 10, 50, 0)]
     # その名前の最初の start より前の stop は、取り始める前に始まった区間（窓の始めで切れた。open の逆）。2026-10-18 に
     # 実機で、取り始めに走っていた fpu_step の stop を「対の無い stop」と数えていた
-    assert found.started_before == {"button": 1} and found.unmatched_stops == {"adc": 1} and found.open == {"adc": 1}
+    assert found.stops_before_first_start == {"button": 1} and found.unmatched_stops == {"adc": 1} \
+        and found.open == {"adc": 1}
     stats = interval_stats(found.intervals, timebase_hz=1000)
     assert stats["adc"]["count"] == 2 and stats["adc"]["max"] == 40 and stats["adc"]["max_at"] == 10
     assert stats["adc"]["seconds"]["max"] == pytest.approx(0.04)

@@ -6,6 +6,7 @@ import BreakpointsPanel from "./BreakpointsPanel.svelte";
 import CallGraphPanel from "./CallGraphPanel.svelte";
 import CallStackPanel from "./CallStackPanel.svelte";
 import CpuLoadPanel from "./CpuLoadPanel.svelte";
+import CrossTriggerPanel from "./CrossTriggerPanel.svelte";
 import DashboardPanel from "./DashboardPanel.svelte";
 import DataSamplingPanel from "./DataSamplingPanel.svelte";
 import DisassemblyPanel from "./DisassemblyPanel.svelte";
@@ -20,6 +21,7 @@ import LocalsPanel from "./LocalsPanel.svelte";
 import LogPanel from "./LogPanel.svelte";
 import LinuxPanel from "./LinuxPanel.svelte";
 import LogicAnalyzerPanel from "./LogicAnalyzerPanel.svelte";
+import LowLevelPanel from "./LowLevelPanel.svelte";
 import MemoryPanel from "./MemoryPanel.svelte";
 import PeripheralsPanel from "./PeripheralsPanel.svelte";
 import PowerPanel from "./PowerPanel.svelte";
@@ -33,6 +35,7 @@ import SwoTracePanel from "./SwoTracePanel.svelte";
 import TerminalPanel from "./TerminalPanel.svelte";
 import ThreadsPanel from "./ThreadsPanel.svelte";
 import TimelinePanel from "./TimelinePanel.svelte";
+import VerifyPanel from "./VerifyPanel.svelte";
 import WatchPanel from "./WatchPanel.svelte";
 
 // group: View メニューの区切りと、閉じていたパネルを開く場所（lib/dock.ts の PanelGroup）
@@ -69,10 +72,16 @@ export const PANELS: PanelDef[] = [
   { id: "interrupts", title: "panel.interrupts", component: InterruptsPanel, group: "analysis" },
   { id: "callGraph", title: "panel.callGraph", component: CallGraphPanel, group: "analysis" },
   { id: "logicAnalyzer", title: "panel.logicAnalyzer", component: LogicAnalyzerPanel, group: "analysis" },
+  // クロストリガーの源 × 動作の経路を 1 か所で（ロジアナ・システム解析・低レベルと同じ API）
+  { id: "crossTrigger", title: "panel.crossTrigger", component: CrossTriggerPanel, group: "analysis" },
+  // 試して確かめる: 故障注入・規則・フック（inject.run・rules.*・hooks.*）
+  { id: "verify", title: "panel.verify", component: VerifyPanel, group: "analysis" },
   { id: "fpgaObs", title: "panel.fpgaObs", component: FpgaObsPanel, group: "analysis" },
   // 道具
   { id: "dashboard", title: "panel.dashboard", component: DashboardPanel, group: "tools" },
   { id: "flash", title: "panel.flash", component: FlashPanel, group: "tools" },
+  // 低レベル（DP・AP・CSR・ピン・GPIO・出力の端子）。既定の配置には入れない（View メニューから開く）
+  { id: "lowLevel", title: "panel.lowLevel", component: LowLevelPanel, group: "tools" },
   { id: "api", title: "panel.api", component: ApiPanel, group: "tools" },
   { id: "favorites", title: "panel.favorites", component: FavoritesPanel, group: "tools" },
 ];

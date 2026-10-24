@@ -1,20 +1,21 @@
 <script lang="ts">
   // システム解析: MCU と FPGA を対等に並べる（どちらかが主でどちらかが従ではない）。MCU = コアの状態と止めずに読む
-  // 番地（ファームウェアのメールボックス・カウンタ等。毎秒の増え方も）、FPGA = 観測の型・状態と各組の最新の値（信号の
-  // 名前で）。どちらも system.status 1 回で読む。細かい前後関係は時間軸（同じ時刻の上に両方が並ぶ）で見る。
-  // FPGA の条件（例: restart changed and state=BUSY）の毎秒の回数を、MCU のカウンタの増え方と横に並べる（速さが
-  // そろえば関係を調べる手がかり。どの対象にも使える汎用の見方）。
-  import { untrack } from "svelte";
+  // 番地（ファームウェアのメールボックス・カウンタ等。読んだ値と読んだ時刻）、FPGA = 観測の型・状態と各組の最新の値
+  // （信号の名前で）。どちらも system.status 1 回で読む。細かい前後関係は時間軸（同じ時刻の上に両方が並ぶ）で見る。
+  // FPGA の条件（例: restart changed and state=BUSY）の回数は、使う人が入れた範囲（最後の N 件）でデーモンが数えた
+  // 事実（fpga_obs.count: 回数・数えた範囲）をそのまま描く。画面では数えない・毎秒を計算しない・推さない。
+  import { tick, untrack } from "svelte";
   import { errorText } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { i18n, type Key } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import { haltReasonKey } from "../../lib/target";
   import {
-    addressKey, countCondition, memoryRateHz, exampleView, fieldsText, flatChannels, parseAddress, parseCondition, rates,
-    fpgaOnly, isSymbolName, ownWatch, sanitizeConditions, symbolWatch, sanitizeWatches, SharedSystem, termName, type Condition,
-    type MemoryRead,
-    type ObsItem, type Watch,
+    addressKey, exampleView, fieldsText, parseAddress, parseCondition, parseCount, parseRate,
+    readConditionCounts, fpgaOnly, isSymbolName, sanitizeConditions, symbolWatch, sanitizeWatches, SharedSystem,
+    correlateParams,
+    memoryStopped as isMemoryStopped, samplingRows, writeWord,
+    type Condition, type ConditionCount, type Watch,
   } from "../../lib/system";
 
   const POLL_MS = 1000;
@@ -24,7 +25,7 @@
   interface Status {
     time_us: number;
     mcu: { connected: boolean; state?: string; target?: string; core?: number; error?: string; memory?: Record<string, number>;
-           connect?: Record<string, unknown> | null };
+           connect?: Record<string, unknown> | null; halt_reason?: string; halt_bits?: string[] };
     fpga: { available: boolean; mode?: string; running?: boolean; stuck?: boolean; driving?: boolean; overflow_seen?: boolean;
             scans?: number; id?: number; latest?: Latest[]; gaps?: number; latest_error?: string;
             config?: Record<string, unknown> | null; auto_reopen?: boolean; reopened?: number };
@@ -36,17 +37,21 @@
   let newAddress = $state("");
   let addError = $state<string | null>(null);
   let status = $state<Status | null>(null);
-  let prev: MemoryRead | null = null;
-  let prevScans: { t_us: number; scans: number } | null = null;
-  let perSecond = $state<Record<string, number>>({});
-  let scansPerSecond = $state<number | null>(null);
   let error = $state<string | null>(null);
-  let rec = $state<{ recording: boolean; name: string | null; events?: number; la_stream?: { running?: boolean; error?: string | null; overrun?: boolean };
+  let rec = $state<{ recording: boolean; name: string | null; events?: number; watch_running?: boolean; la_stream?: { running?: boolean; error?: string | null; overrun?: boolean };
                      events_errors?: { count: number; last: string | null; lost: number } } | null>(null);
   let withPins = $state(load("system.withPins", "1") === "1");       // ピン（ロジアナ）も流し続けて記録へ
   $effect(() => save("system.withPins", withPins ? "1" : "0"));
+  let pinsFormat = $state<"" | "rle" | "raw">((["rle", "raw"].includes(load("system.pinsFormat", "")) ? load("system.pinsFormat", "")
+                                                                                                    : "") as "" | "rle" | "raw");
+  $effect(() => save("system.pinsFormat", pinsFormat));
   let withMemory = $state(load("system.withMemory", "1") === "1");   // MCU のメモリも DAP サンプラで記録へ（名前つき）
   $effect(() => save("system.withMemory", withMemory ? "1" : "0"));
+  // 記録のメモリの読みの速さ（回/秒）: 使う人が入れる（時刻の分解能・リンクの帯域に効くので既定の値で決めない）
+  let memoryRateText = $state(load("system.memoryRateHz", "") || "");
+  $effect(() => save("system.memoryRateHz", memoryRateText));
+  const memoryRate = $derived(parseRate(memoryRateText));
+  const needsRate = $derived(withMemory && watches.length > 0 && memoryRate === null);
   let startedWatch = false;
   let memoryStopped = $state(false);
   let startedPins = $state(false);     // この画面でピンの記録を始めた（後で止まれば知らせる）
@@ -78,13 +83,13 @@
       const recording = Boolean((await conn.call("recording.status", {}, { quiet: true }).catch(() => null))?.recording);
       tl.setSource(recording ? "recording" : "capture");
       const depth = Number(caps.la_depth ?? 0);
-      // 深いバッファは RAW（前後 4096 拍 = 25 MHz で前後 1.3 ms）: RLE は信号の変化が少ないと埋まるのに十数秒かかる
-      const done = await tl.capture({ rate_hz: Number(caps.la_sample_hz ?? 100e6) / 4, pretrigger: Math.floor(depth / 2),
-                                      deep: !depth, crossOnly: true, rle: false });
+      // 速さ・プリトリガ・深いバッファの拍と形式（RLE / RAW）は Timeline で入れて覚えた設定（画面で決めない）。内蔵の捕捉が
+      // 無い構成は深いバッファ
+      const done = await tl.captureSaved({ deep: !depth, crossOnly: true });
       // 記録中なら捕捉は記録にも入る: 記録の時間軸でトリガの前後 1 ms を見せる（ピンと FPGA の信号・MCU が同じ時間軸に並ぶ）
       // 視点は共有の状態（ui.state）で動かす（結果の直前に多い出来事の「表示」と同じ。手元だけ動かすと共有の視点で戻される）
-      if (recording && done?.trigger_time !== undefined) {
-        const ms = Number(caps.timebase_hz ?? 100e6) / 1000, t = done.trigger_time;
+      if (recording && done?.trigger_time !== undefined && Number(caps.timebase_hz) > 0) {   // タイムベースは申告の値だけ
+        const ms = Number(caps.timebase_hz) / 1000, t = done.trigger_time;
         await conn.call("ui.state.set", { view: { source: "recording", t0: Math.round(t - ms), t1: Math.round(t + ms) },
                                           cursors: { selection: t } }, { quiet: true });
       }
@@ -98,15 +103,19 @@
   let trigger = $state<Trigger | null>(null);
   let triggerExpr = $state(load("system.triggerExpr", "") || "");
   let triggerStop = $state(load("system.triggerStop", "0") === "1");
-  let triggerPost = $state(Number(load("system.triggerPost", "1")) || 1);
+  // 止めるまでの秒は使う人が入れる（画面の既定を持たない。止めないときは送らない）
+  let triggerPost = $state(load("system.triggerPost", "") || "");
+  const postS = $derived(triggerPost.trim() === "" ? null : Number(triggerPost));
+  const postOk = $derived(postS !== null && Number.isFinite(postS) && postS >= 0);
   $effect(() => {
     save("system.triggerExpr", triggerExpr);
     save("system.triggerStop", triggerStop ? "1" : "0");
-    save("system.triggerPost", String(triggerPost));
+    save("system.triggerPost", triggerPost);
   });
   async function armTrigger() {
+    if (triggerStop && !postOk) return;
     trigger = (await app.act("recording.trigger_set", { condition: triggerExpr.trim(), action: triggerStop ? "stop" : "mark",
-                                                        post_s: triggerPost })) ?? trigger;
+                                                        ...(triggerStop ? { post_s: postS! } : {}) })) ?? trigger;
   }
   async function clearTrigger() {
     await app.act("recording.trigger_clear", {});
@@ -114,11 +123,14 @@
   }                     // 記録のために watch.set したか（止めるときに戻す）
   let note = $state<string | null>(null);
   let conditions = $state<Condition[]>(sanitizeConditions(JSON.parse(load("system.conditions", "[]") || "[]")));
-  let condRates = $state<Record<string, { count: number; perSecond: number | null }>>({});
+  let condCounts = $state<Record<string, ConditionCount>>({});
   let newCondName = $state("");
   let newCondExpr = $state("");
   let condError = $state<string | null>(null);
-  const COND_WINDOW = 5000;                     // 条件を数える窓（最後の記録の件数）
+  // 条件を数える範囲（最後の N 件）: 使う人が入れる（空なら数えない。暗黙の窓を持たない）
+  let condLastText = $state(load("system.condLast", "") || "");
+  $effect(() => save("system.condLast", condLastText));
+  const condLast = $derived(parseCount(condLastText));
 
   // 表と条件: ブラウザに覚え（古いデーモン・つながる前）、デーモンの画面の状態で別の窓・別の PC・AI と分け合う
   let sharedSystem: SharedSystem | null = null;
@@ -133,7 +145,6 @@
     const s = new SharedSystem(conn, (w, c) => {
       watches = w;
       conditions = c;
-      prev = null;                              // 番地が変わった: 毎秒の増え方は次の読みから
     });
     sharedSystem = s;
     // 手元の表は読むだけ（依存にしない: 表が届くたびに作り直して受け取り直す繰り返しにならないように）
@@ -156,23 +167,14 @@
 
   let polling = false;
   async function poll() {
-    if (polling) return;                         // 前の問い合わせが 1 秒を超えたら重ねない（毎秒の増え方が乱れる）
+    if (polling) return;                         // 前の問い合わせが 1 秒を超えたら重ねない
     polling = true;
     try {
       const s: Status = await conn.call("system.status", { addresses: watches.map((w) => w.address) }, { quiet: true });
-      const cur = { t_us: s.time_us, memory: s.mcu.memory ?? {} };
-      perSecond = rates(prev, cur);
-      prev = cur;
-      if (s.fpga.scans !== undefined) {
-        scansPerSecond = prevScans && s.time_us > prevScans.t_us
-          ? Math.round(((s.fpga.scans - prevScans.scans + 2 ** 32) % 2 ** 32) / ((s.time_us - prevScans.t_us) / 1e6)) : null;
-        prevScans = { t_us: s.time_us, scans: s.fpga.scans };
-      }
       status = s;
       rec = await conn.call("recording.status", {}, { quiet: true });
       if (obsMatch) haltOn = await conn.call("fpga_obs.trigger_status", {}, { quiet: true }).catch(() => haltOn);
-      memoryStopped = !!rec?.recording && startedWatch &&
-        !(await conn.call("watch.status", {}, { quiet: true }).catch(() => null))?.running;
+      memoryStopped = isMemoryStopped(rec, startedWatch);   // recording.status の watch_running（デーモンの事実）
       if (!rec?.recording) startedPins = false;
       if (!rec?.recording && startedWatch) {          // 記録が条件・AI・別の窓で止まった: 記録のための読みも止める
         startedWatch = false;
@@ -182,11 +184,7 @@
       if (rec?.recording || trigger) trigger = await conn.call("recording.trigger_status", {}, { quiet: true }).catch(() => null);
       if (trigger?.state === "off") trigger = null;
       error = null;
-      if (conditions.length && s.fpga.driving) {
-        const r = await conn.call("fpga_obs.read", { last: COND_WINDOW }, { quiet: true });
-        const items: ObsItem[] = r?.items ?? [];
-        condRates = Object.fromEntries(conditions.map((c) => [c.expr, countCondition(items, parseCondition(c.expr) ?? [], s.time_us)]));
-      }
+      condCounts = s.fpga.driving ? (await readConditionCounts(conn, conditions.map((c) => c.expr), condLast)) ?? {} : {};
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -221,9 +219,47 @@
     watches = [...watches.filter((w) => w.address !== a), { name: newName.trim(), address: a }];
     newName = newAddress = "";
     addError = null;
-    prev = null;
   }
   const removeWatch = (a: number) => (watches = watches.filter((w) => w.address !== a));
+
+  // MCU の番地の語を書く（target.memory.write。止めずに書ける）: 値の欄をダブルクリック → Enter で書く・Esc でやめる。
+  // AI の操作と同じ API。AI がつながっていて一時停止していなければ書く前に確かめる（writeWord の中の allowed）
+  const canWrite = $derived(linkOpen && Boolean(status?.mcu.connected) && !status?.mcu.error);
+  let writing = $state<{ address: number; text: string } | null>(null);
+  let writeError = $state<string | null>(null);
+  function startWrite(address: number, v: number | undefined) {
+    if (!canWrite) return;
+    writing = { address, text: v === undefined ? "" : `0x${v.toString(16).toUpperCase()}` };
+    writeError = null;
+  }
+  async function commitWrite() {
+    if (!writing) return;
+    const { address, text } = writing;
+    const bad = await writeWord(app, address, text);
+    if (bad) {
+      writeError = $i18n(bad);
+      return;
+    }
+    writing = null;
+    writeError = null;
+    await poll();                                    // 書いた値を読み直して見せる
+  }
+  function onWriteKey(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void commitWrite();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      writing = null;
+      writeError = null;
+    }
+  }
+  const focusSelect = (el: HTMLInputElement) => {
+    void tick().then(() => {
+      el.focus();
+      el.select();
+    });
+  };
 
   function addCondition() {
     if (!parseCondition(newCondExpr)) {
@@ -240,27 +276,24 @@
     note = null;
     if (await app.act("recording.start", { name: "system" }) === undefined) return;
     if (withMemory && watches.length) await watchMemory();
-    startedPins = withPins && await app.act("recording.la_stream.start", { rle: true }) !== undefined;   // 変化点の圧縮（遅い信号なら長く流せる）
+    // ピンの形式（RLE = 変化点だけ / RAW）は使う人が選んだもの（画面で決めない）
+    startedPins = withPins && pinsFormat !== "" && await app.act("recording.la_stream.start", { rle: pinsFormat === "rle" }) !== undefined;
     await poll();
   }
   // MCU のメモリを DAP サンプラで記録へ（時刻つきの値 = 時間軸の段。名前は表の名前）。サンプラは 1 つなので、ほかの
-  // 道具（変数のライブ観測・タスクの時間軸等）が使っていれば取り上げずに知らせる
+  // 道具・利用者が使っていれば取り上げずに、使っている道具と始めた者（デーモンの事実）を知らせる（自分のものかを推さない。
+  // 止めるのは利用者の操作）
   async function watchMemory() {
     const holder = await conn.call("probe.sampler.status", {}, { quiet: true }).catch(() => null);
-    if (holder?.user === "watch") {                 // 前の記録のために始めて残った読みなら引き継ぐ
-      const running = await conn.call("watch.status", {}, { quiet: true }).catch(() => null);
-      if (ownWatch(running?.watches ?? [], watches)) {
-        startedWatch = true;
-        return;
-      }
-    }
     if (holder?.user) {
-      note = $i18n("system.samplerBusy", { user: holder.user });
+      note = holder.client?.name ? $i18n("system.samplerBusyBy", { user: holder.user, who: holder.client.name })
+                                 : $i18n("system.samplerBusy", { user: holder.user });
       return;
     }
+    if (memoryRate === null) return;               // 始める前に欄で確かめている（needsRate）
     startedWatch = await app.act("watch.set", { expressions: watches.map((w) => addressKey(w.address)),
                                                 names: watches.map((w) => w.name),
-                                                rate_hz: memoryRateHz(withPins, $app.device?.link) }) !== undefined;
+                                                rate_hz: memoryRate }) !== undefined;
     if (!startedWatch) note = $i18n("system.memoryNotRecorded");   // ピン・FPGA は記録している（記録は続ける）
   }
   async function stopRecording() {
@@ -276,7 +309,6 @@
     const args = Object.fromEntries(Object.entries(status?.mcu.connect ?? {}).filter(([, v]) => v !== null));
     await app.act("target.disconnect", {});
     await app.act("target.connect", args);
-    prev = null;                                 // 毎秒の増え方はつなぎ直した後から
     await poll();
   }
   // 観測の回路が答えなくなった（対象の FPGA を書き直した・電源を入れ直した等）: 前と同じ設定で開き直す
@@ -288,9 +320,10 @@
     let flat: number[] = [];
     if (rec?.name) {
       tl.setSource("recording");
-      // 記録の中で変化の無いピンは隠す（16 段が MCU・FPGA の段を画面の外へ押し出さないように）
+      // 記録の中で変化の無いピン（API の unchanged_channels）は隠す（16 段が MCU・FPGA の段を画面の外へ押し出さないように）。
+      // 隠した数は時間軸に出し、ワンクリックで戻せる（tl.autoHidden）
       const ov = await conn.call("recording.overview", { width: 400, streams: [] }, { quiet: true }).catch(() => null);
-      flat = flatChannels(ov?.waveform ?? []);
+      flat = Array.isArray(ov?.unchanged_channels) ? ov.unchanged_channels : [];
     }
     tl.arrangeForSystem(flat);
     dock.show("timeline");
@@ -300,7 +333,9 @@
   interface Cause { condition: string; count: number; judged?: number; preceded: number | null; coverage: number | null; followed: number | null;
                     delay_s: { median: number } | null; examples: { cause_t: number; effect_t: number }[];
                     same?: string[] }   // 同じ時刻に成立する候補（自動の候補の重複をまとめた）
+  // causes_total・truncated・limit: 自動の候補を limit 個に切ったときの切る前の数と印（切ったことを黙らない）
   interface Correlation { effect: { count: number }; causes: Cause[]; timebase_hz: number; auto?: boolean;
+                          causes_total?: number; truncated?: boolean; limit?: number | null;
                           sampling: Record<string, number | null>; fpga_hidden: number;
                           warnings?: string[]; no_values?: string[]; range: [number, number]; gaps?: Gap[] }
   // データの欠け（その間の結果・候補は数えられていない）。黙って数え落とさないために一覧にし、時間軸で見られるように
@@ -315,10 +350,15 @@
   $effect(() => save("system.effect", effectExpr));
   $effect(() => save("system.extraCauses", extraCauses));
   $effect(() => save("system.windowMs", windowOk ? String(windowMs) : ""));
+  // 自動の候補で返す数（上位の数）は使う人が入れる（API の既定を暗黙に使わない）
+  let autoLimit = $state(load("system.autoLimit", ""));
+  $effect(() => save("system.autoLimit", autoLimit));
+  const autoLimitN = $derived(parseCount(autoLimit));
   let correlation = $state<Correlation | null>(null);
   let correlating = $state(false);
   let correlateError = $state<string | null>(null);
-  const effectText = $derived(effectExpr.trim() || (watches[0] ? `${termName(watches[0].name)} changed` : ""));
+  // 結果の条件は使う人が入れたものだけ（表の先頭の変数等から暗黙に決めない。空なら解析を押せない）
+  const effectText = $derived(effectExpr.trim());
   const causeList = $derived([...conditions.map((c) => c.expr),
                               ...extraCauses.split(/[\n,]/).map((x) => x.trim()).filter(Boolean)]);
 
@@ -327,8 +367,9 @@
     correlating = true;
     correlateError = null;
     try {
-      correlation = await conn.call("recording.correlate", { effect: effectText, causes: auto ? null : causeList,
-                                                             window_s: windowMs! / 1000 });
+      const params = correlateParams(effectExpr, causeList, auto, windowMs, autoLimitN);
+      if (!params) return;
+      correlation = await conn.call("recording.correlate", params);
     } catch (e) {
       correlation = null;
       correlateError = errorText(e);
@@ -338,13 +379,14 @@
   }
   async function showExample(ex: { cause_t: number; effect_t: number }) {
     tl.setSource("recording");
-    await conn.call("ui.state.set", exampleView(ex, correlation?.timebase_hz ?? 100e6), { quiet: true });
+    if (!correlation) return;
+    await conn.call("ui.state.set", exampleView(ex, correlation.timebase_hz), { quiet: true });
     dock.show("timeline");
   }
   // 値が続いた時間（recording.durations）: 例 FPGA の state が BUSY の長さと MCU の待ち時間を比べる
   interface Durations { values: Record<string, { count: number; share: number | null;
                                                  duration_s: { min: number; median: number; p90: number; max: number } | null }>;
-                        excluded?: number; gaps?: Gap[] }
+                        excluded?: number; gaps?: Gap[]; values_total?: number; truncated?: boolean; limit?: number }
   let durationVar = $state(load("system.durationVar", "") || "");
   $effect(() => save("system.durationVar", durationVar));
   let durationResult = $state<Durations | null>(null);
@@ -395,10 +437,16 @@
   };
 
   const pct = (x: number | null) => (x === null ? "—" : `${Math.round(x * 100)} %`);
-  const resolutionMs = $derived(Math.max(0, ...Object.values(correlation?.sampling ?? {}).map((x) => (x ?? 0) * 1000)));
+  // 時間分解能: recording.correlate の sampling（変数ごとの読みの周期）をそのまま並べる（最大を取って 1 つにしない）
+  const samplingText = $derived(samplingRows(correlation?.sampling).map(({ name, ms }) =>
+    `${name} ${ms === null ? "—" : `${ms.toFixed(ms < 1 ? 3 : 1)} ms`}`).join(", ") || "—");
 
   const removeCondition = (expr: string) => (conditions = conditions.filter((c) => c.expr !== expr));
-  const fmtRate = (x: number | null | undefined) => (x === null || x === undefined ? "—" : x >= 10 ? Math.round(x).toString() : x.toFixed(1));
+  // 条件の回数: デーモンが数えた回数と、数えた範囲（値の数・最初と最後の値の間の秒）をそのまま
+  const countText = (c: ConditionCount | undefined) => !c ? "—" : c.error ? "!" : String(c.count ?? 0);
+  const countTip = (c: ConditionCount | undefined) => !c ? $i18n("system.condLastTip") : c.error ?? $i18n("system.condRange",
+    { values: c.values ?? 0, s: c.span_s === null || c.span_s === undefined ? "—" : c.span_s.toFixed(3),
+      gaps: c.gaps ?? 0, lost: c.lost ?? 0 });
 
   const mcuOk = $derived(status?.mcu.connected && !status.mcu.error);
   const fpgaOk = $derived(status?.fpga.available && status.fpga.running && !status.fpga.stuck);
@@ -415,8 +463,20 @@
       <button onclick={stopRecording}>{$i18n("system.stopRecording")}</button>
     {:else}
       <label class="small" title={$i18n("system.withMemoryTip")}><input type="checkbox" class="check" bind:checked={withMemory} />{$i18n("system.withMemory")}</label>
+      {#if withMemory}
+        <label class="small" title={$i18n("system.memoryRateTip")}>{$i18n("system.memoryRate")}<span class="req" aria-hidden="true">*</span>
+          <input class="rate mono" inputmode="decimal" placeholder={$i18n("system.memoryRatePlaceholder")} aria-required="true"
+                 bind:value={memoryRateText} /></label>
+      {/if}
       <label class="small" title={$i18n("system.withPinsTip")}><input type="checkbox" class="check" bind:checked={withPins} />{$i18n("system.withPins")}</label>
-      <button title={$i18n("system.startRecordingTip")} disabled={!linkOpen} onclick={startRecording}>{$i18n("system.startRecording")}</button>
+      {#if withPins}
+        <label class="small" title={$i18n("timeline.rleTip")}>{$i18n("timeline.rle")}<span class="req" aria-hidden="true">*</span>
+          <select bind:value={pinsFormat} aria-required="true">
+            <option value=""></option><option value="rle">RLE</option><option value="raw">RAW</option></select></label>
+      {/if}
+      <button title={needsRate ? $i18n("system.memoryRateNeeded") : $i18n("system.startRecordingTip")}
+              disabled={!linkOpen || needsRate || (withPins && pinsFormat === "")}
+              onclick={startRecording}>{$i18n("system.startRecording")}</button>
     {/if}
     <button title={$i18n("system.timelineTip")} onclick={showTimeline}>{$i18n("system.timeline")}</button>
   </div>
@@ -426,12 +486,13 @@
       <span class="small">{$i18n("system.trigger")}</span>
       <input class="mono" placeholder="errors changed" bind:value={triggerExpr} disabled={trigger?.state === "armed" || trigger?.state === "fired"} />
       <label class="small"><input type="checkbox" class="check" bind:checked={triggerStop} />{$i18n("system.triggerStop")}</label>
-      {#if triggerStop}<label class="small">{$i18n("system.triggerPost")}<input class="post" type="number" min="0" step="0.5" bind:value={triggerPost} /></label>{/if}
+      {#if triggerStop}<label class="small">{$i18n("system.triggerPost")}<span class="req" aria-hidden="true">*</span><input class="post"
+        inputmode="decimal" aria-required="true" bind:value={triggerPost} /></label>{/if}
       {#if trigger?.state === "armed" || trigger?.state === "fired"}
         <span class="small" class:ok={trigger.state === "fired"}>{$i18n("system.triggerHits", { n: trigger.hits ?? 0 })}</span>
         <button onclick={clearTrigger}>{$i18n("system.triggerClear")}</button>
       {:else}
-        <button disabled={!triggerExpr.trim()} onclick={armTrigger}>{$i18n("system.triggerArm")}</button>
+        <button disabled={!triggerExpr.trim() || (triggerStop && !postOk)} onclick={armTrigger}>{$i18n("system.triggerArm")}</button>
       {/if}
     </div>
   {/if}
@@ -453,6 +514,8 @@
         {#if status?.mcu.connected}
           <span class="mono">{status.mcu.state ?? "?"}</span>
           {#if haltReasonKey(status.mcu)}<span class="muted">{$i18n(haltReasonKey(status.mcu)!)}</span>{/if}
+          <!-- DFSR の立っていたビット全部（halt_reason は 1 語。複数立っていた事実をそのまま） -->
+          {#if status.mcu.state === "HALTED" && status.mcu.halt_bits?.length}<span class="muted mono">DFSR {status.mcu.halt_bits.join(" ")}</span>{/if}
           {#if status.mcu.state === "HALTED"}
             <!-- 止まった MCU の中（ELF が無くても使えるもの）: 呼び出し履歴・逆アセンブル・レジスタ -->
             <button title={$i18n("system.inspectTip")}
@@ -472,15 +535,23 @@
       {#if !watches.length}<div class="muted small">{$i18n("system.memoryHint")}</div>{/if}
       <table class="grid">
         <thead><tr><th>{$i18n("system.name")}</th><th>{$i18n("system.address")}</th><th>{$i18n("system.value")}</th>
-          <th>{$i18n("system.rate")}</th><th></th></tr></thead>
+          <th></th></tr></thead>
         <tbody>
           {#each watches as w (w.address)}
             {@const v = status?.mcu.memory?.[addressKey(w.address)]}
             <tr>
               <td>{w.name}</td>
               <td class="mono muted">{addressKey(w.address)}</td>
-              <td class="mono">{v === undefined ? "—" : `${v} (0x${v.toString(16).toUpperCase()})`}</td>
-              <td class="mono">{perSecond[addressKey(w.address)] ?? "—"}</td>
+              <td class="mono">
+                {#if writing?.address === w.address}
+                  <input class="mono write" aria-label={$i18n("system.writeValue")} bind:value={writing.text} use:focusSelect
+                         onkeydown={onWriteKey} onblur={() => (writing = null)} />
+                {:else}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <span class:writable={canWrite} title={canWrite ? $i18n("system.writeTip") : undefined}
+                        ondblclick={() => startWrite(w.address, v)}>{v === undefined ? "—" : `${v} (0x${v.toString(16).toUpperCase()})`}</span>
+                {/if}
+              </td>
               <td class="nowrap"><button class="x" title={$i18n("fpgaObs.remove")} aria-label={$i18n("fpgaObs.remove")} onclick={() => removeWatch(w.address)}>✕</button></td>
             </tr>
           {/each}
@@ -488,10 +559,14 @@
             <td><input placeholder={$i18n("system.name")} bind:value={newName} /></td>
             <td><input class="mono" placeholder="0x20040800 / g_errors" bind:value={newAddress}
                        onkeydown={(e) => e.key === "Enter" && addWatch()} /></td>
-            <td colspan="3"><button onclick={addWatch}>{$i18n("system.addWatch")}</button></td>
+            <td colspan="2"><button onclick={addWatch}>{$i18n("system.addWatch")}</button></td>
           </tr>
         </tbody>
       </table>
+      {#if status?.mcu.memory && watches.length}
+        <div class="muted small">{$i18n("system.readAt", { t: (status.time_us / 1e6).toFixed(3) })}</div>
+      {/if}
+      {#if writeError}<div class="note bad">{writeError}</div>{/if}
       {#if addError}<div class="note bad">{addError}</div>{/if}
     </section>
 
@@ -503,7 +578,7 @@
         {#if status?.fpga.available}
           {#if status.fpga.driving}
             <span>{$i18n(modeKey(status.fpga.mode))}</span>
-            <span class="mono muted">{$i18n("system.scansPerSecond")} {scansPerSecond ?? "—"}</span>
+            <span class="mono muted" title={$i18n("system.scansTip")}>{$i18n("fpgaObs.scans")} {status.fpga.scans ?? "—"}</span>
             {#if status.fpga.reopened}<span class="muted" title={$i18n("fpgaObs.autoReopenTip")}>{$i18n("fpgaObs.reopened", { n: status.fpga.reopened })}</span>{/if}
           {:else}
             <span class="muted">{$i18n("system.fpgaIdle")}</span>
@@ -541,13 +616,18 @@
           <button class="armed" onclick={clearHalt}>{$i18n("system.haltDisarm")}</button></div>
       {/if}
       {#if !conditions.length}<div class="muted small">{$i18n("system.conditionsHint")}</div>{/if}
+      {#if conditions.length}
+        <label class="small" title={$i18n("system.condLastTip")}>{$i18n("system.condLast")}
+          <input class="rate mono" inputmode="numeric" placeholder={$i18n("system.condLastPlaceholder")} bind:value={condLastText} />
+          {$i18n("system.condLastUnit")}</label>
+      {/if}
       <table class="grid">
-        <thead><tr><th>{$i18n("system.name")}</th><th>{$i18n("system.condition")}</th><th class="nowrap">{$i18n("system.rate")}</th><th></th></tr></thead>
+        <thead><tr><th>{$i18n("system.name")}</th><th>{$i18n("system.condition")}</th><th class="nowrap">{$i18n("system.condCount")}</th><th></th></tr></thead>
         <tbody>
           {#each conditions as c (c.expr)}
             <tr>
               <td>{c.name}</td><td class="mono">{c.expr}</td>
-              <td class="mono">{fmtRate(condRates[c.expr]?.perSecond)}</td>
+              <td class="mono" title={countTip(condCounts[c.expr])}>{countText(condCounts[c.expr])}</td>
               <td class="nowrap">
                 {#if obsMatch}
                   <button title={$i18n(rec?.la_stream ? "system.captureOnStreamingTip" : "system.captureOnTip")}
@@ -581,20 +661,23 @@
     {#if !rec?.name}<div class="muted small">{$i18n("system.causesHint")}</div>{/if}
     <div class="cause-form">
       <label>{$i18n("system.effect")}
-        <input class="mono" placeholder={effectText || "errors changed"} bind:value={effectExpr} /></label>
+        <input class="mono" placeholder="errors changed" bind:value={effectExpr} /></label>
       <label>{$i18n("system.extraCauses")}
         <input class="mono" placeholder="in0 rose, addr=RESULT and write rose" bind:value={extraCauses} /></label>
       <label class="narrow">{$i18n("system.window")}
         <input type="number" min="0.01" step="any" placeholder="ms" bind:value={windowMs} /></label>
       <button disabled={!linkOpen || correlating || !effectText || !causeList.length || !windowOk} onclick={() => investigate()}>
         {correlating ? $i18n("system.investigating") : $i18n("system.investigate")}</button>
-      <button title={$i18n("system.autoInvestigateTip")} disabled={!linkOpen || correlating || !effectText || !windowOk}
+      <label class="narrow" title={$i18n("system.autoLimitTip")}>{$i18n("system.autoLimit")}<span class="req"
+        aria-hidden="true">*</span>
+        <input class="mono" inputmode="numeric" bind:value={autoLimit} aria-required="true" /></label>
+      <button title={$i18n("system.autoInvestigateTip")} disabled={!linkOpen || correlating || !effectText || !windowOk || autoLimitN === null}
               onclick={() => investigate(true)}>{$i18n("system.autoInvestigate")}</button>
     </div>
     {#if correlateError}<div class="note bad">{correlateError}</div>{/if}
     {#if correlation}
-      <div class="muted small">{$i18n("system.causeNote", { n: correlation.effect.count, ms: resolutionMs.toFixed(resolutionMs < 1 ? 3 : 1),
-                                                           hidden: correlation.fpga_hidden })}</div>
+      <div class="muted small">{$i18n("system.causeNoteSampling", { n: correlation.effect.count, sampling: samplingText,
+                                                                   hidden: correlation.fpga_hidden })}</div>
       {#each correlation.warnings ?? [] as w (w)}<div class="note">{w}</div>{/each}
       {#if correlation.gaps?.length}
         {@const hz = correlation.timebase_hz}
@@ -609,6 +692,9 @@
       {/if}
       {#if correlation.no_values?.length}
         <div class="note" title={$i18n("system.noValuesTip")}>{$i18n("system.noValues2", { names: correlation.no_values.join(", ") })}</div>
+      {/if}
+      {#if correlation.truncated}
+        <div class="note">{$i18n("common.truncated", { shown: correlation.causes.length, total: correlation.causes_total ?? "?", limit: correlation.limit ?? "?" })}</div>
       {/if}
       <!-- 候補ごとに 2 行: 名前・式・回数・見る / 数（狭い右の列でも式が折り返さない） -->
       <ol class="cause-list">
@@ -645,6 +731,9 @@
     {#if durationError}<div class="note bad">{durationError}</div>{/if}
     {#if durationResult}
       {#if durationResult.excluded}<div class="note" title={$i18n("system.excludedTip")}>{$i18n("system.durExcluded", { n: durationResult.excluded, gaps: durationResult.gaps?.length ?? 0 })}</div>{/if}
+      {#if durationResult.truncated}
+        <div class="note">{$i18n("common.truncated", { shown: Object.keys(durationResult.values).length, total: durationResult.values_total ?? "?", limit: durationResult.limit ?? "?" })}</div>
+      {/if}
       <table class="grid">
         <thead><tr><th>{$i18n("system.value")}</th><th class="nowrap">{$i18n("system.count")}</th>
           <th class="nowrap">{$i18n("system.share")}</th><th class="nowrap">{$i18n("system.durationMs")}</th></tr></thead>
@@ -734,6 +823,10 @@
   .grid th { white-space: nowrap; text-align: left; }
   .nowrap, .nowrap button { white-space: nowrap; }
   .stale td { opacity: 0.6; }
+  /* 書ける値（ダブルクリックで書く）: 点線の下線と文字のカーソル */
+  .writable { cursor: text; border-bottom: 1px dashed var(--muted); }
+  .writable:hover { border-bottom-color: var(--accent); }
+  input.write { min-width: 8em; }
   .causes { margin: 0 8px 8px; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
   .cause-form { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; font-size: 12px; }
   .cause-form label { display: flex; flex-direction: column; flex: 1 1 14em; }
@@ -743,6 +836,7 @@
   .trigger-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 4px 8px; }
   .trigger-bar input.mono { flex: 1 1 12em; width: auto; }
   .trigger-bar input.post { width: 4em; min-width: 0; }
+  input.rate { width: 5em; min-width: 0; }
   .armed { border-color: var(--bad); color: var(--bad); }
   button.x { padding: 0 6px; }
   .cause-list { list-style: none; margin: 4px 0 0; padding: 0; }

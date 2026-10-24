@@ -15,7 +15,7 @@ export interface ConnectForm {
 export interface ProbeForm {
   name: string;
   binary: string;
-  method: "uprobe" | "ptrace";
+  method: "" | "uprobe" | "ptrace";                    // "" = まだ選んでいない（既定を置かない）
   symbol: string;
   address: string;
   isa: "" | "arm" | "thumb";
@@ -45,7 +45,8 @@ const words = (s: string) => s.trim().split(/\s+/).filter(Boolean);
 
 /** linux.connect の引数（port は 1..65535 の整数） */
 export function connectParams(f: ConnectForm): Built {
-  const port = Number(f.port);
+  for (const k of ["target", "host", "user"] as const) if (!f[k].trim()) return { error: k };
+  const port = f.port.trim() === "" ? NaN : Number(f.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "port" };
   const out: Record<string, unknown> = { target: f.target.trim(), host: f.host.trim(), user: f.user.trim(), port, sudo: f.sudo };
   if (f.key.trim()) out.key = f.key.trim();
@@ -53,8 +54,21 @@ export function connectParams(f: ConnectForm): Built {
   return { params: out };
 }
 
+/** linux.sync の引数（往復の回数は使う人が入れる 1 以上の整数。空を 0 として送らない） */
+export function syncParams(target: string, count: string): Built {
+  const n = count.trim() === "" ? NaN : Number(count);
+  return Number.isInteger(n) && n >= 1 ? { params: { target, count: n } } : { error: "count" };
+}
+
+/** linux.trace.start の引数（時刻合わせの間隔は使う人が入れる正の秒） */
+export function traceStartParams(target: string, interval: string): Built {
+  const s = interval.trim() === "" ? NaN : Number(interval);
+  return Number.isFinite(s) && s > 0 ? { params: { target, sync_interval_s: s } } : { error: "interval" };
+}
+
 /** linux.probe.add の引数（symbol と address はどちらか 1 つ。address は 10 進か 0x の 16 進） */
 export function probeParams(target: string, f: ProbeForm): Built {
+  if (!f.method) return { error: "method" };
   const out: Record<string, unknown> = { target, name: f.name.trim(), binary: f.binary.trim(), method: f.method };
   const symbol = f.symbol.trim();
   const address = f.address.trim();
@@ -260,11 +274,13 @@ export function perfRecordParams(target: string, f: PerfForm): Built {
   return "error" in r ? r : withPid(r.params, f.pid);
 }
 
-const KEEP = 5000;                                     // 画面に持つ件数（デーモンには残る）
+/** 画面に持つ件数の上限（古いものから捨てる。捨てた数は discarded。デーモンには残る） */
+export const LINUX_KEEP = 5000;
 
 export class LinuxEvents {
   records: LinuxEvent[] = [];
   dropped = 0;
+  discarded = 0;                                         // 画面に持つ上限を超えて捨てた記録の数
   private since = 0;
 
   constructor(private conn: Pick<DaemonConnection, "call">) {}
@@ -273,11 +289,14 @@ export class LinuxEvents {
     this.records = [];
     this.since = 0;
     this.dropped = 0;
+    this.discarded = 0;
   }
 
   async more(target: string): Promise<void> {
     const r = (await this.conn.call("linux.events.read" as never, { target, since: this.since } as never, { quiet: true })) as any;
-    this.records = [...this.records, ...(r.records ?? [])].slice(-KEEP);
+    const all = [...this.records, ...(r.records ?? [])];
+    this.discarded += Math.max(0, all.length - LINUX_KEEP);
+    this.records = all.slice(-LINUX_KEEP);
     this.since = Math.max(this.since, r.next ?? this.since);
     this.dropped = r.dropped ?? 0;
   }

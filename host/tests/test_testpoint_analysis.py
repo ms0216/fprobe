@@ -57,6 +57,27 @@ def test_recursion_counts_outermost_only():
     assert [c.depth for c in sorted(r.calls, key=lambda c: c.t0)] == [0, 1, 2]
 
 
+def test_calls_deeper_than_max_depth_are_counted_as_cut_not_merged_into_the_parent():
+    # 黙って合流しない（総点検 ?12）: max_depth より深い呼び出しは木に入れず、入れなかった数と使った max_depth を返す
+    items = hits((0, 3), (10, 3), (20, 3), (30, 4), (40, 4), (50, 4))
+    r = analyze(items, TABLE, hz=1.0, max_depth=2)
+    inner = r.tree.children["f"].children["f"]
+    assert inner.count == 1 and inner.inclusive == 30 and inner.cut == 1 and not inner.children
+    assert r.tree_max_depth == 2 and r.tree_cut == 1
+    d = r.to_dict()
+    assert d["tree_max_depth"] == 2 and d["tree_cut"] == 1
+    assert analyze(items, TABLE, hz=1.0).tree_cut == 0
+
+
+def test_the_summary_tells_how_many_functions_there_were_when_cut_to_top():
+    # 黙って切らない（総点検 ?11）: 関数を top 個に切ったら、関数の総数・切った印・使った top を返す
+    r = analyze(hits((0, 1), (10, 3), (20, 5), (30, 6), (40, 4), (50, 2)), TABLE, hz=1e6)
+    d = r.to_dict(top=1)
+    assert len(d["functions"]) == 1 and d["functions_total"] == 3 and d["functions_truncated"] is True and d["top"] == 1
+    full = r.to_dict(top=None)
+    assert len(full["functions"]) == 3 and full["functions_truncated"] is False and full["top"] is None
+
+
 def test_missing_exit_is_recovered_and_flagged():
     items = hits((0, 1), (10, 3), (20, 5), (30, 2))          # f・g の出口が無いまま main の出口
     r = analyze(items, TABLE, hz=1.0)
@@ -198,7 +219,7 @@ def test_pipeline_from_source_to_report(tmp_path):
     records = [(1e-6 + k * 10e-6, i, v) for k, (i, v) in enumerate(log)]       # 10 µs ごとに 1 つ
     wave = Wave(8, rate, idle={4: 1, 5: 1}, jitter=3e-9, seed=1)
     synth.gpio_serial(wave, records, clock_channel=4, data_channel=5)
-    dec = decode_gpio_serial(wave.build(end_s=records[-1][0] + 20e-6), 4, 5)
+    dec = decode_gpio_serial(wave.build(end_s=records[-1][0] + 20e-6), 4, 5, guard=1)
     assert [(h.id, h.value) for h in dec.hits] == log
     report = analyze(dec.items, result.table, dec.hz)
     assert not report.anomalies

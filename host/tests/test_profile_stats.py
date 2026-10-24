@@ -1,31 +1,19 @@
-"""fprobe.profile.stats: 割合の信頼区間と、時間の統計・分布・外れ値。"""
+"""fprobe.profile.stats: 時間の統計・分布。"""
+
+import importlib
 
 import pytest
 
-from fprobe.profile.stats import Distribution, wilson_interval
+import fprobe.profile
+import fprobe.profile.stats
+from fprobe.profile.stats import Distribution
 
 
-def test_wilson_known_values():
-    # 教科書の値（95%、z = 1.959964）
-    lo, hi = wilson_interval(5, 10)
-    assert lo == pytest.approx(0.2366, abs=1e-4) and hi == pytest.approx(0.7634, abs=1e-4)
-    lo, hi = wilson_interval(0, 10)
-    assert lo == 0 and hi == pytest.approx(0.2775, abs=1e-4)
-    lo, hi = wilson_interval(10, 10)
-    assert lo == pytest.approx(0.7225, abs=1e-4) and hi == pytest.approx(1.0)
-
-
-def test_wilson_narrows_with_samples_and_confidence():
-    w100 = wilson_interval(30, 100)
-    w10000 = wilson_interval(3000, 10000)
-    assert w10000[1] - w10000[0] < (w100[1] - w100[0]) / 5
-    assert wilson_interval(30, 100, 0.99)[1] > w100[1]
-
-
-def test_wilson_without_samples_is_unknown():
-    assert wilson_interval(0, 0) == (0.0, 1.0)
-    with pytest.raises(ValueError):
-        wilson_interval(3, 2)
+def test_no_confidence_interval_in_the_body():
+    # 割合の信頼区間（Wilson）は独立な二項の試行という仮定の上の推定: 本体に置かない（plugins.heuristics.wilson_interval）
+    assert not hasattr(fprobe.profile.stats, "wilson_interval") and not hasattr(fprobe.profile, "wilson_interval")
+    with pytest.raises(ImportError):
+        importlib.import_module("fprobe.profile.aliasing")
 
 
 def test_distribution_summary():

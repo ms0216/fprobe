@@ -49,7 +49,7 @@ def test_cpu_load_windows_have_task_and_isr_shares(demo):
     demo.rtos_timeline_start(method="itm", exceptions=True)
     demo.now[0] = 3.0
     load = demo.rtos_timeline_load(window_us=100_000)
-    assert load["windows_total"] == 20 and load["peak"]["load"] >= load["mean_load"] > 0.05
+    assert load["windows_total"] == 20 and load["limit"] == 1000 and load["peak"]["load"] >= load["mean_load"] > 0.05
     w = load["windows"][3]
     assert set(w["tasks"]) >= {"main", "IDLE"} and w["isr"] > 0
     assert any(x["covered"] == 0 or x["covered"] < 100_000 * HZ // 1_000_000 for x in load["windows"])  # 止まった間
@@ -107,7 +107,7 @@ def test_profile_uses_the_real_profiler(demo, method):
     res = demo.profile_result()
     assert res["running"] and res["total"] > 500
     names = {r["function"] for r in res["rows"]}
-    assert {"tick", "reset_handler"} <= names and all(0 <= r["ci"][0] <= r["fraction"] <= r["ci"][1] for r in res["rows"])
+    assert {"tick", "reset_handler"} <= names and all(0 <= r["fraction"] <= 1 and "ci" not in r for r in res["rows"])
     lines = demo.profile_result(by="line", function="tick")["rows"]
     assert lines and all(r["function"] == "tick" and r["line"] for r in lines)
     cov = demo.profile_coverage()

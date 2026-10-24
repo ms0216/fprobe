@@ -9,8 +9,9 @@ API（JSON-RPC・MCP）には出さない（呼ぶのはデーモンの GDB サ�
 止める時間: Cortex-M には「PC がそこを通ったこと」を止めずに知らせる仕組みが無い（DWT の比較器の PC 一致は停止か
 ETM へのきっかけだけで、DWT のデータトレースは番地への読み書きにしか効かない。ETM は U34・U35 の後）。よって当たるたびにコアを止めて
 集める（ログ・ブレークポイントと同じ。1 回に数 ms と、止まったことに気づくまでの見張りの周期）。止めずに値を追うなら
-変数のライブ観測（watch.set、DAP サンプラ）。止めると壊れうるターゲット（debug.halt_risk の radio / usb / watchdog
-/ rtos）では、許可（monitor trace allow-halt）かモニタ方式（target.debug_mode.set）が無ければ QTStart を断る。
+変数のライブ観測（watch.set、DAP サンプラ）。断るのは、使う側が明示したときだけ（monitor trace deny-halt。モニタ方式
+= target.debug_mode.set ではコアを止めないので断らない）。ELF の名前（debug.halt_risk）の一致だけを根拠に既定で
+断ることはしない（名前の一致は「止めると壊れる」の証拠ではない。CLAUDE.md）。
 
 仕様: docs/superpowers/specs/2026-10-18-u04-gdb-server-design.md（トレースポイントの節）
 """
@@ -20,7 +21,6 @@ import time
 from pyocd.core.target import Target
 
 from .gdb.trace import Experiment
-from .halt_risk import assess
 from .probe_gdb import GDB_MARK, TRACE_MARK
 
 __all__ = ["GdbTraceTools", "TOOL"]
@@ -73,16 +73,17 @@ class GdbTraceTools:
             self._gdb_trace_owner = owner
             self._gdb_trace_sync()
 
-    def gdb_trace_start(self, owner: str, registers: list[tuple[str, int]], allow_halt: bool = False) -> dict:
+    def gdb_trace_start(self, owner: str, registers: list[tuple[str, int]], deny_halt: bool = False) -> dict:
         """QTStart: 有効なトレースポイントにブレークポイントを置いて始める。registers: GDB の並び（名前, ビット数）。
-        止めると壊れうるターゲットなら、allow_halt かモニタ方式でなければ RuntimeError。"""
+        deny_halt（使う側が monitor trace deny-halt で明示した）なら、モニタ方式でなければ RuntimeError。"""
         with self._lock:
             exp = self.gdb_trace_experiment()
             self.target                                        # 未接続ならここで失敗する
-            if not allow_halt:
-                refusal = self._gdb_trace_refusal()
-                if refusal is not None:
-                    raise RuntimeError(refusal)
+            if deny_halt and getattr(self, "_monitor", None) is None:
+                raise RuntimeError("monitor trace deny-halt が指定されている: トレースポイントは当たるたびにコアを止めて集める"
+                                   "（1 回に数 ms と、止まったことに気づくまでの見張りの周期）。許すなら monitor trace "
+                                   "allow-halt、止めずに済ませるならモニタ方式（monitor target.debug_mode.set mode=monitor）"
+                                   "か変数のライブ観測（monitor watch.set）")
             for address in exp.addresses():
                 hook = self._break_hooks.get(address)
                 if hook is not None and hook[0] != TOOL:
@@ -129,18 +130,6 @@ class GdbTraceTools:
         self._gdb_trace_placed.clear()
         if exp is not None and exp.running:
             exp.stop("terror", 0, "breakpoint_clear でブレークポイントが外された")
-
-    def _gdb_trace_refusal(self) -> str | None:
-        """止めると壊れうるターゲットなら断る理由（ELF が無い・モニタ方式なら None）。"""
-        if self._symbols is None or getattr(self, "_monitor", None) is not None:
-            return None
-        report = assess(self._symbols.names())
-        if not report["matched"]:
-            return None
-        found = "、".join(f"{r['kind']}（{', '.join(r['symbols'][:2])}）" for r in report["matches"])
-        return (f"ELF に、止めている間も外の相手が待たない処理の名前がある: {found}。トレースポイントは当たるたびにコアを止めて集める（1 回に数 ms と、"
-                "止まったことに気づくまでの見張りの周期）。許すなら monitor trace allow-halt、止めずに済ませるならモニタ方式"
-                "（monitor target.debug_mode.set mode=monitor）か変数のライブ観測（monitor watch.set）")
 
     # --- ブレークポイント -------------------------------------------------------------------------------
 

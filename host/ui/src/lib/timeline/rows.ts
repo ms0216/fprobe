@@ -194,6 +194,17 @@ export function systemOrder(c: RowConfig, groups: GroupDef[], flat: number[] = [
            shown: c.shown.filter((id) => !hide.includes(id)) };
 }
 
+/** システム解析の並びで新しく隠すピンの段（flat = API の unchanged_channels。前から隠していた段は入れない）。
+ *  頼まれずに隠すので、画面は数を出して見せ直せるようにする */
+export function systemHides(c: RowConfig, flat: number[]): string[] {
+  return flat.map((ch) => `wave:${ch}`).filter((id) => !c.hidden.includes(id));
+}
+
+/** 段を見せ直す（hidden から外す） */
+export function unhide(c: RowConfig, ids: string[]): RowConfig {
+  return { ...c, hidden: c.hidden.filter((id) => !ids.includes(id)) };
+}
+
 export function parseConfig(text: string | null): RowConfig {
   try {
     const v = JSON.parse(text ?? "");

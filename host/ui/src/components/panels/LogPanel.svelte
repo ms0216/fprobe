@@ -5,7 +5,7 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
-  import { LogView, locationText, startParams, type LogRecord, type StartForm } from "../../lib/logview";
+  import { LOG_KEEP, LogView, locationText, startParams, type LogRecord, type StartForm } from "../../lib/logview";
   import { load, save } from "../../lib/prefs";
 
   const POLL_MS = 500;
@@ -18,6 +18,7 @@
   let records = $state<LogRecord[]>([]);
   let dropped = $state(0);
   let running = $state(false);
+  let discarded = $state(0);                            // 画面に持つ上限を超えて捨てた行
   let error = $state<string | null>(null);
   const view = new LogView(conn);
 
@@ -34,6 +35,7 @@
       await view.more({ level, contains });
       records = view.records;
       dropped = view.dropped;
+      discarded = view.discarded;
       running = view.running;
       error = null;
     } catch (e) {
@@ -100,6 +102,7 @@
   </form>
   {#if error}<div class="bad pad">{error}</div>{/if}
   {#if dropped}<div class="muted pad">{$i18n("log.dropped", { n: dropped })}</div>{/if}
+  {#if discarded}<div class="muted pad">{$i18n("common.discarded", { n: discarded, limit: LOG_KEEP })}</div>{/if}
   <div class="rows mono">
     {#each records as r (r.seq)}
       <div class="row" class:bad={!!r.error} class:warn={r.level === "warn"} class:err={r.level === "error"}>

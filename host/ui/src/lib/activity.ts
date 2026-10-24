@@ -1,6 +1,7 @@
 // Activity（AI と人の操作の記録）の計算: 役割の絞り込み（AI / Human / Script / Hook）・誤りだけ、行 ↔ 記録の時刻
 // （記録中のデーモンは操作を記録の stream host の call として、操作の番号 seq と一緒に入れる）。Svelte に依らない。
 import type { DaemonConnection } from "./api";
+import { queryCut, type QueryCut } from "./cut";
 import { nearestAtOrBefore } from "./timeline/events";
 import type { ActivityEntry } from "./state";
 
@@ -9,9 +10,10 @@ type Call = DaemonConnection["call"];
 export const ROLES = ["ai", "human", "script", "hook"] as const;
 export type RoleFilter = (typeof ROLES)[number] | "";
 
-/** 行の役割: フックの動作（利用者の名前 "hook <id>"）はきっかけの利用者の role で呼ばれるが、別に分ける */
-export function roleOf(e: Pick<ActivityEntry, "client" | "role">): (typeof ROLES)[number] | string {
-  return e.client.startsWith("hook ") ? "hook" : e.role;
+/** 行の役割: フックの動作はきっかけの利用者の role で呼ばれるが、別に分ける（デーモンが記録したつながり方 via = hook。
+ *  利用者の名前の形では決めない） */
+export function roleOf(e: Pick<ActivityEntry, "role" | "via">): (typeof ROLES)[number] | string {
+  return e.via === "hook" ? "hook" : e.role;
 }
 
 export function filterActivity(entries: ActivityEntry[], f: { who?: string; role?: RoleFilter; errorsOnly?: boolean }):
@@ -57,15 +59,16 @@ export class HostCallIndex {
 
 export const HOST_CALLS_SQL = "SELECT t, json_extract(body, '$.seq'), json_extract(body, '$.time') FROM events "
   + "WHERE stream = 'host' AND kind = 'call' AND json_extract(body, '$.seq') IS NOT NULL ORDER BY t";
-const MAX_CALLS = 100_000;
+/** 読む操作の上限（recording.query の最大。超えたら cut で示す） */
+export const HOST_CALLS_LIMIT = 100_000;
 
-/** いま読んでいる記録の操作の索引を読む（記録が無ければ null）。件数の多い記録も全部（recording.query） */
-export async function loadHostCalls(call: Call): Promise<{ name: string; index: HostCallIndex } | null> {
+/** いま読んでいる記録の操作の索引を読む（記録が無ければ null）。上限まで（recording.query）。切ったら cut */
+export async function loadHostCalls(call: Call): Promise<{ name: string; index: HostCallIndex; cut: QueryCut | null } | null> {
   try {
     const status = await call("recording.status", {}, { quiet: true });
     if (!status?.name) return null;
-    const out = await call("recording.query", { sql: HOST_CALLS_SQL, limit: MAX_CALLS }, { quiet: true });
-    return { name: status.name, index: new HostCallIndex(out.rows ?? []) };
+    const out = await call("recording.query", { sql: HOST_CALLS_SQL, limit: HOST_CALLS_LIMIT }, { quiet: true });
+    return { name: status.name, index: new HostCallIndex(out.rows ?? []), cut: queryCut(out, HOST_CALLS_LIMIT) };
   } catch {
     return null;
   }

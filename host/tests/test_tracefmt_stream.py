@@ -67,10 +67,28 @@ def test_ctf_ram_backend_snapshot():
     ram = Ram()
     data = ctf_scenario()
     ram.put(0x2000_3000, data)
-    trace, info = snapshot("ctf", ram.read, {"ram_tracing": (0x2000_3000, 4096)}.get)
+    trace, info = snapshot("ctf", ram.read, {"ram_tracing": (0x2000_3000, 4096)}.get, ctf_header="ts32_id8")
     assert len(trace.events) == 12 and info["source"] == "ram_tracing"
+    assert info["size"] == 4096 and info["truncated"] is False and info["max_bytes"] == 4 << 20
     with pytest.raises(ValueError):
-        snapshot("ctf", ram.read, lambda n: None)
+        snapshot("ctf", ram.read, lambda n: None, ctf_header="ts32_id8")
+
+
+def test_a_snapshot_cut_at_max_bytes_says_so():
+    # 黙って切り詰めない（総点検）: 上限 max_bytes で読みを切ったら、領域の大きさ・切った印・使った上限を返す
+    ram = Ram()
+    data = ctf_scenario()
+    ram.put(0x2000_3000, data)
+    trace, info = snapshot("ctf", ram.read, {"ram_tracing": (0x2000_3000, 4096)}.get, max_bytes=len(data),
+                            ctf_header="ts32_id8")
+    assert info == {"bytes": len(data), "size": 4096, "max_bytes": len(data), "truncated": True,
+                    "address": 0x2000_3000, "source": "ram_tracing"}
+    assert len(trace.events) == 12
+    buf = image([ev(0x2000_0100, 6, 5)], REGISTRY)
+    ram.put(0x2000_8000, buf)
+    ram.put(0x2000_0010, struct.pack("<I", 0x2000_8000))
+    with pytest.raises(ValueError, match="max_bytes"):
+        snapshot("tracex", ram.read, {"_tx_trace_header_ptr": (0x2000_0010, 4)}.get, max_bytes=16)
 
 
 def test_tracex_snapshot_through_the_header_pointer():
@@ -104,7 +122,7 @@ def test_stream_and_file_choices():
     s = TraceStream.create("systemview")
     s.feed(Writer().start(t=0).bytes())
     assert s.trace.ts_hz == 64e6
-    assert decode_trace("ctf", ctf_scenario()).events
+    assert decode_trace("ctf", ctf_scenario(), ctf_header="ts32_id8").events
     with pytest.raises(ValueError):
         TraceStream.create("tracex")
     with pytest.raises(ValueError):

@@ -13,7 +13,6 @@ export interface ProfileRow {
   line?: number | null;
   samples: number;
   fraction: number;
-  ci: [number, number];
 }
 
 /** 関数のカバレッジ（profile.coverage の functions の要素） */
@@ -25,9 +24,6 @@ export interface FunctionCoverage {
   hit_lines: [string, number][];
   missed_lines: [string, number][];
 }
-
-/** 信頼区間の幅の半分（± の表し方） */
-export const halfWidth = (r: { ci: [number, number] }): number => (r.ci[1] - r.ci[0]) / 2;
 
 /** 区間で集計する範囲: 時間軸の基準と選択のカーソルの間（記録の時間軸）。方法 pcsr の時刻はタイムベースなので
  *  そのまま t0 / t1 に渡せる。itm はコアのクロック数で合わないので null（理由は reason） */

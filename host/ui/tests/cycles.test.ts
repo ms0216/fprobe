@@ -5,7 +5,12 @@ import { lineSpec, measureParams } from "../src/lib/cycles";
 describe("measureParams", () => {
   it("始点・終点（関数名・ファイル:行・0x の番地）と回数", () => {
     expect(measureParams("main.c:10", "main.c:20", "3")).toEqual({ params: { start: "main.c:10", end: "main.c:20", count: 3 } });
-    expect(measureParams(" foo ", "0x08000100", "")).toEqual({ params: { start: "foo", end: "0x08000100", count: 1 } });
+    expect(measureParams(" foo ", "0x08000100", "1")).toEqual({ params: { start: "foo", end: "0x08000100", count: 1 } });
+  });
+
+  it("回数は使う人が入れる（空を 1 回とみなさない）", () => {
+    expect(measureParams("a", "b", "")).toEqual({ error: "count" });
+    expect(measureParams("a", "b", " ")).toEqual({ error: "count" });
   });
 
   it("空・回数が整数でない・0 は送らない", () => {

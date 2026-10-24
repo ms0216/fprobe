@@ -10,8 +10,19 @@ from fprobe.trace import elements as el
 from fprobe.trace.etmv4 import Etmv4Config, Etmv4Decoder
 
 
+M_PROFILE = {"commit_opt1": True, "vmid_bytes": 1, "cid_bytes": 4}
+
+
 def decode(data: bytes, **config) -> list:
-    return Etmv4Decoder(Etmv4Config(**config)).decode(data)
+    return Etmv4Decoder(Etmv4Config(**{**M_PROFILE, **config})).decode(data)
+
+
+def test_the_config_has_no_implicit_values():
+    # 本来 TRCIDRn から決まる値（COMMOPT・VMID / CID の大きさ）を暗黙の既定で補わない
+    with pytest.raises(TypeError):
+        Etmv4Config()
+    with pytest.raises(TypeError):
+        Etmv4Decoder()
 
 
 def kinds(items) -> list[str]:
@@ -159,3 +170,16 @@ def test_every_item_keeps_its_bytes_and_offset():
     assert b"".join(i.raw for i in items) == data
     assert [i.offset for i in items] == [0, 12, 15, 20]
     assert items[-1].as_dict()["kind"] == "atoms"
+
+
+def test_context_with_a_vmid_the_etm_says_it_does_not_have_is_an_error():
+    """TRCIDR2 が VMID 0 バイト（無い）なのに Context に VMID の印があれば誤り（1 バイトと仮定して読まない）。"""
+    items = decode(enc.async_() + enc.address_context_is1(0x1000_0040, context=0x40) + b"\x11", vmid_bytes=0)
+    assert any(isinstance(i, el.DecodeError) and "VMID" in i.message for i in items)
+
+
+def test_decoder_config_keeps_the_sizes_the_id_registers_say():
+    from fprobe.trace.coresight import Etmv4Info
+    info = Etmv4Info(4, 2, True, True, False, False, 0, vmid_bytes=0, cid_bytes=0)
+    config = info.decoder_config()
+    assert (config.vmid_bytes, config.cid_bytes) == (0, 0)

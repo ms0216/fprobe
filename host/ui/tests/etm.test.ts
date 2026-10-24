@@ -1,15 +1,24 @@
 // 故障の直前の命令（lib/etm.ts）: トレースの置き場所から trace.etm.decode → trace.etm.history
 import { describe, expect, it } from "vitest";
-import { decodeParams, markersAt, readHistory, parseInteger } from "../src/lib/etm";
-import { FakeConn } from "./fake-conn";
+import { configParam, decodeParams, markersAt, readHistory, parseInteger } from "../src/lib/etm";
+import { FakeConn, deviceError } from "./fake-conn";
 
 describe("decodeParams", () => {
   it("ターゲットのメモリのリング（番地・長さ・最も古い位置）か、デーモンの PC のファイル", () => {
-    expect(decodeParams({ kind: "memory", address: "0x20040000", length: "4096", oldest: "" }))
+    expect(decodeParams({ kind: "memory", address: "0x20040000", length: "4096", oldest: "0" }))
       .toEqual({ params: { address: 0x20040000, length: 4096, oldest: 0 } });
+    // 最も古い位置は使う人が入れる（空を 0 とみなさない）
+    expect(decodeParams({ kind: "memory", address: "0x20040000", length: "4096", oldest: "" })).toEqual({ error: "oldest" });
     expect(decodeParams({ kind: "file", path: "trace.bin" })).toEqual({ params: { path: "trace.bin" } });
     expect(decodeParams({ kind: "memory", address: "x", length: "4", oldest: "" })).toEqual({ error: "address" });
     expect(decodeParams({ kind: "file", path: "" })).toEqual({ error: "path" });
+  });
+
+  it("ETM の構成（etm_config）は全部空なら渡さない（trace.etm.start で読んだ ID レジスタ）、渡すなら 3 つとも", () => {
+    expect(configParam({ commitOpt1: "", vmidBytes: "", cidBytes: "" })).toEqual({ params: {} });
+    expect(configParam({ commitOpt1: "1", vmidBytes: "1", cidBytes: "4" }))
+      .toEqual({ params: { etm_config: { commit_opt1: true, vmid_bytes: 1, cid_bytes: 4 } } });
+    expect(configParam({ commitOpt1: "0", vmidBytes: "", cidBytes: "4" })).toEqual({ error: "vmid_bytes" });
   });
 
   it("整数は 10 進・0x の 16 進", () => {
@@ -31,7 +40,7 @@ describe("readHistory", () => {
   });
 
   it("decode の誤りはそのまま返し、history は読まない", async () => {
-    const conn = new FakeConn({ "trace.etm.decode": () => { throw new Error("RuntimeError: ELF が無い"); } });
+    const conn = new FakeConn({ "trace.etm.decode": () => { throw deviceError("ELF が無い"); } });
     const r = await readHistory(conn, { path: "x" }, 32);
     expect(r).toEqual({ history: null, error: "ELF が無い" });
     expect(conn.calls.map((c) => c[0])).toEqual(["trace.etm.decode"]);
@@ -58,6 +67,16 @@ describe("レビューの指摘（最後の出来事・解読の誤り）", asyn
                                 "trace.etm.history": { total: 0, instructions: [], markers: [], next_address: null, errors: [] } });
     const r = await readHistory(conn, { path: "x" }, 8);
     expect(r.decodeErrors).toEqual(["トレース ID 16 の流れが無い"]);
+  });
+
+  it("誤りを切ったときは総数と上限を返す（黙って切らない）", async () => {
+    const conn = new FakeConn({ "trace.etm.decode": { errors: ["a"], errors_total: 25, errors_truncated: true, errors_limit: 1 },
+                                "trace.etm.history": { total: 0, instructions: [], markers: [], next_address: null, errors: [] } });
+    const r = await readHistory(conn, { path: "x" }, 8);
+    expect(r.decodeErrorsCut).toEqual({ shown: 1, total: 25, limit: 1 });
+    const plain = new FakeConn({ "trace.etm.decode": { errors: [] },
+                                 "trace.etm.history": { total: 0, instructions: [], markers: [], next_address: null, errors: [] } });
+    expect((await readHistory(plain, { path: "x" }, 8)).decodeErrorsCut).toBeNull();
   });
 });
 

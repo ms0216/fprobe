@@ -83,6 +83,14 @@ describe("段の描き方（compose）", () => {
   const tile = load("rows-raw.bin");
   const W = 500;
 
+  it("生の段は範囲の前の値を探した始めと、探し切ったかを持つ（黙って打ち切らない）", () => {
+    for (const lane of tile.lanes) {
+      if (lane.mode !== "raw") continue;
+      expect(typeof lane.carryComplete).toBe("boolean");
+      expect(lane.carryFrom === null || typeof lane.carryFrom === "number").toBe(true);
+    }
+  });
+
   it("段の型ごとの描き方。知らない段は描かない", () => {
     const f = composeFrame(tile, 0, 20000, W, SPECS);
     expect(Array.from(f.modes)).toEqual([MODE.header, MODE.intervals, MODE.intervals, MODE.intervals, MODE.bus,
@@ -152,7 +160,7 @@ describe("拾う・次の出来事・異常の印", () => {
     const task = pick(tile, "rtos.task:0x00000100", 5, 0)!;
     expect(task).toMatchObject({ type: "intervals", label: "main", t: 0, stream: "rtos", kind: "run" });
     const mark = pick(tile, "annotation.mark", 905, 10)!;
-    expect(mark).toMatchObject({ t: 900, label: "mark 900", tone: 3 });
+    expect(mark).toMatchObject({ t: 900, label: "mark 900", tone: 4 });   // 色の意味 = 事実の種類 mark
     expect(pick(tile, "annotation.mark", 950, 10)).toBeNull();
     const state = pick(tile, "target.state", 4300, 0)!;
     expect(state).toMatchObject({ label: "HALTED", t: 4000, tEnd: 4600 });
@@ -171,9 +179,21 @@ describe("拾う・次の出来事・異常の印", () => {
   });
 
   it("縮図の異常の印は誤り・注意の出来事", () => {
-    const found = anomalies(tile);
+    const found = anomalies(tile, 2000);
     expect(found.map((a) => a.t)).toEqual(expect.arrayContaining([900, 4000, 7777, 15000, 18000]));
     expect(found.every((a) => a.tone === 1 || a.tone === 3)).toBe(true);
+  });
+
+  it("縮図の異常の印を減らすときは時間の箱ごとに残し、離れた 1 つ・注意の色を落とさない（等間隔に間引かない）", () => {
+    const n = 3000;
+    const t = new Float64Array([...Array.from({ length: n }, (_, i) => i), 999_000, 999_500]);
+    const tone = new Uint8Array([...Array.from({ length: n }, () => 1), 1, 3]);
+    const fake = { t0: 0, t1: 1_000_000, lanes: [{ mode: "raw", t, tone }] } as any;
+    const found = anomalies(fake, 100);
+    expect(found.length).toBeLessThanOrEqual(2 * 100);
+    expect(found.some((a) => a.t === 999_000 && a.tone === 1)).toBe(true);    // 離れた誤り
+    expect(found.some((a) => a.t === 999_500 && a.tone === 3)).toBe(true);    // 同じ箱の注意も
+    expect(found.some((a) => a.t === 0)).toBe(true);
   });
 });
 

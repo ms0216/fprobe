@@ -24,7 +24,10 @@ import re
 from dataclasses import dataclass
 
 from ..logfmt.printf import Words, format_c
-from .model import Trace, TraceEvent, is_rtos_idle_name
+from .model import Trace, TraceEvent
+
+# printf の引数の大きさ: SystemView は 32 ビットのコア用で、引数を 1 つずつ U32 で送る（SEGGER_SYSVIEW.c の _VPrintHost）
+_POINTER_BITS = 32
 
 __all__ = ["COMMAND_START", "COMMAND_STOP", "CHANNEL_NAME", "SyncNotFound", "SystemViewDecoder", "SystemViewError",
            "decode_systemview", "parse_description", "strip_svdat_header"]
@@ -46,7 +49,7 @@ _FIXED = {0: "", 1: "u", 2: "u", 3: "", 4: "u", 5: "", 6: "u", 7: "uu", 8: "u", 
           23: "uu"}
 _EX_NAMES = {0: "MARK", 1: "NAME_MARKER", 2: "HEAP_DEFINE", 3: "HEAP_ALLOC", 4: "HEAP_ALLOC_EX", 5: "HEAP_FREE",
              6: "REGISTER_DATA", 7: "PRINT_ELF"}
-_PRINT_LEVELS = {0: "info", 1: "warn", 2: "error"}
+_PRINT_LEVELS = {0: "info", 1: "warn", 2: "error"}       # SEGGER_SYSVIEW_LOG・WARNING・ERROR（3 は定義が無い: None）
 
 
 class SystemViewError(Exception):
@@ -247,9 +250,11 @@ class SystemViewDecoder:
             drops = args[0]
             lost = drops - self._drops if self._drops is not None and drops >= self._drops else drops
             self._drops = drops
+            # OVERFLOW は 1 個以上落としたときだけ送られる（SEGGER_SYSVIEW.c の EnableState = 2）: 数えた差が 0 でも
+            # lost には下限の 1 を足す。数えた差そのものは出来事の dropped に残す
             self.trace.lost += max(lost, 1)
             self._current, self._isr_depth = None, 0
-            return self._event(ts, "overflow", name, args={"drop_count": drops})
+            return self._event(ts, "overflow", name, args={"drop_count": drops, "dropped": lost})
         if event_id == 2:
             self._isr_depth += 1
             return self._event(ts, "isr_enter", name, args={"number": args[0]})
@@ -273,8 +278,6 @@ class SystemViewDecoder:
             task = self._task(args[0])
             info = self.trace.task(task)
             info.priority, info.name = args[1], args[2]
-            if is_rtos_idle_name(args[2]):
-                self.trace.idle.add(task)
             return self._event(ts, "task_info", name, task, {"priority": args[1], "name": args[2]})
         if event_id in (10, 11):
             return self._event(ts, "info", name)
@@ -326,9 +329,9 @@ class SystemViewDecoder:
             options = body.varint()
             count = body.varint()
             values = [body.varint() for _ in range(count)]
-            text = format_c(fmt, Words(values)) if count else fmt
-            return self._event(ts, "print", "PRINT_FORMATTED", args={"level": _PRINT_LEVELS.get(options & 3, "info")},
-                               text=text)
+            text = format_c(fmt, Words(values), pointer_bits=_POINTER_BITS) if count else fmt
+            return self._event(ts, "print", "PRINT_FORMATTED",
+                               args={"level": _PRINT_LEVELS.get(options & 3), "options": options}, text=text)
         if event_id == 27:
             return self._event(ts, "info", "NUMMODULES", args={"modules": body.varint()})
         if event_id == 28:
@@ -381,8 +384,8 @@ class SystemViewDecoder:
             while body.remaining:
                 values.append(body.varint())
             fmt = self._strings(address) if self._strings else None
-            text = format_c(fmt, Words(values)) if fmt is not None else None
-            args = {"level": _PRINT_LEVELS.get(options & 3, "info"), "format_address": address}
+            text = format_c(fmt, Words(values), pointer_bits=_POINTER_BITS) if fmt is not None else None
+            args = {"level": _PRINT_LEVELS.get(options & 3), "options": options, "format_address": address}
             if fmt is None:
                 args["values"] = values
             return self._event(ts, "print", name, args=args, text=text)

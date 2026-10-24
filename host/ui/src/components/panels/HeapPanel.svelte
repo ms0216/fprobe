@@ -123,6 +123,9 @@
             {/each}
           </tbody>
         </table>
+        {#if report.truncated}
+          <div class="muted small">{$i18n("common.truncated", { shown: report.live_by_caller.length, total: report.callers_total, limit: report.top })}</div>
+        {/if}
       {/if}
       {#each report.notes ?? [] as n, i (i)}<div class="muted small">{n}</div>{/each}
     {/if}

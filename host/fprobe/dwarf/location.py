@@ -22,7 +22,7 @@ MASK = (1 << ADDRESS_BITS) - 1
 
 
 class NotAvailable(Exception):
-    """値が読めない理由（最適化で消えた・レジスタが復元できない・関数の入口の値 等）。"""
+    """値が読めない理由（DWARF に位置が無い・レジスタが復元できない・関数の入口の値 等）。"""
 
     @property
     def reason(self) -> str:
@@ -119,9 +119,9 @@ _UNARY = {
 
 
 def evaluate_location(ops: Sequence, context: EvalContext, initial: Sequence[int] = ()) -> Place:
-    """位置式を評価して場所にする。空の式 = 最適化で消えた。読めない途中の値は Unavailable。"""
+    """位置式を評価して場所にする。空の式 = DWARF に位置が無い。読めない途中の値は Unavailable。"""
     if not ops:
-        return Unavailable("最適化で消えた")
+        return Unavailable("位置式が空（DWARF に位置が無い）")
     try:
         return _run(ops, context, list(initial))
     except NotAvailable as e:
@@ -228,7 +228,7 @@ def _run(ops: Sequence, context: EvalContext, stack: list[int]) -> Place:
             if size_bits % 8 or (name == "DW_OP_bit_piece" and args[1] % 8):
                 raise NotAvailable("バイト境界でない DW_OP_bit_piece は扱わない")
             if current is None:
-                current = MemoryPlace(stack.pop()) if stack else Unavailable("最適化で消えた部分")
+                current = MemoryPlace(stack.pop()) if stack else Unavailable("位置の無い断片（DWARF に位置が無い）")
             elif name == "DW_OP_bit_piece" and args[1]:
                 current = _shifted(current, args[1] // 8)
             pieces.append((current, size_bits // 8))
@@ -246,7 +246,7 @@ def _run(ops: Sequence, context: EvalContext, stack: list[int]) -> Place:
     if current is not None:
         return current
     if not stack:
-        return Unavailable("最適化で消えた")
+        return Unavailable("位置式が場所を残さない")
     return MemoryPlace(stack[-1])
 
 

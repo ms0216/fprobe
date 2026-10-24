@@ -1,6 +1,8 @@
-// システム解析のパネルの計算: 止めずに読む番地の書き方・毎秒の増え方（カウンタ）・FPGA の値の書き方
+// システム解析のパネルの計算: 止めずに読む番地の書き方・FPGA の値の書き方・条件の回数（デーモンが数える）
 import { describe, expect, it } from "vitest";
-import { fieldsText, parseAddress, rates, sanitizeWatches } from "../src/lib/system";
+import { fieldsText, parseAddress, sanitizeWatches } from "../src/lib/system";
+import * as system from "../src/lib/system";
+import { FakeConn } from "./fake-conn";
 
 describe("番地の書き方", () => {
   it("16 進・10 進。32 ビットの語なので 4 の倍数だけ", () => {
@@ -17,16 +19,51 @@ describe("番地の書き方", () => {
   });
 });
 
-describe("毎秒の増え方", () => {
-  it("前の読みとの差を経過時間で割る（32 ビットの一周も）", () => {
-    const prev = { t_us: 1_000_000, memory: { "0x20040804": 100, "0x20040808": 0xFFFF_FFF0 } };
-    const cur = { t_us: 1_500_000, memory: { "0x20040804": 150, "0x20040808": 0x10 } };
-    expect(rates(prev, cur)).toEqual({ "0x20040804": 100, "0x20040808": 64 });
+describe("画面で推さない・数えない（読んだ値と時刻、デーモンの事実を描く）", () => {
+  it("メモリの毎秒の増え方を画面で計算しない（32 ビットの一周を前進とみなす仮定を持たない）", () => {
+    expect(system).not.toHaveProperty("rates");
   });
-  it("前が無い・時間が進んでいない・番地が増えたものは出さない", () => {
-    expect(rates(null, { t_us: 1, memory: { a: 1 } })).toEqual({});
-    expect(rates({ t_us: 5, memory: { a: 1 } }, { t_us: 5, memory: { a: 2 } })).toEqual({});
-    expect(rates({ t_us: 0, memory: {} }, { t_us: 1e6, memory: { a: 2 } })).toEqual({});
+  it("条件の回数を画面で数えない（暗黙の窓 2 秒・最後の 5000 件を持たない）", () => {
+    expect(system).not.toHaveProperty("countCondition");
+    expect(system).not.toHaveProperty("RATE_WINDOW_US");
+  });
+  it("watch を名前・番地の一致で自分のものと推さない", () => {
+    expect(system).not.toHaveProperty("ownWatch");
+  });
+  it("記録のメモリの読みの速さを経験の値で決めない（使う人が欄で明示する）", () => {
+    expect(system).not.toHaveProperty("memoryRateHz");
+  });
+});
+
+describe("使う人が明示する値の欄", () => {
+  it("読みの速さ（回/秒）: 正の数だけ。空・誤りは null（既定の値を持たない = 始められない）", () => {
+    expect(system.parseRate("200")).toBe(200);
+    expect(system.parseRate(" 12.5 ")).toBe(12.5);
+    expect(system.parseRate("")).toBeNull();
+    expect(system.parseRate("0")).toBeNull();
+    expect(system.parseRate("-5")).toBeNull();
+    expect(system.parseRate("abc")).toBeNull();
+  });
+  it("数える件数（最後の N 件）: 正の整数だけ。空・誤りは null（数えない）", () => {
+    expect(system.parseCount("5000")).toBe(5000);
+    expect(system.parseCount("")).toBeNull();
+    expect(system.parseCount("0")).toBeNull();
+    expect(system.parseCount("1.5")).toBeNull();
+    expect(system.parseCount("x")).toBeNull();
+  });
+});
+
+describe("条件の回数はデーモン（fpga_obs.count）が数える", () => {
+  it("使う人が入れた件数で問い合わせ、条件ごとの事実（回数・数えた範囲）をそのまま返す。件数が無ければ問い合わせない", async () => {
+    const r = { condition: "restart rose", count: 3, values: 40, t0_us: 0, t1_us: 2e6, span_s: 2, gaps: 0, lost: 0 };
+    const conn = new FakeConn({ "fpga_obs.count": () => ({ last: 500, conditions: [r, { condition: "bad", error: "読めない" }] }) });
+    expect(await system.readConditionCounts(conn as any, ["restart rose", "bad"], 500))
+      .toEqual({ "restart rose": r, bad: { condition: "bad", error: "読めない" } });
+    expect(conn.calls).toEqual([["fpga_obs.count", { conditions: ["restart rose", "bad"], last: 500 }]]);
+    expect(conn.quiet).toContain("fpga_obs.count");
+    expect(await system.readConditionCounts(conn as any, ["restart rose"], null)).toBeNull();
+    expect(await system.readConditionCounts(conn as any, [], 500)).toBeNull();
+    expect(conn.calls.length).toBe(1);
   });
 });
 
@@ -48,38 +85,8 @@ describe("FPGA の条件", () => {
     expect(parseCondition("")).toBeNull();
     expect(parseCondition("state >= 2")).toBeNull();
   });
-  it("値の並びで条件の回数と毎秒の速さを数える（変化は直前の値と比べる）", async () => {
-    const { countCondition, parseCondition } = await import("../src/lib/system");
-    const v = (t: number, state: string, restart: number) => ({ kind: "value", time_us: t, fields: { state, restart } });
-    const items = [v(0, "IDLE", 0), v(100, "BUSY", 0), v(200, "BUSY", 1), v(300, "DONE", 1), v(400, "IDLE", 0),
-                   { kind: "gap", time_us: 450 }, v(500, "BUSY", 1), v(1_000_000, "IDLE", 1)];
-    const r = countCondition(items, parseCondition("restart changed and state=BUSY")!);
-    expect(r.count).toBe(2);                                   // 200 と 500（450 の切れ目の後も直前の値と比べる）
-    expect(r.perSecond).toBeCloseTo(2 / 1.0, 5);
-    expect(countCondition([], parseCondition("state=BUSY")!)).toEqual({ count: 0, perSecond: null });
-  });
-  it("今の時刻を渡すと直近 2 秒で数える（スナップショット型は変化しか残さないので、値が止まったら 0）", async () => {
-    const { countCondition, parseCondition } = await import("../src/lib/system");
-    const v = (t: number, state: string) => ({ kind: "value", time_us: t, fields: { state } });
-    const items = [v(0, "IDLE"), v(100_000, "BUSY"), v(200_000, "IDLE"), v(300_000, "BUSY"), v(1_000_000, "IDLE")];
-    const terms = parseCondition("state changed and state=BUSY")!;
-    expect(countCondition(items, terms).perSecond).toBeCloseTo(2, 5);
-    expect(countCondition(items, terms, 1_000_000).perSecond).toBeCloseTo(2, 5);      // 窓が 2 秒より短ければその長さ
-    expect(countCondition(items, terms, 2_200_000).perSecond).toBeCloseTo(0.5, 5);    // 0.2〜2.2 s: 0.3 s の 1 回
-    expect(countCondition(items, terms, 4_000_000).perSecond).toBe(0);                // MCU が止まって 3 秒
-    expect(countCondition([], terms, 9_000_000).perSecond).toBe(0);                   // 窓に値が無い = 変化なし
-    expect(countCondition([], terms).perSecond).toBeNull();                           // 今の時刻が無ければ不明
-    // 今の時刻（system.status）の後に値を読むので、窓の値が今より新しいこともある: 数えた回数を捨てない
-    expect(countCondition([v(5_000_000, "IDLE"), v(5_100_000, "BUSY")], terms, 4_900_000).perSecond).toBeCloseTo(10, 5);
-  });
 });
 
-describe("変化の無いピン", () => {
-  it("記録の縮図の波形（ch ごとの画素の 0 / 1 / x）で、全体が同じ値の ch", async () => {
-    const { flatChannels } = await import("../src/lib/system");
-    expect(flatChannels(["1111", "0010", "0000", "00x0", "", "-11-", "----"])).toEqual([0, 2, 5]);
-  });
-});
 
 describe("結果の直前に多い出来事の例へ飛ぶ", () => {
   it("候補から結果までを、前後に余白（間の半分、最小 50 µs）を付けた範囲にし、基準 = 候補・選択 = 結果のカーソル", async () => {
@@ -128,17 +135,6 @@ describe("表と条件をデーモンの画面の状態で分け合う（別の 
   });
 });
 
-describe("記録のためのメモリの読みを引き継ぐ", () => {
-  it("サンプラを使っている watch がこちらと同じ名前・番地の組なら自分のもの（並びは問わない）", async () => {
-    const { ownWatch } = await import("../src/lib/system");
-    const mine = [{ name: "誤り", address: 0x20040808 }, { name: "回数", address: 0x20040804 }];
-    expect(ownWatch([{ name: "回数", address: "0x20040804" }, { name: "誤り", address: "0x20040808" }], mine)).toBe(true);
-    expect(ownWatch([{ name: "counter", address: "0x20040804" }, { name: "誤り", address: "0x20040808" }], mine)).toBe(false);
-    expect(ownWatch([{ name: "誤り", address: "0x20040808" }], mine)).toBe(false);
-    expect(ownWatch([], [])).toBe(false);
-  });
-});
-
 describe("変数名で MCU のメモリを足す", () => {
   it("ELF の変数（debug.symbol.info）の番地を使う。名前が空なら変数名。関数・語の境でない番地は断る", async () => {
     const { isSymbolName, symbolWatch } = await import("../src/lib/system");
@@ -155,14 +151,10 @@ describe("変数名で MCU のメモリを足す", () => {
 
 describe("FPGA の条件を結果の直前に多い出来事と同じ書き方に", () => {
   it("rose / fell と \"…\" で囲んだ名前・値も読める", async () => {
-    const { parseCondition, countCondition } = await import("../src/lib/system");
+    const { parseCondition } = await import("../src/lib/system");
     expect(parseCondition("restart rose")).toEqual([{ field: "restart", op: "rose" }]);
     expect(parseCondition('"my flag" fell and state="WAIT ACK"')).toEqual(
       [{ field: "my flag", op: "fell" }, { field: "state", op: "=", value: "WAIT ACK" }]);
-    const v = (t: number, restart: number) => ({ kind: "value", time_us: t, fields: { restart } });
-    const items = [v(0, 0), v(10, 1), v(20, 0), v(30, 1), v(40, 1)];
-    expect(countCondition(items, parseCondition("restart rose")!).count).toBe(2);
-    expect(countCondition(items, parseCondition("restart fell")!).count).toBe(1);
   });
   it("FPGA の信号だけの条件か（条件の表に足せるか）", async () => {
     const { fpgaOnly } = await import("../src/lib/system");
@@ -172,21 +164,68 @@ describe("FPGA の条件を結果の直前に多い出来事と同じ書き方�
     expect(fpgaOnly("in0 rose", names)).toBe(false);
     expect(fpgaOnly("fpga.restart rose", names)).toBe(true);
   });
-  it("記録の MCU のメモリの読みの速さ: ピンも Ethernet で流すなら下げる（PYNQ の中継が詰まる）", async () => {
-    const { memoryRateHz } = await import("../src/lib/system");
-    expect(memoryRateHz(false, "eth")).toBe(1000);
-    expect(memoryRateHz(true, "usb")).toBe(1000);
-    expect(memoryRateHz(true, "eth")).toBe(200);
-    expect(memoryRateHz(true, undefined)).toBe(1000);
+});
+
+describe("記録の欠けと分解能はデーモンの事実を描く（b18・b19）", () => {
+  it("記録中にメモリの読みが止まった = recording.status の watch_running が false（watch.status を別に読まない）", () => {
+    const { memoryStopped } = system;
+    expect(memoryStopped({ recording: true, watch_running: false }, true)).toBe(true);
+    expect(memoryStopped({ recording: true, watch_running: true }, true)).toBe(false);
+    expect(memoryStopped({ recording: true }, true)).toBe(false);               // 申告の無いデーモン: 止まったとは言わない
+    expect(memoryStopped({ recording: false, watch_running: false }, true)).toBe(false);
+    expect(memoryStopped({ recording: true, watch_running: false }, false)).toBe(false);   // この画面はメモリを記録していない
   });
-  it("回/秒は同じグループの直前の値と比べる（別のグループの値と比べない。欠落の後も直前の値と比べる）", async () => {
-    const { countCondition, parseCondition } = await import("../src/lib/system");
-    const terms = parseCondition("flag changed")!;
-    const v = (t: number, group: number, fields: Record<string, number>) => ({ kind: "value", time_us: t, group, fields });
-    const items = [v(0, 0, { flag: 0 }), v(10, 1, { other: 5 }), v(20, 0, { flag: 0 }), v(30, 1, { other: 6 }),
-                   { kind: "gap", time_us: 35, group: 0 }, v(40, 0, { flag: 1 }), v(50, 0, { flag: 0 })];
-    // 0→0（グループ 1 を挟んでも変化なし）、0→1（欠落をまたいで）、1→0 で 2 回
-    expect(countCondition(items as any, terms).count).toBe(2);
+  it("recording.correlate の sampling は変数ごとにそのまま（最大を取って 1 つにしない）", () => {
+    expect(system.samplingRows({ errors: 0.001, "fpga.state": null, mailbox: 0.0005 })).toEqual(
+      [{ name: "errors", ms: 1 }, { name: "fpga.state", ms: null }, { name: "mailbox", ms: 0.5 }]);
+    expect(system.samplingRows({})).toEqual([]);
   });
 });
 
+describe("MCU の番地の語を書く（target.memory.write。走行中も）", () => {
+  const fakeApp = (ai: boolean) => {
+    const calls: [string, unknown][] = [];
+    return { calls, aiConnectedUnpaused: ai, act: async (m: string, p: unknown) => { calls.push([m, p]); return {}; } };
+  };
+  const answer = (ok: boolean) => ({ ask: async () => ok }) as any;
+
+  it("10 進・16 進の 32 ビットの値 → リトルエンディアンの 4 バイト", async () => {
+    const app = fakeApp(false);
+    expect(await system.writeWord(app, 0x20000010, "0x12345678")).toBeNull();
+    expect(await system.writeWord(app, 0x20000014, " 4_294_967_295 ")).toBeNull();
+    expect(app.calls).toEqual([["target.memory.write", { address: 0x20000010, data_hex: "78563412" }],
+                               ["target.memory.write", { address: 0x20000014, data_hex: "ffffffff" }]]);
+  });
+  it("32 ビットに入らない・数でない値は書かない", async () => {
+    const app = fakeApp(false);
+    for (const bad of ["", "abc", "0x1_0000_0000", "-1", "1.5"]) expect(await system.writeWord(app, 0x20000010, bad)).toBe("system.badWordValue");
+    expect(app.calls).toEqual([]);
+  });
+  it("AI がつながっていて一時停止していなければ確かめる（人の操作と AI の操作は同じ道。断れば書かない）", async () => {
+    const refused = fakeApp(true);
+    expect(await system.writeWord(refused, 0x20000010, "1", answer(false))).toBeNull();
+    expect(refused.calls).toEqual([]);
+    const accepted = fakeApp(true);
+    await system.writeWord(accepted, 0x20000010, "1", answer(true));
+    expect(accepted.calls).toEqual([["target.memory.write", { address: 0x20000010, data_hex: "01000000" }]]);
+  });
+});
+
+
+describe("結果の直前に多い出来事の引数（recording.correlate）", () => {
+  it("結果の条件は使う人が入れたものだけ。空なら送らない（表の先頭の変数の changed を暗黙に使わない）", () => {
+    expect(system.correlateParams("", ["a rose"], false, 5, null)).toBeNull();
+    expect(system.correlateParams("   ", ["a rose"], true, 5, 20)).toBeNull();
+    expect(system.correlateParams(" err changed ", ["a rose"], false, 5, null))
+      .toEqual({ effect: "err changed", causes: ["a rose"], window_s: 0.005 });
+    expect(system.correlateParams("err changed", ["a rose"], true, 5, 7))
+      .toEqual({ effect: "err changed", causes: null, window_s: 0.005, limit: 7 });
+  });
+  it("窓が無い・候補が無い（自動でない）ときも送らない", () => {
+    expect(system.correlateParams("err changed", ["a rose"], false, null, null)).toBeNull();
+    expect(system.correlateParams("err changed", [], false, 5, null)).toBeNull();
+  });
+  it("自動の候補は返す数（上位の数）を使う人が入れたときだけ（API の既定の 20 を暗黙に使わない）", () => {
+    expect(system.correlateParams("err changed", [], true, 5, null)).toBeNull();
+  });
+});

@@ -74,7 +74,10 @@ def test_system_status_keeps_the_last_known_fpga_value_after_it_leaves_the_windo
     monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"items": next(reads)})
     first = probe.system_status()["fpga"]["latest"]
     assert [(v["group"], v["value"], v["time_us"]) for v in first] == [(0, 1, 5.0)]
-    assert probe.system_status()["fpga"]["latest"] == first                        # 窓に値が無くても最後の値
+    second = probe.system_status(fpga_last=500)["fpga"]
+    assert second["latest"] == first                                              # 窓に値が無くても最後の値
+    # 見た窓（使った件数 last と、窓の中の項目の数）を返す（点検 2 回目 ?: mcp_server.py:1917 の暗黙の窓）
+    assert second["window"] == {"last": 500, "items": 1}
 
 
 def test_read_while_the_logic_analyzer_streams_into_the_recording(probe):
@@ -107,7 +110,7 @@ def test_status_reports_the_settings_it_was_opened_with(probe, monkeypatch):
         def __init__(self, dev):
             self.dev = dev
 
-        def open(self, chain, user_ir, half_period, words, sync_period):
+        def open(self, chain, user_ir, half_period, words, sync_period, id_scans=0):
             return {"id": 1, "mode": "snapshot", "sync_delay": 0, "sample_delay": 0, "clock_hz": 0}
 
         def status(self):
@@ -117,7 +120,8 @@ def test_status_reports_the_settings_it_was_opened_with(probe, monkeypatch):
     assert probe.fpga_obs_status()["config"] is None
     probe.fpga_obs_open(chain={"ir_len": 4}, user_ir=2, half_period=20, words=1, sync_period=0)
     out = probe.fpga_obs_status()
-    assert out["config"] == {"chain": {"ir_len": 4}, "user_ir": 2, "half_period": 20, "words": 1, "sync_period": 0}
+    assert out["config"] == {"chain": {"ir_len": 4}, "user_ir": 2, "half_period": 20, "words": 1, "sync_period": 0,
+                             "id_scans": 0}
     assert out["declared"]["mode"] == "snapshot"
 
 
@@ -134,7 +138,7 @@ def test_auto_reopen_opens_again_with_the_same_settings_when_stuck(probe, monkey
         def __init__(self, dev):
             self.dev = dev
 
-        def open(self, chain, user_ir, half_period, words, sync_period):
+        def open(self, chain, user_ir, half_period, words, sync_period, id_scans=0):
             if StubObs.fail:
                 raise RuntimeError("no answer")
             opened.append((chain, user_ir, half_period, words, sync_period))

@@ -102,7 +102,8 @@ class _SetupHold:
     def report(self) -> dict:
         out = {**self.spec, "setup": self.setup.stats(), "hold": self.hold.stats()}
         if self.spec.get("setup_min_ns") is not None or self.spec.get("hold_min_ns") is not None:
-            out.update(violation_count=self.violation_count, violations=self.violations)
+            out.update(violation_count=self.violation_count, violations=self.violations,
+                       violations_limit=VIOLATION_LIMIT, violations_truncated=self.violation_count > len(self.violations))
         return out
 
 

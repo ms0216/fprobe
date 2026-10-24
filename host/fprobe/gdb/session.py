@@ -33,8 +33,8 @@ HELP = """fprobe の GDB サーバ（monitor のコマンド）
   monitor threads [on|off]          RTOS のタスクを GDB のスレッドとして見せるか
   monitor pause | resume            人の一時停止（AI 等の操作を保留する）/ 再開
   monitor trace [allow-halt|deny-halt]
-                                    トレースポイントの実験の状態。止めると壊れうるターゲットで当たるたびに
-                                    止めるのを許す / 許さない（既定は許さない。この接続だけ）
+                                    トレースポイントの実験の状態。当たるたびにコアを止めるのを許す / 許さない
+                                    （既定は許す。deny-halt ならモニタ方式でなければ QTStart を断る。この接続だけ）
   monitor status                    デーモンの状態（利用者・一時停止・機器）
   monitor <API のメソッド> [JSON | key=value ...]
                                     fprobe の API を呼ぶ（例: monitor la.capture {"mask": 1, "value": 1}、
@@ -86,7 +86,7 @@ class GdbSession:
         self._console = 0                         # セミホスティングの出力の読んだ位置
         self._closing = False
         self._tframe: int | None = None           # 見ているトレースのフレーム（None = 実物）
-        self._trace_allow_halt = False            # monitor trace allow-halt
+        self._trace_deny_halt = False             # monitor trace deny-halt（使う側が明示したときだけ断る）
         self._uploads: list[str] = []             # qTfP / qTfV の残り
 
     # --- 接続 -----------------------------------------------------------------------------------
@@ -304,6 +304,10 @@ class GdbSession:
             if self._threads_on:
                 listing = await self.host.run(self.probe.gdb_threads, control=False)
                 threads, self._thread_note = listing["threads"], listing["note"]
+            if threads and not any(t["current"] for t in threads):
+                # 実行中のタスクが無い（スケジューラの前等）: 先頭のタスクを「いま」とせず、コアそのもののスレッドを足す
+                threads = [*threads, {"id": SINGLE, "name": "core", "state": "running", "current": True,
+                                      "no_task": True}]
             self._threads = threads or [{"id": SINGLE, "name": "main", "state": "running", "current": True}]
         return self._threads
 
@@ -322,7 +326,7 @@ class GdbSession:
 
     async def _current_thread(self) -> int:
         threads = await self._thread_list()
-        return next((t["id"] for t in threads if t["current"]), threads[0]["id"])
+        return next(t["id"] for t in threads if t["current"])           # _thread_list がいまのスレッドを必ず含める
 
     async def _context(self) -> int | None:
         """Hg で選んだスレッドが実行中のタスクでなければ、その TCB の番地（保存された文脈で読む）。"""
@@ -333,6 +337,8 @@ class GdbSession:
 
     @staticmethod
     def _extra(thread: dict) -> str:
+        if thread.get("no_task"):
+            return "no current task"
         if thread["id"] == SINGLE and "priority" not in thread:
             return "no RTOS"
         return f"{thread['state']}, priority {thread['priority']}"
@@ -537,7 +543,7 @@ class GdbSession:
             await self._attach()
             registers = [(r.name, r.bits) for r in self._regs]
             try:
-                await self.host.run(lambda: self.probe.gdb_trace_start(self.owner, registers, self._trace_allow_halt),
+                await self.host.run(lambda: self.probe.gdb_trace_start(self.owner, registers, self._trace_deny_halt),
                                     control=True, record=("gdb.trace.start", {"tracepoints": len(exp.tracepoints)}))
             except RuntimeError as e:
                 await self.console(f"fprobe: {e}\n")
@@ -623,11 +629,11 @@ class GdbSession:
             return "OK"
         if command == "trace":
             if rest in ("allow-halt", "deny-halt"):
-                self._trace_allow_halt = rest == "allow-halt"
+                self._trace_deny_halt = rest == "deny-halt"
             elif rest:
                 raise ValueError("trace [allow-halt|deny-halt]")
             summary = await self.host.run(self.probe.gdb_trace_summary, control=False)
-            await self.console(_json({"allow_halt": self._trace_allow_halt, **summary}))
+            await self.console(_json({"deny_halt": self._trace_deny_halt, **summary}))
             return "OK"
         if command == "elf":
             result = await self.host.call("debug.elf.load", {"path": rest})

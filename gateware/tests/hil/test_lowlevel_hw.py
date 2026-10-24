@@ -43,11 +43,11 @@ def disconnected(probe):
     probe._close_lowlevel()
 
 
-def test_diagnose_finds_the_nucleo_and_suggests_the_target(disconnected):
-    d = disconnected.target_diagnose(frequency_hz=4_000_000)
-    assert d["ok"], d["verdict"]
+def test_diagnose_finds_the_nucleo_and_its_target_name(disconnected):
+    d = disconnected.target_diagnose(frequencies_hz=[4_000_000])
+    assert d["reached"], [s for s in d["steps"] if s["status"] == "fail"]
     assert d["protocol"] == "swd" and d["dp"]["dpidr"]["value"] == 0x2BA01477
-    assert d["part"]["name"] == "STM32F401xD/E" and d["suggested_connect"]["target"] == "stm32f401xe"
+    assert d["part"]["name"] == "STM32F401xD/E" and d["part"]["suggested_target"] == "stm32f401xe"
     assert d["core"]["core"] == "Cortex-M4"
     names = [c["name"] for c in d["aps"][0]["rom_table"]["children"]]
     assert "SCS (Cortex-M4)" in names and "DWT" in names

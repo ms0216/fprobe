@@ -253,7 +253,8 @@ def program(mem: Memory, family: Family, new: int, timeout_s: float = 60.0, laun
 
 
 def protection_status(part: Part, read: Callable[[int], int]) -> dict | None:
-    """接続の診断（fprobe.diagnose）の保護の段: STM32 の RDP。扱えない部品は None。"""
+    """接続の診断（fprobe.diagnose）の保護の段: STM32 の RDP（読めた事実の message と rdp_level・option_bytes）。
+    扱えない部品は None。良し悪しの判定はしない。"""
     try:
         family = family_for(part)
     except OptionBytesError:
@@ -262,8 +263,8 @@ def protection_status(part: Part, read: Callable[[int], int]) -> dict | None:
     level = rdp_level(family.field("RDP").get(raw))
     out = {"rdp_level": level, "option_bytes": raw}
     if level == 0:
-        return {"status": "ok", "message": "STM32 の読み出し保護は Level 0（保護なし）", **out}
+        return {"message": "STM32 の読み出し保護は Level 0（保護なし）", **out}
     if level == 1:
-        return {"status": "warn", "message": "STM32 の読み出し保護が Level 1: デバッガから Flash を読めない"
-                                              "（target_unlock で全消去して解除）", **out}
-    return {"status": "fail", "message": "STM32 の読み出し保護が Level 2: デバッグは永久に塞がっている", **out}
+        return {"message": "STM32 の読み出し保護が Level 1: デバッガから Flash を読めない"
+                           "（target_unlock で全消去して解除）", **out}
+    return {"message": "STM32 の読み出し保護が Level 2: デバッグは永久に塞がっている", **out}

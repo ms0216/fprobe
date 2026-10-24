@@ -3,11 +3,12 @@
     expr    := unary (('+' | '-') unary)*
     unary   := ('*' | '&' | '-' | '~' | '!') unary | '(' 型名 ')' unary | postfix
     postfix := primary ('[' expr ']' | '.' 名前 | '->' 名前)*
-    primary := 名前 ('::' 名前)? | 整数（10 進・0x・0b・'c'） | '(' expr ')'
+    primary := 名前 ('::' 名前)? | '"' ファイル '"' '::' 名前 ('::' 名前)? | 整数（10 進・0x・0b・'c'） | '(' expr ')'
     型名    := (const|volatile)* (struct|union|enum 名前 | 基本型の語 | typedef 名) ('*' (const|volatile)*)*
 
 名前は選んだフレームのスコープ → その CU の static → 大域 の順に引く（DebugInfo.lookup）。
-`関数名::名前` で関数の中の static。結果は Value（型 + 場所）で、読み出し・解読・書き込みは呼ぶ側（Inspector）が行う。
+`関数名::名前` で関数の中の static。同じ名前の static が複数あれば選ばずに誤り（AmbiguousNameError）、
+`"ファイル"::名前`・`"ファイル"::関数名::名前` で選ぶ。結果は Value（型 + 場所）で、読み出し・解読・書き込みは呼ぶ側（Inspector）が行う。
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import struct
 from dataclasses import dataclass
 
 from .access import AccessError
-from .info import DebugInfo, FrameView
+from .info import AmbiguousNameError, DebugInfo, FrameView
 from .location import (EvalContext, MemoryPlace, NotAvailable, Place, PiecesPlace, RegisterPlace, Unavailable,
                        ValuePlace, read_place)
 from .typesys import (ArrayType, BaseType, CType, EnumType, FunctionType, PointerType, QualifiedType, StructType,
@@ -59,6 +60,7 @@ _TOKEN = re.compile(r"""
       (?P<float>\d+\.\d*(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)[fF]?
     | (?P<number>0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[uUlL]*
     | (?P<char>'(?:\\.|[^\\'])')
+    | (?P<file>"[^"]+")
     | (?P<name>[A-Za-z_]\w*)
     | (?P<op>->|::|\|\||&&|==|!=|<=|>=|<<|>>|[.\[\]()*&+\-~!<>|^/%])
     )""", re.VERBOSE)
@@ -86,6 +88,8 @@ def _tokens(text: str) -> list[tuple[str, object]]:
         elif m["char"]:
             body = m["char"][1:-1]
             out.append(("number", _ESCAPES.get(body[1], ord(body[1])) if body.startswith("\\") else ord(body)))
+        elif m["file"]:
+            out.append(("file", m["file"]))
         elif m["name"]:
             out.append(("name", m["name"]))
         else:
@@ -243,6 +247,12 @@ class _Evaluator:
         kind, token = self.take()
         if kind == "number":
             return self.constant(token)
+        if kind == "file":                                  # "ファイル"::名前・"ファイル"::関数::名前（同じ名前の static を選ぶ）
+            self.expect("::")
+            name = f"{token[1:-1]}::{self.name()}"
+            if self.accept("::"):
+                name = f"{name}::{self.name()}"
+            return self.variable(name)
         if kind == "name":
             name = token
             if self.accept("::"):
@@ -278,6 +288,8 @@ class _Evaluator:
     def is_variable(self, name: str) -> bool:
         try:
             self.info.lookup(name, self.frame.pc if self.frame else None)
+            return True
+        except AmbiguousNameError:                                  # 変数ではある（どれかは決まらない）
             return True
         except KeyError:
             return False
@@ -320,6 +332,9 @@ class _Evaluator:
             raise ExpressionError(f"型 {name!r} が無い") from None
 
     def _base_type(self, words: list[str]) -> CType:
+        """基本型。DWARF にあればそれ。無ければ大きさを ELF の ABI の事実から: char 1・short 2・int 4・long long 8・
+        float 4・double 8・_Bool 1 は ELF の ILP32 / LP64 の ABI（AAPCS・AAPCS64・RISC-V・x86-64 の System V）で同じ、
+        long はアドレスの大きさ（ILP32 は 4、LP64 は 8）。long double は ABI で違う（8・12・16）ので無ければ誤り。"""
         if words == ["void"]:
             return VoidType()
         unsigned = "unsigned" in words
@@ -332,11 +347,11 @@ class _Evaluator:
         elif longs == 2:
             name, size = ("unsigned long long" if unsigned else "long long"), 8
         elif longs == 1 and "double" not in core:
-            name, size = ("unsigned long" if unsigned else "long"), 4
+            name, size = ("unsigned long" if unsigned else "long"), self.info.address_size
         elif "float" in core:
             name, size = "float", 4
         elif "double" in core:
-            name, size = ("long double" if longs else "double"), 8
+            name, size = ("long double" if longs else "double"), None if longs else 8
         elif "_Bool" in core:
             name, size = "_Bool", 1
         else:
@@ -344,6 +359,8 @@ class _Evaluator:
         try:
             return self.info.type_named(name)
         except KeyError:
+            if size is None:
+                raise ExpressionError(f"型 {name} が DWARF に無い（大きさは ABI で違う）") from None
             encoding = ("float" if name in ("float", "double", "long double") else "bool" if name == "_Bool"
                         else ("unsigned_char" if unsigned else "signed_char") if size == 1 and "char" in name
                         else "unsigned" if unsigned else "signed")
@@ -372,7 +389,9 @@ class _Evaluator:
 
     def rvalue(self, t: CType, number: int | float) -> Value:
         s = strip(t)
-        size = s.size or 4
+        size = s.size
+        if not size:
+            raise ExpressionError(f"大きさの分からない型 {type_name(t)} の値は作れない")
         if isinstance(s, BaseType) and s.encoding == "float":
             data = struct.pack("<f" if size == 4 else "<d", float(number))
         else:
@@ -398,14 +417,17 @@ class _Evaluator:
                 raise ExpressionError("メモリに無い配列は番地にならない")
             return value.address
         if value.is_bitfield:
-            result = decode_bits(value.type, self.read(value), value.bit_offset, value.bit_size)
-            return result["value"] if isinstance(result, dict) else int(result)
+            return int(decode_bits(value.type, self.read(value), value.bit_offset, value.bit_size)["value"])
         data = self.read(value)
         if isinstance(s, BaseType):
             if s.encoding == "float":
                 return struct.unpack("<f" if s.size == 4 else "<d", data)[0]
+            if s.encoding == "unknown":
+                raise ExpressionError(f"{type_name(value.type)} の符号の種類が分からない（DWARF に無い）")
             return int.from_bytes(data, "little", signed=s.signed)
         if isinstance(s, EnumType):
+            if s.size is None:
+                raise ExpressionError(f"{type_name(value.type)} の大きさが分からない（DWARF に無い）")
             return int.from_bytes(data, "little", signed=s.signed)
         if isinstance(s, PointerType):
             return int.from_bytes(data, "little")
@@ -438,6 +460,8 @@ class _Evaluator:
         except KeyError as e:
             raise ExpressionError(str(e.args[0])) from None
         if m.bit_size is not None:
+            if m.bit_offset is None:
+                raise ExpressionError(f"ビットフィールド {name} の位置が分からない（記憶単位の大きさが DWARF に無い）")
             return Value(m.type, self.offset_place(value, extra), value.lvalue, m.bit_offset, m.bit_size)
         return Value(m.type, self.offset_place(value, extra + m.offset), value.lvalue)
 

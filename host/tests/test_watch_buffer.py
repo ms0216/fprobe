@@ -3,6 +3,7 @@
 import struct
 
 import pytest
+from value_kinds import ints, vint
 
 from fprobe.dwarf.typesys import BaseType
 from fprobe.watch_buffer import TargetRing
@@ -44,11 +45,11 @@ def test_new_elements_are_read_once_in_order_with_their_numbers():
     assert r.poll(t.read) == []                                                   # 最初は位置を合わせるだけ
     t.put(10)
     t.put(-20)
-    assert r.poll(t.read) == [(0, 10), (1, -20)]
+    assert r.poll(t.read) == [(0, vint(10)), (1, vint(-20))]
     assert r.poll(t.read) == []
     for v in range(6):                                                            # 折り返す
         t.put(v)
-    assert r.poll(t.read) == [(2 + k, k) for k in range(6)] and r.lost == 0
+    assert r.poll(t.read) == [(2 + k, vint(k)) for k in range(6)] and r.lost == 0
 
 
 def test_a_lap_before_reading_is_counted_as_lost():
@@ -58,7 +59,7 @@ def test_a_lap_before_reading_is_counted_as_lost():
     for v in range(N + 3):
         t.put(v)
     got = r.poll(t.read)
-    assert [v for _, v in got] == list(range(3, N + 3)) and r.lost == 3 and got[0][0] == 3
+    assert [v for _, v in got] == ints(*range(3, N + 3)) and r.lost == 3 and got[0][0] == 3
 
 
 def test_elements_overwritten_while_reading_are_dropped():
@@ -80,7 +81,7 @@ def test_a_narrow_counter_wraps():
     r.poll(t.read)
     t.put(2)
     t.put(3)                                                                      # 255 → 0 → 1
-    assert [v for _, v in r.poll(t.read)] == [2, 3]
+    assert [v for _, v in r.poll(t.read)] == ints(2, 3)
 
 
 def test_a_write_index_instead_of_a_counter():
@@ -90,7 +91,7 @@ def test_a_write_index_instead_of_a_counter():
     r.poll(t.read)
     t.put(6)
     t.put(7)
-    assert [v for _, v in r.poll(t.read)] == [6, 7]
+    assert [v for _, v in r.poll(t.read)] == ints(6, 7)
     t.mem[COUNT:COUNT + 4] = (N + 1).to_bytes(4, "little")
     with pytest.raises(ValueError):
         r.poll(t.read)

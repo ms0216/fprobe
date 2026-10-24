@@ -5,6 +5,9 @@ import { composeFrame, valueRanges, type RowSpec, type TimelineFrame } from "./c
 import { anomalies, pick, seek, type PickedItem } from "./query";
 import { buildTile, type Tile, type TileHeader } from "./tile";
 
+/** 縮図の異常の印の時間の箱の数（縮図の幅の画素より細かく: 縮図で見える誤り・注意の在りかは欠けない） */
+const ANOMALY_BINS = 4096;
+
 export interface FrameRequest { tile: number; v0: number; v1: number; width: number; rows: RowSpec[] }
 export interface Anomaly { t: number; tone: number }
 
@@ -85,7 +88,7 @@ export class TileStore {
 
   anomalies(id: number): Anomaly[] {
     const tile = this.tiles.get(id);
-    return tile ? anomalies(tile) : [];
+    return tile ? anomalies(tile, ANOMALY_BINS) : [];
   }
 
   /** 要求に答える（Worker の onmessage とその場の実装が使う） */

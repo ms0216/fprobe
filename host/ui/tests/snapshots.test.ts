@@ -1,7 +1,7 @@
 // 故障の状態の保存（lib/snapshots.ts）: snapshot.list と snapshot.info を、Recordings の節の行と「開いている状態」に
 import { describe, expect, it } from "vitest";
 import { readSnapshots } from "../src/lib/snapshots";
-import { FakeConn } from "./fake-conn";
+import { FakeConn, deviceError } from "./fake-conn";
 
 describe("readSnapshots", () => {
   it("一覧（新しい順に並べ替えず、デーモンの順のまま）と開いている状態を読む。読み取りは quiet", async () => {
@@ -19,7 +19,7 @@ describe("readSnapshots", () => {
   });
 
   it("開いていなければ open は null、読めなければ誤りの文", async () => {
-    const conn = new FakeConn({ "snapshot.list": () => { throw new Error("RuntimeError: 置き場所が無い"); },
+    const conn = new FakeConn({ "snapshot.list": () => { throw deviceError("置き場所が無い"); },
                                 "snapshot.info": { open: false } });
     const r = await readSnapshots(conn);
     expect(r.rows).toEqual([]);

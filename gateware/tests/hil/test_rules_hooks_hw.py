@@ -48,9 +48,9 @@ def test_fault_injection_corrupts_a_running_variable_at_a_hardware_time(probe, t
     time.sleep(0.3)                                                    # 時計の対応付けの点を取る
     script = {"name": "hil", "requirements": {"REQ-F1": "変数が壊れても走り続ける"}, "trials": [
         {"id": "counter-jump", "requirement": "REQ-F1", "when": {"host": {"delay_s": 0.05}},
-         "write": {"address": "counter", "value": 0x40000000}, "observe_s": 0.1,
+         "write": {"address": "counter", "value": 0x40000000}, "timeout_s": 2.0, "observe_s": 0.1,
          "expect": [{"state": "running"}, {"memory": {"address": "counter"}, "min": 0x40000000}]},
-        {"id": "table-flip", "when": {"host": {}}, "write": {"address": "table", "flip": 1}, "observe_s": 0,
+        {"id": "table-flip", "when": {"host": {}}, "write": {"address": "table", "flip": 1}, "timeout_s": 2.0, "observe_s": 0,
          "expect": [{"memory": {"address": "table"}, "equals": 0x11111110}],
          "restore": {"write": [{"address": "table", "value": 0x11111111}]}},
     ]}

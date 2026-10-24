@@ -73,9 +73,20 @@ def test_dangling_else_wrapping_keeps_meaning():
 
 
 def test_return_of_unknown_type_uses_auto_type():
-    out, _, _, _ = inst("int (*getter(void))(int) { return sq; }\nSTATIC_T u8 m(void) { return 1; }")
+    """戻り値の型が宣言から取れない（複雑な宣言子）ときだけ __auto_type。"""
+    out, _, _, _ = inst("int (*getter(void))(int) { return sq; }")
     assert "{ __auto_type fprobe_tp_r = (sq);" in out
-    assert out.count("__auto_type") == 2
+
+
+def test_return_type_is_not_judged_by_capital_letters():
+    """全大文字の語をマクロとみなさない（全大文字の typedef もある）。宣言どおりの型を使い、型でない語（記憶域の
+    マクロ等）は使う側が non_type_words で明示したときだけ除く。"""
+    out, _, _, _ = inst("BOOL ready(void) { return 1; }\nSTATIC_T u8 m(void) { return 1; }")
+    assert "{ BOOL fprobe_tp_r = (1);" in out and "{ STATIC_T u8 fprobe_tp_r = (1);" in out
+    assert "__auto_type" not in out
+    out, _, _, _ = inst("STATIC_T u8 m(void) { return 1; }", options=Options(non_type_words=("STATIC_T",)))
+    assert "{ u8 fprobe_tp_r = (1);" in out
+    assert Options(non_type_words=("STATIC_T",)).signature() != Options().signature()
 
 
 def test_variable_writes():

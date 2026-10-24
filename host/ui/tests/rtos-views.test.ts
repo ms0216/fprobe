@@ -2,104 +2,78 @@
 import { describe, expect, it } from "vitest";
 import { stackTops } from "../src/lib/chart";
 import { deepestKeys, rootsOf, treeRows, type StackFunction } from "../src/lib/callgraph";
-import { activations, histogram, longestIn, recordedIsrs, statsFromProfile, statsOf } from "../src/lib/interrupts";
+import { isrAt, longestIn, profileHz, recordedIsrs, statsFromProfile } from "../src/lib/interrupts";
 import { SymbolAddresses, baseName, heatOf, selectedRange, sourceHeat } from "../src/lib/profile";
 import {
-  busyTasks, subtract, loadFromTimeline, loadStack, loadWindows, nextRun, overlap, percent, recordedRuns, recordedTable, runningAt,
-  tableFromTimeline, union, windowAt,
+  loadFromTimeline, loadStack, nextRun, percent, recordedLoad,
+  tableFromTimeline, windowAt,
 } from "../src/lib/rtos";
 import { FakeConn } from "./fake-conn";
 
 describe("RTOS: 表と負荷の推移", () => {
-  it("取った時間軸の要約を使用率の順の表に", () => {
+  it("取った時間軸の要約を rtos.timeline.get の順のまま表に（画面で使用率の順に並べない。b16）", () => {
     const t = tableFromTimeline({ timebase_hz: 1e7, t0: 0, t1: 100, lower_bound: true,
-      stats: { covered: 90, tasks: { IDLE: { handle: 5, cpu: 0.7, runs: 2, total: 63, max_run: 40, min_run: 23, mean_run: 31.5 },
-                                     main: { handle: 1, cpu: 0.3, runs: 3, total: 27, max_run: 10, min_run: 8, mean_run: 9 } } } });
-    expect(t.tasks.map((x) => x.task)).toEqual(["IDLE", "main"]);
+      stats: { covered: 90, tasks: { main: { handle: 1, cpu: 0.3, runs: 3, total: 27, max_run: 10, min_run: 8, mean_run: 9 },
+                                     IDLE: { handle: 5, cpu: 0.7, runs: 2, total: 63, max_run: 40, min_run: 23, mean_run: 31.5 } } } });
+    expect(t.tasks.map((x) => x.task)).toEqual(["main", "IDLE"]);
+    expect(t.tasks[0]).toMatchObject({ handle: 1, runs: 3, max: 10, min: 8, mean: 9 });
     expect(t).toMatchObject({ hz: 1e7, covered: 90, lowerBound: true });
-    expect(t.tasks[1]).toMatchObject({ handle: 1, runs: 3, max: 10, min: 8, mean: 9 });
     expect(loadFromTimeline({ window: 10, windows: [], peak: null, mean_load: 0.2 }).meanLoad).toBe(0.2);
   });
 
-  it("区間の和集合と重なり", () => {
-    expect(union([[5, 8], [0, 2], [1, 3], [8, 9], [4, 4]])).toEqual([[0, 3], [5, 9]]);
-    expect(overlap([[0, 3], [5, 9]], 2, 6)).toBe(2);
-    expect(overlap([[0, 3], [5, 9]], 10, 20)).toBe(0);
-    expect(subtract([[0, 10], [20, 30]], [[2, 4], [8, 22]])).toEqual([[0, 2], [4, 8], [22, 30]]);
-  });
-
-  it("窓ごとの負荷はデーモンと同じ定義（割り込みはタスクから除き負荷に入る、抜けは分母から除く）", () => {
-    // idle は記録の印（デーモンがカーネルの情報で付ける）で知る。名前では決めない
-    const runs: [number, number, number, string, boolean][] = [[0, 30, 1, "main", false], [30, 100, 5, "IDLE", true],
-                                                                [100, 160, 1, "main", false], [160, 200, 5, "IDLE", true]];
-    const s = loadWindows({ runs, isrs: [[10, 20, 15, "SysTick"], [12, 14, 54, "USART2"]], gaps: [[180, 200]] }, 100);
-    expect(s.windows).toHaveLength(2);
-    const [a, b] = s.windows;
-    expect(a).toMatchObject({ t0: 0, t1: 100, covered: 100 });
-    expect(a.tasks.main).toBeCloseTo(0.2);                 // 30 − 割り込み 10
-    expect(a.isr).toBeCloseTo(0.1);
-    expect(a.load).toBeCloseTo(0.3);                       // 1 − アイドル 70 / 100
-    expect(b.covered).toBe(80);
-    expect(b.load).toBeCloseTo(1 - 20 / 80);              // 抜けの中のアイドルは数えない
-    expect(s.peak).toEqual({ t0: 100, t1: 200, load: 0.75 });
-    expect(s.meanLoad).toBeCloseTo((0.3 * 100 + 0.75 * 80) / 180);
+  it("時刻を含む窓と割合の文字", () => {
+    const s = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: [], windows: [
+      { t0: 0, t1: 100, covered: 100, load: 0.5, isr: 0, other: 0, tasks: {} },
+      { t0: 100, t1: 200, covered: 100, load: 0.5, isr: 0, other: 0, tasks: {} }] });
     expect(windowAt(s, 150)?.t0).toBe(100);
     expect(windowAt(s, 250)).toBeNull();
-    expect(busyTasks(s)).toEqual(["main"]);
-    expect(s.idle).toEqual(["IDLE"]);
-    // 名前が IDLE でも印が無ければ idle ではない（「idler」等を idle にしない）
-    expect(loadWindows({ runs: [[0, 100, 5, "IDLE", false]], isrs: [], gaps: [] }, 100).windows[0].load).toBe(1);
-    expect(loadWindows({ runs: [], isrs: [], gaps: [] }, 10).windows).toEqual([]);
-    // 実行の区間の無い間（止まっていた）は情報が無い: 負荷は null（100% にしない）
-    const halted = loadWindows({ runs: [[0, 50, 5, "IDLE", true], [150, 200, 5, "IDLE", true]], isrs: [], gaps: [] }, 100);
-    expect(halted.windows.map((w) => w.covered)).toEqual([50, 50]);
-    expect(halted.windows.map((w) => w.load)).toEqual([0, 0]);
-    expect(loadWindows({ runs: [[0, 50, 5, "IDLE", true], [250, 300, 1, "main", false]], isrs: [], gaps: [] }, 100).windows[1].load)
-      .toBeNull();
     expect(percent(0.1234)).toBe("12.3%");
     expect(percent(null)).toBe("—");
   });
 
-  it("CPU 負荷の積み上げ: タスク（多い順）・割り込み・その他で、上端が負荷。情報の無い窓は切る", () => {
+  it("CPU 負荷の積み上げ: タスク（表の並び = デーモンの順）・割り込み・その他（デーモンの other）で、上端が負荷", () => {
     const s = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: ["IDLE"], windows: [
-      { t0: 0, t1: 100, covered: 100, load: 0.6, isr: 0.1, tasks: { main: 0.3, net: 0.1, IDLE: 0.4 } },
-      { t0: 100, t1: 200, covered: 0, load: null, isr: null, tasks: {} },
-      { t0: 200, t1: 300, covered: 100, load: 0.5, isr: 0, tasks: { main: 0.5, IDLE: 0.5 } },
+      { t0: 0, t1: 100, covered: 100, load: 0.6, isr: 0.1, other: 0.1, tasks: { main: 0.3, net: 0.1, IDLE: 0.4 } },
+      { t0: 100, t1: 200, covered: 0, load: null, isr: null, other: null, tasks: {} },
+      { t0: 200, t1: 300, covered: 100, load: 0.5, isr: 0, other: 0, tasks: { main: 0.5, IDLE: 0.5 } },
     ] });
-    const stack = loadStack(s, (t) => t / 100, { isr: "ISR", other: "Other" }, null, 1);
-    expect(stack.map((x) => x.name)).toEqual(["main", "ISR", "Other"]);
+    // 並びは渡した順（画面で多い順に並べ替えない）。アイドルは積まない
+    const stack = loadStack(s, ["net", "IDLE", "main"], (t) => t / 100, { isr: "ISR", other: "Other" }, null);
+    expect(stack.map((x) => x.name)).toEqual(["net", "main", "ISR", "Other"]);
     expect(stack[0].x).toEqual([0, 1, 2]);
     const tops = stackTops(stack);
-    expect(tops[2][0]).toBeCloseTo(60);                    // 上端 = 負荷
-    expect(tops[2][2]).toBeCloseTo(50);
-    expect(Number.isNaN(tops[2][1])).toBe(true);
-    expect(loadStack(s, (t) => t, { isr: "ISR", other: "Other" }, "main").map((x) => !!x.dim))
+    expect(tops[3][0]).toBeCloseTo(60);                    // 上端 = 負荷
+    expect(tops[3][2]).toBeCloseTo(50);
+    expect(Number.isNaN(tops[3][1])).toBe(true);
+    expect(loadStack(s, ["main", "net"], (t) => t, { isr: "ISR", other: "Other" }, "main").map((x) => !!x.dim))
       .toEqual([false, true, true, true]);
-    // 小さい「その他」（0.01 %）も出す（0.05 % 以下を隠す経験則は使わない。計算の丸めの誤差だけは除く）
-    const tiny = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: ["IDLE"], windows: [
-      { t0: 0, t1: 100, covered: 100, load: 0.5001, isr: 0, tasks: { main: 0.5, IDLE: 0.4999 } }] });
-    expect(loadStack(tiny, (t) => t, { isr: "ISR", other: "Other" }).map((x) => x.name)).toEqual(["main", "Other"]);
+    // その他はデーモンが数えた値そのもの（0 なら出さない。画面で引き算して丸めの閾値を持たない）
+    const none = loadFromTimeline({ window: 100, mean_load: 0.5, peak: null, idle_tasks: ["IDLE"], windows: [
+      { t0: 0, t1: 100, covered: 100, load: 0.5, isr: 0, other: 0, tasks: { main: 0.5, IDLE: 0.5 } }] });
+    expect(loadStack(none, ["main"], (t) => t, { isr: "ISR", other: "Other" }).map((x) => x.name)).toEqual(["main"]);
   });
 
-  it("記録から: 表は SQL の集計、区間は SQL の行、選んだ時刻のタスク・次の実行は find", async () => {
+  it("記録から: 表と推移はデーモン（recording.cpu_load）の数えたまま。窓を切ったら全体の数と上限", async () => {
     const conn = new FakeConn({
-      "recording.query": (p: any) => {
-        if (p.sql.includes("GROUP BY a")) return { rows: [[1, "main", 2, 40, 30, 10, 0, 200, 1e7], [5, "IDLE", 1, 100, 100, 100, 50, 150, 1e7]] };
-        if (p.sql.includes(":t")) return { rows: p.params.t < 50 ? [[1, "main", 0, 30]] : [] };
-        return { rows: [], truncated: false };
-      },
+      "recording.cpu_load": { timebase_hz: 1e7, t0: 0, t1: 200, lower_bound: false,
+        stats: { covered: 140, tasks: { main: { handle: 1, cpu: 40 / 140, runs: 2, total: 40, max_run: 30, min_run: 10, mean_run: 20 },
+                                        IDLE: { handle: 5, cpu: 100 / 140, runs: 1, total: 100, max_run: 100, min_run: 100, mean_run: 100 } } },
+        load: { window: 100, windows: [{ t0: 0, t1: 100, covered: 100, load: 0.3, isr: 0, other: 0, tasks: {} }], windows_total: 2,
+                limit: 1, peak: null, mean_load: 0.3, idle_tasks: ["IDLE"] } },
       "recording.find": { count: 2, events: [{ t: 300, t_end: 340 }, { t: 120, t_end: 150 }] },
     });
-    const t = (await recordedTable(conn as any))!;
-    expect(t.tasks[0]).toMatchObject({ task: "IDLE", cpu: 100 / 140 });     // 分母は実行の区間の合計
-    expect(t.tasks[1]).toMatchObject({ task: "main", mean: 20, max: 30, min: 10 });
-    expect(t).toMatchObject({ t0: 0, t1: 200, covered: 140, hz: 1e7 });
-    expect(await runningAt(conn as any, 10)).toEqual({ handle: 1, task: "main" });
-    expect(await runningAt(conn as any, 90)).toBeNull();
+    const r = (await recordedLoad(conn as any, 10))!;
+    expect(r.table.tasks.map((x) => x.task)).toEqual(["main", "IDLE"]);   // デーモンの順のまま
+    expect(r.table).toMatchObject({ t0: 0, t1: 200, covered: 140, hz: 1e7 });
+    expect(r.series?.idle).toEqual(["IDLE"]);
+    expect(r.windowsCut).toEqual({ shown: 1, total: 2, limit: 1 });
+    expect(conn.calls[0]).toEqual(["recording.cpu_load", { window_us: 10 }]);
     expect(await nextRun(conn as any, 1, 100)).toEqual({ t: 120, tEnd: 150 });
     expect(conn.calls.find(([m]) => m === "recording.find")![1]).toEqual({ query: { stream: "rtos", kind: "run", a: 1, t0: 101 } });
-    expect((await recordedRuns(conn as any)).truncated).toBe(false);
     expect(conn.quiet.length).toBe(conn.calls.length);       // 画面の自動の読みは quiet
+    const noRuns = new FakeConn({ "recording.cpu_load": { timebase_hz: 1e7, stats: null } });
+    expect(await recordedLoad(noRuns as any, null)).toBeNull();
+    expect(noRuns.calls[0]).toEqual(["recording.cpu_load", {}]);         // 窓の幅が無ければ推移は頼まない
   });
 });
 
@@ -114,8 +88,8 @@ describe("Code Profile", () => {
 
   it("ソースの余白: ファイル名ごとの行の当たりと、当たらなかった行", () => {
     const heat = heatOf(
-      [{ function: "tick", file: "C:/src/sram_demo.c", line: 17, samples: 30, fraction: 0.3, ci: [0.2, 0.4] },
-       { function: "tick", file: "sram_demo.c", line: 18, samples: 10, fraction: 0.1, ci: [0.05, 0.2] }],
+      [{ function: "tick", file: "C:/src/sram_demo.c", line: 17, samples: 30, fraction: 0.3 },
+       { function: "tick", file: "sram_demo.c", line: 18, samples: 10, fraction: 0.1 }],
       [{ function: "tick", lines: 4, lines_hit: 2, line_fraction: 0.5, hit_lines: [["sram_demo.c", 17], ["sram_demo.c", 18]],
          missed_lines: [["sram_demo.c", 19], ["sram_demo.c", 21]] }]);
     expect(heat.lines.get("sram_demo.c")!.get(17)).toEqual({ fraction: 0.3, samples: 30, max: 30 });
@@ -141,45 +115,43 @@ describe("Code Profile", () => {
 });
 
 describe("Interrupts", () => {
-  it("入れ子の回の自分の時間と統計（最長の回の時刻）", () => {
-    const groups = activations([[0, 100, 54, "USART2"], [20, 30, 15, "SysTick"], [200, 205, 15, "SysTick"],
-                                [300, 340, 54, "USART2"]]);
-    expect(groups.get(54)!.acts[0]).toEqual({ t: 0, tEnd: 100, inclusive: 100, self: 90 });
-    const stats = statsOf(groups, 10, 1000);
-    expect(stats.map((s) => s.name)).toEqual(["USART2", "SysTick"]);
-    expect(stats[0]).toMatchObject({ count: 2, total: 14, self: 13, min: 4, max: 10, mean: 7, load: 130 / 1000, maxAt: 0,
-                                     maxEnd: 100 });
-    expect(stats[1]).toMatchObject({ count: 2, max: 1, maxAt: 20 });
-  });
-
   it("SWO の例外トレースの結果も同じ表に（秒）", () => {
     const rows = statsFromProfile({ clock_hz: 100, exceptions: [{ exception: 15, name: "SysTick", count: 3, total_inclusive: 30,
       total_self: 24, inclusive: { min: 5, max: 15, mean: 10 }, load: 0.1, max_at: 700, max_end: 715 }] });
     expect(rows[0]).toMatchObject({ number: 15, total: 0.3, self: 0.24, min: 0.05, max: 0.15, mean: 0.1, maxAt: 700 });
   });
 
-  it("分布図: 長い順の上位の棒に印（外れ値の経験則は使わない）、棒の中の最長の回", () => {
-    const acts = [...Array.from({ length: 20 }, (_, i) => ({ t: i * 10, tEnd: i * 10 + 5, inclusive: 5 + (i % 3), self: 5 })),
-                  { t: 999, tEnd: 1049, inclusive: 50, self: 50 }];
-    const h = histogram(acts, 10);
-    expect(h.bars).toHaveLength(10);
-    expect(h.bars[9].mark).toBe(true);
-    expect(h.bars[5].mark).toBe(false);                    // 長い順の上位の無い棒
-    expect(h.longest[0].t).toBe(999);
-    expect(h.longest.map((a) => a.inclusive)).toEqual([...h.longest.map((a) => a.inclusive)].sort((a, b) => b - a));
-    expect(longestIn(h, 9)?.t).toBe(999);
+  const dist = { number: 15, bins: 3, longest_limit: 2,
+    histogram: [{ lo: 10, hi: 20, count: 1, longest: { t: 0, t_end: 10, inclusive: 10 } },
+                { lo: 20, hi: 30, count: 0, longest: null },
+                { lo: 30, hi: 40, count: 2, longest: { t: 300, t_end: 340, inclusive: 40 } }],
+    longest: [{ t: 300, t_end: 340, inclusive: 40, bin: 2 }, { t: 200, t_end: 230, inclusive: 30, bin: 2 }] };
+
+  it("記録の割り込みはデーモン（recording.interrupts）が数えたまま。分布は API の箱・上位・箱ごとの最長", async () => {
+    const conn = new FakeConn({ "recording.interrupts": (p: any) => ({ timebase_hz: 10, exceptions: [{ exception: 15,
+      name: "SysTick", count: 1, total_inclusive: 10, total_self: 10, inclusive: { min: 10, max: 10, mean: 10 }, load: 0.01,
+      max_at: 10, max_end: 20 }], ...(p.number !== undefined ? { distribution: dist } : {}), ...(p.at !== undefined
+      ? { at_numbers: [16, 15] } : {}) }) });
+    const r = await recordedIsrs(conn as any, null);
+    expect(r.hz).toBe(10);
+    expect(r.stats[0]).toMatchObject({ name: "SysTick", count: 1, total: 1, load: 0.01 });
+    expect(r.histogram).toBeNull();
+    const h = (await recordedIsrs(conn as any, { number: 15, bins: 3, longest: 2 })).histogram!;
+    expect(conn.calls.at(-1)).toEqual(["recording.interrupts", { number: 15, bins: 3, longest: 2 }]);
+    expect(h.bars.map((b) => [b.x0, b.y, b.mark])).toEqual([[10, 1, false], [20, 0, false], [30, 2, true]]);
+    expect(h.longest.map((a) => a.t)).toEqual([300, 200]);
+    expect(longestIn(h, 2)?.t).toBe(300);
+    expect(longestIn(h, 1)).toBeNull();
     expect(longestIn(h, null)).toBeNull();
-    expect(histogram([]).bars).toEqual([]);
-    const few = histogram([3, 5, 5, 4].map((d, i) => ({ t: i, tEnd: i + d, inclusive: d, self: d })), 24);
-    expect(few.bars.map((b) => [b.x0, b.y])).toEqual([[2.5, 1], [3.5, 1], [4.5, 2]]);     // 1 つの値に 1 本
+    expect(await isrAt(conn as any, 205)).toBe(15);                      // いちばん内側 = 実行中
   });
 
-  it("記録の割り込みは SQL で読む", async () => {
-    const conn = new FakeConn({ "recording.query": (p: any) => (p.sql.includes("MIN(t)") ? { rows: [[0, 1000, 10]] }
-      : { rows: [[10, 20, 15, "SysTick"]], truncated: false }) });
-    const r = await recordedIsrs(conn as any);
-    expect(r.hz).toBe(10);
-    expect(r.stats[0]).toMatchObject({ name: "SysTick", count: 1, total: 1, load: 10 / 1000 });
+  it("時間の単位が分からなければ秒にしない（1 で割って秒として出さない）", () => {
+    expect(statsFromProfile({ exceptions: [{ exception: 15, name: "S", count: 1, total_inclusive: 10, total_self: 10,
+      inclusive: { min: 10, max: 10, mean: 10 } }] })[0]).toMatchObject({ total: 10 });
+    expect(profileHz({ clock_hz: 16e6 })).toBe(16e6);
+    expect(profileHz({ timebase_hz: 1e6 })).toBe(1e6);
+    expect(profileHz({})).toBeNull();
   });
 });
 
@@ -194,10 +166,17 @@ describe("Call Graph", () => {
     { function: "c", frame: 8, frame_source: "su", max: 8, bounded: false, reasons: ["再帰: c → c"], unknown_from: [],
       path: ["c"], calls: ["c"] },
   ];
-  const roots = rootsOf({ roots: [{ root: "h", kind: "exception", max: 4, bounded: true, path: ["h"] },
-                                   { root: "reset", kind: "reset", max: 40, bounded: true, path: ["reset", "a", "b"] }] });
+  const roots = rootsOf({ roots: [{ root: "reset", kind: "reset", max: 40, bounded: true, path: ["reset", "a", "b"] },
+                                   { root: "h", kind: "exception", max: 4, bounded: true, path: ["h"] }] });
 
-  it("根はリセット → 例外の順、木は開いた所だけ、再帰はそれ以上開かない", () => {
+  it("根は API の並びのまま（画面で種類・大きさの順に並べ替えない）。重複は除く", () => {
+    const api = [{ root: "u", kind: "uncalled", max: 99, bounded: true, path: ["u"] },
+                 { root: "h", kind: "exception", max: 4, bounded: true, path: ["h"] },
+                 { root: "h", kind: "exception", max: 4, bounded: true, path: ["h"] }];
+    expect(rootsOf({ roots: api }).map((r) => r.root)).toEqual(["u", "h"]);
+  });
+
+  it("根は API の並び、木は開いた所だけ、再帰はそれ以上開かない", () => {
     expect(roots.map((r) => r.root)).toEqual(["reset", "h"]);
     expect(treeRows(fns, roots, new Set()).map((r) => r.name)).toEqual(["reset", "h"]);
     const rows = treeRows(fns, roots, new Set(["reset", "reset/a", "reset/c", "reset/c/c"]));
@@ -206,5 +185,18 @@ describe("Call Graph", () => {
     expect(rows.filter((r) => r.deepest).map((r) => r.key)).toEqual(["reset/a", "reset/a/b"]);    // 根の下の経路
     expect(rows.find((r) => r.name === "h")!.fn).toBeNull();
     expect(deepestKeys(roots[0])).toEqual(["reset", "reset/a", "reset/a/b"]);
+  });
+});
+
+describe("RTOS Objects の種類のタブ", () => {
+  it("タブは API の kind そのもの（名前の接尾辞で種類をまとめない。知らない RTOS の型も自分のタブ）", async () => {
+    const { objectKinds, objectsOfKind } = await import("../src/lib/rtos");
+    const objects = [{ kind: "k_msgq" }, { kind: "queue" }, { kind: "my_rtos_mailbox" }, { kind: "queue" }, { kind: "k_sem" }];
+    expect(objectKinds(objects)).toEqual([
+      { kind: "all", count: 5 }, { kind: "k_msgq", count: 1 }, { kind: "k_sem", count: 1 },
+      { kind: "my_rtos_mailbox", count: 1 }, { kind: "queue", count: 2 }]);
+    expect(objectsOfKind(objects, "queue")).toEqual([{ kind: "queue" }, { kind: "queue" }]);
+    expect(objectsOfKind(objects, "all")).toHaveLength(5);
+    expect(objectsOfKind(objects, "mutex")).toEqual([]);
   });
 });

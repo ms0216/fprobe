@@ -32,7 +32,7 @@ def test_i2s_formats_round_trip_signed_samples(format):
     rng = random.Random(len(format))
     frames = [(rng.randrange(-32768, 32768), rng.randrange(-32768, 32768)) for _ in range(6)]
     tr = i2s_wave(frames, word_bits=16, slot_bits=24, format=format)
-    d = decode_i2s(tr, sck=SCK, ws=WS, sd=SD, format=format, word_bits=16)
+    d = decode_i2s(tr, sck=SCK, ws=WS, sd=SD, format=format, word_bits=16, signed=True)
     left, right = pairs(d)
     # 最初のスロット（始まりが見えない）は読まないので、左の 1 つ目が抜けることがある
     assert left == [f[0] for f in frames][-len(left):] and right == [f[1] for f in frames][-len(right):]
@@ -42,11 +42,21 @@ def test_i2s_formats_round_trip_signed_samples(format):
 
 def test_i2s_word_bits_defaults_to_the_slot_and_unsigned():
     tr = i2s_wave([(0x1234, 0xFEDC), (0x0F0F, 0xF0F0), (1, 2)], word_bits=16)
-    d = decode("i2s", tr, sck=SCK, ws=WS, sd=SD, signed=False)
+    d = decode("i2s", tr, sck=SCK, ws=WS, sd=SD, signed=False, format="i2s", word_bits=None)
     left, right = pairs(d)
     assert right == [0xFEDC, 0xF0F0, 2][-len(right):] and 0x0F0F in left
     with pytest.raises(ValueError):
-        decode_i2s(tr, sck=SCK, ws=WS, sd=SD, format="right_justified")
+        decode_i2s(tr, sck=SCK, ws=WS, sd=SD, format="right_justified", word_bits=None, signed=True)
+
+
+def test_i2s_last_slot_without_its_end_is_truncated_whatever_its_length():
+    """捕捉の終わりで WS が変わっていない最後のスロットは、終わりが見えていない（truncated）。前のスロットと同じ
+    ビット数かで「完全」と決めない（スロット長が一定という仮定を使わない）。読めたビット数は fields.bits。"""
+    tr = i2s_wave([(1, 2), (3, 4), (5, 6)], word_bits=16, format="left_justified")
+    d = decode_i2s(tr, sck=SCK, ws=WS, sd=SD, format="left_justified", word_bits=16, signed=False)
+    last = d.of("left", "right")[-1]
+    assert last.value == 6 and last.fields["bits"] == 16 and last.error == "truncated"
+    assert all(a.error is None for a in d.of("left", "right")[:-1])
 
 
 # ---- パラレル ----
@@ -64,12 +74,12 @@ def test_parallel_with_clock_and_enable():
         w.set(clk, 0, t + 1e-6)
         t += 1e-6
     tr = w.build(end_s=t + 1e-6)
-    d = decode_parallel(tr, data=data_ch, clock=clk, enable=en)
+    d = decode_parallel(tr, data=data_ch, clock=clk, edge="rising", enable=en, enable_level=0)
     assert [a.value for a in d.of("word")] == [0x3, 0xA, 0xF, 0x0]
-    both = decode_parallel(tr, data=data_ch, clock=clk, edge="both")
+    both = decode_parallel(tr, data=data_ch, clock=clk, edge="both", enable=None)
     assert len(both.of("word")) == 2 * len(words)
     with pytest.raises(ValueError):
-        decode_parallel(tr, data=[0, 0])
+        decode_parallel(tr, data=[0, 0], clock=None, enable=None)
 
 
 def test_parallel_without_clock_skips_skewed_intermediate_values():
@@ -80,8 +90,9 @@ def test_parallel_without_clock_skips_skewed_intermediate_values():
         w.set(1, v >> 1 & 1, t + 20e-9)                       # 2 本目が 2 サンプル遅れる
         t += 1e-6
     tr = w.build(end_s=t)
-    assert [a.value for a in decode_parallel(tr, data=[0, 1], settle=3).of("word")] == [0b11, 0b00, 0b10]
-    assert len(decode_parallel(tr, data=[0, 1]).of("word")) > 3   # 途中の値も出る
+    assert [a.value for a in decode_parallel(tr, data=[0, 1], settle=3, clock=None,
+                                             enable=None).of("word")] == [0b11, 0b00, 0b10]
+    assert len(decode_parallel(tr, data=[0, 1], clock=None, enable=None).of("word")) > 3   # 途中の値も出る
 
 
 # ---- Manchester ----
@@ -95,7 +106,8 @@ def test_manchester_round_trip(convention, idle):
     t = 2e-6
     for bits in frames:
         t = manchester(w, 0, bits, t, bitrate=1e6, convention=convention, idle=idle) + 5e-6
-    d = decode_manchester(w.build(end_s=t), 0, bitrate=1e6, convention=convention, tolerance=0.25)
+    d = decode_manchester(w.build(end_s=t), 0, bitrate=1e6, convention=convention, tolerance=0.25, word_bits=8,
+                          msb_first=True)
     got = [a.text for a in d.of("frame")]
     assert all(0 <= a.fields["max_deviation"] < 0.1 for a in d.of("frame"))      # 揺らぎ 0.03 µs = 0.03 ビット + 量子化
     assert got[0] == "".join(map(str, frames[0])) and d.errors() == []
@@ -110,21 +122,22 @@ def test_manchester_timing_error_and_bad_params():
     w.set(0, 1, t + 0.1e-6)                                    # 半ビットより短い間
     w.set(0, 0, t + 0.2e-6)
     tr = w.build(end_s=t + 3e-6)
-    d = decode_manchester(tr, 0, bitrate=1e6, tolerance=0.2)
+    d = decode_manchester(tr, 0, bitrate=1e6, tolerance=0.2, convention="ieee", word_bits=8, msb_first=True)
     assert d.errors() and d.of("frame")[0].error == "timing"
     with pytest.raises(ValueError):
-        decode_manchester(tr, 0, bitrate=1e6, convention="nrz", tolerance=0.2)
-    with pytest.raises(ValueError):                                # 許容幅は使う側が明示する（既定の経験則を持たない）
-        decode_manchester(tr, 0, bitrate=1e6)
+        decode_manchester(tr, 0, bitrate=1e6, convention="nrz", tolerance=0.2, word_bits=8, msb_first=True)
+    with pytest.raises(TypeError, match="tolerance"):              # 許容幅は使う側が明示する（既定の経験則を持たない）
+        decode_manchester(tr, 0, bitrate=1e6, convention="ieee", word_bits=8, msb_first=True)
     with pytest.raises(ValueError):                                # 短と長の窓が重なる幅は受けない
-        decode_manchester(tr, 0, bitrate=1e6, tolerance=0.3)
+        decode_manchester(tr, 0, bitrate=1e6, tolerance=0.3, convention="ieee", word_bits=8, msb_first=True)
 
 
 def test_manchester_frame_without_a_long_interval_has_unknown_phase():
     # 同じビットだけのフレームは短い間しか無く、最初の変化が中央か境目か分からない。中央とみなして解読しない
     w = Wave(channels=1, sample_rate_hz=16e6)
     t = manchester(w, 0, [1] * 8, 2e-6, bitrate=1e6)
-    d = decode_manchester(w.build(end_s=t + 3e-6), 0, bitrate=1e6, tolerance=0.25)
+    d = decode_manchester(w.build(end_s=t + 3e-6), 0, bitrate=1e6, tolerance=0.25, convention="ieee", word_bits=8,
+                          msb_first=True)
     (frame,) = d.of("frame")
     assert frame.error == "phase_unknown" and d.of("bit") == [] and d.of("word") == []
 
@@ -140,7 +153,8 @@ def test_manchester_after_a_timing_error_waits_for_a_long_interval_instead_of_as
     level_at_glitch = 0                                   # ieee の 1 = 前半 0: 1 ビット目の前半の中に短い山を入れる
     w.set(0, 1 - level_at_glitch, t0 + 1 * T + 0.10e-6)
     w.set(0, level_at_glitch, t0 + 1 * T + 0.15e-6)
-    d = decode_manchester(w.build(end_s=end + 3e-6), 0, bitrate=1e6, tolerance=0.2)
+    d = decode_manchester(w.build(end_s=end + 3e-6), 0, bitrate=1e6, tolerance=0.2, convention="ieee", word_bits=8,
+                          msb_first=True)
     sp = d.sample_period_s
     out = [(int(((a.start + a.end) / 2 * sp - t0) // T), a.value) for a in d.of("bit")]
     assert d.of("frame")[0].error == "timing" and out

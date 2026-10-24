@@ -88,6 +88,24 @@ def test_pins_are_read_and_written_while_disconnected():
         p.pins_write(swclk=2)
 
 
+def test_a_pin_that_does_not_return_within_the_wait_is_reported_as_not_settled():
+    # 黙って打ち切らない（総点検）: 戻した線が settle_timeout_us の内に戻らなければ settled = false と待った上限を返す
+    p, links = make_probe()
+    p.pins_read()
+    out = p.pins_write(nreset=0, hold_us=10)
+    assert out["settled"] is True and out["settle_timeout_us"] == 100_000
+    link = links[0]
+    access = link.pin_access
+    written = []
+
+    def stuck_low(mask, value):                                               # 書いた後は nRESET が 0 のまま戻らない
+        written.extend([mask] if mask else [])
+        return access(mask, value) & (~0x80 if written else ~0)
+    link.pin_access = stuck_low
+    out = p.pins_write(nreset=0, hold_us=10, settle_timeout_us=2000)
+    assert out["settled"] is False and out["settle_timeout_us"] == 2000 and out["settle_us"] >= 2000
+
+
 def test_pins_are_read_through_pyocd_when_connected_and_writes_are_refused():
     p, links = make_probe()
     connected(p)
@@ -163,7 +181,7 @@ def test_speed_test_reads_writes_verifies_and_restores():
 def test_diagnose_runs_on_the_raw_path_and_leaves_the_dp_ready():
     p, links = make_probe()
     d = p.target_diagnose()
-    assert d["ok"] and d["suggested_connect"]["target"] == "stm32f401xe"
+    assert d["reached"] and d["part"]["suggested_target"] == "stm32f401xe" and d["frequencies_hz"] == [1_000_000]
     assert [s["name"] for s in d["steps"]][:2] == ["voltage", "pins"]
     assert d["steps"][0]["status"] == "skip"                                  # 偽の補助マイコンは計測値を送らない
     assert p.dp_read("CTRL/STAT")["value"] & (1 << 29)
@@ -191,6 +209,7 @@ def test_auto_connect_identifies_the_part_and_closes_the_raw_link(monkeypatch):
     status = p.target_connect("auto", frequency_hz=4_000_000)
     assert opened["target_override"] == "stm32f401xe" and opened["frequency"] == 4_000_000
     assert status["auto"]["part"]["name"] == "STM32F401xD/E" and status["auto"]["target"] == "stm32f401xe"
+    assert status["auto"]["target_source"] == "part" and status["auto"]["frequency_hz"] == 4_000_000
     assert links[0].closed and p._raw_link is None
 
 

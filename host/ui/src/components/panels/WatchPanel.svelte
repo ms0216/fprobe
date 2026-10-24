@@ -1,10 +1,12 @@
 <script lang="ts">
   // Watch: C の式を足して、止まるたびに読む（構造体・配列・ポインタは木で開く。値のダブルクリックで書く）。
   // 走っている間は、このパネルが開いていれば 1 秒ごとに走らせたまま読む（ライブ ウォッチ。Ozone・CubeIDE の Live
-  // Expressions。大域・静的の式）。つないでいなければ ELF だけで式と型を調べ、誤りをその行に出す。書き込みで中断（ウォッチポイント）
+  // Expressions。大域・静的の式）。つないでいなければ ELF だけで式と型を調べ、誤りをその行に出す。書き込みで中断（ウォッチポイント）。
+  // 値は止まっていれば debug.write_expression、走らせたまま読んでいれば watch.write で書く（どちらかを窓の上に示す）
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
+  import { exprWriteMethod } from "../../lib/valuewrite";
   import type { VarNode } from "../../lib/vartree";
   import VarTree from "./VarTree.svelte";
 
@@ -15,6 +17,8 @@
     key: `w:${w.name}`, name: w.name, expr: w.name, type: w.type, value: w.value, error: w.error,
   })));
   const live = $derived(!$dbg.stop && $dbg.watchMode === "live");
+  // 書く API: 止まっていて古くない値か、走らせたまま読んでいる値だけ（ELF だけで調べた値は書けない）
+  const via = $derived(($dbg.stop && !$dbg.stale) || live ? exprWriteMethod($app.target?.state) : null);
 
   $effect(() => dbg.startLive());               // 開いている間だけ走らせたまま読む
 
@@ -34,8 +38,11 @@
     {:else if !$dbg.stop && $dbg.watchMode === "elf" && $dbg.watches.length}
       <span class="mode" title={$i18n("watch.elfOnlyTip")}>{$i18n("watch.elfOnly")}</span>
     {/if}
+    {#if via && $dbg.watches.length}
+      <span class="mode mono" title={$i18n("write.viaTip", { api: via })}>✎ {via}</span>
+    {/if}
   </form>
-  <VarTree {roots} {dbg} gen={$dbg.gen} stops={$dbg.stops} writable={!!$dbg.stop && !$dbg.stale}>
+  <VarTree {roots} {dbg} gen={$dbg.gen} stops={$dbg.stops} {via}>
     {#snippet ops(node: VarNode)}
       <button class="small" title={$i18n("watch.watchpointTip")} disabled={!connected}
               onclick={async () => (await allowed(app)) && dbg.setWatchpoint(node.name)}>{$i18n("watch.watchpoint")}</button>

@@ -1,7 +1,7 @@
 // 主スタック（MSP）の使用量（lib/stack.ts）: target.stack.paint（塗る）と target.stack.usage（読む）
 import { describe, expect, it } from "vitest";
 import { readUsage, usagePercent } from "../src/lib/stack";
-import { FakeConn } from "./fake-conn";
+import { FakeConn, deviceError } from "./fake-conn";
 
 describe("readUsage", () => {
   it("使用量をそのまま返す（読み取りは quiet）", async () => {
@@ -12,7 +12,7 @@ describe("readUsage", () => {
   });
 
   it("塗っていない等の誤りは文で", async () => {
-    const conn = new FakeConn({ "target.stack.usage": () => { throw new Error("RuntimeError: 塗っていない"); } });
+    const conn = new FakeConn({ "target.stack.usage": () => { throw deviceError("塗っていない"); } });
     expect(await readUsage(conn)).toEqual({ usage: null, error: "塗っていない" });
   });
 });
@@ -26,10 +26,13 @@ describe("usagePercent", () => {
 
 describe("boundsParams（範囲を人が明示する）", async () => {
   const { boundsParams } = await import("../src/lib/stack");
-  it("書いた欄だけ（16 進・10 進）。空なら ELF から（送らない）", () => {
+  it("書いた欄だけ（16 進・10 進の番地か、リンカのシンボルの名前）。空なら送らない", () => {
     expect(boundsParams("", "")).toEqual({ params: {} });
     expect(boundsParams("0x20000000", "0x20001000")).toEqual({ params: { bottom: 0x20000000, top: 0x20001000 } });
-    expect(boundsParams("x", "")).toEqual({ error: "bottom" });
+    // シンボルの名前は使う側が明示する（fprobe は _estack 等の名前の慣習で選ばない）
+    expect(boundsParams("__StackLimit", "_estack")).toEqual({ params: { limit_symbol: "__StackLimit", top_symbol: "_estack" } });
+    expect(boundsParams("0xZZ", "")).toEqual({ error: "bottom" });
+    expect(boundsParams("", "a b")).toEqual({ error: "top" });
   });
 
   it("使用量の読み取りにも渡す", async () => {

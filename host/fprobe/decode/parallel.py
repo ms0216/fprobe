@@ -1,26 +1,33 @@
 """パラレルバスの解読。仕様: docs/superpowers/specs/2026-10-18-u20-decoders-design.md
 
 data のチャンネルを並べた値（data[0] がビット 0）を、clock があればその辺（直前の値）で、無ければ値が変わるたびに読む。
-enable を与えると、その線が enable_level の間だけ読む。クロックの無いバスでは settle サンプルより短く続いた値
-（線ごとの変化のずれの途中の値）を捨てる。
+enable を与えると、その線が enable_level の間だけ読む（edge・enable_level は線を与えたときだけ渡す。既定を持たない）。
+クロックの無いバスでは settle サンプルより短く続いた値（線ごとの変化のずれの途中の値）を捨てる。
 """
 
 from ..la import Transitions
-from .core import Annotation, Decoding, project
+from .core import Annotation, Channel, Decoding, project
 
 __all__ = ["decode_parallel"]
 
 EDGES = ("rising", "falling", "both")
 
 
-def decode_parallel(tr: Transitions, *, data: list[int], clock: int | None = None, edge: str = "rising",
-                    enable: int | None = None, enable_level: int = 0, settle: int = 0) -> Decoding:
-    """パラレルバスを解読する。"""
+def decode_parallel(tr: Transitions, *, data: list[Channel], clock: Channel | None, enable: Channel | None,
+                    edge: str | None = None, enable_level: int | None = None, settle: int = 0) -> Decoding:
+    """パラレルバスを解読する。clock・enable は既定を持たない（つながない線は None を明示）。edge は clock を、
+    enable_level は enable を与えたときだけ、かつそのときは必ず渡す（既定の辺・極性で補わない）。"""
+    if (clock is None) != (edge is None):
+        raise ValueError("edge は clock を与えたときだけ、必ず渡す（rising / falling / both）")
+    if (enable is None) != (enable_level is None):
+        raise ValueError("enable_level は enable を与えたときだけ、必ず渡す（0 か 1）")
+    if enable_level not in (None, 0, 1):
+        raise ValueError(f"enable_level は 0 か 1（{enable_level}）")
     if not data:
         raise ValueError("data のチャンネルが要る")
     if len(set(data)) != len(data) or clock in data or (enable is not None and enable in data):
         raise ValueError("チャンネルが重なっている")
-    if edge not in EDGES:
+    if edge is not None and edge not in EDGES:
         raise ValueError(f"辺は {EDGES} のどれか（{edge!r}）")
     if settle < 0:
         raise ValueError(f"settle は 0 以上（{settle}）")

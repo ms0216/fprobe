@@ -9,6 +9,7 @@ from fprobe.decode import (Annotation, Decoding, decode, decode_on, decoder, dec
 from fprobe.decode.synth import Wave, uart
 
 BAUD = 115200
+F8N1 = {"data_bits": 8, "parity": "none", "stop_bits": 1, "invert": False, "lsb_first": True}   # UART の枠の設定（必須）
 
 
 def capture(data=b"AB"):
@@ -23,10 +24,41 @@ def test_builtin_decoders_are_listed_with_their_parameters():
     uart_info = get_decoder("uart").describe()
     assert uart_info["lower"] == [] and uart_info["origin"] == "builtin"
     params = {p["name"]: p for p in uart_info["params"]}
-    assert params["channel"]["required"] and params["baud"] == {"name": "baud", "required": False, "default": None}
+    assert params["channel"]["required"] and params["baud"] == {"name": "baud", "required": True, "nullable": False,
+                                                                "type": "number"}
     assert get_decoder("swd").default_kinds == ("transfer",)
     with pytest.raises(ValueError):
         get_decoder("nothing")
+
+
+def test_parameters_declare_their_type_from_the_annotation_and_channels_are_marked():
+    # 画面は設定の名前（scl・enable 等）でチャンネルかを推さず、解読器が型で申告した事実（type）で欄を決める
+    def types(name):
+        return {p["name"]: p["type"] for p in get_decoder(name).describe()["params"]}
+    assert types("uart") == {"channel": "channel", "baud": "number", "data_bits": "integer", "parity": "string",
+                             "stop_bits": "number", "invert": "boolean", "lsb_first": "boolean"}
+    assert types("spi")["sck"] == "channel" and types("spi")["mosi"] == "channel" and types("spi")["mode"] == "integer"
+    assert types("i2c") == {"scl": "channel", "sda": "channel"}
+    assert types("swd")["drive"] == "channel" and types("swd")["turnaround"] == "integer"
+    assert types("jtag")["trst"] == "channel" and types("jtag")["ir_names"] is None      # str | dict: 1 つの型でない
+    assert types("i2s")["ws"] == "channel" and types("i2s")["word_bits"] == "integer"
+    par = types("parallel")
+    assert par["data"] == "channels" and par["clock"] == "channel" and par["enable"] == "channel"
+    assert par["enable_level"] == "integer" and par["edge"] == "string"
+    assert types("manchester")["channel"] == "channel" and types("can")["channel"] == "channel"
+    assert types("onewire") == {"channel": "channel", "overdrive": "boolean", "timing": "object"}
+    assert types("jtag_arm")["ir_offset"] == "integer"
+
+
+def test_a_user_decoder_without_annotations_has_no_type():
+    def plain(tr, channel, *, speed):
+        return Decoding([], tr.sample_period_s, {})
+    register("plain_test", plain)
+    try:
+        assert {p["name"]: p["type"] for p in get_decoder("plain_test").describe()["params"]} == {
+            "channel": None, "speed": None}
+    finally:
+        unregister("plain_test")
 
 
 def _upper(lower: Decoding, *, prefix: str = ">") -> Decoding:
@@ -39,16 +71,17 @@ def _upper(lower: Decoding, *, prefix: str = ">") -> Decoding:
 def test_stacked_decoder_reads_the_lower_decoding_named_by_its_settings_key():
     register("upper", _upper, lower=("uart",), summary="試験用")
     try:
-        d = decode("upper", capture(), uart={"channel": 1, "baud": BAUD}, prefix="#")
+        d = decode("upper", capture(), uart={"channel": 1, "baud": BAUD, **F8N1}, prefix="#")
         assert [a.text for a in d] == ["#AB"]
-        assert d.params == {"prefix": "#", "uart": get_decoder("uart").function(capture(), 1, baud=BAUD).params}
+        assert d.params == {"prefix": "#", "uart": get_decoder("uart").function(capture(), 1, baud=BAUD, **F8N1).params}
         assert d.sample_period_s == pytest.approx(1 / (BAUD * 16))
-        lower = decode("uart", capture(), channel=1, baud=BAUD)
+        lower = decode("uart", capture(), channel=1, baud=BAUD, **F8N1)
         assert decode_on("upper", lower).annotations[0].text == ">AB"
         with pytest.raises(ValueError, match="uart"):
             decode("upper", capture(), prefix="#")                    # 下の設定が無い
         with pytest.raises(ValueError):
-            decode_on("upper", decode("spi", capture(), sck=0, mosi=1))   # 下の種類が違う
+            decode_on("upper", decode("spi", capture(), sck=0, mosi=1, miso=None, cs=None, mode=0, msb_first=True,
+                                      word_bits=8, cs_active_low=True))  # 下の種類が違う
     finally:
         unregister("upper")
     assert "upper" not in {d.name for d in decoders()}
@@ -91,7 +124,8 @@ def test_user_file_is_loaded_and_reloaded_replacing_its_own_decoders(tmp_path):
     try:
         assert load_file(path) == ["shout"]
         assert get_decoder("shout").origin == str(path.resolve())
-        assert [a.text for a in decode("shout", capture(b"ab"), uart={"channel": 1, "baud": BAUD})] == ["A", "B"]
+        assert [a.text for a in decode("shout", capture(b"ab"),
+                                       uart={"channel": 1, "baud": BAUD, **F8N1})] == ["A", "B"]
         path.write_text(path.read_text(encoding="utf-8").replace('"shout"', '"yell"'), encoding="utf-8")
         assert load_file(path) == ["yell"]                          # 同じファイルの前の登録は消える
         assert "shout" not in {d.name for d in decoders()}
@@ -131,6 +165,6 @@ def test_decoder_must_return_a_decoding():
     register("bad", lambda lower: None, lower=("uart",))
     try:
         with pytest.raises(TypeError):
-            decode("bad", capture(), uart={"channel": 1, "baud": BAUD})
+            decode("bad", capture(), uart={"channel": 1, "baud": BAUD, **F8N1})
     finally:
         unregister("bad")

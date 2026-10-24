@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--baseline", type=Path, help="--only-changed の比較の元の対応表（既定は前回）")
     ins.add_argument("--no-branches", action="store_true", help="分岐に入れない（関数の入口・出口と変数だけ）")
     ins.add_argument("--renumber", action="store_true", help="ID を 1 から振り直す")
+    ins.add_argument("--non-type-word", action="append", default=[],
+                     help="戻り値の型の中の型でない語（記憶域のマクロ等。一時変数の型から除く。繰り返せる）")
     hdr = sub.add_parser("header", help="fprobe_tp.h を置く")
     hdr.add_argument("out", type=Path)
     args = ap.parse_args(argv)
@@ -42,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     map_path = args.map or args.out / "testpoints.json"
     previous = ProbeTable.load(map_path) if map_path.exists() else None
     options = Options(branches=not args.no_branches, variables=tuple(WatchVar.parse(v) for v in args.var),
-                      include=tuple(args.include), exclude=tuple(args.exclude), only_changed=args.only_changed)
+                      include=tuple(args.include), exclude=tuple(args.exclude), only_changed=args.only_changed,
+                      non_type_words=tuple(args.non_type_word))
     baseline = ProbeTable.load(args.baseline) if args.baseline else None
     result = instrument_tree(args.src, args.out, options=options, previous=previous, baseline=baseline,
                              map_path=map_path, renumber=args.renumber)

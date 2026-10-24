@@ -110,6 +110,7 @@ def test_status_shows_both_cores_and_returns_to_the_connected_dp():
     p, flushed = connected(bus)
     status = p.target_status()
     assert status["core"] == 0 and status["state"] == "HALTED"
+    assert status["rescue_dp"] == 0xF1002927                   # 部品の表の救済の DP（画面は品種名で判断しない）
     cores = {c["core"]: c for c in status["cores"]}
     assert cores[0] == {"core": 0, "selected": True, "state": "HALTED", "pc": 0x10000200, "where": "0x10000200"}
     assert cores[1]["selected"] is False and cores[1]["state"] == "HALTED" and cores[1]["pc"] == 0x20000040
@@ -133,7 +134,7 @@ def test_the_other_core_can_be_halted_and_resumed():
 
 def test_status_without_multidrop_has_no_cores_and_core_needs_a_multidrop_target():
     p, _ = connected(None, target="stm32f401xe", core=None)
-    assert "cores" not in p.target_status()
+    assert "cores" not in p.target_status() and "rescue_dp" not in p.target_status()
     with pytest.raises(ValueError, match="複数ドロップ"):
         p.target_halt(core=1)
 

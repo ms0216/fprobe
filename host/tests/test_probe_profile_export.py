@@ -62,6 +62,10 @@ def test_aggregate_in_a_time_window(probe):
     assert by_file["rows"][0]["group"].endswith("sram_demo.c") and by_file["rows"][0]["samples"] == 15
     named = probe.profile_aggregate(by="groups", groups={"timer": ["tick"]})
     assert {r["group"]: r["samples"] for r in named["rows"]} == {"timer": 10, "(other)": 5}
+    split = probe.profile_aggregate(by="prefix", separator="_")                   # 区切りは使う側が明示する
+    assert {r["group"]: r["samples"] for r in split["rows"]} == {"tick": 10, "reached": 5}
+    with pytest.raises(ValueError, match="separator"):
+        probe.profile_aggregate(by="prefix")
     lines = probe.profile_aggregate(by="line", function="tick", t1_s=0.005)
     assert lines["by"] == "line" and sum(r["samples"] for r in lines["rows"]) == 5
 
@@ -138,6 +142,9 @@ def test_testpoint_aggregate_in_a_window(probe):
     assert rows["reset_handler"]["exclusive_s"] == pytest.approx(5e-6)
     grouped = probe.testpoint_aggregate(by="file")
     assert {g["group"] for g in grouped["rows"]} == {"src/a.c", "src/b.c"}
+    cut = probe.testpoint_aggregate(top=1)                                    # 切ったら総数・印・上限（?45）
+    assert len(cut["rows"]) == 1 and cut["rows_total"] == len(whole) and cut["rows_truncated"] and cut["top"] == 1
+    assert grouped["rows_total"] == 2 and not grouped["rows_truncated"]
 
 
 def test_testpoint_export(probe, tmp_path):
@@ -156,3 +163,11 @@ def test_testpoint_export(probe, tmp_path):
     assert len(written["written"]) == 2
     with pytest.raises(ValueError, match="format"):
         probe.testpoint_export("vcd", str(tmp_path / "x"))
+
+
+def test_rows_total_tells_what_top_cut(probe):
+    """上位 top で切った表は、切る前の行の数（rows_total）も返す（切ったことが分かる）"""
+    set_profile(probe)
+    whole = probe.profile_aggregate(top=1)
+    assert len(whole["rows"]) == 1 and whole["rows_total"] == 2
+    assert probe.profile_aggregate(top=100)["rows_total"] == 2

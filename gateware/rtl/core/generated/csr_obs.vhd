@@ -30,6 +30,7 @@ entity csr_obs is
     words : out std_logic_vector(8 downto 0);   -- words（RW）
     sync_period : out std_logic_vector(15 downto 0);   -- sync_period（RW）
     cmd : out std_logic_vector(15 downto 0);   -- cmd（RW）
+    id_scans : out std_logic_vector(7 downto 0);   -- id_scans（RW）
     cmd_push : out std_logic;   -- cmd_push（PULSE: 1 を書いた次の周期に 1）
     status_running : in  std_logic;   -- status.running（RO）
     status_id_ok : in  std_logic;   -- status.id_ok（RO）
@@ -39,6 +40,7 @@ entity csr_obs is
     status_cmd_dropped : in  std_logic;   -- status.cmd_dropped（RO）
     status_target_running : in  std_logic;   -- status.target_running（RO）
     status_driving : in  std_logic;   -- status.driving（RO）
+    status_id_timeout : in  std_logic;   -- status.id_timeout（RO）
     scans : in  std_logic_vector(31 downto 0);   -- scans（RO）
     read_value : in  std_logic_vector(31 downto 0);   -- read_value（RO）
     id : in  std_logic_vector(31 downto 0);   -- id（RO）
@@ -68,6 +70,7 @@ architecture rtl of csr_obs is
   signal words_r : std_logic_vector(8 downto 0) := "000010000";
   signal sync_period_r : std_logic_vector(15 downto 0) := "0000000000010000";
   signal cmd_r : std_logic_vector(15 downto 0) := "0000000000000000";
+  signal id_scans_r : std_logic_vector(7 downto 0) := "00000000";
   signal cmd_push_r : std_logic := '0';
   signal match_mask_r : std_logic_vector(15 downto 0) := "0000000000000000";
   signal match_value_r : std_logic_vector(15 downto 0) := "0000000000000000";
@@ -97,6 +100,7 @@ begin
         words_r <= "000010000";
         sync_period_r <= "0000000000010000";
         cmd_r <= "0000000000000000";
+        id_scans_r <= "00000000";
         match_mask_r <= "0000000000000000";
         match_value_r <= "0000000000000000";
         match_change_change_r <= "0000000000000000";
@@ -149,6 +153,11 @@ begin
             if bus_we = '1' then
               cmd_r <= bus_wdata(15 downto 0);
             end if;
+          when 7 =>   -- id_scans
+            rdata(7 downto 0) <= id_scans_r;
+            if bus_we = '1' then
+              id_scans_r <= bus_wdata(7 downto 0);
+            end if;
           when 8 =>   -- cmd_push
             if bus_we = '1' then
               cmd_push_r <= bus_wdata(0);
@@ -162,6 +171,7 @@ begin
             rdata(5) <= status_cmd_dropped;
             rdata(6) <= status_target_running;
             rdata(7) <= status_driving;
+            rdata(8) <= status_id_timeout;
           when 10 =>   -- scans
             rdata(31 downto 0) <= scans;
           when 11 =>   -- read_value
@@ -206,6 +216,7 @@ begin
   words <= words_r;
   sync_period <= sync_period_r;
   cmd <= cmd_r;
+  id_scans <= id_scans_r;
   cmd_push <= cmd_push_r;
   match_mask <= match_mask_r;
   match_value <= match_value_r;

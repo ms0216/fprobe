@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from dwarf_stack import StackBuilder
 from pyocd.core import exceptions as pyocd_errors
+from value_kinds import venum, vint
 
 from fprobe.debug import Debugger, PyocdAccess
 from fprobe.dwarf.access import AccessError, ImageAccess
@@ -79,12 +80,12 @@ def test_backtrace_uses_cfi_and_reports_call_lines(halted):
 def test_expressions_and_frame_variables(halted):
     dbg, _ = halted
     assert dbg.evaluate("head->next->name")["value"]["string"] == "beta"
-    assert dbg.evaluate("depth", frame=3)["value"] == 1
+    assert dbg.evaluate("depth", frame=3)["value"] == vint(1)
     assert dbg.frame_variables(0) == {"function": "probe_point", "arguments": [
-        {"name": "marker", "type": "int", "value": 77, "line": line_of("void probe_point"),
-         "address": dbg.evaluate("&marker")["value"]["pointer"]}], "locals": []}
+        {"name": "marker", "type": "int", "value": vint(77), "line": line_of("void probe_point"),
+         "address": dbg.evaluate("&marker")["value"]["address"]}], "locals": []}
     dbg.write_expression("sensors[1].mode", "MODE_IDLE")
-    assert dbg.evaluate("sensors[1].mode")["value"] == {"enum": "MODE_IDLE", "value": 0}
+    assert dbg.evaluate("sensors[1].mode")["value"] == venum("MODE_IDLE", 0)
     assert dbg.type_info("union Word")["size"] == 4
 
 
@@ -92,7 +93,7 @@ def test_without_dwarf_the_simple_backtrace_remains():
     image = ImageAccess([(0x2000_1000, (0x1234).to_bytes(4, "little"))],
                         {"pc": 0x100, "lr": 0x201, "xpsr": 0, "msp": 0x2000_1000, "psp": 0})
     frames = Debugger(FakeTarget(image)).backtrace()
-    assert [(f.pc, f.note) for f in frames] == [(0x100, ""), (0x200, "")]
+    assert [(f.pc, f.note) for f in frames] == [(0x100, ""), (0x200, "lr_without_cfi")]   # LR からの推定の印
     with pytest.raises(RuntimeError):
         Debugger(FakeTarget(image)).evaluate("x")
 

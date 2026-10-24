@@ -41,7 +41,7 @@ host/fprobe/probe_decode.py  la_decoders・la_decoder_load・la_export・la_load
 
 | 名前 | 主な設定 | 注釈の種類 | 要点 |
 |---|---|---|---|
-| can | channel・bitrate・data_bitrate・sample_point・data_sample_point・invert | frame・sof・id・control・data・stuff_count・crc・ack/nack・eof・error | サンプル点で読み、次のサンプル点の前の変化で再同期。スタッフの除去と 6 連続の誤り。CRC-15 / FD の CRC-17・21（ISO: 初期値の最上位 1、ダイナミックスタッフを含めて計算、固定スタッフ、スタッフ数のグレイ符号とパリティ）。BRS のサンプル点〜CRC 区切りのサンプル点はデータのビットレート。SOF は劣勢 10.5 ビット以上の後。誤り: stuff・form・crc・stuff_count・ack・data_bitrate・truncated |
+| can | channel・bitrate・data_bitrate・sample_point・data_sample_point・invert | frame・sof・id・control・data・stuff_count・crc・ack/nack・eof・error | サンプル点で読み、次のサンプル点の前の変化で再同期。スタッフの除去と 6 連続の誤り。CRC-15 / FD の CRC-17・21（ISO: 初期値の最上位 1、ダイナミックスタッフを含めて計算、固定スタッフ、スタッフ数のグレイ符号とパリティ）。BRS のサンプル点〜CRC 区切りのサンプル点はデータのビットレート。SOF は劣勢をサンプル点で 11 ビット（ISO 11898-1 の休止）読んだ後。誤り: stuff・form・crc・stuff_count・ack・data_bitrate・truncated |
 | onewire | channel・overdrive | reset・presence・bit・rom_command・rom・data | 0 の長さでビット / リセットを区別。リセット直後の 0 はプレゼンス。ROM コマンド（READ・MATCH・SKIP・SEARCH・ALARM・OD SKIP・OD MATCH・RESUME）、ROM の CRC-8、SEARCH の三つ組から ROM を組み立て、OD コマンドの後はオーバードライブ、標準のリセットで戻る |
 | jtag | tck・tms・tdi・tdo・trst・initial_state・ir_names | state・reset・ir・dr | TCK の立ち上がりで TAP を進める。Pause を挟むシフトは Update まで 1 つ。初めの状態が分からなければ TMS = 1 の 5 回で同期。誤り: aborted・truncated |
 | jtag_arm（jtag の上） | ir_bits・ir_offset・dr_offset | access・idcode | DPACC / APACC の 35 ビットを要求と応答に。読みの値は次の走査で返る（previous に元の要求）。WAIT は error="wait"。鎖の中の DP の位置を offset で |

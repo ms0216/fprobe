@@ -85,8 +85,10 @@ class StructLayout:
 class Memory:
     """ターゲットのメモリの小さな読み（リトルエンディアン）。"""
 
-    def __init__(self, read_memory: Callable[[int, int], bytes]):
+    def __init__(self, read_memory: Callable[[int, int], bytes],
+                 on_truncated: Callable[[int, int], None] | None = None):
         self.read = read_memory
+        self.on_truncated = on_truncated          # cstring が上限で切ったとき (番地, 使った上限) で呼ぶ
 
     def u8(self, address: int) -> int:
         return self.read(address, 1)[0]
@@ -97,6 +99,10 @@ class Memory:
     def uint(self, address: int, size: int, signed: bool = False) -> int:
         return int.from_bytes(self.read(address, size), "little", signed=signed)
 
-    def cstring(self, address: int, limit: int) -> str:
+    def cstring(self, address: int, limit: int, whole: bool = False) -> str:
+        """NUL までの文字列（limit バイトまで）。whole = limit がその文字の配列の大きさそのもの（切ったのではない）。
+        そうでなく limit までに NUL が無ければ on_truncated(番地, limit) で知らせる（黙って切らない）。"""
         data = self.read(address, limit)
+        if b"\0" not in data and not whole and self.on_truncated is not None:
+            self.on_truncated(address, limit)
         return data.split(b"\0", 1)[0].decode("utf-8", errors="replace")

@@ -58,6 +58,17 @@ def test_the_summary_has_the_same_rows_as_the_raw_lane(recorded):
     assert max(h for h in highs if h == h) == 18.0                          # 最後の count（k = 18）
 
 
+def test_a_broken_signal_definition_is_reported_on_the_lane(recorded):
+    # 壊れた信号の定義を黙って空にしない: 組の値の段で見せ、壊れていたことを段に出す（?70）
+    recorded.update_meta(**{"fpga.signals": {"groups": {"0": [{"name": "x", "lsb": 40, "width": 1}]}}})
+    ln = lane(recording_tile(recorded, 0, 20_000))[1]
+    assert ln["signals_error"] and "0" in rows_by_title(ln)
+    summary = lane(recording_tile(recorded, 0, 20_000, bin=64, max_events=5))[1]
+    assert summary["signals_error"] == ln["signals_error"]
+    fine = lane(recording_tile(recorded.__class__.open(recorded.directory), 0, 20_000))[1]
+    assert fine["signals_error"]                                         # 記録の情報に残っている限り出る
+
+
 def test_renaming_after_the_recording_changes_the_rows_of_the_past(recorded):
     recorded.update_meta(**{"fpga.signals": {"groups": {"0": [{"name": "pulse", "lsb": 0, "width": 1}]}}})
     titles = set(rows_by_title(lane(recording_tile(recorded, 0, 20_000))[1]))
@@ -68,6 +79,23 @@ def test_values_before_the_range_are_carried_in(recorded):
     # 範囲の始め（15_500）の前の最後の値（15_000）から、状態の帯が続いて見える
     i, ln = lane(recording_tile(recorded, 15_500, 15_900))
     assert ln["items"] > 0 and {"RUN", "IDLE"} & set(ln["labels"])
+
+
+def test_the_lane_tells_from_when_the_values_before_the_range_were_searched(recorded, tmp_path):
+    # 黙って打ち切らない（総点検）: 範囲の前の値を探した始め（carry_from）と、探すべき所を探し切ったか（carry_complete）。
+    # 組の切り替えの記録があれば、最後の切り替え（1000）から探し切る
+    i, ln = lane(recording_tile(recorded, 15_500, 15_900))
+    assert ln["carry_from"] == 1000 and ln["carry_complete"] is True
+    i, ln = lane(recording_tile(recorded, 500, 12_000))                    # 記録の始めより前: 探すものが無い
+    assert ln["carry_from"] is None and ln["carry_complete"] is True
+    # 切り替えの記録の無い古い記録: 範囲の幅の 16 倍前（9100）で組 0 が見つかって止める。組 2 の最後の値（5000）は
+    # 探した範囲の外: 範囲の始めの値が分からないのは、探していないから（無いのではない）
+    rec = Recorder(tmp_path / "old", timebase_hz=HZ, meta={"fpga.signals": DEFS})
+    rec.add("fpga", "value", 5000, a=2, b=0xBEEF)
+    rec.add("fpga", "value", 15_000, a=0, b=0x0111)
+    rec.flush()
+    i, ln = lane(recording_tile(Recording.open(rec.directory), 15_500, 15_900))
+    assert ln["carry_from"] == 15_500 - 400 * 16 and ln["carry_complete"] is False
 
 
 @pytest.fixture

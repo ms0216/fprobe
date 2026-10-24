@@ -2,7 +2,7 @@
 原因・故障した命令の番地・その時のレジスタを言葉で返す（IAR の Fault exception viewer・Ozone の相当）。
 
     report = analyze(target, symbols)       # target: read32 / read_core_register（pyOCD の CortexM と同じ）
-    report["causes"]                        # [{"bit": "NOCP", "meaning": ..., "hint": ...}]
+    report["causes"]                        # [{"bit": "NOCP", "register": "UFSR", "meaning": ..., "hint": ...}]
 
 ARMv7-M / ARMv8-M（M3・M4・M7・M33）は CFSR で原因まで分かる。ARMv6-M（M0・M0+）は HardFault だけ（原因の
 レジスタが無い）なので、例外のフレームの位置だけを返す。
@@ -11,10 +11,11 @@ ARMv7-M / ARMv8-M（M3・M4・M7・M33）は CFSR で原因まで分かる。ARM
 
 from dataclasses import dataclass
 
-__all__ = ["analyze", "decode_cfsr", "decode_hfsr", "decode_dfsr"]
+__all__ = ["analyze", "decode_cfsr", "decode_hfsr", "decode_dfsr", "dfsr_bits", "halt_reason"]
 
 CPUID, ICSR, CFSR, HFSR, DFSR, MMFAR, BFAR, AFSR, CPACR = (0xE000ED00, 0xE000ED04, 0xE000ED28, 0xE000ED2C,
                                                            0xE000ED30, 0xE000ED34, 0xE000ED38, 0xE000ED3C, 0xE000ED88)
+WRITE_ONE_TO_CLEAR = ("CFSR", "HFSR", "DFSR")   # ARMv7-M / v8-M の rc_w1（1 を書いたビットを消す）
 _V6M_PARTNOS = {0xC20, 0xC60, 0xD20}       # Cortex-M0 / M0+ / M23（M23 は v8-M Baseline: CFSR が無い）
 EXCEPTIONS = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault", 7: "SecureFault",
               11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
@@ -73,27 +74,39 @@ _DFSR_BITS = (
 )
 
 
-def _decode(value: int, bits) -> list[dict]:
-    return [{"bit": b.name, "meaning": b.meaning, **({"hint": b.hint} if b.hint else {})}
+def _decode(value: int, bits, register) -> list[dict]:
+    """立っているビット。register(位置) = そのビットのレジスタの名前（CFSR は MMFSR・BFSR・UFSR の部分）。"""
+    return [{"bit": b.name, "register": register(b.position), "meaning": b.meaning, **({"hint": b.hint} if b.hint else {})}
             for b in bits if value >> b.position & 1]
 
 
+def _cfsr_part(position: int) -> str:
+    """CFSR の部分（ARMv7-M ARM B3.2.15: [7:0] MMFSR、[15:8] BFSR、[31:16] UFSR）。"""
+    return "MMFSR" if position < 8 else "BFSR" if position < 16 else "UFSR"
+
+
 def decode_cfsr(value: int) -> list[dict]:
-    return _decode(value, _CFSR_BITS)
+    return _decode(value, _CFSR_BITS, _cfsr_part)
 
 
 def decode_hfsr(value: int) -> list[dict]:
-    return _decode(value, _HFSR_BITS)
+    return _decode(value, _HFSR_BITS, lambda _: "HFSR")
 
 
 def decode_dfsr(value: int) -> list[dict]:
-    return _decode(value, _DFSR_BITS)
+    return _decode(value, _DFSR_BITS, lambda _: "DFSR")
+
+
+def dfsr_bits(dfsr: int) -> list[str]:
+    """DFSR の立っているビットの名前（HALTED / BKPT / DWTTRAP / VCATCH / EXTERNAL。ビットの順）。"""
+    return [b.name for b in _DFSR_BITS if dfsr >> b.position & 1]
 
 
 def halt_reason(dfsr: int, instruction: int | None, breakpoint: bool = False) -> str | None:
     """止まった理由を 1 語で（DFSR は pyOCD が再開・ステップのたびにクリアするので、その停止の分だけ）。
     instruction: PC の 16 ビットの命令（BKPT 0xBExx なら、デバッガが置いたもの（breakpoint=True）でなければファームウェア
-    自身の BKPT = panic・assert・セミホスティング等）。複数のビットなら具体的なほうを優先（ステップで踏んだブレークポイント等）。"""
+    自身の BKPT = panic・assert・セミホスティング等）。複数のビットなら 1 語にはそのうちの 1 つを選ぶ（BKPT・DWTTRAP・
+    VCATCH・EXTERNAL・HALTED の順）。立っていたビットは全部 dfsr_bits で添えること（1 語で事実を潰さない）。"""
     if dfsr & 0x02:
         own = instruction is not None and instruction & 0xFF00 == 0xBE00 and not breakpoint
         return "bkpt_instruction" if own else "breakpoint"
@@ -128,6 +141,11 @@ def analyze(target, symbols=None, entry_sp: int | None = None) -> dict:
         cfsr, hfsr = target.read32(CFSR), target.read32(HFSR)
         out["registers"] = {"CFSR": cfsr, "HFSR": hfsr, "DFSR": dfsr, "MMFAR": None, "BFAR": None,
                             "CPACR": target.read32(CPACR)}
+        # 読んだ番地（32 ビット）と、1 を書いたビットが消える（rc_w1）レジスタ。書く側が target.memory.write で書ける
+        out["locations"] = {name: {"address": address, "size": 4}
+                            for name, address in (("CFSR", CFSR), ("HFSR", HFSR), ("DFSR", DFSR), ("MMFAR", MMFAR),
+                                                  ("BFAR", BFAR), ("CPACR", CPACR))}
+        out["write_one_to_clear"] = list(WRITE_ONE_TO_CLEAR)
         out["causes"] = decode_hfsr(hfsr) + decode_cfsr(cfsr)
         if cfsr >> 7 & 1:
             out["registers"]["MMFAR"] = target.read32(MMFAR)
@@ -147,20 +165,24 @@ def analyze(target, symbols=None, entry_sp: int | None = None) -> dict:
 
 def _stacked_frame(target, symbols, entry_sp: int | None) -> dict | None:
     """例外に入ったときに積まれたフレーム（r0〜r3・r12・lr・pc・xpsr）。LR（EXC_RETURN）で MSP か PSP かを選ぶ。
-    ハンドラが LR を書き換えた後で止まっていると読めない（None）。"""
+    ハンドラが LR を書き換えた後で止まっていると読めない（None）。sp_source: どの SP の値を使ったか（psp = 今の PSP /
+    entry_sp = 渡された入った時の SP / msp_now = 今の MSP。ハンドラが積んだ後ならフレームからずれる）。"""
     lr = target.read_core_register("lr")
     if lr >> 24 != 0xFF:
         return None
     use_psp = bool(lr & 0x4)
     if use_psp:
-        sp = target.read_core_register("psp")             # ハンドラは MSP を使うので、PSP はフレームを指したまま
+        sp, source = target.read_core_register("psp"), "psp"   # ハンドラは MSP を使うので、PSP はフレームを指したまま
+    elif entry_sp is not None:
+        sp, source = entry_sp, "entry_sp"
     else:
-        sp = entry_sp if entry_sp is not None else target.read_core_register("msp")
+        sp, source = target.read_core_register("msp"), "msp_now"
     words = [target.read32(sp + 4 * i) for i in range(8)]
     names = ("r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr")
     regs = dict(zip(names, words))
     extended = not lr & 0x10                       # 浮動小数点の文脈も積まれている
     caller_sp = sp + (0x68 if extended else 0x20) + (4 if regs["xpsr"] >> 9 & 1 else 0)
-    return {"stack": "PSP" if use_psp else "MSP", "sp": sp, "exc_return": lr, "fp_context": extended,
+    return {"stack": "PSP" if use_psp else "MSP", "sp": sp, "sp_source": source, "exc_return": lr, "fp_context": extended,
             "registers": regs, "caller_sp": caller_sp,
+            "locations": {name: {"address": sp + 4 * i, "size": 4} for i, name in enumerate(names)},
             "pc": _place(symbols, regs["pc"]), "lr": _place(symbols, regs["lr"] & ~1)}

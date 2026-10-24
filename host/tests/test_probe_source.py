@@ -17,7 +17,7 @@ def probe():
 
 
 def test_without_an_elf_there_are_no_sources(probe):
-    assert probe.source_list() == {"files": []}
+    assert probe.source_list() == {"files": [], "same_name": {}}
     with pytest.raises(RuntimeError):
         probe.source_read("sram_demo.c")
 

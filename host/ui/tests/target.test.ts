@@ -15,6 +15,15 @@ describe("linkOf", () => {
 });
 
 describe("コア クロックの既定", () => {
+  it("SystemCoreClock は読んだ値をそのまま示す（妥当な範囲という境界で捨てない。使うかは利用者が欄で確かめる）", async () => {
+    const conn = (value: unknown) => ({ call: async () => ({ name: "SystemCoreClock", value }) });
+    expect(await coreClock(conn(500) as any)).toEqual({ mhz: 0.0005, source: "SystemCoreClock" });
+    expect(await coreClock(conn(3_000_000_000) as any)).toEqual({ mhz: 3000, source: "SystemCoreClock" });
+    expect(await coreClock(conn(12_345_678) as any)).toEqual({ mhz: 12.345678, source: "SystemCoreClock" });   // 丸めない
+    expect(await coreClock(conn(0) as any)).toEqual({ mhz: 0, source: "SystemCoreClock" });                   // 初期化前の 0 も読んだ値
+    expect(await coreClock(conn("x") as any)).toBeNull();                                                     // 数でない
+  });
+
   it("ELF に SystemCoreClock（CMSIS）があればターゲットのその値。無ければ null（品種名から典型の値を推測しない）", async () => {
     const conn = (value: unknown) => ({
       call: async (method: string, params: any) => {
@@ -26,7 +35,6 @@ describe("コア クロックの既定", () => {
     });
     expect(await coreClock(conn(48_000_000) as any, "nrf52840")).toEqual({ mhz: 48, source: "SystemCoreClock" });
     expect(await coreClock(conn(new Error("無い")) as any, "nrf52840")).toBeNull();
-    expect(await coreClock(conn(0) as any, "stm32f401xe")).toBeNull();                               // まだ初期化前
     expect(await coreClock(conn(new Error("無い")) as any, "cortex_m")).toBeNull();
   });
 });

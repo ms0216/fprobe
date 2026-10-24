@@ -26,6 +26,7 @@ class Client:
     name: str
     role: str            # "human" / "ai" / "script"
     via: str = "api"     # つながり方: api（WebSocket の JSON-RPC）/ gdb（GDB サーバ）
+    automated: bool | None = None   # hello で申告した自動操作か（画面は navigator.webdriver）。申告が無ければ None
 
 
 class Arbiter:

@@ -41,7 +41,7 @@ def packet(trice_id: int, payload: bytes, selector: int = 1, ts: int = 0, cycle:
 def test_official_example_1(table):
     d = TriceDecoder(table)
     [r] = d.feed(bytes.fromhex("818e0923c002b801a400"))
-    assert (r.text, r.id, r.timestamp, r.channel, r.args) == ("MSG: 💚 START select = 440", 3713, 9, "MSG", (440,))
+    assert (r.text, r.id, r.timestamp, r.channel, r.args) == ("MSG: 💚 START select = 440", 3713, 9, None, (440,))
     assert r.location == {"file": "src/main.c", "line": 42} and r.format == "trice"
     assert r.template == "MSG: 💚 START select = %d\\n"
 
@@ -54,10 +54,17 @@ def test_official_example_2(table):
 
 
 def test_negative_values_and_lowercase_tags(table):
-    d = TriceDecoder(table)
-    out = d.feed(bytes.fromhex("c174e22300") + bytes.fromhex("b8767b1884fee1fde1fce1fbe1fae100"))
-    assert [(r.text, r.level, r.channel) for r in out] == [("started", "info", "inf"),
-                                                           ("-1 -2 -3 -4 -5 -6", "debug", "dbg")]
+    # 行頭の「xxx:」をチャンネルとみなすのは、使う側が levels（タグ → 重要度。重要度なしは None）で明示したタグ
+    # だけ。名前の形（小文字だけ等）で決めず、本文も書き換えない（"value: 3" のような普通の文を壊さない）
+    raw = bytes.fromhex("c174e22300") + bytes.fromhex("b8767b1884fee1fde1fce1fbe1fae100")
+    out = TriceDecoder(table).feed(raw)
+    assert [(r.text, r.level, r.channel) for r in out] == [("inf:started", None, None),
+                                                           ("dbg:-1 -2 -3 -4 -5 -6", None, None)]
+    out = TriceDecoder(table, levels={"inf": "info", "dbg": None}).feed(raw)
+    assert [(r.text, r.level, r.channel) for r in out] == [("inf:started", "info", "inf"),
+                                                           ("dbg:-1 -2 -3 -4 -5 -6", None, "dbg")]
+    with pytest.raises(TriceError, match="levels"):
+        TriceDecoder(table, levels={"inf": "information"})
 
 
 def test_a_trice_without_newline_joins_the_next_one(table):
@@ -72,8 +79,8 @@ def test_strings_floats_and_buffers(table):
     data = (packet(102, b"reset") + packet(103, struct.pack("<d", 2.5), cycle=0xC1) +
             packet(104, b"\x01\xab\x10", cycle=0xC2))
     out = d.feed(data)
-    assert [r.text for r in out[:2]] == ["received command:reset", "value 2.500000"]
-    assert out[1].level == "error"
+    assert [r.text for r in out[:2]] == ["rx:received command:reset", "err:value 2.500000"]
+    assert out[1].level is None and out[1].channel is None
     assert d.feed(packet(101, b"\x05", cycle=0xC3))[0].text == "01 ab 10 end 5"
 
 
@@ -89,8 +96,10 @@ def test_cycle_errors_are_noted(table):
     d.feed(packet(100, b"\x01", cycle=0xC5) + packet(101, b"\x01", cycle=0xC6))
     [r] = d.feed(packet(101, b"\x02", cycle=0xC9))
     assert d.cycle_errors == 1 and any("2" in n for n in r.notes)
-    [r] = d.feed(packet(101, b"\x03", cycle=0xC0))                                  # 0xC0: ターゲットのリセット
-    assert d.cycle_errors == 1 and any("リセット" in n for n in r.notes)
+    # 0xC0 への飛びも、ほかの飛びと同じく数える（取りこぼしとリセットを番号だけでは区別できない。解釈しない）
+    [r] = d.feed(packet(101, b"\x03", cycle=0xC0))
+    assert d.cycle_errors == 2 and not any("リセット" in n for n in r.notes)
+    assert any("0xCA" in n and "0xC0" in n for n in r.notes)
 
 
 def test_unknown_ids_and_bad_lengths_are_undecoded(table):
@@ -119,3 +128,9 @@ def test_go_like_formatting():
         (3.14159, 32), ("hi", 0)], unsigned=True) == \
         "-1 4294967295 ff FF 10 101 true A    42|7   |0003.142 \"hi\" %"
     assert go_format("%lu %llx %p %zd", [(1, 32), (255, 64), (16, 32), (-2, 32)], unsigned=True) == "1 ff 10 -2"
+
+
+def test_framed_stream_reports_bytes_dropped_without_a_delimiter(table):
+    d = TriceDecoder(table, frame_limit=8)
+    out = d.feed(b"\x11" * 9 + b"\x00")
+    assert len(out) == 1 and out[0].error and out[0].cut_at == 8 and d.errors == 1

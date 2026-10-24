@@ -2,7 +2,8 @@
 
 線（CAN トランシーバの RXD。劣勢 = 1、優勢 = 0）を 1 本読む。ビットはサンプル点（ビットの始まりからの割合）で読み、
 次のビットの読みより前に変化点があればそこをビットの始まりとして合わせ直す（受信器の再同期と同じ考え）。
-- SOF: 劣勢が 10.5 ビット以上続いた後の優勢への変化（ACK 区切り 1 + EOF 7 + フレーム間 3 = 11 ビット）。
+- SOF: 劣勢を 11 ビット（ACK 区切り 1 + EOF 7 + フレーム間 3。ISO 11898-1 の休止）サンプル点で読んだ後の優勢への変化。
+  劣勢の始まりをビットの始まりとして、11 個目のサンプル点（10 + サンプル点のビット）が劣勢の中にあるかで決める。
 - スタッフ: SOF からデータ（クラシックは CRC まで）、同じ値が 5 個続いたら逆の値が 1 個入る（6 個続けば誤り "stuff"）。
 - CAN FD: FDF = 1 のフレーム。BRS = 1 ならその BRS のサンプル点から CRC 区切りのサンプル点までデータのビットレート。
   CRC の欄はスタッフ数（グレイ符号 3 ビット + 偶数パリティ）と CRC-17（データ 16 バイト以下）/ CRC-21 で、
@@ -13,7 +14,7 @@
 from bisect import bisect_left, bisect_right
 
 from ..la import Transitions
-from .core import Annotation, ChannelLevels, Decoding
+from .core import Annotation, Channel, ChannelLevels, Decoding
 
 __all__ = ["CRC15", "CRC17", "CRC21", "DLC_LENGTHS", "GRAY", "can_crc", "decode_can"]
 
@@ -22,7 +23,7 @@ CRC15 = (15, 0x4599, 0)                       # (幅, 多項式（最上位の�
 CRC17 = (17, 0x1685B, 1 << 16)                # ISO の CAN FD は初期値の最上位が 1
 CRC21 = (21, 0x102899, 1 << 20)
 GRAY = (0, 1, 3, 2, 6, 7, 5, 4)               # スタッフ数 mod 8 のグレイ符号
-IDLE_BITS = 10.5
+IDLE_BITS = 11                                # ISO 11898-1: 休止と認める劣勢のビット数
 
 
 def can_crc(bits, spec: tuple[int, int, int]) -> int:
@@ -143,26 +144,30 @@ class _Line:
         return self.initial ^ (bisect_right(self.edges, index) & 1)
 
     def find_sof(self, after: float, idle: float) -> int | None:
-        """after 以降で、劣勢が idle サンプル以上続いた後の優勢への変化。"""
+        """after 以降で、劣勢が idle サンプルより長く続いた後の優勢への変化（idle は最後に読むサンプル点の位置）。"""
         edges = self.edges
         for i in range(bisect_left(edges, after), len(edges)):
             if self.initial ^ ((i + 1) & 1):                    # この変化の後が劣勢: SOF ではない
                 continue
             previous = edges[i - 1] if i else 0
-            if edges[i] - previous >= idle:
+            if edges[i] - previous > idle:
                 return edges[i]
         return None
 
 
-def decode_can(tr: Transitions, channel: int, *, bitrate: float, data_bitrate: float | None = None,
-               sample_point: float = 0.75, data_sample_point: float | None = None, invert: bool = False) -> Decoding:
-    """CAN / CAN FD を解読する。bitrate は調停相、data_bitrate は CAN FD の BRS = 1 のデータ相のビットレート。"""
+def decode_can(tr: Transitions, channel: Channel, *, bitrate: float, sample_point: float, invert: bool,
+               data_bitrate: float | None = None, data_sample_point: float | None = None) -> Decoding:
+    """CAN / CAN FD を解読する。bitrate は調停相、data_bitrate は CAN FD の BRS = 1 のデータ相のビットレート。
+    sample_point（ビットの中のサンプル点の割合）は規格で決まらずバスごとの設定なので必須（既定を持たない）。invert
+    （線の極性）も必須。data_bitrate と data_sample_point は一緒に渡す（データ相のサンプル点を調停相から借りない）。
+    data_bitrate を省くと BRS = 1 のフレームは error="data_bitrate"（データ相を解読しない）。"""
     if bitrate <= 0 or (data_bitrate is not None and data_bitrate <= 0):
         raise ValueError(f"ビットレートが正でない（{bitrate}, {data_bitrate}）")
-    data_sample_point = sample_point if data_sample_point is None else data_sample_point
-    for sp in (sample_point, data_sample_point):
-        if not 0.2 <= sp <= 0.95:
-            raise ValueError(f"サンプル点は 0.2〜0.95（{sp}）")
+    if (data_bitrate is None) != (data_sample_point is None):
+        raise ValueError("data_bitrate と data_sample_point は一緒に渡す（CAN FD のデータ相の設定。既定を持たない）")
+    for sp in (sample_point,) if data_sample_point is None else (sample_point, data_sample_point):
+        if not 0 < sp < 1:
+            raise ValueError(f"サンプル点はビットの中（0 と 1 の間）: {sp}")
     period = tr.sample_period_s
     nominal = (1 / (bitrate * period), sample_point)
     data = (1 / (data_bitrate * period), data_sample_point) if data_bitrate else None
@@ -173,7 +178,7 @@ def decode_can(tr: Transitions, channel: int, *, bitrate: float, data_bitrate: f
     out: list[Annotation] = []
     after: float = 0
     while True:
-        sof = line.find_sof(after, IDLE_BITS * nominal[0])
+        sof = line.find_sof(after, (IDLE_BITS - 1 + sample_point) * nominal[0])
         if sof is None:
             break
         end = _frame(bits, sof, out, tr.length)

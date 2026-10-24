@@ -1,7 +1,7 @@
 """I2C の解読。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md"""
 
 from ..la import Transitions
-from .core import Annotation, Decoding, project
+from .core import Annotation, Channel, Decoding, project
 
 __all__ = ["decode_i2c"]
 
@@ -25,13 +25,20 @@ class _Transfer:
         self.last_ten_bit = last_ten_bit              # 同じ取引で前に書いた 10 ビットのアドレス
 
 
-def decode_i2c(tr: Transitions, *, scl: int, sda: int) -> Decoding:
-    """I2C を解読する。SCL が 1 の間の SDA の変化が START / STOP、SCL の立ち上がりで SDA を読む。"""
+def decode_i2c(tr: Transitions, *, scl: Channel, sda: Channel) -> Decoding:
+    """I2C を解読する。SCL が 1 の間の SDA の変化が START / STOP、SCL の立ち上がりで SDA を読む。
+
+    サンプルの間隔より短い順序は測れない。同じサンプルで SCL と SDA が変わった所は、印を付けて返す:
+    - 休止中に SCL と SDA が同じサンプルで下がった: START として解読を続け、注釈の fields に same_sample = True。
+      SDA が先なら START、SCL が先なら（規格に無い）休止中の SCL の立ち下がりで、どちらかは測れていない。
+    - SCL の立ち上がりと同じサンプルで SDA が変わったビット: 変わった後の SDA を読み、そのバイトの注釈（address・
+      data）の fields の same_sample_bits にビットの位置（0 = 最上位、8 = ACK）を並べる。"""
     starts, values = project(tr, [scl, sda])
     out: list[Annotation] = []
     params = {"scl": scl, "sda": sda}
     cur: _Transfer | None = None
     bits: list[int] = []
+    same_bits: list[int] = []                         # SCL の立ち上がりと同じサンプルで SDA が変わったビットの位置
     bit_start = 0                                     # 組み立て中のバイトの最初の SCL の立ち上がり
     ack_pending: tuple[int, bool] | None = None       # (9 ビット目の立ち上がり, ACK) — 次の SCL の立ち下がりで閉じる
     ten_bit_memory: int | None = None                 # 取引（START〜STOP）の中で最後に書いた 10 ビットのアドレス
@@ -54,8 +61,10 @@ def decode_i2c(tr: Transitions, *, scl: int, sda: int) -> Decoding:
             for b in bits[:n]:
                 value = value << 1 | b
             out.append(Annotation(bit_start, max(end, bit_start + 1), "data", f"0x{value:02X}?", value=value,
-                                  error="incomplete", fields={"bits": len(bits)}))
+                                  error="incomplete",
+                                  fields=marks({"bits": len(bits)}, [b for b in same_bits if b < len(bits)])))
             bits.clear()
+        same_bits.clear()
 
     def close_transfer(end: int, error: str | None = None) -> None:
         nonlocal cur
@@ -73,7 +82,12 @@ def decode_i2c(tr: Transitions, *, scl: int, sda: int) -> Decoding:
                                                        "data": list(cur.data), "ack": cur.ack}))
         cur = None
 
-    def byte_done(value: int, ack: bool, at: int) -> None:
+    def marks(fields: dict, same: list[int]) -> dict:
+        if same:
+            fields["same_sample_bits"] = same
+        return fields
+
+    def byte_done(value: int, ack: bool, at: int, same: list[int]) -> None:
         nonlocal ten_bit_memory
         c = cur
         first = c.bytes == 0
@@ -85,34 +99,34 @@ def decode_i2c(tr: Transitions, *, scl: int, sda: int) -> Decoding:
                 if ack:
                     c.ten_hi = hi                     # 下位 8 ビットは次のバイト
                 else:
-                    _address(c, None, "W", ack, at)  # 見出しで拒まれた: 下位のビットは来ない
+                    _address(c, None, "W", ack, at, same)  # 見出しで拒まれた: 下位のビットは来ない
                 return
             c.rw = "R"
             known = c.last_ten_bit if c.last_ten_bit is not None and c.last_ten_bit >> 8 == hi else None
-            _address(c, known, "R", ack, at)
+            _address(c, known, "R", ack, at, same)
             return
         if c.ten_hi is not None and c.bytes == 2:        # 10 ビットの書きの下位 8 ビット
             address = c.ten_hi << 8 | value
             c.ten_hi = None
             ten_bit_memory = address
-            _address(c, address, "W", ack, at)        # 範囲は見出しのバイトから
+            _address(c, address, "W", ack, at, same)  # 範囲は見出しのバイトから
             return
         if first:
             c.address_start = bit_start
-            _address(c, value >> 1, "R" if value & 1 else "W", ack, at)
+            _address(c, value >> 1, "R" if value & 1 else "W", ack, at, same)
             return
         out.append(Annotation(bit_start, at, "data", f"0x{value:02X}", value=value,
-                              fields={"rw": c.rw, "ack": ack}))
+                              fields=marks({"rw": c.rw, "ack": ack}, same)))
         if not ack and c.rw == "W" and c.error is None:
             c.error = "nack"                          # 書きのデータを拒まれた（読みの NACK は主が終わりを示す合図）
         if c.rw is not None:
             c.data.append(value)
 
-    def _address(c: _Transfer, address: int | None, rw: str, ack: bool, at: int) -> None:
+    def _address(c: _Transfer, address: int | None, rw: str, ack: bool, at: int, same: list[int]) -> None:
         c.address, c.rw, c.ack = address, rw, ack
         text = f"{rw} " + ("0x???" if address is None else f"0x{address:0{3 if c.ten_bit else 2}X}")
         out.append(Annotation(c.address_start, max(at, c.address_start + 1), "address", text, value=address,
-                              fields={"rw": rw, "ten_bit": c.ten_bit, "ack": ack}))
+                              fields=marks({"rw": rw, "ten_bit": c.ten_bit, "ack": ack}, same)))
         if not ack and c.error is None:
             c.error = "nack"
 
@@ -138,24 +152,30 @@ def decode_i2c(tr: Transitions, *, scl: int, sda: int) -> Decoding:
                 out.append(Annotation(at, at + 1, "restart" if restart else "start", "Sr" if restart else "S"))
                 cur = _Transfer(at, ten_bit_memory)
             bits.clear()
+            same_bits.clear()
         elif changed & _SDA and changed & _SCL and scl_high_before and cur is None and not now & _SDA:
-            # SCL の立ち下がりと SDA の立ち下がりが同じサンプル（オーバーサンプリングが低い）: 休止中なら START
-            out.append(Annotation(at, at + 1, "start", "S"))
+            # SCL と SDA の立ち下がりが同じサンプル: 順序は測れていない。START として続け、印を付ける
+            out.append(Annotation(at, at + 1, "start", "S", fields={"same_sample": True}))
             cur = _Transfer(at, None)
             bits.clear()
+            same_bits.clear()
         elif changed & _SCL:
-            if scl_high_now:                          # 立ち上がり: SDA を読む（同じサンプルで変わったら変わった後）
+            if scl_high_now:                          # 立ち上がり: SDA を読む
                 if cur is not None:
                     if not bits:
                         bit_start = at
+                    if changed & _SDA:                # 同じサンプルで SDA も変わった: 変わった後を読む（印を付ける）
+                        same_bits.append(len(bits))
                     bits.append(1 if now & _SDA else 0)
                     if len(bits) == 9:
                         value = 0
                         for b in bits[:8]:
                             value = value << 1 | b
                         ack = bits[8] == 0
+                        same = list(same_bits)
                         bits.clear()
-                        byte_done(value, ack, at)
+                        same_bits.clear()
+                        byte_done(value, ack, at, same)
                         ack_pending = (at, ack)
             else:
                 close_ack(at)

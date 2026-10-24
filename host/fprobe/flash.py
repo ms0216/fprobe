@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 __all__ = ["Block", "Comparison", "Difference", "FlashMemory", "Image", "image_format", "ProgramReport", "Progress", "Rate",
-           "Segment", "add_flm_region", "compare", "crc32", "remove_region", "save_image"]
+           "RegisterGuard", "Segment", "add_flm_region", "compare", "crc32", "remove_region", "save_image"]
 
 READ_CHUNK = 0x4000            # 読み出しの 1 回の大きさ（進捗の細かさ。DAP の転送は pyOCD がさらに分ける）
 FLM_ATTRIBUTE = "fprobe_flm"   # add_flm_region で足した領域の印（FlashRegion.attributes）
@@ -37,61 +37,65 @@ CONTEXT_REGISTERS = (*(f"r{i}" for i in range(13)), "lr", "pc", "xpsr", "msp", "
 ANALYZER_SIZE = 0x600          # pyOCD の CRC 解析のコードが analyzer_address から使う大きさ
 
 
-class _Stm32F2F4F7Clock:
-    """走っているプログラムのクロックのまま書き込みアルゴリズムを動かさないための守り（STM32F2 / F4 / F7）。
-    標準のアルゴリズム（Keil の FLM 由来）はリセット直後の HSI を前提に、Init で FLASH_ACR の待ちを 0 にする。PLL（例
-    84 MHz）のまま動かすと Flash の読みが化けて書き込みが失敗し、戻ったプログラムも待ち 0 のまま走って LOCKUP する
-    （2026-10-18 に実機で）。アルゴリズムの間は SYSCLK を HSI にし、抜けるときに待ち → クロックの順に戻す。
-    pyOCD は書く前にリセットするので要らない（fprobe はプログラムを止めずに書くので要る）。
-    抜けるときに ART のキャッシュも捨てる: 書き換えた Flash の古い命令を実行し続ける（2026-10-18 に実機で、戻した BKPT で
-    止まり続けた）。捨てるのはキャッシュを止めている間だけできる（RM0368 3.5.2）。"""
-    RCC_CR, RCC_CFGR, FLASH_ACR = 0x40023800, 0x40023808, 0x40023C00
-    HSION, HSIRDY = 1 << 0, 1 << 1
-    CACHES_ON = 3 << 9                                       # ICEN・DCEN（F7 は ARTEN と予約）
+_GUARD_OPS = {"write": ("address", "mask", "value"), "wait": ("address", "mask", "value"),
+              "restore": ("address", "mask"), "wait_restored": ("address", "mask")}
 
-    @staticmethod
-    def applies(target) -> bool:
-        part = str(getattr(target, "part_number", "") or "").upper()
-        return part.startswith(("STM32F2", "STM32F4", "STM32F7"))
 
-    def enter(self, target) -> tuple[int, int, int]:
-        saved = (target.read32(self.RCC_CR), target.read32(self.RCC_CFGR), target.read32(self.FLASH_ACR))
-        cr, cfgr, _ = saved
-        if not cr & self.HSIRDY:
-            target.write32(self.RCC_CR, cr | self.HSION)
-            self._wait(target, lambda: target.read32(self.RCC_CR) & self.HSIRDY)
-        if cfgr & 0xC:                                       # SWS が HSI でない: SW = HSI
-            target.write32(self.RCC_CFGR, cfgr & ~0x3)
-            self._wait(target, lambda: not target.read32(self.RCC_CFGR) & 0xC)
+class RegisterGuard:
+    """書き込みアルゴリズムの間だけチップのレジスタを決めた状態にし、抜けるときに戻す手順（使う側が渡す。本体は機器
+    固有の守りを持たない。例: STM32F2 / F4 / F7 のクロックはプラグイン fprobe.plugins.stm32_flash_clock）。
+    {"enter": [手順], "exit": [手順]}。手順（op）:
+    - write {address, mask, value}: 読んで mask のビットを value にして書く（mask = 0xFFFFFFFF なら value をそのまま）
+    - wait {address, mask, value}: (読んだ値 & mask) == value になるまで読む（tries 回で終わらなければ誤り）
+    - restore {address, mask}: enter の前に読んでおいた値の mask のビットに戻す
+    - wait_restored {address, mask}: (読んだ値 & mask) == (enter の前の値 & mask) になるまで読む
+    restore・wait_restored の番地は enter の前に読んで覚える。"""
+
+    def __init__(self, enter: list[dict], exit: list[dict], tries: int = 1000):
+        self.enter_steps, self.exit_steps, self.tries = enter, exit, tries
+        self.saved_addresses = sorted({s["address"] for s in enter + exit if s["op"] in ("restore", "wait_restored")})
+
+    @classmethod
+    def from_dict(cls, spec: dict) -> "RegisterGuard":
+        if not isinstance(spec, dict) or set(spec) - {"enter", "exit"}:
+            raise ValueError(f"守りは {{enter, exit}}: {spec!r}")
+        steps = {}
+        for part in ("enter", "exit"):
+            steps[part] = []
+            for step in spec.get(part) or []:
+                need = _GUARD_OPS.get(step.get("op")) if isinstance(step, dict) else None
+                if need is None or set(step) != {"op", *need} or not all(isinstance(step[k], int) for k in need):
+                    raise ValueError(f"守りの手順は {', '.join(f'{op} {{{', '.join(k)}}}' for op, k in _GUARD_OPS.items())}"
+                                     f" のどれか: {step!r}")
+                steps[part].append(dict(step))
+        return cls(steps["enter"], steps["exit"])
+
+    def enter(self, target) -> dict[int, int]:
+        saved = {address: target.read32(address) for address in self.saved_addresses}
+        self._run(target, self.enter_steps, saved)
         return saved
 
-    def exit(self, target, saved: tuple[int, int, int]) -> None:
-        cr, cfgr, acr = saved
-        off = target.read32(self.FLASH_ACR) & ~self.CACHES_ON
-        part = str(getattr(target, "part_number", "") or "").upper()
-        reset = 1 << 11 if part.startswith("STM32F7") else 3 << 11  # F2/F4: ICRST・DCRST、F7: ARTRST
-        target.write32(self.FLASH_ACR, off)
-        target.write32(self.FLASH_ACR, off | reset)
-        target.write32(self.FLASH_ACR, off)
-        target.write32(self.FLASH_ACR, acr)                  # 先に待ちを戻す（速いクロックに戻す前に）
-        target.write32(self.RCC_CFGR, cfgr)
-        self._wait(target, lambda: (target.read32(self.RCC_CFGR) & 0xC) == (cfgr & 0xC))
-        if not cr & self.HSION:
-            target.write32(self.RCC_CR, target.read32(self.RCC_CR) & ~self.HSION)
+    def exit(self, target, saved: dict[int, int]) -> None:
+        self._run(target, self.exit_steps, saved)
 
-    @staticmethod
-    def _wait(target, ready, tries: int = 1000) -> None:
-        for _ in range(tries):
-            if ready():
-                return
-        raise RuntimeError("クロックの切り替えが終わらない（RCC）")
-
-
-_CLOCK_GUARDS = (_Stm32F2F4F7Clock(),)
+    def _run(self, target, steps: list[dict], saved: dict[int, int]) -> None:
+        for s in steps:
+            address, mask, op = s["address"], s["mask"], s["op"]
+            if op in ("write", "restore"):
+                value = s["value"] if op == "write" else saved[address]
+                current = 0 if mask == 0xFFFFFFFF else target.read32(address)
+                target.write32(address, (current & ~mask | value & mask) & 0xFFFFFFFF)
+            else:
+                want = s["value"] if op == "wait" else saved[address] & mask
+                for _ in range(self.tries):
+                    if target.read32(address) & mask == want:
+                        break
+                else:
+                    raise RuntimeError(f"守りの待ち（0x{address:08X} & 0x{mask:08X} == 0x{want:X}）が終わらない")
 
 
 def _algorithm(method):
-    """書き込みアルゴリズムを動かす操作: チップのクロックの守り（_CLOCK_GUARDS）の中で行う（入れ子なら外側だけ）。"""
+    """書き込みアルゴリズムを動かす操作: 使う側が渡した守り（FlashMemory.guards）の中で行う（入れ子なら外側だけ）。"""
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._clock_guarded():
@@ -144,7 +148,7 @@ class Image:
 
     @classmethod
     def load(cls, path: str | Path, address: int | None = None, format: str | None = None) -> "Image":
-        """ファイルを読む。format（elf / hex / bin）は省略時に拡張子と中身から決める。BIN は address が要る
+        """ファイルを読む。format（elf / hex / bin）は省略時に中身の先頭から決める。BIN は address が要る
         （HEX・ELF に address を渡すと誤り: 番地はファイルが持つ）。"""
         path = Path(path)
         fmt = format or _guess_format(path)
@@ -166,18 +170,13 @@ class Image:
 
 
 def image_format(path: str | Path) -> str:
-    """ファイルの形式（elf / hex / bin）。拡張子、無ければ中身の先頭で決める（Image.load と同じ判断）。"""
+    """ファイルの形式（elf / hex / bin）。中身の先頭で決める（Image.load と同じ。拡張子 = 名前の慣習では決めない）。"""
     return _guess_format(Path(path))
 
 
 def _guess_format(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix in (".elf", ".axf", ".out"):
-        return "elf"
-    if suffix in (".hex", ".ihex", ".ihx"):
-        return "hex"
-    if suffix == ".bin":
-        return "bin"
+    """中身の先頭: ELF の印（0x7F "ELF"）なら elf、':'（Intel HEX の行の始まり）なら hex、どちらでもなければ生のバイト列
+    （bin）。"""
     head = path.read_bytes()[:4]
     if head == b"\x7fELF":
         return "elf"
@@ -341,17 +340,21 @@ class ProgramReport:
 class FlashMemory:
     """ターゲット（pyOCD の CoreSightTarget）の Flash。どの操作もターゲットを止める（書き込みアルゴリズムがコアで走る）。"""
 
-    def __init__(self, target, read_chunk: int = READ_CHUNK):
+    def __init__(self, target, read_chunk: int = READ_CHUNK, guards: list[RegisterGuard] | None = None):
+        """guards: 書き込みアルゴリズムの間のレジスタの守り（RegisterGuard。使う側が渡す。無ければチップのレジスタに
+        触らない）。"""
         self.target = target
         self.read_chunk = read_chunk
+        self.guards: list[RegisterGuard] = list(guards or [])
         self._guard_depth = 0
 
     @contextlib.contextmanager
     def _clock_guarded(self):
-        """アルゴリズムを動かす間、チップのクロックを前提の状態にし、抜けるときに戻す（入れ子なら外側だけ）。
-        プログラムを止めずに書く fprobe では、走っていたプログラムのクロック（例 PLL 84 MHz）のままになっている。"""
+        """アルゴリズムを動かす間、割り込みを止め、使う側が渡した守り（guards）でチップのレジスタを前提の状態にし、
+        抜けるときに戻す（入れ子なら外側だけ）。プログラムを止めずに書く fprobe では、走っていたプログラムの状態（例:
+        PLL 84 MHz のクロック）のままになっている。どの状態が前提かは書き込みアルゴリズム（チップ）ごとなので本体は決めない。"""
         outermost = self._guard_depth == 0
-        guards = [g for g in _CLOCK_GUARDS if g.applies(self.target)] if outermost else []
+        guards = list(self.guards) if outermost else []
         primask = None
         if outermost:
             # 割り込みを止める（PRIMASK = 1）: 走っていたプログラムの割り込み（SysTick 等）がアルゴリズムの間に入ると、
@@ -663,9 +666,11 @@ class FlashMemory:
         """CPU に pc と別の Flash の行を 1 度読ませる（RAM の scratch で ldr pc, [pc, #0] を 1 命令）。Flash の読みの
         行の保持（STM32F4 の Flash の取り込みの 128 ビット等）は書き換えでは捨てられず、止めた場所（pc）に置いたまま
         再開すると古い命令を実行する（2026-10-18 に実機で、戻した BKPT を実行し続けた。別の行を通れば読み直す。ART の
-        キャッシュのリセット・待ちの切り替えでは捨てられなかった）。レジスタと scratch は呼び手が戻す。"""
+        キャッシュのリセット・待ちの切り替えでは捨てられなかった）。レジスタと scratch は呼び手が戻す。
+        別の行は、Flash の領域の pc から遠い方の端（領域の半分以上離れた所。行の大きさを仮定しない）。"""
         region = next(iter(self.memory_map.iter_matching_regions(is_flash=True)))
-        other = region.start if (region.start ^ pc) >> 4 else region.start + 16
+        half = region.length // 2
+        other = region.start if pc - region.start >= half else (region.start + region.length - 4) & ~3
         self.target.write_memory_block8(scratch, list(bytes.fromhex("dff800f0") + (other | 1).to_bytes(4, "little")))
         self.target.write_core_register("pc", scratch)
         self.target.step(disable_interrupts=True)

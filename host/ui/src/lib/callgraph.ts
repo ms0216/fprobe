@@ -39,13 +39,10 @@ export interface GraphRow {
   deepest: boolean;                // 根の最深の経路の上
 }
 
-/** 根の並び: 報告の根（リセット → 例外 → 呼ばれない関数 → その他）。重複は除く */
+/** 根の並び: 報告（debug.stack.static の roots）の並びのまま（画面で種類・大きさの順に並べ替えない）。重複は除く */
 export function rootsOf(report: { roots?: StackRoot[] }): StackRoot[] {
-  const order = ["reset", "exception", "user", "uncalled", "address_taken"];
   const seen = new Set<string>();
-  return [...(report.roots ?? [])]
-    .sort((a, b) => (order.indexOf(a.kind) + 99) % 99 - (order.indexOf(b.kind) + 99) % 99 || b.max - a.max)
-    .filter((r) => !seen.has(r.root) && seen.add(r.root));
+  return (report.roots ?? []).filter((r) => !seen.has(r.root) && seen.add(r.root));
 }
 
 /** 開いている行（open: 経路の鍵）を木の順に並べる */
@@ -66,6 +63,48 @@ export function treeRows(functions: StackFunction[], roots: StackRoot[], open: S
   };
   for (const r of roots) walk(r.root, 0, [], r.root, r, r.path);
   return out;
+}
+
+// --- ベクタ表の欄 ----------------------------------------------------------------------------------------------
+// 例外の根と MSP の見積もりは、使う側が明示したベクタ表の番地（と大きさ）で出る（debug.stack.static の vector_table・
+// vector_table_size）。画面は名前で表を探さず、VTOR も読んで欄に入れるだけ（自動で使わない）
+
+/** VTOR（SCB の Vector Table Offset Register。Cortex-M のアーキテクチャの規格で決まる番地） */
+export const VTOR = 0xe000ed08;
+
+export interface VectorTableForm {
+  address: string;                 // 空 = 渡さない
+  size: string;                    // 空 = ELF のその番地の変数の大きさ（デーモンが決める）
+}
+
+const INTEGER = /^(0x[0-9a-f]+|\d+)$/i;
+const integer = (text: string): number | null => (INTEGER.test(text) ? Number(text) : null);
+
+/** 欄から debug.stack.static の引数（0x は 16 進、ほかは 10 進）。誤りは欄の名前 */
+export function vectorTableParams(form: VectorTableForm):
+    { params: { vector_table?: number; vector_table_size?: number } } | { error: "address" | "size" } {
+  const a = form.address.trim(), s = form.size.trim();
+  if (!a && !s) return { params: {} };
+  const address = integer(a);
+  if (address === null || address > 0xffffffff) return { error: "address" };
+  if (!s) return { params: { vector_table: address } };
+  const size = integer(s);
+  if (size === null || size < 1) return { error: "size" };
+  return { params: { vector_table: address, vector_table_size: size } };
+}
+
+/** 使った表（debug.stack.static の結果の vector_table）の欄。無ければ空 */
+export function vectorTableForm(table: { address: number; size: number } | null | undefined): VectorTableForm {
+  if (!table) return { address: "", size: "" };
+  return { address: `0x${table.address.toString(16).toUpperCase().padStart(8, "0")}`, size: String(table.size) };
+}
+
+/** target.memory.read（16 進の文字列。番地の順のバイト）の 4 バイトを 32 ビットの値に（リトル エンディアン）。
+ *  4 バイトでなければ null */
+export function vtorValue(hex: string | null | undefined): number | null {
+  if (typeof hex !== "string" || !/^[0-9a-f]{8}$/i.test(hex)) return null;
+  const b = hex.match(/../g)!.map((x) => parseInt(x, 16));
+  return (b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24)) >>> 0;
 }
 
 /** 根の最深の経路をすべて開く鍵（「最深の経路を開く」） */

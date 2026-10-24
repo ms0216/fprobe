@@ -2,8 +2,10 @@
 // recording.find の query、結果の要約・CSV・時間軸の印、区間の統計（timing.measure）の分布図・長い順の上位、調査の印とメモ。
 // Svelte・DOM に依らない。仕様: docs/reports/2026-10-18-gap-analysis.md G07
 import type { Bar } from "./chart";
+import { parseCount } from "./system";
 import { formatDuration } from "./time";
 import type { Mark } from "./timeline/state";
+import { display } from "./vartree";
 
 /** 記録の出来事（recording.find / recording.events の 1 件。fprobe.recording.Event） */
 export interface RecEvent {
@@ -71,6 +73,14 @@ export function toQuery(c: Condition, range: [number, number] | null = null): Re
   return q;
 }
 
+/** 区間の統計（timing.measure）の引数。棒の数 bins・長い順の上位の数 longest は使う人が入れた正の整数だけ（無ければ
+ *  null = 送らない。画面の数・API の既定を暗黙に使わない） */
+export function measureParams(start: Condition, end: Condition, binsText: string, longestText: string):
+  { start: Record<string, unknown>; end: Record<string, unknown>; bins: number; longest: number } | null {
+  const bins = parseCount(binsText), longest = parseCount(longestText);
+  return bins === null || longest === null ? null : { start: toQuery(start), end: toQuery(end), bins, longest };
+}
+
 /** 条件の短い表し方（統計の開始・終了の見出し・印のラベル） */
 export function describeCondition(c: Condition): string {
   const parts = [c.stream || "*", c.kind ? `.${c.kind}` : ""];
@@ -82,26 +92,56 @@ export function describeCondition(c: Condition): string {
 
 const hex = (v: number) => `0x${(v >>> 0).toString(16).toUpperCase()}`;
 
-/** 本文の要約（出来事の種類ごとに読みやすい欄、無ければ JSON） */
+/** 本文の要約（出来事の stream・kind ごとに読みやすい欄。決めていない stream・kind は本文の JSON）。
+ *  表し方は stream・kind で選ぶ（本文のキーの有無で推さない） */
 export function summary(e: RecEvent): string {
-  const b = e.body;
-  if (b && typeof b === "object") {
-    if (typeof b.text === "string") return b.error ? `${b.text} (${b.error})` : b.text;
-    if (typeof b.method === "string") {
-      const who = b.client ? `${b.client}: ` : "";
-      return `${who}${b.method}${b.error ? ` — ${b.error}` : ""}`;
-    }
-    if (typeof b.task === "string") return b.on ? `${b.task} ← ${b.on}` : b.task;
-    if (typeof b.to === "string") return `${b.from ?? "?"} → ${b.to}`;
-    if (typeof b.name === "string") return b.value !== undefined ? `${b.name} = ${b.value}` : b.name;
-    if (typeof b.state === "string") return b.reason ? `${b.state} (${b.reason})` : b.state;
-    if (typeof b.object === "string") return b.object;
-    return JSON.stringify(b);
+  const text = summaryOf(e, (e.body ?? {}) as Record<string, any>);
+  if (text !== null) return text;
+  return e.body === null || e.body === undefined ? "" : JSON.stringify(e.body);
+}
+
+const withError = (text: unknown, error: unknown) => (error ? `${text} (${error})` : String(text ?? ""));
+
+function summaryOf(e: RecEvent, b: Record<string, any>): string | null {
+  switch (e.stream) {
+    case "annotation":                                   // 調査の印（mark）・解読の注釈（<protocol>.<種類>）
+      return e.kind === "mark" || e.kind.includes(".") ? withError(b.text, b.error) : null;
+    case "log":                                          // ログの形式の解読（fprobe.logfmt）
+      return withError(b.text, b.error);
+    case "semihosting":
+    case "rtt":
+      return e.kind === "line" ? String(b.text ?? "") : null;
+    case "host":
+      return e.kind === "call" ? `${b.client ? `${b.client}: ` : ""}${b.method}${b.error ? ` — ${b.error}` : ""}` : null;
+    case "target":
+      return e.kind === "state" ? [b.state, b.halt_reason].filter(Boolean).join(" ") : null;
+    case "rtos":
+      switch (e.kind) {
+        case "switch": return `${b.from ?? "?"} → ${b.to ?? "?"}`;
+        case "blocked": return `${b.task ?? "?"} ← ${b.on ?? "?"}`;
+        case "isr": return String(b.name ?? "");
+        case "gap": return String(b.reason ?? "");
+        default: return typeof b.task === "string" ? b.task : null;    // run・カーネルの出来事（タスクの名前）
+      }
+    case "user":
+      return e.kind === "value" ? `${b.name} = ${b.value}` : String(b.name ?? "");
+    case "swo":
+      if (e.kind === "line") return String(b.text ?? "");
+      return e.kind === "data_access" ? `${b.name} = ${display(b.value)}` : null;   // 値は fprobe.dwarf.values の形
+    case "testpoint":
+      return e.kind === "anomaly" ? String(b.message ?? "") : String(b.name ?? `#${e.a}`);
+    case "trace":                                        // 取り込んだトレース（fprobe.tracefmt）
+      return String(b.text ?? b.name ?? "");
+    case "uart":
+      return e.b >= 0x20 && e.b < 0x7f ? `'${String.fromCharCode(e.b)}'` : hex(e.b);
+    case "dap":
+    case "sample":
+      return `${hex(e.a)} = ${hex(e.b)}`;
+    case "aux":
+      return `${e.b} mV`;
+    default:
+      return null;
   }
-  if (e.stream === "uart") return e.b >= 0x20 && e.b < 0x7f ? `'${String.fromCharCode(e.b)}'` : hex(e.b);
-  if (e.stream === "dap" || e.stream === "sample") return `${hex(e.a)} = ${hex(e.b)}`;
-  if (e.stream === "aux") return `${e.b} mV`;
-  return "";
 }
 
 /** a・b が番地・値・ハンドル（16 進で読む）の stream。ほか（aux の mV 等の量・回数）は 10 進 */
@@ -133,28 +173,19 @@ export function searchMarks(events: RecEvent[]): Mark[] {
 // --- 区間の統計（timing.measure） --------------------------------------------------------------------
 
 export interface Histogram { lo: number; hi: number; count: number }
-export interface Longest { t: number; t_end: number; duration: number }   // 長い順の上位（timing.measure の longest）
+/** 長い順の上位（timing.measure の longest。bin = 入る棒の番号） */
+export interface Longest { t: number; t_end: number; duration: number; bin: number }
 
-/** 時間 d が入る棒の番号（無ければ -1）。棒の分け方は fprobe.profile.stats.Distribution.histogram と同じ
- *  （最小〜最大を等しい幅に、最後の棒は最大を含む。全部同じ値なら棒は 1 つ） */
-export function binOf(d: number, hist: Histogram[]): number {
-  if (!hist.length) return -1;
-  const lo = hist[0].lo, hi = hist[hist.length - 1].hi;
-  if (d < lo || d > hi) return -1;
-  if (hi === lo) return 0;
-  return Math.min(Math.floor((d - lo) / ((hi - lo) / hist.length)), hist.length - 1);
-}
-
-/** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒を目立たせる） */
+/** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒（デーモンが示した bin）を目立たせる） */
 export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null, longest: Longest[]): Bar[] {
-  const outlying = new Set(longest.map((o) => binOf(o.duration, hist)));
+  const outlying = new Set(longest.map((o) => o.bin));
   return hist.map((h, i) => ({ x0: h.lo / timebaseHz, x1: (h.hi > h.lo ? h.hi : h.lo + 1) / timebaseHz, y: h.count,
                                mark: i === picked || outlying.has(i) }));
 }
 
-/** 棒 i に入る区間（[開始の時刻, 時間]） */
-export function intervalsInBin(intervals: [number, number][], hist: Histogram[], i: number): [number, number][] {
-  return intervals.filter(([, d]) => binOf(d, hist) === i);
+/** 棒 i に入る区間（[開始の時刻, 時間]）。棒は timing.measure の interval_bins（intervals と同じ並び）で選ぶ */
+export function intervalsInBin(intervals: [number, number][], bins: number[], i: number): [number, number][] {
+  return intervals.filter((_, k) => bins[k] === i);
 }
 
 /** 長い順の上位 → 時間軸の印（区間。普通の色: 異常とは言わない） */
@@ -172,33 +203,18 @@ export interface Note {
   role: string | null;                // ai / human / script / hook
 }
 
-/** 印（annotation.mark）に置いた者を添える: フックの印は body.hook、ほかは同じ本文の recording.mark の操作
- *  （記録の host.call。params の text・t が合うもの）から。分からなければ null（記録の外で置いた印・古い記録） */
-export function notesOf(marks: RecEvent[], calls: RecEvent[]): Note[] {
-  const placing = calls.filter((c) => c.body?.method === "recording.mark");
-  const used = new Set<RecEvent>();
+/** 印（annotation.mark）に置いた者を添える: 印の本文の事実だけ（フックの印は body.hook、recording.mark の印は
+ *  デーモンが残した body.client）。無ければ null（fprobe が置いた印・古い記録。操作の記録から推さない） */
+export function notesOf(marks: RecEvent[]): Note[] {
   return marks.map((m) => {
     const text = String(m.body?.text ?? "");
     if (m.body?.hook !== undefined) return { t: m.t, text, by: `hook ${m.body.hook}`, role: "hook" };
-    const candidates = placing.filter((c) => !used.has(c) && c.body?.params?.text === text
-      && (c.body?.params?.t === undefined || c.body?.params?.t === null || c.body.params.t === m.t));
-    // 同じ本文が何度もあれば、印の時刻にいちばん近い操作
-    const call = candidates.sort((x, y) => Math.abs(x.t - m.t) - Math.abs(y.t - m.t))[0];
-    if (!call) return { t: m.t, text, by: null, role: null };
-    used.add(call);
-    return { t: m.t, text, by: String(call.body.client ?? ""), role: call.body.role ?? null };
+    const client = m.body?.client;
+    return { t: m.t, text, by: client?.name ?? null, role: client?.role ?? null };
   });
 }
 
 // --- 記録の概要（stream・kind ごとの件数。Tracealyzer の Event Log の種類・TRACE32 の統計の入口） ---------------
-
-/** recording.query の引数: stream・kind ごとの件数・最初・最後。range は時刻の範囲 [t0, t1)（SQL の条件と、長期の
- *  記録の分割を選ぶ t0 / t1 の両方に。無ければ全体） */
-export function kindQuery(range: [number, number] | null): { sql: string; params: number[]; t0?: number; t1?: number } {
-  const where = range ? " WHERE t >= ? AND t < ?" : "";
-  const sql = `SELECT stream, kind, COUNT(*) AS n, MIN(t) AS first, MAX(t) AS last FROM events${where} GROUP BY stream, kind`;
-  return range ? { sql, params: [range[0], range[1]], t0: range[0], t1: range[1] } : { sql, params: [] };
-}
 
 export interface KindStat {
   stream: string;
@@ -207,17 +223,14 @@ export interface KindStat {
   first: number;                      // 最初・最後の出来事の時刻（タイムベース）
   last: number;
   share: number;                      // 全体の件数に対する割合（0〜1）
-  perSecond: number;                  // 1 秒あたりの件数（範囲の長さで。分からなければ NaN）
+  perSecond: number | null;           // 1 秒あたりの件数（範囲の長さが分からなければ null）
 }
 
-/** recording.query の結果 → 件数の多い順の表。timebaseHz・spanTicks は範囲の長さ（1 秒あたりの件数） */
-export function kindStats(result: { rows?: unknown[][] }, timebaseHz: number, spanTicks: number):
-  { rows: KindStat[]; total: number; max: number } {
-  const raw = (result.rows ?? []).map((r) => ({ stream: String(r[0]), kind: String(r[1]), count: Number(r[2]) || 0,
-                                                first: Number(r[3]), last: Number(r[4]) }));
-  const total = raw.reduce((n, r) => n + r.count, 0);
-  const seconds = timebaseHz > 0 && spanTicks > 0 ? spanTicks / timebaseHz : NaN;
-  const rows = raw.map((r) => ({ ...r, share: total ? r.count / total : 0, perSecond: r.count / seconds }))
-    .sort((x, y) => y.count - x.count || x.stream.localeCompare(y.stream) || x.kind.localeCompare(y.kind));
-  return { rows, total, max: rows.length ? rows[0].count : 0 };
+/** recording.kinds の応答 → 表（数え方・割合・1 秒あたり・並びはデーモンが決める）。max は棒の長さの目盛り */
+export function kindRows(result: any): { rows: KindStat[]; total: number; max: number } {
+  const rows: KindStat[] = (Array.isArray(result?.kinds) ? result.kinds : []).map((k: any) => ({
+    stream: String(k.stream), kind: String(k.kind), count: Number(k.count) || 0, first: Number(k.first),
+    last: Number(k.last), share: Number(k.share) || 0, perSecond: typeof k.per_second === "number" ? k.per_second : null,
+  }));
+  return { rows, total: Number(result?.total) || 0, max: rows.reduce((m, r) => Math.max(m, r.count), 0) };
 }

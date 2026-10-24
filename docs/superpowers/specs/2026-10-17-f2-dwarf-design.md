@@ -65,18 +65,23 @@ class WritableAccess(TargetAccess, Protocol):
 
 ### 値（values.py）
 
+どの値も `kind`（値の種類。DWARF の型で決まる事実）を持つ JSON の object。使う側（画面・AI・ホストの道具）は `kind` を
+読み、キーの有無や型の名前から種類を推さない（2026-10-24 に改めた。前の形はキーの有無でしか種類が分からず、構造体の
+メンバー名が `enum`・`value` 等だと別の種類に見え、`float32_t` 等の typedef の浮動小数は整数に見えた。API の版 2）。
+
 | 型 | 値 |
 |---|---|
-| 整数・文字 | `int` |
-| bool | `bool` |
-| float / double | `float`（NaN・無限大は文字列 `"nan"` / `"inf"` / `"-inf"`。JSON にできるように） |
-| 列挙 | `{"enum": "MODE_RUN", "value": 1}`（名前の無い値は `"enum": null`） |
-| ポインタ | `{"pointer": 536871200, "to": "struct Sensor"}`。`char *` は読み手があれば `"string"` も。関数ポインタ・番地はシンボルがあれば `"symbol": "square"` |
-| 構造体・共用体 | `{メンバー名: 値}`（宣言の順。無名のメンバーは C11 と同じく外側に展開） |
-| 配列 | `[値, ...]`（多次元は入れ子）。要素が `max_elements`（既定 64）を超えたら `{"length": n, "head": [先頭の max_elements 個]}` |
-| 文字の配列 | `{"string": "hello", "values": [...]}`（NUL まで。非 ASCII は `\xNN`）。文字 = `char`・`signed char`・`unsigned char`（`uint8_t`・`int8_t` の typedef は数の配列として扱う） |
-| ビットフィールド | `int`（符号付きは符号拡張） |
-| 読めない | `{"unavailable": "理由"}`（最適化で消えた・レジスタが復元できない・関数の入口の値 等） |
+| 整数・文字 | `{"kind": "int", "value": 1}` |
+| bool | `{"kind": "bool", "value": true}` |
+| float / double | `{"kind": "float", "value": 2.5}`（NaN・無限大は value が文字列 `"nan"` / `"inf"` / `"-inf"`。JSON にできるように） |
+| 生のバイト | `{"kind": "bytes", "hex": "ff7f"}`（符号の種類の分からない基本型・4 / 8 バイト以外の浮動小数・void） |
+| 列挙 | `{"kind": "enum", "name": "MODE_RUN", "value": 1}`（列挙子に無い値は `"name": null`） |
+| ポインタ | `{"kind": "pointer", "address": 536871200, "to": "struct Sensor"}`。`char *` は読み手があれば `"string"` も（NUL の前で読むのをやめたら `string_end`・`string_limit`）。関数ポインタ・番地はシンボルがあれば `"symbol": "square"` |
+| 構造体・共用体 | `{"kind": "struct", "members": {メンバー名: 値}}`（宣言の順。無名のメンバーは C11 と同じく外側に展開） |
+| 配列 | `{"kind": "array", "length": n, "items": [値, ...]}`（多次元は入れ子）。items は `max_elements`（既定 64）個まで: `len(items) < length` なら切った |
+| 文字の配列 | 配列 + `"string": "hello"`（NUL まで。非 ASCII は `\xNN`）。文字 = `char`・`signed char`・`unsigned char`（`uint8_t`・`int8_t` の typedef は数の配列として扱う） |
+| ビットフィールド | int・enum・bool の同じ形（符号付きは符号拡張） |
+| 読めない | `{"kind": "unavailable", "reason": "理由"}`（最適化で消えた・レジスタが復元できない・関数の入口の値 等） |
 
 `encode(type, value)` は基本型・列挙（名前か数）・ポインタ（数）・bool をバイト列にする（書き込み用）。
 
@@ -158,7 +163,7 @@ insp.write("sensors[0].gain", 2.5)                         # 書き込み（メ�
 
 - float を d レジスタに置いた変数（`DW_OP_regx d8` で 4 バイト）は下位の s（s16）だけを読む（上位の s が復元できないフレームでも読める）。
 - 書き込みはメモリ上の値だけ。整数は型の符号に合わせて範囲を確かめる（`int8_t` に 200 は書かない）。ビットフィールドは読み・変更・書き。
-- 位置式・巻き戻しで読めないものは例外にせず `{"unavailable": 理由}`・フレームの打ち切りにする（AI が途中まででも使える）。
+- 位置式・巻き戻しで読めないものは例外にせず `{"kind": "unavailable", "reason": 理由}`・フレームの打ち切りにする（AI が途中まででも使える）。
 
 ## 試験
 

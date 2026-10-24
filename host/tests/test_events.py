@@ -1,6 +1,6 @@
 """DAP イベントの復号と、ポストされた読みの対応付け（ハードウェア不要）。"""
 
-from fprobe.events import KIND_HOST, decode_events, resolve
+from fprobe.events import KIND_HOST, KIND_HOST_UNTRACKED, decode_events, resolve
 
 
 def event(t, *, ap, read, reg, address=0, data=0, ack=1, parity=0, kind=KIND_HOST):
@@ -69,3 +69,16 @@ def test_injected_writes_are_their_own_kind_with_the_transfer_count():
     assert [(a.kind, a.address, a.value, a.transfers) for a in resolve(decode_events(data))] == [
         ("inject", 0xE000EDF0, 0xA05F0003, 4), ("ap_read", 0x20000000, 0x22, None),
         ("inject", 0xE000EDF0, 0xA05F0003, None)]
+
+
+def test_drw_whose_address_was_not_tracked_is_its_own_kind():
+    """回路がメモリの番地を追えなかった DRW（種類 12）は、番地の分かるアクセス（ap_read / ap_write）と分ける"""
+    data = b"".join([
+        event(1, ap=True, read=False, reg=0xC, address=0xC, data=0x33, kind=KIND_HOST_UNTRACKED),
+        event(2, ap=True, read=True, reg=0xC, address=0xC, kind=KIND_HOST_UNTRACKED),
+        event(3, ap=False, read=True, reg=0xC, data=0x44),                      # RDBUFF（値 = 上の読み）
+        event(4, ap=True, read=True, reg=0xC, address=0x20000000),              # 追えた読み
+        event(5, ap=False, read=True, reg=0xC, data=0x55),
+    ])
+    assert [(a.kind, a.address, a.value) for a in resolve(decode_events(data))] == [
+        ("drw_write", 0xC, 0x33), ("drw_read", 0xC, 0x44), ("ap_read", 0x20000000, 0x55)]

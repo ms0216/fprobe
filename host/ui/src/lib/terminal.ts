@@ -1,7 +1,7 @@
 // 端末（Terminal のパネル）の源と文字の扱い。Svelte に依らない。
 // 源: RTT の上りのチャンネル（rtt0〜）・SWO の ITM のポート（swo0〜）・UART・セミホスティング。デーモンの
-// terminal.sources / terminal.read で読む（位置 since から。ほかの読み手の位置は動かさない）。terminal.* の無い
-// 古いデーモンでは rtt.status / rtt.read（RTT とセミホスティング）に落とす。
+// terminal.sources / terminal.read で読む（位置 since から。ほかの読み手の位置は動かさない）。画面はデーモンと
+// 一緒に配られるので、古いデーモン向けの経路（誤りの文の語で rtt.* に落とす・チャンネル 0 だけ書けるとみなす）は持たない。
 // 行の時刻: terminal.read の times（受け取りごとの壁時計の秒と、記録中ならタイムベースの時刻 t）を画面の文字の位置の
 // 印（Stamp）にし、行の始まりの時刻を出す。t のある行は時間軸のその時刻へ飛べる。
 import type { DaemonConnection } from "./api";
@@ -46,51 +46,19 @@ export interface Chunk {
   terminals?: TerminalSwitch[];   // RTT の源だけ（仮想端末の切り替えはデーモンが文字から除いて返す）
 }
 
-const legacy = (e: unknown) => /terminal\.\w+ は無い|-32601|not found/i.test(String((e as Error)?.message ?? e));
-// terminals を知らない古いデーモン（引数の検証で断られる）
-const noTerminals = (e: unknown) => /terminals/.test(String((e as Error)?.message ?? e));
-
 export async function loadSources(call: Call): Promise<SourceList> {
-  try {
-    const r = await call("terminal.sources", {}, { quiet: true });
-    return { sources: r.sources, rtt: Boolean(r.rtt), swo: Boolean(r.swo) };
-  } catch (e) {
-    if (!legacy(e)) throw e;
-    const s = await call("rtt.status", {}, { quiet: true });
-    const ups: { index: number; name?: string }[] = Array.isArray(s?.up) ? s.up : s?.running ? [{ index: 0 }] : [];
-    return {
-      rtt: Boolean(s?.running), swo: false,
-      sources: [...ups.map((c) => ({ id: `rtt${c.index}`, kind: "rtt" as const, name: c.name || `RTT ${c.index}`,
-                                     writable: c.index === 0, channel: c.index })),
-                { id: "semihosting", kind: "semihosting", name: "Semihosting", writable: true }],
-    };
-  }
+  const r = await call("terminal.sources", {}, { quiet: true });
+  return { sources: r.sources, rtt: Boolean(r.rtt), swo: Boolean(r.swo) };
 }
 
-/** 源の位置 since からを読む（times なら受け取りの時刻も。古いデーモンでは時刻は無い）。RTT は仮想端末の切り替え
- *  （terminals）も頼む（知らない古いデーモンには頼まずに読み直す） */
+/** 源の位置 since からを読む（times なら受け取りの時刻も）。RTT は仮想端末の切り替え（terminals）も頼む */
 export async function readSource(call: Call, source: TerminalSource, since: number, times = false): Promise<Chunk> {
-  const read = async (terminals: boolean): Promise<Chunk> => {
-    const r = await call("terminal.read", { source: source.id, since, ...(times ? { times: true } : {}),
-                                            ...(terminals ? { terminals: true } : {}) } as any, { quiet: true });
-    return { data: r.data, next: r.next, lost: r.lost ?? 0,
-             ...(times ? { times: r.times ?? [], timebaseHz: r.timebase_hz ?? null } : {}),
-             ...(Array.isArray(r.terminals) ? { terminals: r.terminals } : {}) };
-  };
-  try {
-    if (source.kind !== "rtt") return await read(false);
-    try {
-      return await read(true);
-    } catch (e) {
-      if (!noTerminals(e)) throw e;
-      return await read(false);
-    }
-  } catch (e) {
-    if (!legacy(e) || (source.kind !== "rtt" && source.kind !== "semihosting")) throw e;
-    const channel = source.kind === "rtt" ? source.channel ?? 0 : "semihosting";
-    const r = await call("rtt.read", { channel, since }, { quiet: true });
-    return { data: r.data, next: r.next, lost: r.lost ?? 0 };
-  }
+  const terminals = source.kind === "rtt";
+  const r = await call("terminal.read", { source: source.id, since, ...(times ? { times: true } : {}),
+                                          ...(terminals ? { terminals: true } : {}) } as any, { quiet: true });
+  return { data: r.data, next: r.next, lost: r.lost ?? 0,
+           ...(times ? { times: r.times ?? [], timebaseHz: r.timebase_hz ?? null } : {}),
+           ...(Array.isArray(r.terminals) ? { terminals: r.terminals } : {}) };
 }
 
 /** 送る操作（メソッドと引数）: RTT の下り・セミホスティングの標準入力は rtt.write、UART は uart.write */
@@ -150,6 +118,18 @@ export const BAUDS = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 23040
 /** SWO の速さの選択肢（TPIU の分周で作れる代表値） */
 export const SWO_BAUDS = [500000, 1000000, 2000000, 4000000, 6000000, 8000000];
 
+/** swo.configure の引数: ITM のポート（0〜31 の整数を , か空白で区切る）と SWO の速さは使う人が入れたものだけ（暗黙の
+ *  ポート 0〜3・速さを使わない）。コア クロックは空なら null（デーモンが要れば誤りで返す）。足りない・誤りは null */
+export function swoConfigureParams(portsText: string, baudText: string, coreClockText: string):
+  { ports: number[]; swo_baud: number; core_clock_hz: number | null } | null {
+  const parts = portsText.split(/[\s,]+/).filter(Boolean);
+  if (!parts.length || !parts.every((p) => /^\d+$/.test(p) && Number(p) <= 31)) return null;
+  const baud = Number(baudText);
+  if (!baudText.trim() || !(baud > 0)) return null;
+  const clock = Number(coreClockText);
+  return { ports: parts.map(Number), swo_baud: baud, core_clock_hz: coreClockText.trim() && clock > 0 ? clock : null };
+}
+
 // --- 制御コード（VT100 の一部: 色・太字・画面の消去） ----------------------------------------------------
 
 export interface Span {
@@ -172,9 +152,13 @@ export interface Screen {
   pending: string;            // 途中で切れたエスケープの並び（次の文字と合わせる）
   stamps: Stamp[];            // at の昇順
   length: number;             // 画面の文字の数
+  discarded: number;          // 上限（limit）を超えて画面から捨てた文字の数（黙って捨てない）
 }
 
-export const emptyScreen = (): Screen => ({ spans: [], fg: null, bold: false, pending: "", stamps: [], length: 0 });
+/** 画面に持つ文字の上限（古い文字から捨てる。捨てた数は Screen.discarded） */
+export const TERMINAL_KEEP_CHARS = 200_000;
+
+export const emptyScreen = (): Screen => ({ spans: [], fg: null, bold: false, pending: "", stamps: [], length: 0, discarded: 0 });
 
 const ESC = "\x1b";
 // CSI（ESC [ 引数 文字）・OSC（ESC ] … BEL / ESC \）・2 文字のエスケープ
@@ -185,7 +169,7 @@ type Work = Omit<Screen, "pending"> & { pending: string };
 /** 受けた文字を画面に足す（色を spans に、CR LF を LF に、ESC[2J / ESC c で消す、ほかの制御は捨てる）。
  *  times（受け取りの時刻。at は input の中の位置）があれば、その位置の画面の文字に時刻の印を付ける。
  *  limit を超えたら古い文字から捨てる */
-export function feed(screen: Screen, input: string, limit = 200_000, times: ChunkTime[] = []): Screen {
+export function feed(screen: Screen, input: string, limit = TERMINAL_KEEP_CHARS, times: ChunkTime[] = []): Screen {
   const w: Work = { ...screen, spans: screen.spans.slice(), stamps: screen.stamps.slice() };
   let pos = 0;
   for (const m of [...times].sort((a, b) => a.at - b.at)) {
@@ -262,7 +246,7 @@ function trim(w: Work, limit: number): Screen {
   let k = -1;                                         // 新しい始めより前（か同じ）に始まった最後の受け取り
   while (k + 1 < moved.length && moved[k + 1].at <= 0) k++;
   const stamps = k >= 0 ? [{ ...moved[k], at: 0 }, ...moved.slice(k + 1)] : moved;
-  return { ...w, spans: i ? spans.slice(i) : spans, length: w.length - dropped, stamps };
+  return { ...w, spans: i ? spans.slice(i) : spans, length: w.length - dropped, stamps, discarded: w.discarded + dropped };
 }
 
 /** 画面の文字だけ（ログの保存） */

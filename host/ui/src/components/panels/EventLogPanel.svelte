@@ -9,11 +9,13 @@
   import { download, shortNumber } from "../../lib/chart";
   import { shared } from "../../lib/context";
   import {
-    describeCondition, emptyCondition, eventsCsv, fieldText, histogramBars, intervalsInBin, kindQuery, kindStats, notesOf,
-    longestMarks, searchMarks, summary, toQuery, type Condition, type Histogram, type KindStat, type Note, type Longest,
+    describeCondition, emptyCondition, eventsCsv, fieldText, histogramBars, intervalsInBin, kindRows, notesOf,
+    longestMarks, measureParams, searchMarks, summary, toQuery, type Condition, type Histogram, type KindStat, type Note, type Longest,
     type RecEvent,
   } from "../../lib/eventlog";
   import { allowed } from "../../lib/guard";
+  import { queryCut, topCut } from "../../lib/cut";
+  import { parseCount } from "../../lib/system";
   import { i18n } from "../../lib/i18n";
   import { onCalls, onRecording } from "../../lib/notify";
   import { load, save } from "../../lib/prefs";
@@ -42,6 +44,9 @@
   let tab = $state<Tab>(load("eventLog.tab", "search") as Tab);
   let status = $state<any>(null);                        // recording.status
   let streams = $state<string[]>([]);
+  let streamsCut = $state<ReturnType<typeof queryCut>>(null);  // stream の選択肢を上限で切った
+  const STREAMS_LIMIT = 100;
+  const IN_BIN_SHOWN = 500;                              // 棒の中の区間の表に描く行の上限（切ったら数と上限を出す）
 
   // 検索
   let cond = $state(restore("eventLog.query"));
@@ -56,11 +61,14 @@
   let startCond = $state(restore("eventLog.start"));
   let endCond = $state(restore("eventLog.end"));
   let stats = $state<any>(null);
+  // 分布図の棒の数・長い順の上位の数は使う人が入れる（空から。画面の数・API の既定を暗黙に使わない）
+  let binsText = $state(load("eventLog.bins", ""));
+  let longestText = $state(load("eventLog.longestN", ""));
   let picked = $state<number | null>(null);
   let statsError = $state<string | null>(null);
 
   // 概要（stream・kind ごとの件数）
-  let overview = $state<{ rows: KindStat[]; total: number; max: number; partial: boolean } | null>(null);
+  let overview = $state<{ rows: KindStat[]; total: number; max: number } | null>(null);
   let overviewScope = $state<"all" | "view">("all");
   let overviewError = $state<string | null>(null);
 
@@ -117,9 +125,10 @@
     try {
       status = await conn.call("recording.status", {}, { quiet: true });
       if (status?.name && !streams.length) {
-        const out = await conn.call("recording.query", { sql: "SELECT DISTINCT stream FROM events", limit: 100 },
+        const out = await conn.call("recording.query", { sql: "SELECT DISTINCT stream FROM events", limit: STREAMS_LIMIT },
                                     { quiet: true });
         streams = (out.rows ?? []).map((r: unknown[]) => String(r[0]));
+        streamsCut = queryCut(out, STREAMS_LIMIT);
       }
     } catch {
       status = status && status.name ? status : null;
@@ -198,8 +207,12 @@
   async function measure() {
     save("eventLog.start", JSON.stringify(startCond));
     save("eventLog.end", JSON.stringify(endCond));
+    save("eventLog.bins", binsText);
+    save("eventLog.longestN", longestText);
+    const params = measureParams(startCond, endCond, binsText, longestText);
+    if (!params) return;
     try {
-      stats = await conn.call("timing.measure", { start: toQuery(startCond), end: toQuery(endCond), bins: 24 });
+      stats = await conn.call("timing.measure", params);
       statsError = null;
     } catch (e) {
       stats = null;
@@ -212,8 +225,10 @@
   const hist = $derived<Histogram[]>(stats?.histogram ?? []);
   const longest = $derived<Longest[]>(stats?.longest ?? []);
   const bars = $derived(hz ? histogramBars(hist, hz, picked, longest) : []);
-  const inBin = $derived<[number, number][]>(picked === null ? [] : intervalsInBin(stats?.intervals ?? [], hist, picked)
-    .slice(0, 500));
+  const inBinAll = $derived<[number, number][]>(picked === null ? [] : intervalsInBin(stats?.intervals ?? [], stats?.interval_bins ?? [], picked));
+  const inBin = $derived(inBinAll.slice(0, IN_BIN_SHOWN));
+  const inBinCut = $derived(topCut(inBin.length, inBinAll.length, IN_BIN_SHOWN));
+  const canMeasure = $derived(parseCount(binsText) !== null && parseCount(longestText) !== null);
   const dur = (ticks: number) => (hz ? formatDuration(ticks / hz) : String(ticks));
 
   // --- 概要 -------------------------------------------------------------------------------------
@@ -221,11 +236,8 @@
   /** stream・kind ごとの件数を数える（表示中の範囲か記録全体） */
   async function countKinds() {
     const r = overviewScope === "view" ? viewRange : null;
-    const q = kindQuery(r);
     try {
-      const out = await conn.call("recording.query", { ...q, limit: 1000 }, { quiet: true });
-      const span = r ? r[1] - r[0] : status?.span ? status.span[1] - status.span[0] + 1 : 0;
-      overview = { ...kindStats(out, hz, span), partial: !!out.partial };
+      overview = kindRows(await conn.call("recording.kinds", r ? { t0: r[0], t1: r[1] } : {}, { quiet: true }));
       overviewError = null;
     } catch (e) {
       overview = null;
@@ -245,12 +257,8 @@
 
   async function readNotes() {
     try {
-      const [marks, calls] = await Promise.all([
-        conn.call("recording.find", { query: { stream: "annotation", kind: "mark" } }, { quiet: true }),
-        conn.call("recording.find", { query: { stream: "host", kind: "call", body: { method: "recording.mark" } } },
-                  { quiet: true }),
-      ]);
-      notes = notesOf(marks.events ?? [], calls.events ?? []);
+      const marks = await conn.call("recording.find", { query: { stream: "annotation", kind: "mark" } }, { quiet: true });
+      notes = notesOf(marks.events ?? []);
     } catch {
       notes = [];
     }
@@ -301,7 +309,6 @@
       {/if}
     </div>
     {#if overviewError}<div class="error">{overviewError}</div>{/if}
-    {#if overview?.partial}<div class="hint muted">{$i18n("eventLog.overviewPartial")}</div>{/if}
     {#if overview}
       <div class="rows">
         <table class="grid">
@@ -315,7 +322,7 @@
                 <td class="mono">{k.kind}</td>
                 <td class="mono num bar" style:--w="{overview.max ? (k.count / overview.max) * 100 : 0}%">{k.count.toLocaleString()}</td>
                 <td class="mono num">{(k.share * 100).toFixed(k.share < 0.01 ? 2 : 1)} %</td>
-                <td class="mono num">{Number.isFinite(k.perSecond) ? shortNumber(k.perSecond) : "—"}</td>
+                <td class="mono num">{k.perSecond === null ? "—" : shortNumber(k.perSecond)}</td>
                 <td><TimeLink to={{ source: "recording", t: k.first }} /></td>
                 <td><TimeLink to={{ source: "recording", t: k.last }} /></td>
                 <td><button class="small" title={$i18n("eventLog.searchKindTip")} onclick={() => searchKind(k)}>
@@ -331,6 +338,7 @@
   {:else if tab === "search"}
     <form class="pane-bar sub" onsubmit={(e) => { e.preventDefault(); void search(); }}>
       <ConditionFields bind:cond {streams} />
+      {#if streamsCut}<span class="muted">{$i18n("eventLog.streamsTruncated", { n: streamsCut.shown, limit: streamsCut.limit })}</span>{/if}
       <select bind:value={scope} aria-label={$i18n("eventLog.scope")} title={$i18n("eventLog.scope")}>
         <option value="all">{$i18n("eventLog.scopeAll")}</option>
         <option value="view" disabled={!viewRange}>{$i18n("eventLog.scopeView")}</option>
@@ -385,7 +393,14 @@
       <div><span class="label">{$i18n("eventLog.start")}</span><ConditionFields bind:cond={startCond} {streams} /></div>
       <div><span class="label">{$i18n("eventLog.end")}</span><ConditionFields bind:cond={endCond} {streams} /></div>
       <div>
-        <button type="submit" class="primary">{$i18n("eventLog.measure")}</button>
+        <label>{$i18n("eventLog.bins")}<input class="num" bind:value={binsText} inputmode="numeric" size="4"
+          aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
+        <label>{$i18n("eventLog.longestN")}<input class="num" bind:value={longestText} inputmode="numeric" size="4"
+          aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
+      </div>
+      <div>
+        <button type="submit" class="primary" disabled={!canMeasure}
+                title={canMeasure ? "" : $i18n("eventLog.needBins")}>{$i18n("eventLog.measure")}</button>
         <span class="muted">{$i18n("eventLog.measureHint")}</span>
       </div>
     </form>
@@ -414,7 +429,7 @@
         <div class="chart">
           <Chart bars={bars} height={140} xFormat={formatDuration} label={$i18n("eventLog.histogram")}
                  onpick={(_, bar) => (picked = bar)}
-                 onopen={(_, bar) => { const first = bar === null ? undefined : intervalsInBin(stats.intervals, hist, bar)[0];
+                 onopen={(_, bar) => { const first = bar === null ? undefined : intervalsInBin(stats.intervals, stats.interval_bins ?? [], bar)[0];
                                        if (first) reveal({ source: "recording", t: first[0], tEnd: first[0] + first[1] }); }} />
         </div>
         <div class="lists">
@@ -433,6 +448,10 @@
                 {/each}
               </tbody>
             </table>
+            {#if inBinCut}<div class="muted">{$i18n("common.truncated", inBinCut)}</div>{/if}
+            {#if stats.intervals_total !== undefined}
+              <div class="muted">{$i18n("eventLog.intervalsTruncated", { shown: stats.intervals.length, total: stats.intervals_total })}</div>
+            {/if}
           </div>
           <div>
             <div class="muted head">{$i18n("eventLog.longest", { n: longest.length })}</div>
@@ -499,6 +518,8 @@
   .hint { padding: 8px 12px; margin: 0; }
   .stats-form { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   .stats-form .label { display: inline-block; width: 4.5em; color: var(--muted); }
+  .stats-form label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); margin-right: 8px; }
+  .stats-form input.num { width: 5em; }
   .summary { padding: 4px 8px; }
   .figures { width: auto; }
   .chart { padding: 0 8px; }

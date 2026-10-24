@@ -20,7 +20,7 @@
   const PERIODS = [500, 1000, 2000, 5000];
 
   const { app, conn, dbg, ui } = shared();
-  let input = $state(load("memory.address", "0x20000000"));
+  let input = $state(load("memory.address", ""));   // 番地は使う人が入れる（特定の品種の SRAM を入れない）
   let unit = $state(Number(load("memory.unit", "8")));
   let auto = $state(load("memory.auto", "0") === "1");
   let period = $state(Number(load("memory.period", "1000")));
@@ -70,6 +70,11 @@
   async function go(compare = false) {
     save("memory.address", input);
     save("memory.unit", String(unit));
+    if (!input.trim()) {                            // 入れていなければ読まない
+      base = view = null;
+      error = null;
+      return;
+    }
     try {
       base = await resolveAddress(conn.call.bind(conn), input, $dbg.frame);
       error = null;
@@ -181,7 +186,8 @@
 
 <div class="pane">
   <form class="pane-bar" onsubmit={(e) => { e.preventDefault(); void go(); }}>
-    <label>{$i18n("memory.address")} <input class="mono addr" bind:value={input} title={$i18n("memory.addressHint")} /></label>
+    <label>{$i18n("memory.address")} <input class="mono addr" bind:value={input} title={$i18n("memory.addressHint")}
+      aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
     <button disabled={!connected}>{$i18n("common.go")}</button>
     <button type="button" class="small" disabled={base === null || !connected} title={$i18n("memory.previous")}
             aria-label={$i18n("memory.previous")} onclick={() => page(-1)}>‹</button>
@@ -199,7 +205,7 @@
       </select>
     {/if}
     <span class="spacer"></span>
-    {#if error}<span class="bad" title={error}>{error.length > 60 ? $i18n("memory.badAddress", { address: input }) : error}</span>{/if}
+    {#if error}<span class="bad" title={error}>{error}</span>{/if}
   </form>
   {#if view && connected}
     <table class="dump mono" class:stale={(!halted && !auto) || failed} title={failed ? $i18n("memory.staleTip") : undefined}>

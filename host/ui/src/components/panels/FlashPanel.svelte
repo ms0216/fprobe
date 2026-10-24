@@ -8,8 +8,8 @@
   import { base64 } from "../../lib/debugger";
   import { frequency } from "../../lib/format";
   import {
-    algoParams, baseName, defaultReadPath, emptyAlgo, eraseMethodKey, formatOf, loadOptions, overall, parseNumber,
-    programParams, programStages, remaining, sectorsText, seconds, size, speed, verifyParams, type AlgoForm,
+    algoParams, baseName, defaultReadPath, emptyAlgo, eraseMethodKey, loadOptions, parseNumber,
+    programParams, programStages, sectorsText, seconds, size, speed, verifyParams, type AlgoForm,
     type FlashOptions, type Progress, type Stage,
   } from "../../lib/flash";
   import { allowed } from "../../lib/guard";
@@ -23,11 +23,13 @@
   const { app, conn, dbg, ui } = shared();
 
   let path = $state(load("flash.path", ""));
-  let address = $state(load("flash.address", "0x08000000"));
+  // 前の版は ELF・HEX のときも欄を隠して値を覚えていた: 隠れていた値を黙って送らないよう、覚える名前を変え空から始める
+  let address = $state(load("flash.loadAddress", ""));
   let options = $state<FlashOptions>(loadOptions(load("flash.options", "{}")));
   let eraseMode = $state<"range" | "chip" | "mass">("range");
-  let eraseAddress = $state("0x08000000");
-  let eraseLength = $state("16K");
+  // 消す範囲は使う人が入れる（特定の品種の番地・長さを初めから入れない）
+  let eraseAddress = $state("");
+  let eraseLength = $state("");
   let readPath = $state(load("flash.readPath", ""));
   let readAddress = $state("");
   let readLength = $state("");
@@ -57,12 +59,11 @@
 
   const online = $derived($app.link === "open");
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
-  const isBin = $derived(formatOf(path) === "bin");
   const stages = $derived<Stage[]>(result?.kind === "program" ? programStages(result.data) : []);
   const verify = $derived(result?.kind === "program" ? result.data?.verify : result?.kind === "verify" ? result.data : null);
 
   $effect(() => save("flash.path", path));
-  $effect(() => save("flash.address", address));
+  $effect(() => save("flash.loadAddress", address));
   $effect(() => save("flash.options", JSON.stringify(options)));
   $effect(() => save("flash.readPath", readPath));
   $effect(() => save("flash.packPath", packPath));
@@ -355,13 +356,12 @@
         <button class="small" disabled={!$dbg.elf || path === $dbg.elf} title={$i18n("flash.useElfTip", { path: $dbg.elf ?? "-" })}
                 onclick={() => (path = $dbg.elf ?? path)}>{$i18n("flash.useElf")}</button>
       </div>
-      {#if isBin}
-        <label for="flash-address">{$i18n("flash.address")}</label>
-        <div class="row">
-          <input id="flash-address" class="mono num" bind:value={address} title={$i18n("flash.addressHint")} />
-          <span class="muted">{$i18n("flash.addressHint")}</span>
-        </div>
-      {/if}
+      <!-- 番地の欄は常に出す（形式を拡張子で推さない。BIN か否かはデーモンが中身で決める） -->
+      <label for="flash-address">{$i18n("flash.address")}</label>
+      <div class="row">
+        <input id="flash-address" class="mono num" bind:value={address} title={$i18n("flash.addressHint")} />
+        <span class="muted">{$i18n("flash.addressHint")}</span>
+      </div>
       <span></span>
       <div class="row options">
         <label title={$i18n("flash.eraseTip")}>{$i18n("flash.erase")}
@@ -390,8 +390,10 @@
           <option value="mass">{$i18n("flash.eraseMass")}</option>
         </select>
         {#if eraseMode === "range"}
-          <input class="mono num" bind:value={eraseAddress} aria-label={$i18n("flash.address")} title={$i18n("flash.address")} />
-          <input class="mono len" bind:value={eraseLength} aria-label={$i18n("flash.length")} title={$i18n("flash.length")} />
+          <input class="mono num" bind:value={eraseAddress} aria-label={$i18n("flash.address")} aria-required="true"
+                 placeholder={$i18n("flash.address")} title={$i18n("flash.address")} /><span class="req" aria-hidden="true">*</span>
+          <input class="mono len" bind:value={eraseLength} aria-label={$i18n("flash.length")} aria-required="true"
+                 placeholder={$i18n("flash.length")} title={$i18n("flash.length")} /><span class="req" aria-hidden="true">*</span>
         {/if}
         <button disabled={!online || !!busy} onclick={erase}>{$i18n("flash.eraseNow")}</button>
       </div>
@@ -406,13 +408,12 @@
     </div>
 
     {#if progress}
-      {@const f = overall(progress, options.verify)}
-      {@const left = remaining(progress, options.verify)}
+      {@const f = progress.fraction}
+      <!-- 段（phase）と段の中の進み・経過は通知の値のまま（段を合成しない・残りの時間を見積もらない） -->
       <div class="progress" role="progressbar" aria-valuenow={Math.round(f * 100)} aria-valuemin={0} aria-valuemax={100}>
         <span>{$i18n(`flash.phase.${progress.phase}` as Key)}</span>
         <span class="bar"><span style:width="{f * 100}%"></span></span>
         <span class="mono">{Math.round(f * 100)}% · {seconds(progress.elapsed_s)}</span>
-        {#if left}<span class="muted mono">{$i18n("flash.remaining", { t: seconds(left) })}</span>{/if}
       </div>
     {/if}
     {#if invalid}<div class="line bad">{invalid}</div>{/if}
@@ -574,7 +575,7 @@
     <details>
       <summary title={$i18n("flash.benchmarkTip")}>{$i18n("flash.benchmark")}</summary>
       <div class="row pad">
-        <label>{$i18n("flash.benchSector")} <input class="mono num" bind:value={benchSector} placeholder="0x08060000" /></label>
+        <label>{$i18n("flash.benchSector")} <input class="mono num" bind:value={benchSector} /></label>
         <button class="small" disabled={!online || !!busy} title={$i18n("flash.benchmarkTip")} onclick={benchmark}>
           {$i18n("flash.benchRun")}</button>
         {#if bench?.frequency_hz}<span class="muted mono">{$i18n("flash.frequency", { f: frequency(bench.frequency_hz) })}</span>{/if}

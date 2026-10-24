@@ -150,8 +150,20 @@ def test_o1_tail_call_from_a_handler_returns_straight_to_the_interrupted_code():
     assert frames[1].note == "exception" and frames[1].pc == interrupted
 
 
-def test_frame_zero_without_cfi_is_treated_as_a_leaf():
+def test_frame_zero_without_cfi_stops_unless_the_leaf_assumption_is_given():
+    """CFI の無い最内の関数で、葉という仮定を黙って使わない。止めた理由を返し、仮定は使う側が明示したときだけ。"""
     info, syms, unwinder = load("dwarf_demo_O0.elf")
+    b = StackBuilder(syms)
+    b.enter("reset_handler", lr=RESET_LR)
+    site = b.call_site("reset_handler", "walk")
+    access = b.halt_at(0x2000_0010, lr=(site + 4) | 1)               # ベクタ表の中（FDE が無い）
+    frames = unwinder.unwind(access)
+    assert len(frames) == 1 and frames[0].stop == {"reason": "no_cfi", "pc": 0x2000_0010}
+
+
+def test_frame_zero_without_cfi_is_treated_as_a_leaf_when_asked():
+    info, syms, _ = load("dwarf_demo_O0.elf")
+    unwinder = Unwinder(CallFrameTable.from_dwarf(info.dwarf), assume_leaf=True)
     b = StackBuilder(syms)
     b.enter("reset_handler", lr=RESET_LR)
     site = b.call_site("reset_handler", "walk")
@@ -171,3 +183,21 @@ def test_unwinding_stops_when_the_stack_is_unreadable():
     access.registers["r7"] = 0x1000_0000                             # CFA = r7 + 8 が読めない番地
     frames = unwinder.unwind(access)
     assert len(frames) == 1 and frames[0].pc == pc
+    assert frames[0].stop["reason"] == "not_available" and "0x" in frames[0].stop["detail"]
+
+
+def test_unwinding_reports_the_frame_limit_and_the_end_of_the_chain():
+    """上限で切ったら、切ったことと使った上限を最後のフレームに書く。最後まで辿れたら戻り先の値を書く。"""
+    info, syms, _ = load("dwarf_demo_O0.elf")
+    sensors = syms.variable("sensors").address
+    b = StackBuilder(syms)
+    b.enter("reset_handler", lr=RESET_LR)
+    b.call("reset_handler", "walk", sensors, 3)
+    pc = b.call("walk", "leaf_sum", sensors + 80, 0)
+    table = CallFrameTable.from_dwarf(info.dwarf)
+    frames = Unwinder(table, max_frames=2).unwind(b.halt_at(pc))
+    assert len(frames) == 2 and frames[0].stop is None
+    assert frames[1].stop == {"reason": "max_frames", "max_frames": 2}
+    frames = Unwinder(table).unwind(b.halt_at(pc))
+    assert names(info, frames)[-1] == "reset_handler"
+    assert frames[-1].stop == {"reason": "return_address", "value": RESET_LR}

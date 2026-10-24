@@ -115,9 +115,13 @@ class LowLevelTools:
         return {**{name: (value >> bit) & 1 for name, bit in PIN_BITS.items()}, "not_reported": NOT_REPORTED}
 
     def pins_write(self, swclk: int | None = None, swdio: int | None = None, nreset: int | None = None,
-                   hold_us: int = 0) -> dict:
+                   hold_us: int = 0, settle_timeout_us: int = 100_000) -> dict:
         """ピンを個別に High（1）/ Low（0）にする（None は変えない）。未接続のときだけ。hold_us があればその後で
-        元の値に戻す（例 nreset=0, hold_us=1000 で 1 ms のリセットの脈）。書いた後の状態を返す。"""
+        元の値に戻し、戻した線が戻るまで最大 settle_timeout_us 待つ（例 nreset=0, hold_us=1000 で 1 ms のリセットの脈）。
+        書いた後の状態を返す。脈のときは settle_us（戻るまで・打ち切るまでの時間）・settled（戻ったか）・
+        settle_timeout_us（使った上限）も。"""
+        if settle_timeout_us < 0:
+            raise ValueError("settle_timeout_us は 0 以上")
         wanted = {"swclk": swclk, "swdio": swdio, "nreset": nreset}
         if any(v not in (None, 0, 1) for v in wanted.values()):
             raise ValueError("ピンの値は 0 か 1（変えないなら省く）")
@@ -129,19 +133,22 @@ class LowLevelTools:
             link = self._raw_started().link
             before = link.pin_access(0, 0)
             link.pin_access(mask, value)
-            settle_us = None
+            settle = None
             if hold_us:
                 time.sleep(hold_us / 1e6)
                 link.pin_access(mask, before & mask)
                 # 戻した線が戻るまで待つ: nRESET はオープンドレインで、ターゲットのコンデンサ（Nucleo の NRST は
                 # 100 nF）があると立ち上がりに時間がかかる（実機で、戻した直後に読むとまだ 0 だった。2026-10-18）
                 started = time.perf_counter()
-                while (link.pin_access(0, 0) ^ before) & mask and time.perf_counter() - started < 0.1:
+                limit_s = settle_timeout_us / 1e6
+                while not (settled := not (link.pin_access(0, 0) ^ before) & mask) \
+                        and time.perf_counter() - started < limit_s:
                     time.sleep(0.0005)
-                settle_us = round((time.perf_counter() - started) * 1e6)
+                settle = {"settle_us": round((time.perf_counter() - started) * 1e6), "settled": settled,
+                          "settle_timeout_us": settle_timeout_us}
             out = self._pins_dict(link.pin_access(0, 0))
-            if settle_us is not None:
-                out["settle_us"] = settle_us             # 元の値に戻るまでの時間（0.1 秒で打ち切り）
+            if settle is not None:
+                out.update(settle)                       # 戻るまでの時間・戻ったか（打ち切ったら false）・上限
             return out
 
     # --- DP / AP ----------------------------------------------------------------------------------
@@ -346,42 +353,48 @@ class LowLevelTools:
 
     # --- 診断 -------------------------------------------------------------------------------------
 
-    def target_diagnose(self, frequency_hz: int = DEFAULT_HZ, max_aps: int = 8, jtag: bool = True) -> dict:
+    def target_diagnose(self, frequencies_hz: list[int] | None = None, max_aps: int = 8, jtag: bool = True) -> dict:
         """ターゲットにつながらない理由を順に調べる（未接続のときだけ）: 電圧 → ピン → SWD（切り替え・休眠・
-        複数ドロップ・速度を下げて）→ JTAG のチェーン → DP（電源の要求）→ AP・ROM テーブル → コア → 部品の判別 → 保護。
-        verdict（結論）・段ごとの status と message・suggested_connect（target_connect の引数）を返す。"""
+        複数ドロップ）→ JTAG のチェーン → DP（電源の要求）→ AP・ROM テーブル → コア → 部品の判別 → 保護。
+        frequencies_hz: 試す速さ（この順に。省略は [DEFAULT_HZ] の 1 つだけ。暗黙に下げない）。段ごとの status（ok 読めた /
+        fail 読めなかった / skip）・message・data と、reached（DP に届いた）・応答した protocol と frequency_hz を返す。
+        結論の文・接続の引数のおすすめはプラグイン（fprobe.plugins.heuristics.diagnose_verdict）。"""
         with self._lock:
-            d = self._diagnose(frequency_hz, max_aps, jtag)
+            d = self._diagnose(frequencies_hz or [DEFAULT_HZ], max_aps, jtag)
             return d.as_dict()
 
-    def _diagnose(self, frequency_hz: int, max_aps: int, jtag: bool, measure: bool = True) -> diag.Diagnosis:
+    def _diagnose(self, frequencies_hz: list[int], max_aps: int, jtag: bool, measure: bool = True) -> diag.Diagnosis:
         self._require_disconnected("接続の診断")
         jtag = jtag and self.session.device.capabilities().jtag      # JTAG の無い構成（標準）では JTAG を調べない
         dap = self._raw()
         self._raw_dp_ready = False
         voltage = self._voltage_reading if measure else None
         pins = (lambda: self._raw_started().link.pin_access(0, 0)) if measure else None
-        d = diag.diagnose(dap, frequency_hz, voltage=voltage, pins=pins, protection=protection_status,
+        d = diag.diagnose(dap, frequencies_hz, voltage=voltage, pins=pins, protection=protection_status,
                           max_aps=max_aps, jtag=jtag)
-        self._raw_dp_ready = d.connect is not None             # 以後の dp_read 等はこの線と速度で
+        self._raw_dp_ready = d.reached                         # 以後の dp_read 等はこの線と速度で
         if d.jtag is not None:
             self._jtag_scan = d.jtag
         return d
 
     def _voltage_reading(self) -> dict:
-        r = Aux(self.session.device).read()
-        return {"volts": r.target_volts, "over_range": r.over_range, "live": r.live, "samples": r.samples,
-                "errors": r.errors}
+        return Aux(self.session.device).read().as_dict()
 
     def _auto_target(self, frequency_hz: int) -> tuple[str, dict]:
-        """target_connect の target="auto": 診断（電圧・ピンを除く）で部品を判別し、pyOCD のターゲット名を選ぶ。"""
-        d = self._diagnose(frequency_hz, 8, True, measure=False)
+        """target_connect の target="auto": 診断（電圧・ピンを除く。速さは頼まれた frequency_hz だけ）で部品を判別し、
+        pyOCD のターゲット名を選ぶ。部品の候補がちょうど 1 つならその名前（target_source = "part"）、そうでなければ
+        汎用の cortex_m（target_source = "generic"）。DP に届かなければ、読めなかった段の事実で断る。"""
+        d = self._diagnose([frequency_hz], 8, True, measure=False)
         self._close_lowlevel()
-        if d.connect is None:
-            raise RuntimeError(f"ターゲットを判別できない: {d.verdict()}（target_diagnose で詳しく）")
-        info = {"verdict": d.verdict(), "part": d.part.as_dict() if d.part else None,
-                "core": d.core["core"] if d.core else None, "suggested_connect": d.connect}
-        return d.connect["target"], info
+        if not d.reached:
+            failed = " / ".join(s.message for s in d.steps if s.status == "fail") or "DP に届かなかった"
+            raise RuntimeError(f"ターゲットを判別できない: {failed}（target_diagnose で詳しく）")
+        chosen = d.part.suggested_target if d.part else None
+        info = {"part": d.part.as_dict() if d.part else None, "core": d.core["core"] if d.core else None,
+                "protocol": d.protocol, "frequency_hz": d.frequency_hz,
+                "jtag_chain": d.jtag.chain if d.protocol == "jtag" and d.jtag is not None else None,
+                "target_source": "part" if chosen else "generic"}
+        return chosen or "cortex_m", info
 
 
 def _rate(length: int, seconds: float) -> dict:

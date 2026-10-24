@@ -7,9 +7,9 @@ use work.csr_bus_pkg.all;
 use work.build_info_pkg.all;
 
 package design_caps_pkg is
-  constant CAPS_ROM : csr_word_array_t(0 to 53) := (
+  constant CAPS_ROM : csr_word_array_t(0 to 54) := (
     x"50414346",
-    x"000000D8",
+    x"000000DC",
     x"00040001",
     x"00000002",
     x"00140002",
@@ -53,8 +53,9 @@ package design_caps_pkg is
     x"00000007",
     x"00020011",
     x"00000104",
-    x"00040013",
-    x"00090007",
+    x"00060014",
+    x"00040003",
+    x"00000001",
     x"00140010",
     BUILD_INFO(0),
     BUILD_INFO(1),

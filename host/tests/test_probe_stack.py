@@ -61,9 +61,14 @@ def test_elf_size_of_another_elf_and_errors(probe, tmp_path):
 
 
 def test_stack_static_finds_the_su_next_to_the_elf(probe):
-    out = probe.stack_static(top=3)
+    out = probe.stack_static(top=3, vector_table=0x0800_0000)
     assert out["su_files"] == [str(DEMO / "stack_demo.su")] and len(out["functions"]) == 3
+    assert out["su_paths"] == [str(DEMO)]                                   # 探した所を返す（?48）
+    assert out["msp"]["exception_frame_source"] in ("fpu_instructions", "no_fpu_instructions")   # 枠の出どころ（?63）
     assert out["functions_total"] > 10 and out["msp"]["thread"] == "Reset_Handler"
+    assert out["vector_table"] == {"address": 0x0800_0000, "size": 64}
+    bare = probe.stack_static(top=3)                                          # ベクタ表を名前で探さない
+    assert bare["msp"] is None and bare["vector_table"] is None
     one = probe.stack_static(function="tail")
     assert one["functions"][0]["path"] == ["tail", "middle", "leaf"] and one["functions"][0]["max"] == 112
     # 画面の呼び出しの木（Call Graph）: 直接の呼び先と関数の番地
@@ -79,7 +84,8 @@ def test_stack_static_finds_the_su_next_to_the_elf(probe):
 
 def test_paint_then_measure_the_msp(probe):
     target = connect(probe, msp=TOP - 0x80)
-    painted = probe.stack_paint(margin=64)
+    painted = probe.stack_paint(margin=64, top_symbol="_estack", size_symbol="_Min_Stack_Size")
+    assert painted["margin"] == 64
     assert painted["bottom"] == BOTTOM and painted["end"] == TOP - 0x80 - 64 and painted["top"] == TOP
     assert painted["fill"] == 0xCD and painted["bytes"] == 0x400 - 0x80 - 64
     assert target.memory.read_memory(BOTTOM, 4) == b"\xCD" * 4
@@ -101,18 +107,32 @@ def test_paint_needs_a_halted_core_and_room(probe):
     with pytest.raises(RuntimeError, match="止め"):
         probe.stack_paint()
     target.state = Target.State.HALTED
+    with pytest.raises(ValueError, match="top_symbol"):
+        probe.stack_paint()                                 # 範囲の名前を推さない
     target.registers["msp"] = BOTTOM + 8
     with pytest.raises(ValueError, match="SP"):
-        probe.stack_paint()
+        probe.stack_paint(top_symbol="_estack", size_symbol="_Min_Stack_Size")
     target.registers["msp"] = TOP
     out = probe.stack_paint(bottom=TOP - 0x100, top=TOP, fill=0xAA, margin=0)
     assert out["bytes"] == 0x100 and out["bounds"]["bottom_source"] == "argument"
 
 
 def test_usage_without_paint_is_marked(probe):
+    # 塗りの記録が無ければ塗りの値（IAR の慣習の 0xCD 等）を仮定しない（点検 2 回目 H12）: 使う側が fill で渡す
     connect(probe)
-    m = probe.stack_usage()
-    assert not m["painted"] and m["reached_bottom"] and any("塗" in n for n in m["notes"])
+    with pytest.raises(ValueError, match="fill"):
+        probe.stack_usage(top_symbol="_estack", size_symbol="_Min_Stack_Size")
+    m = probe.stack_usage(top_symbol="_estack", size_symbol="_Min_Stack_Size", fill=0xCD)
+    assert not m["painted"] and m["reached_bottom"] and any("塗" in n for n in m["notes"]) and m["fill"] == 0xCD
+
+
+def test_usage_after_paint_uses_the_painted_value_even_with_bounds(probe):
+    # 範囲を渡しても、塗りの記録の値（事実）で測る（暗黙の既定の値に戻らない）
+    target = connect(probe, msp=TOP)
+    probe.stack_paint(bottom=TOP - 0x100, top=TOP, fill=0xAA, margin=0)
+    target.memory.write_memory(TOP - 0x40, b"\x11" * 4)
+    m = probe.stack_usage(bottom=TOP - 0x100, top=TOP)
+    assert m["fill"] == 0xAA and m["used"] == 0x40 and m["painted"]
 
 
 def test_stack_static_reuses_the_loaded_symbols(probe, monkeypatch):

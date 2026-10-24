@@ -13,8 +13,8 @@
   import { onCalls, onRecording } from "../../lib/notify";
   import { Poller } from "../../lib/poll";
   import {
-    loadFromTimeline, loadStack, loadWindows, percent, recordedRuns, recordedTable, tableFromTimeline, windowAt,
-    type LoadSeries, type RecordedRuns, type TaskTable,
+    loadFromTimeline, loadStack, percent, recordedLoad, tableFromTimeline, windowAt, type LoadSeries, type RecordedLoad,
+    type TaskTable,
   } from "../../lib/rtos";
   import { axisTime, formatDuration, originFor, type Origin } from "../../lib/time";
   import Chart from "../charts/Chart.svelte";
@@ -27,9 +27,11 @@
 
   let mode = $state<"timeline" | "recording" | null>(null);
   let method = $state(load("cpuLoad.method", "sampled"));
-  let rate = $state(Number(load("cpuLoad.rate", "20000")));
+  // 周期・窓の幅は使う人が選ぶ（画面の既定を持たない。周期を選ぶまで始められず、窓を選ぶまで推移を読まない）
+  const positive = (v: number) => (v > 0 ? v : null);
+  let rate = $state<number | null>(positive(Number(load("cpuLoad.rate", ""))));
   let exceptions = $state(load("cpuLoad.exceptions", "1") === "1");
-  let windowUs = $state(Number(load("cpuLoad.window", "10000")));
+  let windowUs = $state<number | null>(positive(Number(load("cpuLoad.window", ""))));
   let byTask = $state(load("cpuLoad.byTask", "1") === "1");
   let table = $state<TaskTable | null>(null);
   let series = $state<LoadSeries | null>(null);
@@ -37,16 +39,15 @@
   let takenWith = $state("");                               // 取った方法（表示）
   let inRecording = $state(false);                          // 開いている記録のデータ（時刻の 0 を記録の始めに）
   let recording = $state<string | null>(null);
-  let truncated = $state(0);
+  let windowsCut = $state<RecordedLoad["windowsCut"]>(null);   // 窓を上限で切った（全体の数と上限。黙って切らない）
   let focus = $state<string | null>(null);                  // 表で選んだタスク（グラフで強調）
-  let cached: { key: string; runs: RecordedRuns } | null = null;
   const poller = new Poller(refresh);
   onDestroy(() => poller.dispose());
 
   $effect(() => save("cpuLoad.method", method));
-  $effect(() => save("cpuLoad.rate", String(rate)));
+  $effect(() => save("cpuLoad.rate", rate === null ? "" : String(rate)));
   $effect(() => save("cpuLoad.exceptions", exceptions ? "1" : "0"));
-  $effect(() => save("cpuLoad.window", String(windowUs)));
+  $effect(() => save("cpuLoad.window", windowUs === null ? "" : String(windowUs)));
   $effect(() => save("cpuLoad.byTask", byTask ? "1" : "0"));
 
   const online = $derived($app.link === "open");
@@ -67,43 +68,45 @@
     let g: any = null, l: any = null;
     try {
       g = await conn.call("rtos.timeline.get", { limit: 0 }, quiet);
-      l = await conn.call("rtos.timeline.load", { window_us: windowUs }, quiet);
+      l = windowUs === null ? null : await conn.call("rtos.timeline.load", { window_us: windowUs }, quiet);
     } catch (e) {
       if (!isNoData(e)) throw e;
       g = null;
     }
     if (g) {
       table = tableFromTimeline(g);
-      series = loadFromTimeline(l);
+      series = l ? loadFromTimeline(l) : null;
       running = !!g.running;
       takenWith = g.method === "itm" ? $i18n("cpuLoad.itm") : $i18n("cpuLoad.sampled");
       inRecording = g.window?.source === "recording";
       mode = "timeline";
-      truncated = 0;
+      const shown = l?.windows?.length ?? 0;
+      windowsCut = l && l.windows_total > shown ? { shown, total: l.windows_total, limit: l.limit } : null;
       return;
     }
     running = false;
     const st = await conn.call("recording.status", {}, quiet);
-    const tab = st.name ? await recordedTable(conn) : null;
-    if (tab) {
-      const key = `${st.name}/${st.events}`;
-      if (cached?.key !== key) cached = { key, runs: await recordedRuns(conn) };
-      table = tab;
-      series = loadWindows(cached.runs, Math.max(1, Math.round((windowUs * tab.hz) / 1e6)), [tab.t0, tab.t1]);
-      truncated = cached.runs.truncated ? cached.runs.runs.length : 0;
+    const rec = st.name ? await recordedLoad(conn, windowUs) : null;     // 記録からもデーモンが数える（画面で数えない）
+    if (rec) {
+      table = rec.table;
+      series = rec.series;
+      windowsCut = rec.windowsCut;
       recording = st.name;
       inRecording = true;
       mode = "recording";
       return;
     }
     mode = null;
+    windowsCut = null;
     table = null;
     series = null;
   }
 
   async function start() {
-    if (!(await allowed(app))) return;
-    const done = await app.act("rtos.timeline.start", { method: method as "sampled" | "itm", rate_hz: rate,
+    const r = rate;
+    if ((method === "sampled" && r === null) || !(await allowed(app))) return;
+    const done = await app.act("rtos.timeline.start", { method: method as "sampled" | "itm",
+                                                        ...(method === "sampled" && r !== null ? { rate_hz: r } : {}),
                                                         exceptions: method === "itm" && exceptions });
     if (done !== undefined) await poller.refresh();
   }
@@ -123,7 +126,8 @@
   const chartSeries = $derived.by((): Series[] => {
     const ws = series?.windows ?? [];
     if (!ws.length || !series) return [];
-    if (byTask) return loadStack(series, (t) => t, { isr: $i18n("cpuLoad.isr"), other: $i18n("cpuLoad.other") }, focus);
+    if (byTask) return loadStack(series, (table?.tasks ?? []).map((x) => x.task), (t) => t,
+                                 { isr: $i18n("cpuLoad.isr"), other: $i18n("cpuLoad.other") }, focus);
     const x = ws.map((w) => w.t0);
     const pct = (v: number | null | undefined) => (v === null || v === undefined ? NaN : v * 100);
     const out: Series[] = [{ name: $i18n("cpuLoad.load"), x, y: ws.map((w) => pct(w.load)), step: true, unit: "%" }];
@@ -133,9 +137,9 @@
   const cursor = $derived($tl.source === "recording" && $tl.selection !== null && table ? $tl.selection : null);
   const peak = $derived(series?.peak ?? null);
 
-  // 最大の窓を時間軸に印として置く（閉じたら消す）
+  // 最大の窓を時間軸に印として置く（普通の色: 最大は事実で、異常とは言わない。閉じたら消す）
   $effect(() => {
-    tl.setMarks("cpuLoad", "recording", peak ? [{ t: peak.t0, tEnd: peak.t1, tone: 3,
+    tl.setMarks("cpuLoad", "recording", peak ? [{ t: peak.t0, tEnd: peak.t1, tone: 0,
                                                  label: $i18n("cpuLoad.peak", { load: percent(peak.load) }) }] : []);
   });
   onDestroy(() => tl.setMarks("cpuLoad", "recording", []));
@@ -162,15 +166,17 @@
           <option value="itm">{$i18n("cpuLoad.itm")}</option>
         </select></label>
       {#if method === "sampled"}
-        <label>{$i18n("cpuLoad.rate")}
-          <select bind:value={rate}>
+        <label>{$i18n("cpuLoad.rate")}<span class="req" aria-hidden="true">*</span>
+          <select bind:value={rate} aria-required="true">
+            {#if rate === null}<option value={null} disabled></option>{/if}
             {#each [5000, 10000, 20000, 50000] as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
           </select></label>
       {:else}
         <label title={$i18n("cpuLoad.exceptionsTip")}><input type="checkbox" bind:checked={exceptions} />
           {$i18n("cpuLoad.exceptions")}</label>
       {/if}
-      <button class="primary" disabled={!connected || !$poller.loaded} title={connected ? $i18n("cpuLoad.startTip") : $i18n("hint.connectFirst")}
+      <button class="primary" disabled={!connected || !$poller.loaded || (method === "sampled" && rate === null)}
+              title={connected ? $i18n("cpuLoad.startTip") : $i18n("hint.connectFirst")}
               onclick={start}>{$i18n("cpuLoad.start")}</button>
     {/if}
     {#if mode}
@@ -178,28 +184,31 @@
                                               : $i18n("cpuLoad.fromRecording", { name: recording ?? "" })}</span>
     {/if}
     <span class="spacer"></span>
-    <label>{$i18n("cpuLoad.window")}
-      <select bind:value={windowUs}>
+    <label>{$i18n("cpuLoad.window")}<span class="req" aria-hidden="true">*</span>
+      <select bind:value={windowUs} aria-required="true">
+        {#if windowUs === null}<option value={null} disabled></option>{/if}
         {#each WINDOWS as w (w)}<option value={w}>{formatDuration(w / 1e6)}</option>{/each}
       </select></label>
     <label><input type="checkbox" bind:checked={byTask} /> {$i18n("cpuLoad.byTask")}</label>
   </div>
 
   <LoadState state={$poller} onretry={() => void poller.refresh()} />
-  {#if mode && table && series}
+  {#if mode && table}
     <div class="summary">
       {#if peak}
         <span>{$i18n("cpuLoad.peak", { load: percent(peak.load) })}</span>
         <TimeLink to={{ source: "recording", t: peak.t0, tEnd: peak.t1 }} origin={base} />
       {/if}
-      <span class="muted">{$i18n("cpuLoad.mean", { load: percent(series.meanLoad) })}</span>
+      {#if series}<span class="muted">{$i18n("cpuLoad.mean", { load: percent(series.meanLoad) })}</span>{/if}
       {#if table.lowerBound}<span class="warn" title={$i18n("cpuLoad.lowerBound")}>⚠</span>{/if}
-      {#if truncated}<span class="warn">{$i18n("cpuLoad.truncated", { n: truncated })}</span>{/if}
+      {#if windowsCut}<span class="warn">{$i18n("common.truncated", windowsCut)}</span>{/if}
     </div>
-    <div title={$i18n("cpuLoad.chartTip")}>
-      <Chart type={byTask ? "stacked" : "line"} series={chartSeries} yDomain={[0, 100]} height={150} {cursor} {xFormat}
-             yFormat={(v) => `${v}%`} onopen={openAt} label={$i18n("cpuLoad.load")} />
-    </div>
+    {#if series}
+      <div title={$i18n("cpuLoad.chartTip")}>
+        <Chart type={byTask ? "stacked" : "line"} series={chartSeries} yDomain={[0, 100]} height={150} {cursor} {xFormat}
+               yFormat={(v) => `${v}%`} onopen={openAt} label={$i18n("cpuLoad.load")} />
+      </div>
+    {/if}
     <table class="grid">
       <thead><tr><th>{$i18n("cpuLoad.task")}</th><th>{$i18n("cpuLoad.usage")}</th><th>{$i18n("cpuLoad.count")}</th>
         <th>{$i18n("cpuLoad.total")}</th><th>{$i18n("cpuLoad.max")}</th><th>{$i18n("cpuLoad.min")}</th>

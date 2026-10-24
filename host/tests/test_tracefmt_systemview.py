@@ -30,7 +30,7 @@ def test_a_stream_decodes_tasks_isrs_prints_and_times():
     assert trace.ts_hz == 64_000_000 and trace.system["O"] == "FreeRTOS"
     assert {t.id: (t.name, t.priority) for t in trace.tasks.values()} == {
         A: ("sensor", 3), B: ("logger", 2), IDLE: ("IDLE", 0)}
-    assert trace.idle == {IDLE}
+    assert not getattr(trace, "idle", set())       # 名前でアイドルを決めない（使う側が idle_tasks で渡す）
     kinds = [(e.kind, e.ts, e.task) for e in trace.events if e.kind in ("task_in", "task_out", "isr_enter", "isr_exit")]
     assert kinds == [("task_in", 1_100, IDLE), ("isr_enter", 1_200, None), ("isr_exit", 1_260, None),
                      ("task_in", 1_310, A), ("task_out", 1_500, A), ("task_in", 1_520, IDLE)]
@@ -131,10 +131,26 @@ def test_a_broken_packet_resynchronizes_at_the_next_sync():
     assert d.trace.errors >= 1 and sum(1 for e in d.trace.events if e.kind == "print") >= 1
 
 
-def test_idle_is_only_the_names_the_rtos_defines():
-    # 名前の部分一致・前方一致で idle を決めない（「idler」等の利用者のタスクを idle にしてしまう）。RTOS のソースが
-    # 定める名前だけ: FreeRTOS の configIDLE_TASK_NAME の既定 "IDLE"（SMP は "IDLE<n>"）、Zephyr の "idle"（SMP は
-    # "idle <nn>"）、RTX5 の "osRtxIdleThread"
-    from fprobe.tracefmt.model import is_rtos_idle_name
-    assert all(map(is_rtos_idle_name, ["IDLE", "IDLE1", "idle", "idle 01", "osRtxIdleThread"]))
-    assert not any(map(is_rtos_idle_name, ["idler", "IDLE_task", "Idle hook", "my_idle", "Idle", "idle task"]))
+def test_the_model_has_no_idle_task_name_rule():
+    # タスクの名前でアイドルを決めない（configIDLE_TASK_NAME は設定で変わり、同じ名前の利用者のタスクもありうる）。
+    # アイドルのタスクは使う側が trace_stop / trace_snapshot / trace_import の idle_tasks で明示する
+    import fprobe.tracefmt.model as model
+    assert not hasattr(model, "is_rtos_idle_name") and not hasattr(model, "_IDLE_NAME")
+
+
+def test_overflow_keeps_the_counted_drops_apart_from_the_lower_bound():
+    """DropCount の差（数えた分）を出来事に残す。差が 0 でも OVERFLOW は 1 個以上落ちた印なので lost は下限の 1。"""
+    w = Writer().start(t=0)
+    w.packet(1, varint(4), 10).packet(1, varint(4), 20)
+    trace = decode_systemview(w.bytes())
+    overflows = [e for e in trace.events if e.kind == "overflow"]
+    assert [e.args["dropped"] for e in overflows] == [4, 0]
+    assert trace.lost == 4 + 1
+
+
+def test_a_print_level_the_protocol_does_not_define_is_not_named():
+    """options の下位 2 ビット 3 は SystemView に無い重要度（LOG 0・WARNING 1・ERROR 2）: info と名付けず None。"""
+    w = Writer().start(t=0)
+    w.packet(26, string("x") + varint(3) + varint(0), 10)
+    [p] = [e for e in decode_systemview(w.bytes()).events if e.kind == "print"]
+    assert p.args["level"] is None and p.args["options"] == 3

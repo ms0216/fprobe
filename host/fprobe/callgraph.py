@@ -53,16 +53,24 @@ class FunctionFlow:
     name: str
     address: int
     size: int
-    frame: int = 0                  # 最大の深さ（バイト）
+    frame: int = 0                  # たどれた命令の最大の深さ（バイト）
     calls: list[CallSite] = field(default_factory=list)
     dynamic: bool = False           # 可変長の確保など、深さに上限が無い
-    uncertain: bool = False         # たどれない所があった（表の分かれ先が分からない等）。枠は多めに見積もった
+    truncated: bool = False         # 同じ所を訪ねなおす回数の上限（_REVISITS）で解析を打ち切った（frame は下限）
+    uncertain: bool = False         # たどれない所があった（表の分かれ先が分からない等）
+    unreached_frame: int = 0        # たどれなかった命令の SP を下げる量の和（上限の見積もりに足す分。frame とは別）
     uses_fpu: bool = False          # 浮動小数点の命令がある（例外の枠が大きくなる）
     reasons: list[str] = field(default_factory=list)
 
+    @property
+    def frame_bound(self) -> int:
+        """枠の上限の見積もり = たどれた最大 + たどれなかった命令の SP を下げる量の和。"""
+        return self.frame + self.unreached_frame
+
     def as_dict(self) -> dict:
         return {"function": self.name, "address": self.address, "size": self.size, "frame": self.frame,
-                "dynamic": self.dynamic, "uncertain": self.uncertain, "reasons": list(self.reasons),
+                "unreached_frame": self.unreached_frame, "dynamic": self.dynamic, "truncated": self.truncated,
+                "uncertain": self.uncertain, "reasons": list(self.reasons),
                 "calls": [{"address": c.address, "callee": c.callee, "kind": c.kind, "depth": c.depth}
                           for c in self.calls]}
 
@@ -204,11 +212,12 @@ def _is_return(insn: Instruction) -> bool:
 
 
 def _table_targets(code: Sequence[Instruction], index: int) -> list[int] | None:
-    """tbb / tbh の表（直後のデータ）の分かれ先。表が読めなければ None。"""
+    """tbb / tbh の表の分かれ先。表は使う側が大きさを渡したもの（逆アセンブラの branch_tables。data_basis =
+    "branch_table"）だけ。渡されていなければ None（直後のデータを表とみなさない: $d のリテラルが続くこともある）。"""
     insn = code[index]
     entries = []
     for item in code[index + 1:]:
-        if item.kind != "data" or item.literal_value is None:
+        if item.kind != "data" or item.literal_value is None or item.data_basis != "branch_table":
             break
         entries.append(item.literal_value)                         # 逆アセンブラは表の幅（1 / 2 バイト）で区切る
     if not entries:
@@ -236,8 +245,8 @@ def analyze_function(code: Sequence[Instruction], name: str, start: int, end: in
             if n in seen:
                 revisits[n] = revisits.get(n, 0) + 1
                 if revisits[n] > _REVISITS:
-                    if not flow.dynamic:
-                        flow.dynamic = True
+                    if not flow.truncated:
+                        flow.truncated = True
                         flow.reasons.append(f"0x{code[n].address:08X}: より深い SP で {_REVISITS} 回を超えて訪ねなおしたので"
                                             "解析を打ち切った（深さはここまでの下限）")
                     break
@@ -303,9 +312,10 @@ def _site(sites: dict[int, CallSite], site: CallSite) -> None:
 
 def _unreached(code: Sequence[Instruction], seen: dict[int, int], flow: FunctionFlow,
                sites: dict[int, CallSite], resolve: Callable[[int], str | None]) -> None:
-    """たどれなかった命令: SP を下げる量を全部足して枠を多めにし、呼び出しは枠の深さで加える。"""
+    """たどれなかった命令: SP を下げる量の和を unreached_frame に（frame には混ぜない）、呼び出しは上限の見積もり
+    （frame_bound）の深さで加える。"""
     flow.uncertain = True
-    flow.reasons.append("分岐の先が分からない所がある（表の分岐など）: たどれない命令の分を多めに足した")
+    flow.reasons.append("分岐の先が分からない所がある（表の分岐など）: たどれない命令の SP を下げる量の和を unreached_frame に")
     extra = 0
     probe = FunctionFlow(flow.name, flow.address, flow.size)
     for n, insn in enumerate(code):
@@ -313,7 +323,7 @@ def _unreached(code: Sequence[Instruction], seen: dict[int, int], flow: Function
             continue
         after = _step(insn, _State(0, {}), probe)
         extra += max(after.depth, 0)
-    flow.frame += extra
+    flow.unreached_frame = extra
     if probe.dynamic:
         flow.dynamic = True
         flow.reasons += probe.reasons
@@ -321,28 +331,29 @@ def _unreached(code: Sequence[Instruction], seen: dict[int, int], flow: Function
         if n in seen or insn.kind != "code" or insn.flow != "call":
             continue
         if insn.target is None:
-            _site(sites, CallSite(insn.address, None, "indirect", flow.frame))
+            _site(sites, CallSite(insn.address, None, "indirect", flow.frame_bound))
         else:
-            _site(sites, CallSite(insn.address, resolve(insn.target), "call", flow.frame, insn.target))
+            _site(sites, CallSite(insn.address, resolve(insn.target), "call", flow.frame_bound, insn.target))
 
 
 # --- 全体 ---------------------------------------------------------------------------------------
 
-def vector_table(image) -> tuple[int, int] | None:
-    """ELF のベクタ表の (番地, 大きさ)。名前（g_pfnVectors 等）か、最も低い区画の先頭の変数。"""
-    from .elfsize import VECTOR_SYMBOLS
-    for name in VECTOR_SYMBOLS:
-        try:
-            s = image.symbol(name)
-        except KeyError:
-            continue
-        return s.address, s.size or 64
-    if image.regions:
-        first = image.regions[0].address
-        s = image.symbol_at(first, "object")
-        if s is not None and s.address == first and s.size:
-            return s.address, s.size
-    return None
+def vector_table(image, address: int, size: int | None = None) -> tuple[int, int]:
+    """使う側が番地を渡したベクタ表の (番地, 大きさ)。大きさは size（明示）か、ELF のその番地から始まる変数の大きさ。
+    ベクタ表を名前の慣習（g_pfnVectors・__isr_vector 等）や「最も低い区画の先頭の変数」で探さない（名前は利用者が
+    変えられ、置き場所もファームによる）。番地は実機なら VTOR（0xE000ED08）の値、ELF ならリンカの map 等で分かる。"""
+    if size is None:
+        s = image.symbol_at(address, "object")
+        if s is None or s.address != address or not s.size:
+            raise ValueError(f"0x{address:08X} から始まる大きさの分かる変数が ELF に無い（vector_table_size で"
+                             "大きさを渡す）")
+        size = s.size
+    if size < 8 or size % 4:
+        raise ValueError(f"ベクタ表の大きさ {size} は 4 の倍数で 8 以上（初期の MSP と リセットの処理）")
+    return address, size
+
+
+_vector_table = vector_table                      # CallGraph.build の引数の名前と重なるので別名で呼ぶ
 
 
 @dataclass
@@ -351,10 +362,14 @@ class CallGraph:
     address_taken: set[str]                       # 番地がデータ・リテラルにある関数（関数ポインタの呼び先の候補）
     vectors: dict[int, str] = field(default_factory=dict)    # 例外番号 → 処理の関数（ベクタ表から）
     failed: dict[str, str] = field(default_factory=dict)     # 読めなかった関数 → 理由
+    vector_table: tuple[int, int] | None = None   # 使う側が渡したベクタ表の (番地, 大きさ)。無ければ vectors は空
 
     @classmethod
-    def build(cls, disassembler: Disassembler, names: Iterable[str] | None = None) -> "CallGraph":
-        """ELF の全関数（names で絞れる）を解析する。disassembler は ELF のシンボル付き（Disassembler.from_elf）。"""
+    def build(cls, disassembler: Disassembler, names: Iterable[str] | None = None, *,
+              vector_table: int | None = None, vector_table_size: int | None = None) -> "CallGraph":
+        """ELF の全関数（names で絞れる）を解析する。disassembler は ELF のシンボル付き（Disassembler.from_elf）。
+        vector_table: ベクタ表の番地（使う側が明示する。名前で探さない）。大きさは vector_table_size か、ELF のその
+        番地から始まる変数の大きさ。渡さなければ vectors（例外番号 → 処理）は空で、表の語もデータの語として数える。"""
         from .profile.coverage import elf_functions
         symbols = disassembler.symbols
         if symbols is None:
@@ -386,20 +401,22 @@ class CallGraph:
             functions[name] = analyze_function(code, name, start, start + size, resolve)
             literals |= _code_constants(code)
         image = disassembler.image
-        table = vector_table(image) if image is not None else None
-        vectors = {}
-        if table is not None:
+        table, vectors = None, {}
+        if vector_table is not None:
+            if image is None:
+                raise ValueError("ベクタ表を読むには ELF が要る（Disassembler.from_elf）")
+            table = _vector_table(image, vector_table, vector_table_size)
             address, size = table
             try:
                 raw = image.read_memory(address, size)
-            except MemoryReadError:
-                raw = b""
-            for n in range(1, len(raw) // 4):
+            except MemoryReadError as e:
+                raise ValueError(f"ベクタ表 0x{address:08X}（{size} バイト）が ELF の中身のある区画に無い") from e
+            for n in range(1, len(raw) // 4):          # 0 番は初期の MSP。処理の番地は Thumb（最下位ビット 1）
                 word = int.from_bytes(raw[4 * n:4 * n + 4], "little")
                 if word & 1 and (word & ~1) in by_start:
                     vectors[n] = by_start[word & ~1]
         taken = {by_start[v & ~1] for v in literals | _data_words(image, table) if v & 1 and (v & ~1) in by_start}
-        return cls(functions, taken, vectors, failed)
+        return cls(functions, taken, vectors, failed, table)
 
     def callees(self, name: str) -> list[str]:
         out = []

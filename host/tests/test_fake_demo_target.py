@@ -7,6 +7,7 @@ import pytest
 
 from fake_demo import DemoProbe
 from fprobe.probe_elf_files import DEMO_ELF
+from value_kinds import vint
 
 
 @pytest.fixture
@@ -65,11 +66,13 @@ def test_continuing_from_the_fault_handler_keeps_running_in_it_and_is_reported_a
     demo.target_resume()
     wait_for(lambda: demo.state == "HALTED")
     demo.target_resume()                                  # ハンドラの無限ループを回り続ける
+    assert "fatal" not in demo.target_status()            # 名前の表を持たない: 渡されなければ知らせない
+    demo.liveness_set(functions=["default_handler"], pc_samples=4)      # 利用者が明示する
     status = demo.target_status()
-    assert status["state"] == "RUNNING" and status["fatal"]["kind"] == "fault_loop"   # 待たずに事実として
+    assert status["state"] == "RUNNING" and status["fatal"]["kind"] == "pc_in"   # 待たずに事実として
     clock[0] += 2
     fatal = demo.target_status()["fatal"]
-    assert fatal["kind"] == "fault_loop" and fatal["function"] == "default_handler" and fatal["since"] == 5000.0
+    assert fatal["kind"] == "pc_in" and fatal["function"] == "default_handler" and fatal["since"] == 5000.0
     demo.target_halt()
     assert "fatal" not in demo.target_status()
 
@@ -79,14 +82,14 @@ def test_fatal_demo_is_risky_to_halt_and_crashes_while_running(tmp_path, monkeyp
     d = DemoProbe(fatal_after_s=0.05)
     try:
         risk = d.halt_risk()
-        assert risk["matched"] and [r["kind"] for r in risk["matches"]] == ["radio", "rtos"]
+        assert risk["matched"] and [r["query"] for r in risk["matches"]] == ["RADIO_IRQHandler", "_kernel"]
         clock = [100.0]
         d._clock = lambda: clock[0]
         assert d.state == "RUNNING"
         wait_for(lambda: d._fatal_pc is not None)
         d.target_status()
         clock[0] += 2
-        assert d.target_status()["fatal"]["kind"] == "fault_loop"
+        assert d.target_status()["fatal"]["kind"] == "pc_in"
     finally:
         d.state = "HALTED"
 
@@ -114,11 +117,12 @@ def test_the_log_has_recorded_hits_and_grows_while_running(demo):
     assert len(log["entries"]) == 7 and all(0 < e["t"] < 2 * 10_000_000 for e in log["entries"])
     first = log["entries"][0]
     assert first["function"] == "reached_milestone" and first["line"] == 13 and first["message"] == "milestone {value} (counter={counter})"
-    assert first["values"] == {"value": 256, "counter": 256}
+    assert first["values"] == {"value": vint(256), "counter": vint(256)}
     demo.target_resume()
     wait_for(lambda: len(demo.breakpoint_log(since=log["next"])["entries"]) >= 2)
     new = demo.breakpoint_log(since=log["next"])["entries"]
-    assert "t" not in new[0] and new[0]["values"]["value"] == new[0]["values"]["counter"] > 0
+    assert "t" not in new[0] and new[0]["values"]["value"] == new[0]["values"]["counter"]
+    assert new[0]["values"]["value"]["value"] > 0
     assert demo.state == "RUNNING"                               # ログでは止まらない
 
 

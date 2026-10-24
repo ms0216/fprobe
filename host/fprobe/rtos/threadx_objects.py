@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from ..dwarf.access import AccessError
 from .model import KernelObject, Task, Waiter
-from .objects import typed_variables
 from .structs import StructLayout
 
 __all__ = ["IDS", "KINDS", "ThreadXObjects"]
@@ -27,10 +26,23 @@ KIND_IDS = {kind: ident for ident, kind in IDS.items()}
 TX_AND, TX_CLEAR = 0x2, 0x1               # tx_event_flags_get の get_option（TX_AND・TX_AND_CLEAR・TX_OR_CLEAR）
 
 
+# ThreadX が定める、カーネルのオブジェクトを指す変数（tx_thread.h・tx_timer.h・各 tx_*.h の *_created_ptr）。
+# オブジェクトの別名（aliases）に使わない。名前の接頭辞（_tx_）では決めない。
+KERNEL_VARIABLES = frozenset(
+    {"_tx_thread_current_ptr", "_tx_thread_execute_ptr", "_tx_thread_priority_list", "_tx_timer_current_ptr",
+     "_tx_timer_expired_timer_ptr", "_tx_timer_list", "_tx_timer_list_start", "_tx_timer_list_end", "_tx_timer_thread"}
+    | {f"_tx_{kind}_created_ptr" for kind in ("thread", "queue", "semaphore", "mutex", "event_flags", "block_pool",
+                                              "byte_pool", "timer")})
+
+
 class ThreadXObjects:
     def __init__(self, rtos):
         self.rtos = rtos
         self.mem = rtos.mem
+
+    def kernel_variables(self) -> frozenset[str]:
+        """KERNEL_VARIABLES のうち ELF にあるもの。"""
+        return frozenset(v.name for v in self.rtos.info.global_variables() if v.name in KERNEL_VARIABLES)
 
     # --- 一覧 ------------------------------------------------------------------------------------
 
@@ -39,8 +51,7 @@ class ThreadXObjects:
         names: dict[int, list[str]] = {}                                  # 番地 → 変数の式（変数そのものを先に）
         structs = {type_name: kind for kind, (type_name, _) in KINDS.items() if kind in self.rtos.layouts}
         structs["TX_THREAD"] = "thread"
-        kernel = frozenset(v.name for v in self.rtos.info.global_variables() if v.name.startswith("_tx_"))
-        for f in sorted(typed_variables(self.rtos.info, self.mem, structs, exclude=kernel), key=lambda f: f.pointer):
+        for f in sorted(self.rtos.typed_objects(structs, exclude=self.kernel_variables()), key=lambda f: f.pointer):
             if f.family != "thread":
                 names.setdefault(f.address, []).append(f.expression)
         objects = []

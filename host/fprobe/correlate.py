@@ -340,7 +340,8 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
     結果の割合）・coverage（記録のうち、候補の後 window 以内に当たる時間の割合。先行率とどう比べるかは使う側が決める）・
     followed（後に結果が来た候補の割合）・遅れ（秒）・例（時刻。タイムベース）。並びは preceded の大きい順、同じなら
     条件の文字の順。causes が None なら記録の変数から候補を作る（_candidates。auto = True、一度も起きない候補は除き、
-    上位 limit 個。max_coverage を明示すれば coverage がそれを超える候補を除く）。gap_s を明示すれば、それより長い
+    上位 limit 個。max_coverage を明示すれば coverage がそれを超える候補を除く）。切る前の候補の数は causes_total、
+    切ったかは truncated、使った limit は limit（明示の causes は切らないので None）。gap_s を明示すれば、それより長い
     MCU のメモリの読みの空白を欠け（gaps）にし、欠けにかかる結果を判定から外す。"""
     if window_s is None:
         raise ValueError("window_s（結果の直前を見る窓の秒）を渡す（既定の値は持たない）")
@@ -383,7 +384,10 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
     if auto:
         out_causes = [c for c in out_causes if c["count"]
                       and (max_coverage is None or c["coverage"] is None or c["coverage"] <= max_coverage)]
-        out_causes = _merge_same(out_causes)[:limit]
+        out_causes = _merge_same(out_causes)
+    causes_total = len(out_causes)                          # 切る前の数（切ったことを黙らない）
+    if auto:
+        out_causes = out_causes[:limit]
     for c in out_causes:
         c.pop("_times", None)
     if auto:                                                # 返す候補だけの変数（sampling・no_values・warnings）
@@ -415,7 +419,8 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
              if vars_.resolve(t.name)[0] == "mcu" and (s := vars_.series(t.name)).values}
     return {"effect": {"condition": eff_cond.text, "count": len(eff), "delta": delta}, "window_s": window_s, "range": [lo, hi],
             "timebase_hz": hz, "auto": auto, "no_values": no_values, "warnings": warnings,
-            "causes": out_causes, "sampling": sampling, "reads": reads, "fpga_hidden": vars_.hidden, "gaps": gaps,
+            "causes": out_causes, "causes_total": causes_total, "truncated": len(out_causes) < causes_total,
+            "limit": limit if auto else None, "sampling": sampling, "reads": reads, "fpga_hidden": vars_.hidden, "gaps": gaps,
             "gap_s": gap_s}
 
 
@@ -518,15 +523,15 @@ def _rank(causes: list[dict]) -> list[dict]:
 
 
 def _merge_same(causes: list[dict]) -> list[dict]:
-    """成立する時刻（_times）がすべて同じ候補を 1 つに: 項の多いもの（説明が多い。同じなら短いもの）を残し、ほかを
-    same に（自動の候補の重複。例 "restart changed and state=BUSY" と "restart changed and addr=CTRL"・"restart rose"
-    がこのデータでは同じ出来事）。順は保つ。"""
+    """成立する時刻（_times）がすべて同じ候補を 1 つに: 並びの最初のもの（_rank の事実の順）を残し、ほかを same に
+    （自動の候補の重複。例 "restart changed and state=BUSY" と "restart changed and addr=CTRL"・"restart rose"
+    がこのデータでは同じ出来事）。代表を「項が多い」等の決めごとで選ばない。順は保つ。"""
     groups: dict[tuple, list[dict]] = {}
     for c in causes:
         groups.setdefault(c["_times"], []).append(c)
     out = []
     for group in groups.values():
-        keep = min(group, key=lambda c: (-len(parse_condition(c["condition"]).terms), len(c["condition"])))
+        keep = group[0]
         rest = [c["condition"] for c in group if c is not keep]
         item = {k: v for k, v in keep.items() if k != "_times"}
         if rest:
@@ -611,7 +616,8 @@ def durations(rec: Any, name: str, t0: int | None = None, t1: int | None = None,
               gap_s: float | None = None) -> dict:
     """変数 name の値ごとの回数・続いた時間（両端の見えている区間だけ。秒の最小・中央値・90 % 点・最大）・範囲の中で
     その値だった時間の割合（share。最初の値を見てから範囲の終わりまでのうち）。値は列挙の名前か数の文字。続いた時間の
-    合計の大きい順に limit 個。例: FPGA の state が BUSY のまま続く時間と、MCU の待ち時間を比べる。"""
+    合計の大きい順に limit 個（値の総数は values_total、切ったかは truncated、使った limit は limit）。
+    例: FPGA の state が BUSY のまま続く時間と、MCU の待ち時間を比べる。"""
     lo, hi = _range(rec, t0, t1)
     hz = rec.meta["timebase_hz"]
     vars_ = _Variables(rec, lo, hi, gap_s=gap_s)
@@ -636,6 +642,7 @@ def durations(rec: Any, name: str, t0: int | None = None, t1: int | None = None,
     ranked = sorted(held, key=lambda v: -held[v])[:limit]
     return {"variable": name, "range": [lo, hi], "changes": max(0, len(series.times) - 1), "excluded": excluded,
             "gaps": _gaps(rec, vars_, {name}, lo, hi),
+            "values_total": len(held), "truncated": len(ranked) < len(held), "limit": limit,
             "values": {label.get(v, str(v)): {"count": len(spans.get(v, [])), "share": held[v] / observed if observed else None,
                                               "duration_s": _quantiles(spans.get(v, []))} for v in ranked}}
 
@@ -647,7 +654,8 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
     成り立つまで（最後は範囲の終わりまで）。区間ごとに by（変数）の開始時の値・counts の各条件が区間の中で成り立った
     回数・effect が区間の中で起きたか（by_at = "end" なら by は区間の終わり = 次の始めの直前の値。ファームウェアが要求の
     最後に書く値で分けるとき）。by の値ごとに区間の数・effect の割合・counts の平均（groups。by の値の順）、
-    最初の rows 区間の中身（rows）。例: start "state changed and state=BUSY"、by "left_hi"、counts ["restart changed
+    最初の rows 区間の中身（rows。欠けで除いた区間は入れない。入れうる区間の数は rows_total、切ったかは rows_truncated、
+    使った rows は rows_limit）。例: start "state changed and state=BUSY"、by "left_hi"、counts ["restart changed
     and state=BUSY"]、effect "errors changed" → B が大きい要求だけ再試行され、再試行された要求だけ誤る、が 1 回で分かる。"""
     if by_at not in ("start", "end"):
         raise ValueError("by_at は start（区間の始めの値）か end（区間の終わり = 次の始めの直前の値）")
@@ -674,7 +682,7 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
     holes = _holes(vars_, sorted(names))
     by_var = {n: _holes(vars_, [n]) for n in sorted(names)}
     excluded_by: dict[str, int] = {}
-    out_rows, groups, excluded = [], {}, 0
+    out_rows, groups, excluded, listed = [], {}, 0, 0
     offsets, lengths = [], []                                # 結果の始めからの時間・区間の長さ（秒）
     split = {True: [0, [0] * len(conds)], False: [0, [0] * len(conds)]}   # 結果が起きた区間・起きなかった区間
     for a, b in zip(starts, ends):
@@ -691,6 +699,7 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
         lengths.append((b - a) / rec.meta["timebase_hz"])
         if hit:
             offsets.append((effects[bisect_left(effects, a)] - a) / rec.meta["timebase_hz"])
+        listed += 1
         if len(out_rows) < rows:
             out_rows.append({"t": a, "end": b, "by": key, "counts": n, "effect": hit})
         g = groups.setdefault(value, {"by": key, "count": 0, "effects": 0, "sums": [0] * len(n)})
@@ -714,6 +723,7 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
                          + ", ".join(f"{n} {k}" for n, k in excluded_by.items()) + "。excluded_by・gaps）"] if excluded else [],
             "gaps": _gaps(rec, vars_, names, lo, hi),
             "groups": out_groups, "rows": out_rows,
+            "rows_total": listed, "rows_truncated": len(out_rows) < listed, "rows_limit": rows,
             "by_effect": {k: {"count": c, "counts": {name: x / c if c else None for name, x in zip(counts, sums)}}
                           for k, (c, sums) in (("with", split[True]), ("without", split[False]))} if effect_cond else None}
 

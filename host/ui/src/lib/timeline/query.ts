@@ -1,7 +1,7 @@
 // タイルへの問い合わせ（Worker の中）: 時刻の出来事を拾う（ホバーの説明・クリックで選ぶ）、次 / 前の出来事を探す
 // （N / P キー）。Svelte・DOM に依らない。
 import { lowerBound, upperBound } from "./decimate";
-import { NO_LABEL, type RowHeader, type Tile } from "./tile";
+import { NO_LABEL, TONE, type RowHeader, type Tile } from "./tile";
 
 /** 拾った出来事（区間・箱・状態・印は 1 件、値の段はその時刻に保たれている値） */
 export interface PickedItem {
@@ -81,17 +81,25 @@ export function seek(tile: Tile, rows: string[], from: number, dir: 1 | -1): { t
   return best;
 }
 
-/** 画面の縮図の異常の印: 色の意味が bad / warn の出来事の時刻（全部の段。多ければ間引く） */
-export function anomalies(tile: Tile, limit = 2000): { t: number; tone: number }[] {
-  const out: { t: number; tone: number }[] = [];
+/** 画面の縮図の異常の印: 色の意味が bad / warn の出来事の時刻（全部の段）。タイルの範囲を bins 個の等しい時間の箱に
+ *  分け、箱ごとに bad・warn のそれぞれ最初の 1 つを残す（箱は縮図の画素より細かくする: 縮図で見える「その辺りに誤り・
+ *  注意がある」は欠けない。等間隔に間引いて離れた 1 つを落とさない） */
+export function anomalies(tile: Tile, bins: number): { t: number; tone: number }[] {
+  const span = Math.max(1, tile.t1 - tile.t0);
+  const kept = new Map<number, { t: number; tone: number }>();          // 箱 × 2 + (warn ? 1 : 0)
   for (const lane of tile.lanes) {
     if (lane.mode !== "raw") continue;
     for (let i = 0; i < lane.t.length; i++) {
-      if (lane.tone[i] === 1 || lane.tone[i] === 3) out.push({ t: lane.t[i], tone: lane.tone[i] });
+      // 失敗（failure）は 1、止める・印・その他（stop / mark / other）は 3 の色で縮図に出す（色の見せ方）
+      const raw = lane.tone[i];
+      const tone = raw === TONE.failure ? 1 : raw === TONE.stop || raw === TONE.mark || raw === TONE.other ? 3 : 0;
+      if (tone === 0) continue;
+      const t = lane.t[i];
+      const box = Math.min(bins - 1, Math.max(0, Math.floor(((t - tile.t0) / span) * bins)));
+      const key = box * 2 + (tone === 3 ? 1 : 0);
+      const had = kept.get(key);
+      if (!had || t < had.t) kept.set(key, { t, tone });
     }
   }
-  out.sort((a, b) => a.t - b.t);
-  if (out.length <= limit) return out;
-  const step = out.length / limit;
-  return Array.from({ length: limit }, (_, k) => out[Math.floor(k * step)]);
+  return [...kept.values()].sort((a, b) => a.t - b.t);
 }

@@ -85,7 +85,8 @@ def test_p2_swd_traffic_is_captured_and_decoded(session):
         p.la_arm(rate_hz=25e6, pretrigger=256, fall=1 << 8)           # ch8 = プローブが SWDIO を駆動し始めた
         p.read_memory(0x10000100, 4)
         p.la_collect()
-        texts = [a["text"] for a in p.la_decode("swd", {"swclk": 0, "swdio": 3}, limit=8)["annotations"]]
+        texts = [a["text"] for a in p.la_decode("swd", {"swclk": 0, "swdio": 3, "drive": None, "turnaround": 1,
+                                                        "orundetect": False}, limit=8)["annotations"]]
         assert any("TAR 0x10000100 OK" in t for t in texts), texts
         assert any(t.startswith("AP0 R DRW") for t in texts), texts
     finally:

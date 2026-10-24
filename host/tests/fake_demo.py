@@ -17,6 +17,8 @@ from fake_demo_rtos import RtosDemo
 from fake_demo_sampling import SamplingDemo
 from fake_demo_search import SearchDemo
 from fake_demo_target import TargetDemo
+from fake_demo_verify import VerifyDemo
+from fake_demo_xtrig import XtrigDemo
 from fake_values import DemoMemory, DemoValues, GLOBALS
 from fprobe.dwarf.cexpr import UnknownNameError
 from fprobe.memview import format_hexdump, hexdump
@@ -41,7 +43,7 @@ COUNTER = next(v.address for v in GLOBALS if v.name == "counter")
 MILESTONE = next(v.address for v in GLOBALS if v.name == "milestone")
 
 
-class DemoProbe(SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProbe):
+class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProbe):
     """偽の機器のデモ。ビューごとのデモの値は fake_demo_*.py の mixin（ビューのまとまりごとに分けた）。"""
 
     def __init__(self, fatal_after_s: float | None = None):
@@ -62,7 +64,8 @@ class DemoProbe(SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProb
         self.pc = self._line_address(28)
         self.counter = 0x2A
         self.la_capture()
-        for init in (self._init_sampling, self._init_rtos, self._init_search, self._init_target, self._init_io):
+        for init in (self._init_sampling, self._init_rtos, self._init_search, self._init_target, self._init_io,
+                     self._init_xtrig, self._init_verify):
             init()
 
     @property
@@ -231,14 +234,15 @@ class DemoProbe(SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProb
     def type_info(self, name):
         return self._values.type_info(name)
 
-    def disasm_around(self, address=None, before=8, after=8, from_elf=False):
-        return self._elf.disasm_around(self.pc if address is None else address, before, after, from_elf=True)
+    def disasm_around(self, address=None, before=8, after=8, from_elf=False, branch_tables=None):
+        return self._elf.disasm_around(self.pc if address is None else address, before, after, from_elf=True,
+                                       branch_tables=branch_tables)
 
-    def disasm_range(self, address, length, from_elf=False, offset=0, limit=256):
-        return self._elf.disasm_range(address, length, True, offset, limit)
+    def disasm_range(self, address, length, from_elf=False, offset=0, limit=256, branch_tables=None):
+        return self._elf.disasm_range(address, length, True, offset, limit, branch_tables)
 
-    def disasm_function(self, location, from_elf=False, offset=0, limit=256):
-        return self._elf.disasm_function(location, True, offset, limit)
+    def disasm_function(self, location, from_elf=False, offset=0, limit=256, branch_tables=None):
+        return self._elf.disasm_function(location, True, offset, limit, branch_tables)
 
     def memory_view(self, address, length, unit=8, width=16, compare=False, from_elf=False):
         self._need()
@@ -287,7 +291,7 @@ class DemoProbe(SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProb
         out = []
         for r in regs:
             value = self._regs.get(r.path, r.reset_value or 0)
-            out.append({"path": r.path, "address": r.address, "value": value,
+            out.append({"path": r.path, "address": r.address, "size": r.size, "value": value,
                         "fields": [f.as_dict() for f in r.decode(value)]})
         return {"registers": out, "skipped": []}
 

@@ -28,7 +28,10 @@ class ApiError(Exception):
 
 class DaemonClient:
     def __init__(self, url: str, name: str, role: str, token: str | None = None, api_version: int = API_VERSION,
-                 _hello: bool = True):
+                 _hello: bool = True, automated: bool | None = None, source: str | None = None):
+        """automated: hello で自動操作かを申告する（省略で申告しない）。source: 以後の要求に付ける「どこから」
+        （操作の記録の source。省略で付けない）。"""
+        self.source = source
         self._stack = ExitStack()                       # websockets 17 は connect を with で使う形が正
         self._ws = self._stack.enter_context(connect(url, max_size=None, ping_interval=None))
         self._lost: BaseException | None = None          # 受信が止まった理由（以後の要求はすぐ失敗させる）
@@ -40,7 +43,8 @@ class DaemonClient:
         self._reader.start()
         if _hello:
             try:
-                self.hello = self.call("session.hello", name=name, role=role, api_version=api_version, token=token)
+                extra = {} if automated is None else {"automated": automated}
+                self.hello = self.call("session.hello", name=name, role=role, api_version=api_version, token=token, **extra)
             except BaseException:
                 self.close()
                 raise
@@ -51,6 +55,10 @@ class DaemonClient:
         return cls(url, "", "", _hello=False)
 
     def request(self, method: str, params: dict) -> dict:
+        return self.request_with(method, params, source=self.source)
+
+    def request_with(self, method: str, params: dict, *, source: Any = None) -> dict:
+        """生の応答を返す。source を付ける（None なら付けない）。"""
         rid = next(self._ids)
         future: Future = Future()
         with self._lock:
@@ -58,7 +66,10 @@ class DaemonClient:
                 raise ConnectionError("デーモンとの接続が切れている") from self._lost
             self._pending[rid] = future
         try:
-            self._ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}))
+            message = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+            if source is not None:
+                message["source"] = source
+            self._ws.send(json.dumps(message))
         except ConnectionClosed as e:
             with self._lock:
                 self._pending.pop(rid, None)

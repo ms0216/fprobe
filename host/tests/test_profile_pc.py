@@ -86,11 +86,12 @@ def test_fractions_and_confidence_intervals(syms, dis):
     for name, p in truth.items():
         if name is None:
             continue
-        lo, hi = rows[name]["ci"]
-        assert lo < p < hi, (name, rows[name])
-        assert hi - lo < 4 * 1.96 * (p * (1 - p) / n) ** 0.5               # 区間は理論の幅（の 2 倍以内）
+        row = rows[name]
+        assert row["fraction"] == row["samples"] / n and abs(row["fraction"] - p) < 4 * (p * (1 - p) / n) ** 0.5
+        assert "ci" not in row                       # 信頼区間は二項の仮定の上の推定: 本体は出さない（プラグイン）
     sleep = prof.category_table()["sleep"]
-    assert sleep["ci"][0] < 0.10 < sleep["ci"][1]
+    assert sleep["fraction"] == sleep["samples"] / n and "ci" not in sleep
+    assert "confidence" not in prof.as_dict()
     assert rows["tick"]["active_fraction"] == pytest.approx(rows["tick"]["samples"] / prof.active)
     assert sum(r["samples"] for r in prof.lines()) == prof.categories["code"]
     assert sum(r["samples"] for r in prof.instructions()) == prof.categories["code"]

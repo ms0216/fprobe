@@ -51,3 +51,11 @@ export function parseRegister(text: string, size: number): number | null {
   const v = parseInt(s, 16);
   return v < 2 ** size ? v : null;
 }
+
+/** target.svd.load の引数: デバイス名（Pack・同梱の SVD から探す）かファイルのパスかは使う人が選ぶ（文字の形で推さない）。
+ *  空なら null */
+export function svdLoadParams(kind: "device" | "path", text: string): { device: string } | { path: string } | null {
+  const s = text.trim();
+  if (!s) return null;
+  return kind === "path" ? { path: s } : { device: s };
+}

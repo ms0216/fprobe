@@ -8,6 +8,7 @@ import time
 import pytest
 
 from fake_demo import DemoProbe
+from value_kinds import vbool, vint
 
 
 @pytest.fixture
@@ -58,22 +59,22 @@ def test_values_move_with_time_while_running(demo):
     first = {v["name"]: v for v in demo.watch_values()["values"]}
     time.sleep(0.15)
     later = {v["name"]: v for v in demo.watch_values()["values"]}
-    assert later["counter"]["value"] > first["counter"]["value"]                 # 4 / ms で増える
+    assert later["counter"]["value"]["value"] > first["counter"]["value"]["value"]   # 4 / ms で増える
     assert later["counter"]["time_us"] > first["counter"]["time_us"]
-    assert isinstance(later["sensors[0].value"]["value"], float)
+    assert later["sensors[0].value"]["value"]["kind"] == "float"
     series = demo.watch_series("sensors[0].value", last=1000)
     assert series["name"] == "sensors[0].value" and len(series["samples"]) >= 5
     times = [s["time_us"] for s in series["samples"]]
     assert times == sorted(times)
-    assert len({round(s["value"]) for s in series["samples"]}) > 1               # 波形（一定ではない）
+    assert len({round(s["value"]["value"]) for s in series["samples"]}) > 1      # 波形（一定ではない）
 
 
 def test_values_hold_while_halted(demo):
     demo.target_halt()
     demo.watch_set(["counter"])
     assert wait_for(lambda: len(demo.watch_series("counter")["samples"]) >= 3)
-    assert len({s["value"] for s in demo.watch_series("counter")["samples"]}) == 1
-    assert demo.watch_values()["values"][0]["value"] == demo.counter
+    assert len({s["value"]["value"] for s in demo.watch_series("counter")["samples"]}) == 1
+    assert demo.watch_values()["values"][0]["value"] == vint(demo.counter)
 
 
 def test_status_reports_rounds_and_overruns(demo):
@@ -103,19 +104,19 @@ def test_trigger_captures_from_the_condition(demo):
 def test_write_while_running_changes_the_value(demo):
     demo.target_resume()
     r = demo.watch_write("sensors[0].gain", 50)
-    assert r == {"expression": "sensors[0].gain", "address": "0x20000402", "type": "uint16_t", "value": 50,
+    assert r == {"expression": "sensors[0].gain", "address": "0x20000402", "type": "uint16_t", "value": vint(50),
                  "atomic": True}
     demo.target_halt()
-    assert demo.evaluate("sensors[0].gain")["value"] == 50                       # 止めて読んでも同じ RAM
+    assert demo.evaluate("sensors[0].gain")["value"] == vint(50)                 # 止めて読んでも同じ RAM
     raw = demo.watch_write("0x20000460:4", 9600)
-    assert raw["value"] == 9600 and raw["type"] is None
-    assert demo.watch_write("config.verbose", False)["value"] is False
+    assert raw["value"] == vint(9600) and raw["type"] is None                    # 番地の式は符号なし整数
+    assert demo.watch_write("config.verbose", False)["value"] == vbool(False)
 
 
 def test_target_voltage_moves_slowly_around_3v3(demo):
     readings = [demo.target_voltage() for _ in range(3)]
     for r in readings:
-        assert set(r) == {"volts", "over_range", "live", "samples", "errors"}
+        assert set(r) == {"volts", "over_range", "live", "samples", "samples_before", "window_s", "errors"}
         assert r["live"] is True and r["over_range"] is False
         assert 2.9 < r["volts"] < 3.35
     assert readings[-1]["samples"] >= readings[0]["samples"]

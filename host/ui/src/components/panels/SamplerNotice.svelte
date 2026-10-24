@@ -12,7 +12,7 @@
   let status = $state<SamplerStatus | null>(null);
 
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
-  const holder = $derived(blockedBy(holderOf(status, $app.activity), mine));
+  const holder = $derived(blockedBy(holderOf(status), mine));
 
   async function refresh() {
     status = await readSampler(conn);

@@ -73,11 +73,13 @@ class WindowTools:
     def _init_window(self) -> None:
         self._sampler_user: str | None = None
         self._sampler_since: float | None = None
+        self._sampler_client: dict | None = None
 
     # --- DAP サンプラの持ち主 -------------------------------------------------------------------
 
-    def _claim_sampler(self, user: str) -> None:
-        """DAP サンプラを user（watch / rtos / profile）が使う。ほかが使っていれば RuntimeError。"""
+    def _claim_sampler(self, user: str, caller: dict | None = None) -> None:
+        """DAP サンプラを user（watch / rtos / profile）が使う。ほかが使っていれば RuntimeError。caller（デーモンが渡す
+        呼び出し元 {id, name, role}。デーモンを通さない呼び出しは None）は、使い始めたとき（since と組で）だけ覚える。"""
         holder = self._sampler_user
         if holder is not None and holder != user:
             release = _RELEASE.get(holder)
@@ -86,19 +88,23 @@ class WindowTools:
                                f"が使っている{how}")
         if self._sampler_user != user:
             self._sampler_since = time.time()
+            self._sampler_client = dict(caller) if caller is not None else None
         self._sampler_user = user
 
     def _release_sampler(self, user: str) -> None:
         if self._sampler_user == user:
             self._sampler_user = None
             self._sampler_since = None
+            self._sampler_client = None
 
     def sampler_status(self) -> dict:
         """DAP サンプラ（1 つ）をいま使っている道具（機器には触れない）: user（watch / rtos / profile / rtt / clock、
-        空きなら None）、release（止める API。clock は自分で終わるので None）、since（使い始めた時刻、UNIX 秒）。"""
+        空きなら None）、release（止める API。clock は自分で終わるので None）、since（使い始めた時刻、UNIX 秒）、
+        client（使い始めた呼び出し元 {id, name, role}。デーモンが渡した事実。分からなければ None）。"""
         user = self._sampler_user
         return {"user": user, "release": _RELEASE.get(user) if user else None,
-                "since": self._sampler_since if user else None}
+                "since": self._sampler_since if user else None,
+                "client": self._sampler_client if user else None}
 
     # --- 出来事の窓 ---------------------------------------------------------------------------
 

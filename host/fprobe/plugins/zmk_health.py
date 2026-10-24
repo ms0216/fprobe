@@ -35,8 +35,13 @@ class ZmkHealth:
         self.unavailable: list[str] = []
 
     def _value(self, expression: str) -> Any:
+        """列挙は列挙子の名前（列挙子に無い値は None）、数・真偽はその値。ほかの種類（読めない等）は誤り。"""
         value = self.api.call("debug.evaluate", expression=expression, live=True)["value"]
-        return value["enum"] if isinstance(value, dict) and "enum" in value else value
+        if value["kind"] == "enum":
+            return value["name"]
+        if value["kind"] in ("int", "float", "bool"):
+            return value["value"]
+        raise ValueError(f"{expression} は数でない（{value.get('reason') or value['kind']}）")
 
     def _try(self, what: str, expression: str) -> Any:
         try:

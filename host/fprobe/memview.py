@@ -179,9 +179,14 @@ class ElfImage:
                     if s["sh_flags"] & SH_FLAGS.SHF_EXECINSTR]
         self.code_map = CodeMap(marks, ends)
         self._starts = [r.address for r in self.regions]
+        self._index_names(named)
+
+    def _index_names(self, named: dict[str, "ElfSymbol"]) -> None:
+        """名前 → シンボルと、symbol_at の索引（番地の順。同じ番地は大きいほうが先）。"""
         self._named = named
         self._by_address = sorted(named.values(), key=lambda n: (n.address, -n.size))
         self._name_starts = [n.address for n in self._by_address]
+        self._name_extent = max((max(n.size, 1) for n in self._by_address), default=1)   # 後ろを探す距離（最大の大きさ）
 
     # --- シンボル（関数・変数）: 番地 → 名前 ---------------------------------------------
 
@@ -194,7 +199,7 @@ class ElfImage:
     def symbol_at(self, address: int, kind: str | None = None) -> "ElfSymbol | None":
         """address を含む関数・変数（大きさ 0 のものは先頭の番地だけ）。kind で "function" / "object" に限る。"""
         i = bisect.bisect_right(self._name_starts, address) - 1
-        while i >= 0 and address - self._by_address[i].address < (1 << 20):
+        while i >= 0 and address - self._by_address[i].address < self._name_extent:
             s = self._by_address[i]
             if (kind is None or s.kind == kind) and (address < s.address + s.size or address == s.address):
                 return s

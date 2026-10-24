@@ -352,7 +352,8 @@ class LogicAnalyzer:
         samples = raw[start:] + raw[:start]
         self.dev.write32(g.LA_CONTROL, 0)
         return Capture(samples, (trigger - start) % self.depth,
-                       pin_time(time_hi << 32 | time_lo, self.caps.la_delay_internal), sample_period_s, self.channels)
+                       pin_time(time_hi << 32 | time_lo, self.caps.la_delay_internal, self.caps.la_phase_span),
+                       sample_period_s, self.channels)
 
     def capture(self, *, timeout_s: float = 5.0, **trigger) -> Capture:
         period = self.start(**trigger)
@@ -553,10 +554,10 @@ def split_segments(data: bytes) -> list[StreamSegment]:
     return out
 
 
-def pin_time(trigger_time: int, delay: float) -> int:
-    """FPGA がトリガのサンプルに付けた時刻を、ピンの変化の時刻に直す（delay = ケイパビリティ LA_DELAY の刻み数。
-    同期化・符号器までの段の分。半刻みは切り上げて引く = ±0.5 刻み）。"""
-    return trigger_time - math.floor(delay + 0.5)
+def pin_time(trigger_time: int, delay: int, span: int) -> int:
+    """FPGA がトリガのサンプルに付けた時刻を、ピンの変化の時刻の下限に直す（delay = ケイパビリティ LA_DELAY の段数、
+    span = 位相の幅。ピンの変化は 返す時刻 以上 返す時刻 + span 未満のどこか。どこかは測っていない）。"""
+    return trigger_time - delay - span
 
 
 class DeepAnalyzer:
@@ -700,7 +701,8 @@ class DeepAnalyzer:
         self.dev.write32(g.LA_DEEP_COMMAND, 1 << g.LA_DEEP_COMMAND_READ[0])
         data = self.dev.read_stream(count * BEAT_BYTES, timeout_ms=5000)
         return data, trigger_sample(data, self._rle, before, slot), pin_time(time_hi << 32 | time_lo,
-                                                                             self.caps.la_delay_deep)
+                                                                             self.caps.la_delay_deep,
+                                                                             self.caps.la_phase_span)
 
     def capture(self, *, timeout_s: float = 10.0, before_beats: int | None = None, after_beats: int | None = None,
                 **trigger) -> Capture:

@@ -297,6 +297,7 @@ def test_swo_packets_are_recorded(probe):
 # --- 通信の解読 -----------------------------------------------------------------------------
 
 BAUD = 115200
+F8N1 = {"data_bits": 8, "parity": "none", "stop_bits": 1, "invert": False, "lsb_first": True}   # UART の枠の設定（必須）
 
 
 def uart_capture(data=b"OK\r\n", trigger_s=0.0):
@@ -310,15 +311,17 @@ def test_la_decode_the_last_capture_with_paging_and_filters(probe):
     with pytest.raises(RuntimeError):
         probe.la_decode("uart", {"channel": 5})
     probe._keep_capture(uart_capture(), "la.capture")
-    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD})
+    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1})
     assert out["capture"]["id"] == 1 and out["errors"] == 0
     data = [a["value"] for a in out["annotations"] if a["kind"] == "data"]
     assert bytes(data) == b"OK\r\n"
-    page = probe.la_decode("uart", {"channel": 5, "baud": BAUD}, kinds=["data"], offset=1, limit=2)
+    page = probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1}, kinds=["data"], offset=1, limit=2)
     assert [a["value"] for a in page["annotations"]] == list(b"K\r") and page["matched"] == 4
-    assert probe.la_decode("uart", {"channel": 5, "baud": BAUD}, errors_only=True)["matched"] == 0
+    assert probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1}, errors_only=True)["matched"] == 0
+    with pytest.raises(ValueError, match="data_bits・parity・stop_bits・invert・lsb_first"):
+        probe.la_decode("uart", {"channel": 5, "baud": BAUD})                  # 枠の設定は既定を持たない
     with pytest.raises(ValueError):
-        probe.la_decode("uart", {"chanel": 5})                                 # 設定の名前の誤り
+        probe.la_decode("uart", {"chanel": 5, "baud": BAUD, **F8N1})            # 設定の名前の誤り
     with pytest.raises(ValueError):
         probe.la_decode("no_such_protocol", {})
     with pytest.raises(KeyError):
@@ -329,13 +332,13 @@ def test_la_decode_annotations_are_put_on_the_common_timeline(probe):
     probe.recording_start(name="decode")
     tr = uart_capture()
     probe._keep_capture(tr, "la.capture")
-    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD}, kinds=["data"])
+    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1}, kinds=["data"])
     first = out["annotations"][0]
     events = probe.recording_find({"stream": "annotation", "kind": "uart.data"})["events"]
     assert [e["a"] for e in events] == list(b"OK\r\n")
     tps = tr.sample_period_s * 100_000_000
     assert events[0]["t"] == tr.trigger_time - round(tr.trigger * tps) + round(first["start"] * tps)
-    probe.la_decode("uart", {"channel": 5, "baud": BAUD})                      # 同じ解読は二度入れない
+    probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1})                      # 同じ解読は二度入れない
     assert len(probe.recording_find({"stream": "annotation", "kind": "uart.data"})["events"]) == 4
 
 

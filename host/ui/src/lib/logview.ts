@@ -32,9 +32,8 @@ export function startParams(form: StartForm): Record<string, unknown> {
   return out;
 }
 
-const KEEP = 5000;                                     // 画面に持つ行の上限（古いものから捨てる。デーモンには残る）
-
-const LIMIT = 200;                                     // 1 回の log.read の件数（デーモンの既定と同じ）
+/** 画面に持つ行の上限（古いものから捨てる。捨てた数は discarded。デーモンには残る） */
+export const LOG_KEEP = 5000;
 
 /** 記録の場所（file・line・module・function のうち分かるもの）を 1 行に */
 export function locationText(loc: { file?: string; line?: number; module?: string; function?: string } | undefined): string {
@@ -46,6 +45,7 @@ export function locationText(loc: { file?: string; line?: number; module?: strin
 export class LogView {
   records: LogRecord[] = [];
   dropped = 0;
+  discarded = 0;                                       // 画面に持つ上限（LOG_KEEP）を超えて捨てた行の数
   running = false;
   private since = 0;
   private generation = 0;                              // reset で上げる（前の絞り込みの応答を捨てる）
@@ -58,9 +58,10 @@ export class LogView {
     this.records = [];
     this.since = 0;
     this.dropped = 0;
+    this.discarded = 0;
   }
 
-  /** since から読み足す（level 以上・contains を含むものだけ）。返った件数が上限に達している間は続けて読む */
+  /** since から読み足す（level 以上・contains を含むものだけ）。API が続きがある（more）と言う間は続けて読む */
   more(filter: { level: string; contains: string }): Promise<void> {
     const generation = this.generation;
     this.queue = this.queue.then(() => this.read(filter, generation));
@@ -77,11 +78,13 @@ export class LogView {
       if (generation !== this.generation) return;
       const last = this.records.at(-1)?.seq ?? 0;
       const fresh = (r.records ?? []).filter((x: LogRecord) => x.seq > last);
-      this.records = [...this.records, ...fresh].slice(-KEEP);
+      const all = [...this.records, ...fresh];
+      this.discarded += Math.max(0, all.length - LOG_KEEP);
+      this.records = all.slice(-LOG_KEEP);
       this.since = Math.max(this.since, r.next ?? this.since);
       this.dropped = r.dropped ?? 0;
       this.running = !!r.running;
-      if ((r.records ?? []).length < LIMIT) return;
+      if (!r.more) return;
     }
   }
 }

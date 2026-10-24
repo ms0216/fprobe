@@ -53,7 +53,7 @@ def test_params_are_validated(spec):
 
 def test_generated_files_match_the_spec(spec):
     ts = render_typescript(spec)
-    assert "export const API_VERSION = 1;" in ts and '"debug.run_until_halt"' in ts
+    assert f"export const API_VERSION = {API_VERSION};" in ts and '"debug.run_until_halt"' in ts
     md = render_markdown(spec)
     assert "## debug.run_until_halt" in md
     for path in write_all(check=True):                                            # 生成済みのファイルと一致
@@ -79,3 +79,24 @@ def test_irreversible_methods_are_declared_in_the_spec(spec):
     marked = {name for name, m in spec.methods.items() if m.irreversible}
     assert marked == IRREVERSIBLE
     assert all(spec.methods[name].kind == "control" for name in marked)
+
+
+CALLER = {"ui.state.set", "watch.set", "rtos.timeline.start", "profile.start", "rtt.start", "cycles.clock",
+          "recording.mark", "rules.check", "inject.run"}
+
+
+def test_who_started_or_placed_something_is_the_callers_fact(spec):
+    # だれがサンプラ・watch を始めたか、だれが印を置いたかは、画面が操作の記録から推さず、デーモンが渡す呼び出し元を
+    # 実装が事実として残す（仕様の印 caller）
+    import inspect
+    marked = {name for name, m in spec.methods.items() if m.caller}
+    assert marked == CALLER
+    for name in marked:
+        assert "caller" in inspect.signature(getattr(Probe, spec.methods[name].impl)).parameters, name
+
+
+def test_the_count_window_of_fpga_conditions_is_given_by_the_caller(spec):
+    # 条件の回数を数える範囲（最後の何件か）は使う側が明示する。既定の値を持たない
+    m = spec.methods["fpga_obs.count"]
+    assert set(m.params["required"]) == {"conditions", "last"}
+    assert "default" not in m.params["properties"]["last"]

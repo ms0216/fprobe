@@ -461,7 +461,7 @@ def check(recording: Recording, ruleset: RuleSet, *, t0: int | None = None, t1: 
             expected["steps"] = len(rule.params["steps"])
         item = {"id": rule.id, "kind": rule.kind, "description": rule.description, "requirement": list(rule.requirement),
                 "severity": rule.severity, "verdict": verdict, "expected": expected, "measured": measured,
-                "violations": violations[:limit], "violations_total": len(violations)}
+                "violations": violations[:limit], "violations_total": len(violations), "violations_limit": limit}
         if base_ctx is not None:
             base_measured, _, _ = _evaluate(base_ctx, rule)
             delta = {k: round(v - base_measured[k], 6) for k, v in measured.items()

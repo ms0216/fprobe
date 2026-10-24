@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from .stats import Distribution
 
-__all__ = ["IntervalReport", "interval_report", "measure", "pair_times"]
+__all__ = ["IntervalReport", "interval_report", "limit_intervals", "measure", "pair_times"]
 
 
 def pair_times(starts: Iterable[int], ends: Iterable[int]) -> list[tuple[int, int]]:
@@ -41,9 +41,11 @@ class IntervalReport:
         return Distribution([d for _, d in self.pairs])
 
     def longest(self) -> list[dict]:
-        """長い順の上位 longest_n 件（同じ長さなら早い順）。t は開始の時刻（記録・タイムラインのその時刻へ跳ぶ鍵）。"""
+        """長い順の上位 longest_n 件（同じ長さなら早い順）。t は開始の時刻（記録・タイムラインのその時刻へ跳ぶ鍵）、
+        bin は histogram の箱の番号。"""
         top = sorted(self.pairs, key=lambda p: (-p[1], p[0]))[:self.longest_n]
-        return [{"t": t, "t_end": t + d, "duration": d} for t, d in top]
+        d = self.distribution
+        return [{"t": t, "t_end": t + dur, "duration": dur, "bin": d.bin_of(dur, self.bins)} for t, dur in top]
 
     def as_dict(self) -> dict:
         d = self.distribution
@@ -59,7 +61,18 @@ class IntervalReport:
                 out["seconds"] = {k: stats[k] / self.timebase_hz
                                   for k in ("min", "max", "mean", "stdev", "median", "p90", "p99")}
         out["intervals"] = [list(p) for p in self.pairs]
+        out["interval_bins"] = [d.bin_of(v, self.bins) for _, v in self.pairs]   # intervals と同じ並びの箱の番号
         return out
+
+
+def limit_intervals(report: dict, limit: int) -> dict:
+    """IntervalReport.as_dict() の生の組（intervals と、同じ並びの interval_bins）を先頭 limit 件に切る（切る前の数は
+    intervals_total）。統計・箱・長い順の上位は全部の組のまま。"""
+    if len(report.get("intervals", ())) > limit:
+        report["intervals_total"] = len(report["intervals"])
+        report["intervals"] = report["intervals"][:limit]
+        report["interval_bins"] = report["interval_bins"][:limit]
+    return report
 
 
 def interval_report(pairs: Iterable[tuple[int, int]], timebase_hz: float | None = None, *, bins: int = 20,

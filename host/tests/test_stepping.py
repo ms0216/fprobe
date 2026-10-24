@@ -147,6 +147,7 @@ def test_a_breakpoint_inside_a_stepped_over_call_stops_the_step():
     dbg.breakpoint(0x204)
     stop = dbg.step_line("over")
     assert stop.reason == "breakpoint" and stop.pc == 0x204
+    assert stop.halt_bits == ["BKPT"]                            # 止まったときの DFSR の立っていたビット（全部）
     assert cpu.breakpoints == {0x204}                            # 利用者のものは残し、踏み台は外す
 
 
@@ -173,6 +174,13 @@ def test_a_call_that_never_returns_times_out_and_halts():
     stop = dbg.step_line("over", timeout_s=0.05)
     assert stop.reason == "timeout" and stop.where.function == "forever"
     assert cpu.state.name == "HALTED" and not cpu.breakpoints
+
+
+def test_a_watchpoint_on_an_address_needs_its_size():
+    # 番地のウォッチポイントの大きさを 4 と仮定しない（3 回目の点検 ?12）
+    _, dbg = machine()
+    with pytest.raises(ValueError, match="size"):
+        dbg.watchpoint(0x20000000)
 
 
 def test_step_needs_line_information_and_a_known_mode():

@@ -11,7 +11,7 @@
 限界: M-profile の ETM は命令だけでデータの値が無い。ここで出すのは「どの命令を実行したか」で、レジスタ・メモリの
 過去の値は含まない（推定するなら別に、スナップショットから前へ模擬する）。
 
-    flow = Reconstructor(ElfImage("app.elf"), Symbols("app.elf")).run(Etmv4Decoder().decode(data))
+    flow = Reconstructor(ElfImage("app.elf"), Symbols("app.elf")).run(Etmv4Decoder(Etmv4Config(commit_opt1=True, vmid_bytes=1, cid_bytes=4)).decode(data))
     flow.history(32)                       # 最後の 32 命令（事後の命令履歴）
 """
 
@@ -30,7 +30,7 @@ from . import elements as el
 
 __all__ = ["WALK_LIMIT", "Block", "Flow", "Insn", "Marker", "Reconstructor"]
 
-WALK_LIMIT = 1 << 16             # 分岐の無いまま進む命令の数の上限（越えたら像が違うとみなして止める）
+WALK_LIMIT = 1 << 16             # 分岐の無いまま進む命令の数の上限（越えたら止めて、上限に達したと書く。原因は推測しない）
 _TABLE_BRANCHES = ("tbb", "tbh")
 
 
@@ -295,8 +295,8 @@ class _Run:
                 return addresses, insn
             addresses.append(address)
             address += insn.size
-        self.errors.append(f"0x{start:08X} から {self.r.walk_limit} 命令たどっても分岐が無い（プログラムの像が違う？）")
-        self._mark("lost", address=address, reason="分岐が見つからない")
+        self.errors.append(f"0x{start:08X} から {self.r.walk_limit} 命令（たどる上限）たどっても分岐が無い。そこで止めた")
+        self._mark("lost", address=address, reason=f"たどる上限 {self.r.walk_limit} 命令まで分岐が無い")
         self.pc, self.waiting = None, False
         return addresses, None
 

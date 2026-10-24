@@ -23,10 +23,12 @@ from pathlib import Path
 
 from fprobe import fault
 from fprobe.debug import VECTOR_CATCH
+from fprobe.dwarf.values import unavailable
 from fprobe.flash import Image, Rate, Segment, compare, save_image
 from fprobe.flash_bp import DORMANT_LIMIT
-from fprobe.halt_risk import assess
+from fprobe.halt_risk import scan
 from fprobe.liveness import Liveness
+from fprobe.probe_breakpoints import _truth
 from fprobe.symbols import Symbol
 
 __all__ = ["TargetDemo"]
@@ -97,13 +99,18 @@ class TargetDemo:
         now = time.monotonic()
         for k in range(1, 8):
             t = int(k * 0.25 * HZ) + 1234
-            self._add_log(address, k, {"value": 256 * k, "counter": 256 * k}, now - (2.0 - t / HZ), t)
+            n = {"kind": "int", "value": 256 * k}
+            self._add_log(address, k, {"value": n, "counter": n}, now - (2.0 - t / HZ), t)
         self._bp_actions[address]["hits"] = 7
-        # 致命的エラーの見張り: 走っている間の PC の見本（DWT_PCSR の代わり）を本物の fprobe.liveness に渡す
+        # 走らせたままの見張り: 走っている間の PC の見本（DWT_PCSR の代わり）を本物の fprobe.liveness に渡す
         self._clock = time.time
         self._fatal_pc: int | None = None
         self._demo_live = Liveness(self._function_at)
+        self._demo_live_settings = {"functions": [], "patterns": [], "pc_samples": None, "tick_variable": None}
         if self._fatal_after_s is not None:
+            # 致命的エラーのデモ: 利用者が明示する条件の例として、故障の処理の名前と、足した無線・RTOS の名前を渡しておく
+            self.liveness_set(functions=["default_handler"], pc_samples=4)
+            self.halt_risk_set(names=["RADIO_IRQHandler", "_kernel"])
             self.state = "RUNNING"
             threading.Timer(self._fatal_after_s, self._crash_running).start()
 
@@ -140,12 +147,21 @@ class TargetDemo:
     # --- 致命的エラー（止めると壊れるターゲット） -------------------------------------------------------
 
     def halt_risk(self):
-        """致命的エラーのデモでは、デモの ELF に無線の割り込みと RTOS のカーネルの手がかりを足して見分ける。"""
+        """致命的エラーのデモでは、デモの ELF に無線の割り込みと RTOS のカーネルのシンボルを足して探す。"""
         out = self._elf.halt_risk()
         if self._fatal_after_s is not None:
             extra = [Symbol("RADIO_IRQHandler", 0, 0, "function"), Symbol("_kernel", 0, 0, "object")]
-            out.update(assess([*self._elf._symbols.names(), *extra]))
+            out.update(scan([*self._elf._symbols.names(), *extra], self._elf._halt_names, self._elf._halt_patterns))
         return out
+
+    def liveness_set(self, functions=None, patterns=None, pc_samples=None, tick_variable=None):
+        self._demo_live = Liveness(self._function_at, functions or [], patterns or [])
+        self._demo_live_settings = {"functions": list(functions or []), "patterns": list(patterns or []),
+                                    "pc_samples": pc_samples, "tick_variable": tick_variable}
+        return self.liveness_get()
+
+    def liveness_get(self):
+        return dict(self._demo_live_settings)
 
     def _crash_running(self) -> None:
         """走っている間に故障し、故障の処理（default_handler）の無限ループを回り続ける（止まらない）。"""
@@ -157,7 +173,8 @@ class TargetDemo:
         if self.state != "RUNNING" or self._fatal_pc is None:
             self._demo_live.reset()
             return None
-        return self._demo_live.observe(False, [self._fatal_pc] * 4, self.counter, self._clock())
+        return self._demo_live.observe(False, [self._fatal_pc] * (self._demo_live_settings["pc_samples"] or 0), self.counter,
+                                      self._clock())
 
     def _demo_resume(self) -> bool:
         """DemoProbe.target_resume の前に。故障のハンドラの中・ベクタキャッチで故障する・動作のあるブレークポイントの
@@ -210,7 +227,7 @@ class TargetDemo:
             return False
         if action["condition"]:
             try:
-                if not self._values.read(action["condition"], pc)["value"]:
+                if not _truth(self._values.read(action["condition"], pc)["value"]):          # 本物と同じ真偽
                     return False
             except Exception as e:                                     # 評価できない: 止めて知らせる
                 action["last_error"] = f"{action['condition']}: {e}"
@@ -222,7 +239,7 @@ class TargetDemo:
             try:
                 values[expression] = self._values.read(expression, pc)["value"]
             except Exception as e:
-                values[expression] = {"error": str(e)}
+                values[expression] = unavailable(str(e))
         self._add_log(address, action["hits"], values, time.monotonic(), None)
         return False
 
@@ -249,8 +266,9 @@ class TargetDemo:
 
     def breakpoint_list(self):
         out = super().breakpoint_list()
-        for i, b in enumerate(out["breakpoints"]):
+        for i, b in enumerate(x for x in out["breakpoints"] if x["enabled"]):
             b["kind"] = "hw" if i < FPB_COMPARATORS else "sw"            # デモの ELF は SRAM（比較器が尽きたら RAM の BKPT）
+        for b in out["breakpoints"]:
             if b["address"] in self._bp_actions:
                 b["action"] = dict(self._bp_actions[b["address"]])
         return out
@@ -264,8 +282,11 @@ class TargetDemo:
         self._bp_log.append(entry)
 
     def breakpoint_log(self, since=0, limit=200):
-        items = [e for e in self._bp_log if e["seq"] > since][:limit]
-        return {"entries": items, "next": items[-1]["seq"] if items else since}
+        found = [e for e in self._bp_log if e["seq"] > since]
+        items = found[:limit]
+        return {"entries": items, "next": items[-1]["seq"] if items else since, "lost": 0,
+                "more": len(found) > limit, "kept_limit": 10_000,
+                "last": self._bp_seq}
 
     def flash_breakpoints(self, enabled=None, dormant_limit=None, scratch=None):
         if dormant_limit is not None and dormant_limit < 1:
@@ -490,11 +511,12 @@ class TargetDemo:
         return {"packs": [{"pack": p, "version": v, "path": f"C:/Users/demo/AppData/Local/cmsis-pack-manager/{p}.{v}.pack"}
                           for p, v in sorted({(pack, ver) for _, _, pack, ver in PACKS}) if p in self._packs]}
 
-    def pack_find(self, pattern, update=False):
+    def pack_find(self, pattern, update=False, limit=200):
         from fprobe.packs import glob_matcher
         match = glob_matcher(pattern)
-        return {"parts": [{"part": part, "vendor": vendor, "pack": pack, "version": ver, "installed": pack in self._packs}
-                          for part, vendor, pack, ver in PACKS if match(part)]}
+        parts = [{"part": part, "vendor": vendor, "pack": pack, "version": ver, "installed": pack in self._packs}
+                 for part, vendor, pack, ver in PACKS if match(part)]
+        return {"parts": parts[:limit], "total": len(parts), "truncated": len(parts) > limit, "limit": limit}
 
     def pack_install(self, pattern, update=False):
         parts = self.pack_find(pattern)["parts"]

@@ -2,8 +2,10 @@
 （docs/superpowers/specs/2026-10-22-modular-design.md §3.3）。
 
 組は線の同じ辺を両方の時計で見たもの。FPGA の遅れ（親: 送る時刻を決めてから線が 1 になるまで TX、子: 線が 1 になってから
-記録するまで RX。どちらも回路で決まる定数）を引いてから、最小二乗の直線で合わせる。不確かさは測った事実だけを返す
-（時刻の量子化 1 刻み・組の残差の最大・最も近い組までの刻み）。配線の遅れは測っていないので None（使う側が明示して足す）。
+記録するまで RX。どちらも回路で決まる定数）を引いてから、最小二乗の直線で合わせる。子は非同期の辺を自分の時計で取り込む
+ので、辺は RX の分より 0 以上 1 刻み未満前のどこか（SYNC_RX_PHASE_SPAN_TICKS。どこかは測っていない）: 合わせには最も前
+（RX + 幅）を使い、換算した親の時刻は「t − 幅 より後、t 以前」（phase_span_ticks）。不確かさは測った事実だけを返す
+（時刻の量子化 1 刻み・位相の幅・組の残差の最大・最も近い組までの刻み）。配線の遅れは測っていないので None（使う側が明示して足す）。
 """
 
 import bisect
@@ -13,8 +15,8 @@ from dataclasses import dataclass
 from . import generated as g
 from .fpga_obs import fit_line
 
-# 子の時刻 → 線の辺: 回路の遅れ（周期）と、非同期の辺を取り込む位相の平均
-_RX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_TICKS
+# 子の時刻 → 線の辺（最も前）: 回路の遅れ（周期）と、非同期の辺を取り込む位相の幅
+_RX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_SPAN_TICKS
 
 __all__ = ["ParentTime", "fit_parent", "interpolator", "segments", "to_parent"]
 
@@ -43,6 +45,7 @@ def to_parent(fit: ParentTime, local: int, pair_locals: Sequence[int]) -> dict:
     """子の時刻 local を親の刻みに。pair_locals は合わせに使った組の子の時刻（最も近い組までの刻みを返す）。"""
     return {"t": round(fit.parent0 + fit.ratio * (local - fit.local0)),
             "quantization_ticks": 1,
+            "phase_span_ticks": g.SYNC_RX_PHASE_SPAN_TICKS,
             "residual_max_ticks": fit.residual_max,
             "nearest_pair_ticks": min(abs(local - p) for p in pair_locals),
             "cable_delay": None}

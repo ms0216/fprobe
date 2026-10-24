@@ -400,3 +400,35 @@ def test_reopening_during_initialization_waits_for_the_next_poll(setup):
     mem.poke(CB + 24, struct.pack("<IIIIII", 0, UP0, 256, 0, 0, RttMode.NO_BLOCK_SKIP))
     target.write(0, b"ok\n")
     assert rtt.poll() == {0: b"ok\n"} and rtt.reopens == 0                     # 元と同じリングに戻った: そのまま読む
+
+
+# --- 制御ブロックの検め: 根拠の無い数の上限を使わない（総点検 B3） -----------------------------------------------
+
+def test_a_control_block_with_many_buffers_is_accepted_when_it_fits():
+    # 上り 100 個（以前は 64 を超えると偽物とした）。記述子が RAM の範囲に収まれば本物の候補
+    mem = FakeMemory()
+    build(mem, BASE + 0x100, up=[(None, BASE + 0x6000, 16, 0)] * 100, down=[])
+    assert find_control_block(mem, [(BASE, RAM)]) == BASE + 0x100
+
+
+def test_a_header_whose_descriptors_do_not_fit_the_range_is_not_a_candidate():
+    mem = FakeMemory()
+    mem.poke(BASE + 0x40, b"SEGGER RTT".ljust(16, b"\0") + struct.pack("<II", 2000, 0))   # 24 × 2000 > 範囲の残り
+    with pytest.raises(ControlBlockNotFound):
+        find_control_block(mem, [(BASE, RAM)])
+
+
+def test_several_candidates_are_reported_instead_of_picking_one():
+    mem = FakeMemory()
+    build(mem, BASE + 0x100, up=[("a", BASE + 0x2000, 64, 0)], down=[])
+    build(mem, BASE + 0x400, up=[(None, 0, 0, 0)], down=[])               # 大きさ 0 の上りだけ（以前は偽物とした）
+    with pytest.raises(RttError) as e:
+        find_control_block(mem, [(BASE, RAM)])
+    assert "0x20000100" in str(e.value) and "0x20000400" in str(e.value)
+
+
+def test_open_refuses_descriptors_beyond_the_given_end():
+    mem = FakeMemory()
+    mem.poke(CB, b"SEGGER RTT".ljust(16, b"\0") + struct.pack("<II", 2000, 0))                # 24 × 2000 は範囲の終わりを越える
+    with pytest.raises(RttError):
+        Rtt(mem, CB, end=BASE + RAM).open()

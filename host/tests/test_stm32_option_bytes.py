@@ -100,6 +100,6 @@ def test_protection_status_for_the_diagnosis():
     part = Part("STMicroelectronics", "STM32F401xD/E", "", 0x433)
     flash = FakeStm32Flash("optcr", 0x0FFFBBED)
     status = ob.protection_status(part, flash.read32)
-    assert status["status"] == "warn" and status["rdp_level"] == 1 and "target_unlock" in status["message"]
-    assert ob.protection_status(part, FakeStm32Flash("optcr").read32)["status"] == "ok"
+    assert "status" not in status and status["rdp_level"] == 1 and "target_unlock" in status["message"]   # 判定しない
+    assert ob.protection_status(part, FakeStm32Flash("optcr").read32)["rdp_level"] == 0
     assert ob.protection_status(Part("Raspberry Pi", "RP2040", "", 2), lambda a: 0) is None

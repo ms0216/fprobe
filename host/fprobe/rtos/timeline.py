@@ -114,14 +114,14 @@ class Timeline:
 # --- 方法 A: サンプル ---------------------------------------------------------------------------
 
 def timeline_from_samples(samples: Iterable[tuple[int, int]], names: Mapping[int, str], period: float | None = None,
-                          gap_factor: float | None = None) -> Timeline:
+                          gap: float | None = None) -> Timeline:
     """(時刻, pxCurrentTCB の値) の列 → 時間軸。
 
     値が変わった 2 つのサンプルの中点を切り替えの時刻とし、不確かさは間隔の半分。分解能は period（無ければ
     サンプルの間隔の中央値）。ただし実際の間隔の中央値が period より長ければそれ（サンプラが設定の周期に追いつかない
-    とき。SWD の速さで 1 巡回が長い）。gap_factor を明示したときだけ、間隔が gap_factor × 分解能を超えたところを抜けに
-    する（区間を切り、切り替えに数えない）。既定では抜けにしない（経験則の倍率を持たない。長い間隔は切り替えの時刻の
-    不確かさ = 間隔の半分、として表れる）。
+    とき。SWD の速さで 1 巡回が長い）。分解能は表すだけで、判定には使わない。gap（タイムベースの刻み）を明示したときだけ、
+    間隔が gap を超えたところを抜けにする（区間を切り、切り替えに数えない。代表値の倍率で決めない）。既定では抜けに
+    しない（長い間隔は切り替えの時刻の不確かさ = 間隔の半分、として表れる）。
     """
     points = sorted(samples)
     if not points:
@@ -137,7 +137,7 @@ def timeline_from_samples(samples: Iterable[tuple[int, int]], names: Mapping[int
         tl.runs.append(Run(value, name_of(names, value), start, end, max(start_unc, end_unc), count))
     for t, v in points[1:]:
         dt = t - last
-        if gap_factor is not None and resolution and dt > gap_factor * resolution:
+        if gap is not None and dt > gap:
             close(last, 0)
             tl.gaps.append(Gap(last, t, "no_samples"))
             start, start_unc, value, count = t, 0.0, v, 1

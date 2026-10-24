@@ -24,7 +24,7 @@ from __future__ import annotations
 import struct
 
 from ..logfmt.printf import Words, format_c
-from .model import Trace, TraceEvent, is_rtos_idle_name, unwrap32
+from .model import Trace, TraceEvent
 
 __all__ = ["CHANNEL_NAME", "COMMAND_START", "COMMAND_STOP", "PSF_MAGIC", "TracealyzerDecoder", "TracealyzerError",
            "decode_tracealyzer"]
@@ -52,6 +52,11 @@ _CODES = {0x01: "TRACE_START", 0x02: "TS_CONFIG", 0x03: "OBJ_NAME", 0x04: "TASK_
           0xA3: "TIMER_CHANGEPERIOD", 0xB0: "EVENTGROUP_SYNC", 0xB1: "EVENTGROUP_WAITBITS",
           0xB2: "EVENTGROUP_CLEARBITS", 0xB4: "EVENTGROUP_SETBITS", 0xE9: "MALLOC_FAILED", 0xEA: "FREE_FAILED",
           0xEB: "UNUSED_STACK"}
+# カーネルオブジェクト（キュー・セマフォ・ミューテックス・タイマ・イベントグループ・ストリーム / メッセージバッファ）の
+# 作成・削除・操作のコード（上の表の名前で決めた集合。番号の範囲で決めない: NEW_TIME・MALLOC・LOWPOWER・UNUSED_STACK
+# 等はオブジェクトの操作でない）
+_OBJECT_CODES = frozenset(c for c, n in _CODES.items() if n.split("_")[0] in (
+    "QUEUE", "SEMAPHORE", "MUTEX", "TIMER", "EVENTGROUP", "STREAMBUFFER", "MESSAGEBUFFER"))
 _USER, _USER_FIXED = 0x90, 0x98
 _BLOCKING = {0x56, 0x57, 0x58, 0x66, 0x67, 0x68, 0x79, 0x7A, 0x7B, 0xB1}
 
@@ -134,7 +139,8 @@ class TracealyzerDecoder:
         count, symbol_size, states = (self._uint(self._buf, i * w, w, self._order) for i in range(3))
         entry = w + w * states + 4 + symbol_size
         if states > 16 or symbol_size > 256 or count > 4096:
-            raise TracealyzerError("エントリの表の形が合わない（見出しの版が違う）")
+            raise TracealyzerError(f"エントリの表の値が読む範囲の外（states {states}・symbol_size {symbol_size}・count {count}。"
+                                   "読む範囲は states ≤ 16・symbol_size ≤ 256・count ≤ 4096）")
         total = 3 * w + count * entry
         if len(self._buf) < total:
             return False
@@ -181,7 +187,7 @@ class TracealyzerDecoder:
                 out.append(self._add(TraceEvent(self._ts or ts, "overflow", "lost", None, {"missing": gap})))
                 self._current, self._isr_depth = None, 0
         self._counts[core] = seq
-        self._ts = unwrap32(self._ts, ts)
+        self._ts = self.trace.unwrap(self._ts, ts)
         out.extend(self._add(e) for e in self._decode(code, words, raw, self._ts))
         return True
 
@@ -194,8 +200,6 @@ class TracealyzerDecoder:
         info = self.trace.task(task)
         if info.name is None and task in self._names:
             info.name = self._names[task]
-        if info.name and is_rtos_idle_name(info.name):
-            self.trace.idle.add(task)
         return info
 
     def _text(self, raw: bytes, fixed: int) -> str:
@@ -255,7 +259,7 @@ class TracealyzerDecoder:
         if _USER < code < _USER_FIXED and words:
             nargs = code - _USER - 1
             fmt = self._text(raw, 1 + nargs)
-            text = format_c(fmt, Words(words[1:1 + nargs]))
+            text = format_c(fmt, Words(words[1:1 + nargs]), pointer_bits=8 * self._word)
             return [TraceEvent(ts, "print", "USER_EVENT", None,
                                 {"channel": self._names.get(words[0], f"0x{words[0]:08X}")}, text)]
         if _USER_FIXED <= code <= _USER_FIXED + 4 and len(words) >= 2:
@@ -265,10 +269,10 @@ class TracealyzerDecoder:
             if fmt is None:
                 args.update(format_address=words[1], values=words[2:])
             return [TraceEvent(ts, "print", "USER_EVENT_COMPACT", None, args,
-                               format_c(fmt, Words(words[2:])) if fmt is not None else None)]
+                               format_c(fmt, Words(words[2:]), pointer_bits=8 * self._word) if fmt is not None else None)]
         if code in _BLOCKING:
             return [TraceEvent(ts, "task_block", name, self._current, {"values": words})]
-        kind = "object" if code in _CODES and code >= 0x11 else "other"
+        kind = "object" if code in _OBJECT_CODES else "other"
         args = {"values": words}
         if words and words[0] in self._names:
             args["object"] = self._names[words[0]]

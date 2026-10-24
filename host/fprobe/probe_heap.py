@@ -8,7 +8,8 @@ _record_host・_watch_stops と、BreakpointActions の _break_hooks（道具が
 記録の方法（ブレークポイント）: 確保の関数（FreeRTOS は pvPortMalloc、newlib は _malloc_r）の入口で大きさと戻り先を
 読み、戻り先に一時のブレークポイントを置いて、戻ったところで返した番地（r0）を読む。解放の関数（vPortFree・
 _free_r）は入口で番地を読む。calloc・realloc は中で _malloc_r / _free_r を呼ぶので確保と解放として残る（その場で
-大きさを変えた realloc は見えない）。呼び出し元は戻り先（calloc 等の包みの中なら呼び出し履歴で外へ）。
+大きさを変えた realloc は見えない）。呼び出し元は戻り先の関数。calloc 等の包みの外を呼び出し元にしたいときは、
+飛ばす関数の名前を使う側が skip_functions で明示する（名前の慣習で黙って飛ばさない。飛ばしたフレームは出来事の skipped）。
 当たるたびにコアを数 ms 止めるので、確保が毎秒数百回を超えるファームには向かない（ponytail: 速い頻度はトレース
 フック traceMALLOC / traceFREE を ITM に流す方法で。未実装）。
 
@@ -22,7 +23,7 @@ from dataclasses import dataclass, field
 from pyocd.core.target import Target
 
 from .debug import PyocdAccess
-from .heap import ALLOCATORS, AllocationTracker, SymbolTable, detect, scan
+from .heap import ALLOCATORS, ISSUES_LIMIT, SERIES_POINTS, AllocationTracker, SymbolTable, detect, scan
 
 __all__ = ["HeapTools"]
 
@@ -33,9 +34,6 @@ STREAM = "heap"
 FUNCTIONS = {"freertos": [("pvPortMalloc", "alloc", "r0"), ("vPortFree", "free", "r0")],
              "newlib": [("_malloc_r", "alloc", "r1"), ("_free_r", "free", "r1")]}
 FALLBACK = {"newlib": [("malloc", "alloc", "r0"), ("free", "free", "r0")]}
-WRAPPERS = frozenset({"malloc", "free", "calloc", "realloc", "_calloc_r", "_realloc_r", "_malloc_r", "_free_r",
-                      "reallocf", "_reallocf_r", "memalign", "_memalign_r", "strdup", "_strdup_r", "strndup",
-                      "_strndup_r", "pvPortMalloc", "vPortFree", "pvPortCalloc", "__wrap_malloc", "__wrap_free"})
 
 
 @dataclass
@@ -50,6 +48,7 @@ class _Entry:
 class _HeapTrace:
     entries: dict[int, _Entry]
     started: float
+    skip: tuple[str, ...] = ()           # 呼び出し元を探すとき飛ばす関数（使う側が明示した名前。既定は飛ばさない）
     tracker: AllocationTracker = field(default_factory=AllocationTracker)
     pending: dict[int, list[tuple[float, int, dict, str]]] = field(default_factory=dict)   # 戻り先 → 確保の途中
     owned: set[int] = field(default_factory=set)                                          # 置いた戻り先
@@ -72,9 +71,16 @@ class HeapTools:
     # --- 走査 ----------------------------------------------------------------------------------
 
     def heap_scan(self, allocator: str | None = None, regions: list[list[int]] | None = None, end: int | None = None,
-                  live: bool = False, blocks: int = 0, compare: bool = False) -> dict:
+                  live: bool = False, blocks: int = 0, compare: bool = False, changes_limit: int = 50,
+                  regions_symbol: str | None = None, break_symbol: str | None = None) -> dict:
         """ヒープを辿る: 使用量・空き・最大の空き・断片化・大きさの分布・壊れ（issues）。allocator を省くと ELF にある
-        もの全部（freertos / newlib_nano / newlib）。止まっているときだけ（live なら走行中にも: 一貫しない）。"""
+        もの全部（freertos / newlib_nano / newlib）。止まっているときだけ（live なら走行中にも: 一貫しない）。
+        heap_5 の領域は regions か、領域の表（HeapRegion_t の配列）の変数の名前 regions_symbol。newlib-nano の終わり
+        （program break）は end か、それを持つ変数の名前 break_symbol（sbrk の実装の変数）。名前は使う側が明示する
+        （慣習の名前を探さない）。無ければ heap_5 は空きのリストだけ、newlib-nano は形の崩れた所まで（complete = false）。
+        compare の増減（changes）の new・gone は changes_limit 個まで（総数・切ったか・使った上限も changes に）。"""
+        if changes_limit < 0:
+            raise ValueError("changes_limit は 0 以上")
         with self._lock:
             syms = self._heap_symbols()
             names = [allocator] if allocator else detect(syms)
@@ -92,13 +98,14 @@ class HeapTools:
             trace = self._heap_trace
             heaps = []
             for name in names:
-                result = scan(access.read_memory, syms, name, regions=pairs, end=end)
+                result = scan(access.read_memory, syms, name, regions=pairs, end=end, regions_symbol=regions_symbol,
+                              break_symbol=break_symbol)
                 d = result.to_dict(blocks)
                 used = {b.pointer: b.size for b in result.blocks if b.used}
                 if trace is not None:
                     d["callers"] = _callers(used, trace.tracker)
                 if compare:
-                    d["changes"] = _changes(self._heap_last.get(name), used)
+                    d["changes"] = _changes(self._heap_last.get(name), used, changes_limit)
                 self._heap_last[name] = used
                 heaps.append(d)
                 self._record_host(STREAM, "scan", time.monotonic(), a=d["used"], b=d["free"],
@@ -108,9 +115,13 @@ class HeapTools:
 
     # --- malloc / free の記録 -------------------------------------------------------------------
 
-    def heap_trace_start(self, allocators: list[str] | None = None) -> dict:
+    def heap_trace_start(self, allocators: list[str] | None = None, skip_functions: list[str] | None = None,
+                         issues_limit: int = ISSUES_LIMIT) -> dict:
         """malloc / free の記録を始める（確保・解放の関数にブレークポイント。止めずに続ける）。記録中なら
-        stream "heap" にも入る。→ `heap_trace_report`（呼び出し元ごとの生きている確保）/ `heap_trace_events`。"""
+        stream "heap" にも入る。→ `heap_trace_report`（呼び出し元ごとの生きている確保）/ `heap_trace_events`。
+        呼び出し元は戻り先の関数。skip_functions（関数の名前）を渡すと、戻り先がその関数なら呼び出し履歴で外へ辿り、
+        最初の skip_functions に無い関数を呼び出し元にする（飛ばしたフレームは出来事の skipped）。
+        issues_limit: 持つ誤り（二重の解放等）の数の上限（総数は数え、heap_trace_report の issues_total に）。"""
         with self._lock:
             if self._heap_trace is not None and self._heap_trace.active:
                 raise RuntimeError("記録している（heap_trace_stop を先に）")
@@ -142,13 +153,13 @@ class HeapTools:
                 for address in placed:
                     dbg.remove_breakpoint(address)
                 raise
-            trace = _HeapTrace(entries, time.monotonic())
+            trace = _HeapTrace(entries, time.monotonic(), tuple(skip_functions or ()), AllocationTracker(issues_limit))
             self._heap_trace = trace
             for address in entries:
                 self._break_hooks[address] = (TOOL, self._heap_entry_hit)
             self._watch_stops(self.target.get_state() != Target.State.HALTED)
             return {"functions": [{"function": e.function, "op": e.op, "address": a} for a, e in entries.items()],
-                    "notes": ["当たるたびにコアを数 ms 止める（確保の多いファームでは遅くなる）"]}
+                    "skip_functions": list(trace.skip), "notes":["当たるたびにコアを数 ms 止める（確保の多いファームでは遅くなる）"]}
 
     def heap_trace_stop(self) -> dict:
         """記録を止める（ブレークポイントを外す。記録した出来事と要約は heap_trace_report で読める）。"""
@@ -178,17 +189,21 @@ class HeapTools:
             trace.active = False
             trace.notes.append("breakpoint_clear でブレークポイントが外れたので記録が止まった")
 
-    def heap_trace_report(self, min_age_s: float = 0.0, top: int = 20) -> dict:
+    def heap_trace_report(self, min_age_s: float = 0.0, top: int = 20, series_points: int = SERIES_POINTS,
+                          live_points: int = 5) -> dict:
         """記録の要約: 確保・解放の回数、生きている確保、最大の使用量、誤り（二重の解放・失敗・解放されていない番地の
-        再利用）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。live_counts = 5 つの時点の
-        生きている数。リークかは判定しない）、使用量の推移。
+        再利用）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。バイトの多い順に top 個。
+        callers_total = 切る前の呼び出し元の数、truncated = 切ったか、top = 使った値。live_counts = 5 つの時点の
+        生きている数。リークかは判定しない）、使用量の推移（series_points 点まで等間隔に間引く: series_total =
+        元の点の数、series_downsampled = 間引いたか）。誤りは issues_total = 総数、issues_truncated = 持つ上限で切ったか、
+        issues_limit = 上限。skip_functions = 呼び出し元を探すとき飛ばした関数。
         時刻は記録を始めてからの秒。"""
         with self._lock:
             trace = self._heap_trace
             if trace is None:
                 raise RuntimeError("記録が無い（heap_trace_start を先に）")
             now = time.monotonic()
-            out = trace.tracker.report(now, min_age_s, top)
+            out = trace.tracker.report(now, min_age_s, top, series_points, live_points)
             t0 = trace.started
             for issue in out["issues"]:
                 issue["t"] = round(issue["t"] - t0, 6)
@@ -197,17 +212,20 @@ class HeapTools:
                 c["live_counts"] = [(round(t - t0, 6), n) for t, n in c["live_counts"]]
             out["series"] = [(round(t - t0, 6), b) for t, b in out["series"]]
             out.update(active=trace.active, elapsed_s=round(now - t0, 3), notes=list(trace.notes),
-                       functions=sorted({e.function for e in trace.entries.values()}))
+                       functions=sorted({e.function for e in trace.entries.values()}), skip_functions=list(trace.skip))
             return out
 
     def heap_trace_events(self, since: int = 0, limit: int = 200) -> dict:
-        """記録した確保・解放の出来事（seq が since より後を古い順に limit 件）。next を次の since に。"""
+        """記録した確保・解放の出来事（seq が since より後を古い順に limit 件）。next を次の since に。
+        出来事は新しい kept_limit 件だけ持つ: dropped = since より後で、持つ数を超えて捨てた出来事の数。"""
         with self._lock:
             trace = self._heap_trace
             if trace is None:
                 raise RuntimeError("記録が無い（heap_trace_start を先に）")
             items = [e for e in trace.events if e["seq"] > since][:limit]
-            return {"events": items, "next": items[-1]["seq"] if items else since}
+            oldest = trace.events[0]["seq"] if trace.events else trace.seq + 1
+            return {"events": items, "next": items[-1]["seq"] if items else since,
+                    "dropped": max(0, oldest - max(since, 0) - 1), "kept_limit": EVENT_LIMIT}
 
     # --- ブレークポイントの処理（_lock の中で。BreakpointActions._break_action から） ---------------------------
 
@@ -219,7 +237,7 @@ class HeapTools:
         target = self.target
         value = target.read_core_register(entry.register)
         lr = target.read_core_register("lr")
-        caller = self._heap_caller(lr)
+        caller = self._heap_caller(lr, trace.skip)
         now = time.monotonic()
         if entry.op == "free":
             trace.tracker.free(now, value, caller["where"])
@@ -255,26 +273,37 @@ class HeapTools:
             return None                                           # 使う人のブレークポイント: ふつうの動作へ
         return True
 
-    def _heap_caller(self, lr: int) -> dict:
-        """呼び出し元の場所（戻り先の 1 つ前 = 呼び出しの命令）。calloc 等の包みの中なら呼び出し履歴で外へ。"""
+    def _heap_caller(self, lr: int, skip: tuple[str, ...]) -> dict:
+        """呼び出し元の場所（戻り先の 1 つ前 = 呼び出しの命令）。戻り先の関数が skip（使う側が明示した名前）にあれば
+        呼び出し履歴で外へ辿り、skip に無い最初のフレームにする。skipped = 飛ばしたフレームの関数。巻き戻せない・
+        履歴のフレームがすべて skip のときは戻り先のまま、unwind_error にその事実。"""
         ret = lr & ~1
+        here = {"address": ret, **self._place_of(max(ret - 2, 0)), "skipped": []}
         syms = self._symbols
         function = syms.function_at(ret) if syms is not None else None
-        if function is not None and function.name in WRAPPERS:
-            try:
-                for frame in self.dbg.backtrace(max_frames=8)[1:]:
-                    f = syms.function_at(frame.pc)
-                    if f is not None and f.name not in WRAPPERS:
-                        return {"address": frame.pc, **self._place_of(max(frame.pc - 2, 0))}
-            except Exception:                                     # 巻き戻せない: 戻り先のまま
-                pass
-        return {"address": ret, **self._place_of(max(ret - 2, 0))}
+        if function is None or function.name not in skip:
+            return here
+        try:
+            frames = self.dbg.backtrace()[1:]                     # 0 = 確保の関数の入口
+        except Exception as e:
+            return {**here, "unwind_error": f"{type(e).__name__}: {e}"}
+        skipped = []
+        for frame in frames:
+            f = syms.function_at(frame.pc)
+            if f is None or f.name not in skip:
+                return {"address": frame.pc, **self._place_of(max(frame.pc - 2, 0)), "skipped": skipped}
+            skipped.append(f.name)
+        return {**here, "skipped": skipped,
+                "unwind_error": f"呼び出し履歴の {len(frames)} 個のフレームがすべて skip_functions の関数"}
 
     def _heap_event(self, trace: _HeapTrace, t: float, op: str, pointer: int, size: int, caller: dict,
                     entry: _Entry) -> None:
         trace.seq += 1
-        trace.events.append({"seq": trace.seq, "t": round(t - trace.started, 6), "op": op, "pointer": pointer,
-                             "size": size, "caller": caller["where"], "allocator": entry.allocator})
+        event = {"seq": trace.seq, "t": round(t - trace.started, 6), "op": op, "pointer": pointer,
+                 "size": size, "caller": caller["where"], "allocator": entry.allocator, "skipped": caller["skipped"]}
+        if "unwind_error" in caller:
+            event["unwind_error"] = caller["unwind_error"]
+        trace.events.append(event)
         self._record_host(STREAM, op, t, a=pointer, b=size, body={"caller": caller["where"],
                                                                   "allocator": entry.allocator})
 
@@ -284,19 +313,21 @@ def _callers(used: dict[int, int], tracker: AllocationTracker) -> list[dict]:
     groups: dict[str, dict] = {}
     for pointer, size in used.items():
         live = tracker.live.get(pointer)
-        caller = live.caller if live is not None else "(記録の前の確保)"
+        caller = live.caller if live is not None else "(記録に無い確保)"   # いつ確保したかは分からない（前とは決めない）
         g = groups.setdefault(caller, {"caller": caller, "count": 0, "bytes": 0})
         g["count"] += 1
         g["bytes"] += size
     return sorted(groups.values(), key=lambda g: -g["bytes"])
 
 
-def _changes(previous: dict[int, int] | None, now: dict[int, int], limit: int = 50) -> dict:
-    """前回の走査からの使用中のブロックの差（増えたものはリークの手がかり）。"""
+def _changes(previous: dict[int, int] | None, now: dict[int, int], limit: int) -> dict:
+    """前回の走査からの使用中のブロックの差（増えたものはリークの手がかり）。new・gone は番地の順に limit 個まで
+    （総数は new_count・gone_count、切ったかは new_truncated・gone_truncated、使った上限は limit）。"""
     if previous is None:
         return {"first": True}
     new = sorted(set(now) - set(previous))
     gone = sorted(set(previous) - set(now))
     return {"first": False, "new": [{"pointer": p, "size": now[p]} for p in new[:limit]],
             "gone": [{"pointer": p, "size": previous[p]} for p in gone[:limit]], "new_count": len(new),
-            "gone_count": len(gone), "new_bytes": sum(now[p] for p in new), "gone_bytes": sum(previous[p] for p in gone)}
+            "gone_count": len(gone), "new_bytes": sum(now[p] for p in new), "gone_bytes": sum(previous[p] for p in gone),
+            "new_truncated": len(new) > limit, "gone_truncated": len(gone) > limit, "limit": limit}

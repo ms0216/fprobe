@@ -1,5 +1,5 @@
 // API パネルとお気に入りが共有する呼び出し: 呼ぶ前の確かめ（read は無し、control は引数を見せて確かめ、元に戻せない
-// 操作は赤。AI の作業中は先に聞く）と、結果・誤りの文字列。Svelte に依らない
+// 操作は赤。AI がつながっていて一時停止していなければ先に聞く）と、結果・誤りの文字列。Svelte に依らない
 import { errorText, type DaemonConnection } from "./api";
 import { confirmLevel, type ApiMethod } from "./apiform";
 import { confirmer, type Confirmer } from "./confirm";
@@ -9,7 +9,7 @@ import type { AppState } from "./state";
 
 export interface CallDeps {
   conn: Pick<DaemonConnection, "call">;
-  app: Pick<AppState, "aiWorking">;
+  app: Pick<AppState, "aiConnectedUnpaused">;
   ask?: Confirmer;
 }
 

@@ -14,7 +14,17 @@ DEMO = Path(__file__).resolve().parents[1] / "firmware" / "stack_demo"
 
 @pytest.fixture(scope="module")
 def graph():
-    return CallGraph.build(Disassembler.from_elf(DEMO / "stack_demo.elf"))
+    return CallGraph.build(Disassembler.from_elf(DEMO / "stack_demo.elf"), vector_table=0x0800_0000)   # g_pfnVectors
+
+
+def test_without_the_vector_table_there_are_no_reset_or_exception_roots(su):
+    # ベクタ表は使う側が渡す（名前で探さない）。無ければリセット・例外の根も MSP の見積もりも出さない
+    bare = CallGraph.build(Disassembler.from_elf(DEMO / "stack_demo.elf"))
+    report = analyze_stack(bare, su)
+    assert not any(r["kind"] in ("reset", "exception") for r in report["roots"])
+    assert report["msp"] is None and any("vector_table" in n for n in report["notes"])
+    entry = analyze_stack(bare, su, entry="Reset_Handler")                  # リセットの根は entry で明示できる
+    assert any(r["kind"] == "reset" for r in entry["roots"]) and entry["msp"] is None
 
 
 @pytest.fixture(scope="module")

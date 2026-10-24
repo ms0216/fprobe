@@ -4,11 +4,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AppState } from "../src/lib/state";
-import { channelChoices, channelName, levelAt, panView, rateChoices, setChannelLayout, ticks, wheelFactor, zoomView } from "../src/lib/waveform";
+import { captureRequest, readCaptureSettings } from "../src/lib/waveform";
+import { channelChoices, channelName, laChannelCount, levelAt, panView, rateChoices, setChannelLayout, ticks, wheelFactor, zoomView } from "../src/lib/waveform";
 import { InlineDecimator } from "../src/lib/timeline/decimator";
 import { decodeFrame } from "../src/lib/timeline/frame";
 import { TimelineState, type TimelineSnapshot } from "../src/lib/timeline/state";
-import { FakeConn } from "./fake-conn";
+import { E_NO_DATA, RpcError } from "../src/lib/api";
+import { FakeConn, deviceError } from "./fake-conn";
 
 describe("表示の区間の計算", () => {
   it("拡大縮小はマウスの位置を動かさない", () => {
@@ -31,8 +33,8 @@ describe("表示の区間の計算", () => {
     expect(panView({ start: 100, end: 200 }, -500, [50, 1000])).toEqual({ start: 50, end: 150 });
   });
 
-  it("チャンネルに名前を付ける", () => {
-    expect([0, 7, 8, 9, 12].map(channelName)).toEqual(["ch0", "ch7", "SWDIO drive", "DAP busy", "ch12"]);   // 既定は英語
+  it("申告（la_layout）が無ければ ch の番号だけ（ピン・内部の並びを仮定しない）", () => {
+    expect([0, 7, 8, 9, 12].map(channelName)).toEqual(["ch0", "ch7", "ch8", "ch9", "ch12"]);
   });
 
   it("チャンネルの名前と選択肢はデバイスの申告（la_layout）に従う（U22）", () => {
@@ -50,9 +52,34 @@ describe("表示の区間の計算", () => {
     expect(channelName(10)).toBe("ch10");
     // 並びを渡せば、それで名前を付ける（画面は申告が後から届いても描き直す: 申告を引数で依存させる）
     expect(channelName(10, layout)).toBe("in0");
-    // 申告の無い古いデバイスは ch 0〜7 = ピン、8・9 = 内部
-    expect(channelChoices({ la_channels: 16 })).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    expect(channelChoices({})).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // 並びの申告が無ければ申告の ch の数だけ（古いデバイスの並びはデーモンが申告に入れる）。数も無ければ無し
+    expect(channelChoices({ la_channels: 4 })).toEqual([0, 1, 2, 3]);
+    expect(channelChoices({})).toEqual([]);
+  });
+
+  it("捕捉の設定は使う人が Timeline で入れた値だけ（速さ・プリトリガ・深いバッファの拍）。無ければ捕捉しない", () => {
+    const store: Record<string, string> = { "la.rate": "25000000", "la.pretrigger": "512" };
+    const read = (k: string) => store[k] ?? "";
+    const s = readCaptureSettings(read);
+    expect(s).toEqual({ rate_hz: 25e6, pretrigger: 512, beforeBeats: null, afterBeats: null, rle: null });
+    const rates = rateChoices(100e6);
+    expect(captureRequest(s, false, rates)).toEqual({ rate_hz: 25e6, pretrigger: 512, deep: false });
+    expect(captureRequest(s, true, rates)).toBeNull();                       // 深いバッファの拍を入れていない
+    // 深いバッファは RLE か RAW かも使う人が選ぶ（画面・API の既定にまかせない）
+    expect(captureRequest({ ...s, beforeBeats: 100, afterBeats: 200 }, true, rates)).toBeNull();
+    expect(captureRequest({ ...s, beforeBeats: 100, afterBeats: 200, rle: false }, true, rates))
+      .toEqual({ rate_hz: 25e6, deep: true, beforeBeats: 100, afterBeats: 200, rle: false });
+    expect(readCaptureSettings((k) => (k === "la.rle" ? "rle" : "")).rle).toBe(true);
+    expect(readCaptureSettings((k) => (k === "la.rle" ? "raw" : "")).rle).toBe(false);
+    expect(captureRequest(readCaptureSettings(() => ""), false, rates)).toBeNull();   // 何も入れていない（1024 等を仮定しない）
+    expect(captureRequest(s, false, rateChoices(30e6))).toBeNull();          // このボードで選べない速さ（3 番目等を選ばない）
+    expect(captureRequest(s, false, rateChoices(undefined as any))).toBeNull();   // 最高速度の申告が無い（100 MHz を仮定しない）
+  });
+
+  it("ch の数はデバイスの申告だけ（無ければ null。10 本等を仮定しない）", () => {
+    expect(laChannelCount({ la_channels: 16 })).toBe(16);
+    expect(laChannelCount({})).toBeNull();
+    expect(laChannelCount(null)).toBeNull();
   });
 
   it("1・2・5 の切りのよい間隔で、トリガを 0 とした時刻の目盛りを付ける", () => {
@@ -110,7 +137,7 @@ function setup(livePollMs?: number) {
   const tl = new TimelineState(conn as any, app, new InlineDecimator(), livePollMs);
   let snap!: TimelineSnapshot;
   tl.subscribe((s) => (snap = s));
-  return { conn, tl, get: () => snap, bump: () => (id += 1), summarize: (on: boolean) => (summary = on) };
+  return { conn, app, tl, get: () => snap, bump: () => (id += 1), summarize: (on: boolean) => (summary = on) };
 }
 
 const settle = async () => {
@@ -145,10 +172,11 @@ describe("TimelineState", () => {
     expect(get().capturedBy).toBe("claude");
   });
 
-  it("捕捉が無ければ誤りにせず、空のまま", async () => {
+  it("捕捉が無ければ（E_NO_DATA）誤りにせず、空のまま", async () => {
     const { conn, tl, get } = setup();
     conn.responders["timeline.tiles"] = () => {
-      throw new Error("RuntimeError: 捕捉が無い（la_capture / la_deep_capture を先に）");
+      throw new RpcError(E_NO_DATA, "NoData: 捕捉が無い（la_capture / la_deep_capture を先に）",
+                         { exception: "NoData", detail: "捕捉が無い（la_capture / la_deep_capture を先に）" });
     };
     tl.setWidth(500);
     conn.link!("open", {});
@@ -156,6 +184,15 @@ describe("TimelineState", () => {
     expect(get().capture).toBeNull();
     expect(get().error).toBeNull();
     expect(get().loading).toBe(false);
+  });
+
+  it("機器の誤りは文に「捕捉が無い」等の語があっても誤りとして出す（文の語で見分けない）", async () => {
+    const { conn, tl, get } = setup();
+    conn.responders["timeline.tiles"] = () => { throw deviceError("記録が空になった区間の読みに失敗"); };
+    tl.setWidth(500);
+    conn.link!("open", {});
+    await settle();
+    expect(get().error).toBe("記録が空になった区間の読みに失敗");
   });
 
   it("要約が粗くなるまで拡大したら、視点の前後を細かく読み直す（続けて動かしても読みは重ならない）", async () => {
@@ -179,6 +216,23 @@ describe("TimelineState", () => {
     expect(get().header?.wave.mode).toBe("raw");
   });
 
+  it("メニュー等の捕捉は Timeline で覚えた設定で。設定が足りなければ捕捉せず誤りを出す（1024 等を仮定しない）", async () => {
+    const { conn, app, tl } = setup();
+    conn.responders["probe.info"] = { capabilities: { la_sample_hz: 100e6 } };
+    tl.setWidth(500);
+    conn.link!("open", {});
+    await settle();
+    let error: string | null = null;
+    app.subscribe((s) => (error = s.error));
+    const store: Record<string, string> = { "la.rate": "25000000" };
+    expect(await tl.captureSaved({ deep: false }, (k) => store[k] ?? "")).toBeUndefined();
+    expect(conn.calls.some(([m]) => m === "la.capture")).toBe(false);
+    expect(error).toBeTruthy();
+    store["la.pretrigger"] = "300";
+    await tl.captureSaved({ deep: false }, (k) => store[k] ?? "");
+    expect(conn.calls.find(([m]) => m === "la.capture")?.[1]).toEqual({ rate_hz: 25e6, pretrigger: 300, rise: 0, fall: 0 });
+  });
+
   it("画面から捕捉する", async () => {
     const { conn, tl, get } = setup();
     tl.setWidth(500);
@@ -197,7 +251,7 @@ describe("TimelineState", () => {
     await settle();
     conn.responders["la.deep.capture"] = { trigger_time: 12345, trigger_index: 7 };
     await tl.capture({ rate_hz: 25e6, pretrigger: 512, deep: false, crossOnly: true });
-    expect(await tl.capture({ rate_hz: 25e6, pretrigger: 0, deep: true, crossOnly: true, rle: false }))
+    expect(await tl.capture({ rate_hz: 25e6, deep: true, beforeBeats: 4096, afterBeats: 4096, crossOnly: true, rle: false }))
       .toMatchObject({ trigger_time: 12345 });                     // 呼び出し元がトリガの時刻（記録の時間軸）を使う
     expect(conn.calls.find(([m]) => m === "la.capture")?.[1]).toEqual({ rate_hz: 25e6, pretrigger: 512, mask: 1, value: 1, fall: 1, rise: 0 });
     expect(conn.calls.find(([m]) => m === "la.deep.capture")?.[1]).toMatchObject({ mask: 1, value: 1, fall: 1, rise: 0, rle: false });

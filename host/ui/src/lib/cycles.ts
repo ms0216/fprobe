@@ -8,7 +8,7 @@ export function measureParams(start: string, end: string, count: string):
   const e = end.trim();
   if (!s) return { error: "start" };
   if (!e) return { error: "end" };
-  const c = count.trim() === "" ? 1 : Number(count);
+  const c = count.trim() === "" ? NaN : Number(count);             // 空を 1 回とみなさない（画面の既定を持たない）
   if (!Number.isInteger(c) || c < 1) return { error: "count" };
   return { params: { start: s, end: e, count: c } };
 }

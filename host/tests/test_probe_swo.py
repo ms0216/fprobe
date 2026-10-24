@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from probe_fakes import DictMemory, FakeDevice, FakeTarget, use_fake_ring
+from value_kinds import ints, vint
 
 from fprobe import collector, probe_window
 from fprobe import swo_trace as st
@@ -88,7 +89,7 @@ def value_packet(c, value, write=True):
 def test_data_trace_writes_in_order_and_assembles_accesses(probe):
     target, dev = probe.target, probe.session.device
     out = probe.swo_configure(data_trace=[{"expression": "counter"}], exception_trace=True, swo_baud=2_000_000,
-                              core_clock_hz=16e6, trace_pin=False)
+                              core_clock_hz=16e6)
     assert out["core"] == {"name": "Cortex-M4", "arch": "v7m", "cpuid": M4}
     (use,) = [c for c in out["plan"]["comparators"] if c["name"] == "counter"]
     assert use["index"] == 3 and use["function"] == 0b1111
@@ -106,25 +107,26 @@ def test_data_trace_writes_in_order_and_assembles_accesses(probe):
     dev.swo(dev.ticks + 100, SYNC + pc_packet(3, pc) + value_packet(3, 41) + bytes([0x0E, 15, 0x10]))
     dev.swo(dev.ticks + 100, pc_packet(3, pc) + value_packet(3, 42))
     trace = probe.swo_trace()
-    assert trace["total"] == 2 and [a["value"] for a in trace["accesses"]] == [41, 42]
+    assert trace["total"] == 2 and [a["value"] for a in trace["accesses"]] == ints(41, 42)   # 変数の型で解釈
     a = trace["accesses"][0]
     assert a["name"] == "counter" and a["address"] == counter and a["write"] and a["function"] == "tick"
     assert a["complete"] and a["t"] > 0 and a["time_us"] >= 0
     assert trace["exceptions"]["counts"] == {"SysTick": 1}
-    assert probe.swo_trace(offset=1)["accesses"][0]["value"] == 42
+    assert trace["exceptions"]["events_dropped"] == 0 and trace["exceptions"]["events_limit"] == 1 << 16   # ?50
+    assert probe.swo_trace(offset=1)["accesses"][0]["value"] == vint(42)
     stopped = probe.swo_unconfigure()
     assert stopped["total"] == 2 and not stopped["running"]
     assert target.memory.u32(st.dwt_function(3)) == 0
     assert target.memory.u32(dwt.DWT_CTRL) & (1 << 16) == 0             # 例外トレースは元に戻した
     assert probe.swo_trace()["total"] == 2                               # 止めた後も最後の結果を読める
     target.write_log.clear()
-    probe.swo_configure(ports=[0], swo_baud=2_000_000, trace_pin=False)  # 戻した後の設定は、もう一度戻さない
+    probe.swo_configure(ports=[0], swo_baud=2_000_000)  # 戻した後の設定は、もう一度戻さない
     assert (st.dwt_function(3), 0) not in target.write_log[:1]
     probe.swo_unconfigure()
 
 
 def test_value_watch_halt_uses_the_value_comparator_and_a_link(probe):
-    out = probe.swo_configure(value_watch=[{"expression": "milestone", "value": 512}], trace_pin=False)
+    out = probe.swo_configure(value_watch=[{"expression": "milestone", "value": 512}])
     uses = {c["role"]: c for c in out["plan"]["comparators"]}
     assert uses["value_watch"]["index"] == 1 and uses["link"]["index"] == 3
     memory = probe.target.memory
@@ -145,7 +147,7 @@ def test_busy_comparators_and_pyocd_reservations(probe):
     fake_dwt = SimpleNamespace(watchpoints=watchpoints, watchpoint_used=1, dwt_configured=False,
                                init=lambda: initialized.append(True))
     probe.target.selected_core = SimpleNamespace(dwt=fake_dwt)
-    out = probe.swo_configure(data_trace=[{"expression": "counter"}], swo_baud=2_000_000, trace_pin=False)
+    out = probe.swo_configure(data_trace=[{"expression": "counter"}], swo_baud=2_000_000)
     assert initialized == [True]                                          # pyOCD の DWT を先に初期化（後で消されない）
     (use,) = out["plan"]["comparators"]
     assert use["index"] == 0                                              # 3（使用中）・2（pyOCD）・1（値の比較用）を避ける
@@ -156,13 +158,13 @@ def test_busy_comparators_and_pyocd_reservations(probe):
 
 def test_swo_configure_needs_a_baud_and_refuses_while_profiling(probe):
     with pytest.raises(ValueError, match="swo_baud"):
-        probe.swo_configure(ports=[0], trace_pin=False)
+        probe.swo_configure(ports=[0])
     probe.target.memory.write_memory(st.CPUID, (0x410FD213).to_bytes(4, "little"))
     with pytest.raises(ValueError, match="ARMv8-M"):
-        probe.swo_configure(data_trace=[{"expression": "counter"}], swo_baud=2_000_000, trace_pin=False)
+        probe.swo_configure(data_trace=[{"expression": "counter"}], swo_baud=2_000_000)
     probe._profile_run = object()
     with pytest.raises(RuntimeError, match="profile_stop"):
-        probe.swo_configure(ports=[0], swo_baud=2_000_000, trace_pin=False)
+        probe.swo_configure(ports=[0], swo_baud=2_000_000)
     probe._profile_run = None
     with pytest.raises(RuntimeError, match="swo_configure"):
         probe.swo_unconfigure()
@@ -170,19 +172,20 @@ def test_swo_configure_needs_a_baud_and_refuses_while_profiling(probe):
 
 def test_counters_and_reconfigure_replace_the_previous(probe):
     dev = probe.session.device
-    probe.swo_configure(ports=[0, 1], counters=["cpi", "lsu"], swo_baud=2_000_000, core_clock_hz=16e6,
-                        trace_pin=False)
+    probe.swo_configure(ports=[0, 1], counters=["cpi", "lsu"], swo_baud=2_000_000, core_clock_hz=16e6)
     assert probe.target.memory.u32(dwt.ITM_TER) == 0b11
     dev.swo(dev.ticks + 100, SYNC + bytes([0x05, 0x09, 0x05, 0x01]))       # 溢れ: CPI+LSU、CPI
     trace = probe.swo_trace()
     assert trace["counters"]["cpi"] == 512 and trace["counters"]["lsu"] == 256
-    probe.swo_configure(ports=[2], swo_baud=2_000_000, trace_pin=False)
+    probe.swo_configure(ports=[2], swo_baud=2_000_000)
     assert probe.target.memory.u32(dwt.ITM_TER) == 0b100                 # 前の設定（ポート 0・1）は戻してから
     assert probe.target.memory.u32(dwt.DWT_CTRL) & (1 << 17) == 0
     probe.swo_unconfigure()
 
 
-def test_trace_pin_uses_the_svd_field(probe):
+def test_trace_pin_writes_only_the_svd_fields_the_caller_names(probe):
+    # SVD のレジスタ名の慣習（DBGMCU_CR.TRACE_IOEN）で書き込み先を探して既定で書かない（点検 2 回目 H7）:
+    # 使う側が trace_pin = {"register": SVD の場所, "fields": {欄: 値}} で明示したときだけ書く
     from fprobe.svd import Device
     svd = Device.parse(b"""<device><name>STM32F401</name><width>32</width><peripherals><peripheral><name>DBG</name>
         <baseAddress>0xE0042000</baseAddress><registers><register><name>DBGMCU_CR</name><addressOffset>0x4</addressOffset>
@@ -193,18 +196,42 @@ def test_trace_pin_uses_the_svd_field(probe):
     probe._svd, probe._svd_info = svd, {"source": "test", "origin": "test"}
     probe.target.memory.write_memory(0xE0042004, (0b11 << 6).to_bytes(4, "little"))
     out = probe.swo_configure(ports=[0], swo_baud=2_000_000)
-    assert probe.target.memory.u32(0xE0042004) == 1 << 5                  # TRACE_IOEN=1・非同期（TRACE_MODE=0）
-    assert out["trace_pin"] == "DBG.DBGMCU_CR"
+    assert probe.target.memory.u32(0xE0042004) == 0b11 << 6 and out["trace_pin"] is None   # 渡さなければ書かない
     probe.swo_unconfigure()
+    out = probe.swo_configure(ports=[0], swo_baud=2_000_000,
+                              trace_pin={"register": "DBG.DBGMCU_CR", "fields": {"TRACE_IOEN": 1, "TRACE_MODE": 0}})
+    assert probe.target.memory.u32(0xE0042004) == 1 << 5                  # TRACE_IOEN=1・非同期（TRACE_MODE=0）
+    assert out["trace_pin"] == {"register": "DBG.DBGMCU_CR", "fields": {"TRACE_IOEN": 1, "TRACE_MODE": 0}}
+    probe.swo_unconfigure()
+    with pytest.raises(KeyError, match="TRACE_X"):
+        probe.swo_configure(ports=[0], swo_baud=2_000_000, trace_pin={"register": "DBG.DBGMCU_CR",
+                                                                       "fields": {"TRACE_X": 1}})
 
 
 def test_recording_gets_the_accesses(probe):
     dev = probe.session.device
     probe.recording_start()
-    probe.swo_configure(data_trace=[{"expression": "counter", "pc": False}], swo_baud=2_000_000, trace_pin=False)
+    probe.swo_configure(data_trace=[{"expression": "counter", "pc": False}], swo_baud=2_000_000)
     dev.swo(dev.ticks + 100, SYNC + value_packet(3, 7))
     dev.advance(1000)
     probe.swo_unconfigure()
     events = [e for e in probe.recording_events(streams=["swo"])["events"] if e["kind"] == "data_access"]
     assert len(events) == 1 and events[0]["b"] == 7 and events[0]["body"]["name"] == "counter"
+    assert events[0]["body"]["value"] == vint(7) and events[0]["body"]["raw"] == 7        # 記録にも値の形で残る
     assert events[0]["a"] == address_of(probe, "counter")
+
+
+def test_trace_before_configure_is_no_data_not_a_device_error(probe):
+    # 設定していないのは「まだ読む物が無い」（NoData = E_NO_DATA）。画面は誤りの文の語でなく符号で見分ける
+    from fprobe.api import NoData
+    with pytest.raises(NoData):
+        probe.swo_trace()
+    with pytest.raises(NoData):
+        probe.swo_unconfigure()
+
+
+def test_the_demo_trace_before_configure_is_no_data_too():
+    from fake_demo import DemoProbe
+    from fprobe.api import NoData
+    with pytest.raises(NoData):
+        DemoProbe().swo_trace()

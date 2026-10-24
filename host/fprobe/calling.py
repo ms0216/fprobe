@@ -3,7 +3,8 @@
 止まったコアで、関数を引数付きで実行して戻り値を得る（GDB の print f(1, 2)、winIDEA testIDEA の関数単位の試験の土台）。
 
     caller = FunctionCaller(target, runner, info, symbols)
-    caller.call(signature_of(info, symbols, "square"), [7])     # {"returned": True, "return": {"type": "int", "value": 49}, ...}
+    caller.call(signature_of(info, symbols, "square"), [7])
+    # → {"returned": True, "return": {"type": "int", "value": {"kind": "int", "value": 49}, "raw": 49}, ...}
 
 手順:
 1. レジスタ（コア・特殊・FPU）を保存する。
@@ -33,7 +34,7 @@ from dataclasses import dataclass, field
 
 from . import fault
 from .dwarf.typesys import ArrayType, BaseType, CType, EnumType, PointerType, StructType, VoidType, strip, type_name
-from .dwarf.values import DecodeContext, decode, encode
+from .dwarf.values import DecodeContext, decode, encode, unavailable
 from .stepping import FAULTS, Halt, Runner
 
 __all__ = ["CallError", "FunctionCaller", "Placement", "Signature", "allocate", "hard_float", "read_return_value",
@@ -187,7 +188,7 @@ def read_return_value(target, info, t: CType, hard: bool, memory: int | None = N
         return {"type": name, "value": None}
     size = t.size
     if size is None:
-        return {"type": name, "value": {"unavailable": "大きさの分からない型"}}
+        return {"type": name, "value": unavailable("大きさの分からない型")}
     hfa = _homogeneous_float(t) if hard else None
     if hard and isinstance(s, BaseType) and s.encoding == "float":
         data = _vfp_bytes(target, size // 4)
@@ -195,7 +196,7 @@ def read_return_value(target, info, t: CType, hard: bool, memory: int | None = N
         data = _vfp_bytes(target, size // 4)
     elif _returns_in_memory(t, hard):
         if memory is None:
-            return {"type": name, "value": {"unavailable": "メモリで返る戻り値（置き場所の番地が分からない）"}}
+            return {"type": name, "value": unavailable("メモリで返る戻り値（置き場所の番地が分からない）")}
         data = bytes(target.read_memory_block8(memory, size))
     else:
         r0, r1 = target.read_core_registers_raw(["r0", "r1"])
@@ -230,7 +231,7 @@ class Signature:
 
 def signature_of(info, symbols, location: str | int) -> Signature:
     """場所（関数名・"0x..."・番地）の関数の型を DWARF から。DWARF が無い関数は型の分からない Signature（引数は
-    整数だけ、戻り値は r0 の値）。"""
+    整数だけ、戻り値は r0・r1 のまま）。"""
     if symbols is None and not isinstance(location, int):
         raise CallError("ELF が読み込まれていない: 関数は番地で指定する")
     address = location if isinstance(location, int) else symbols.resolve(location)
@@ -292,7 +293,8 @@ class FunctionCaller:
                                  values[fixed:], hidden)
             sp_call = (top - len(placement.stack)) & ~7
             if old_sp - sp_call > SCRATCH_LIMIT:
-                raise CallError(f"引数の置き場所が大きすぎる（{old_sp - sp_call} バイト）")
+                raise CallError(f"引数の置き場所が大きすぎる（{old_sp - sp_call} バイト。sp の下に使う上限は "
+                                f"SCRATCH_LIMIT = {SCRATCH_LIMIT} バイト）")
             original = bytes(self.target.read_memory_block8(sp_call, old_sp - sp_call)) if old_sp > sp_call else b""
             trampoline = self._trampoline()
             if trampoline == signature.address:
@@ -315,7 +317,8 @@ class FunctionCaller:
                     out["return"] = (read_return_value(self.target, self.info, result_type, self.hard, hidden)
                                      if result_type is not None else self._raw_return())
                 else:
-                    out["reason"] = "fault" if halt.reason == "timeout" and halt.regs.ipsr in FAULTS else halt.reason
+                    out["reason"] = halt.reason                       # 止まった理由のまま（時間切れは timeout）
+                    out["ipsr"] = halt.regs.ipsr                      # 止まった時の例外の番号（故障の中か）
                     out["stopped_at"] = self._place(halt.regs.pc)
                     if halt.regs.ipsr in FAULTS or halt.reason == "vector_catch":
                         out["fault"] = fault.analyze(self.target, self.symbols)
@@ -462,8 +465,9 @@ class FunctionCaller:
                 return halt
 
     def _raw_return(self) -> dict:
+        """型の分からない戻り値（DWARF の無い関数）: 値にせず r0・r1 をそのまま返す。"""
         r0, r1 = self.target.read_core_registers_raw(["r0", "r1"])
-        return {"type": None, "value": r0, "r1": r1}
+        return {"type": None, "r0": r0, "r1": r1}
 
     def _place(self, address: int) -> dict:
         out: dict = {"pc": address}

@@ -84,7 +84,8 @@ def main(argv: list[str] | None = None) -> None:
                 timeout_s=args.timeout, rate_hz=args.rate, pretrigger=args.pretrigger, mask=args.mask,
                 value=args.value, rise=sum(1 << c for c in args.rise), fall=sum(1 << c for c in args.fall))
             write_vcd(cap, args.vcd)
-            print(f"{len(cap.samples)} サンプル（{cap.sample_period_s * 1e9:g} ns 間隔）、トリガ {cap.trigger} → {args.vcd}")
+            print(f"{len(cap.samples)} サンプル（{cap.sample_period_s * 1e9:g} ns 間隔）、トリガ {cap.trigger}"
+                  f"（pretrigger {args.pretrigger}・時間切れ {args.timeout:g} 秒）→ {args.vcd}")
 
 
 def _json_default(value):
@@ -147,7 +148,11 @@ def _add_run(commands) -> None:
     run.add_argument("--set", action="append", default=[], metavar="EXPR=VALUE",
                      help="走らせる前に書く変数（C の式。--load flash では起動のコードが .data を上書きすることに注意）")
     run.add_argument("--set-at", metavar="LOCATION",
-                     help="--set を書く場所（関数名・ファイル:行。起動のコードの後。省略時は main があれば main）")
+                     help="--set を書く場所（関数名・ファイル:行。起動のコードの後。省略時は今すぐ書く: 名前の慣習で main を探さない）")
+    run.add_argument("--set-timeout", type=float, metavar="SECONDS",
+                     help="--set の場所まで待つ秒（省略時は --timeout）")
+    run.add_argument("--vector-table", type=lambda s: int(s, 0), metavar="ADDRESS",
+                     help="--load ram で起動に使うベクタ表の番地（省略時は ELF の入口 e_entry から。SP・VTOR は変えない）")
     run.add_argument("--no-catch-faults", action="store_true", help="故障の入口でコアを止めない（ベクタキャッチを使わない）")
     rtt = run.add_mutually_exclusive_group()
     rtt.add_argument("--rtt", dest="rtt", action="store_true", default=None, help="RTT を読む（既定: ELF に _SEGGER_RTT があれば）")
@@ -158,6 +163,8 @@ def _add_run(commands) -> None:
     run.add_argument("--pass", dest="pass_pattern", metavar="REGEX", help="この行が出たら合格で終える")
     run.add_argument("--fail", dest="fail_pattern", metavar="REGEX", help="この行が出たら不合格で終える")
     run.add_argument("--wait-halt", action="store_true", help="試験のまとめの行が出ても、止まる・終わるまで待つ")
+    run.add_argument("--end-bkpt", type=lambda s: int(s, 0), metavar="IMM",
+                     help="この即値の BKPT で止まったら終わり（ファームとの約束。probe-rs 流は 0。省略時は BKPT を終わりとしない）")
     run.add_argument("--junit", type=Path, help="JUnit XML の出力先")
     run.add_argument("--out", type=Path, default=Path("fprobe-run"),
                      help="result.json・output.log・故障時のスナップショット等の置き場")
@@ -175,10 +182,10 @@ def _run(args) -> int:
     options = run_mod.RunOptions(
         elf=args.elf, out_dir=args.out, target=args.target, frequency_hz=int(args.frequency),
         connect_mode=args.connect_mode, load=args.load, reset=not args.no_reset, set_values=values,
-        set_at=args.set_at, catch_faults=not args.no_catch_faults,
+        set_at=args.set_at, vector_table=args.vector_table, set_timeout_s=args.set_timeout, catch_faults=not args.no_catch_faults,
         timeout_s=args.timeout, rtt=args.rtt, rtt_address=args.rtt_address, swo_baud=args.swo, swo_port=args.swo_port,
         pass_pattern=args.pass_pattern, fail_pattern=args.fail_pattern, stop_on_summary=not args.wait_halt,
-        junit=args.junit, snapshot=not args.no_snapshot)
+        junit=args.junit, snapshot=not args.no_snapshot, end_bkpt=args.end_bkpt)
 
     def echo(text: str) -> None:
         sys.stdout.write(text)

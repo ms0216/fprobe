@@ -3,6 +3,7 @@ run_until_halt の中と、target_resume の後の背景の見張りの両方。
 
 import pytest
 from test_probe_observe import RTT_DEMO, FakeCpu, connect, probe, wait_for  # noqa: F401（probe は fixture）
+from value_kinds import ints, varray, vbool, venum, vfloat, vint, vna, vptr, vstruct
 
 from fprobe.symbols import Symbols
 
@@ -54,9 +55,40 @@ def test_log_breakpoint_records_values_and_does_not_stop(probe):
     log = probe.breakpoint_log()
     assert [e["hit"] for e in log["entries"]] == [1, 2, 3, 4, 5] and log["next"] == 5
     first = log["entries"][0]
-    assert first["values"]["2 + 3"] == 5 and "error" in first["values"]["1 / 0"] and first["message"] == "通った"
+    assert first["values"]["2 + 3"] == vint(5) and first["message"] == "通った"
+    assert first["values"]["1 / 0"]["kind"] == "unavailable" and first["values"]["1 / 0"]["reason"]   # 評価できない式
     assert probe.breakpoint_log(since=4)["entries"][0]["hit"] == 5
+    assert log["lost"] == 0 and log["more"] is False and log["kept_limit"] == 10_000
+    cut = probe.breakpoint_log(limit=2)
+    assert cut["more"] is True and cut["next"] == 2                            # 続きがあることを返す
     assert probe.breakpoint_list()["breakpoints"][0]["action"]["hits"] == 5
+    # いちばん新しい seq（last）を返す: since がそれより後なら、読み手の位置はこのログに無い（事実で分かる）
+    assert log["last"] == 5 and {k: probe.breakpoint_log(since=99)[k] for k in ("entries", "next", "last")} == {"entries": [], "next": 99, "last": 5}
+
+
+def test_the_log_says_how_many_entries_were_dropped(probe, monkeypatch):
+    # 持つのは最新 LOG_LIMIT 件。since より後で捨てた分を lost で返す（黙って飛ばさない。?37）
+    import collections
+    setup(probe)
+    probe._break_log = collections.deque(maxlen=3)
+    for seq in range(1, 7):
+        probe._break_log.append({"seq": seq})
+    out = probe.breakpoint_log(since=1)
+    assert [e["seq"] for e in out["entries"]] == [4, 5, 6] and out["lost"] == 2
+
+
+def test_a_condition_without_a_truth_value_is_an_error_not_true():
+    # 真偽は値の kind で決める。構造体・読めない値を真とみなさない: 評価できない条件として止めて知らせる（?38）
+    import pytest
+
+    from fprobe.probe_breakpoints import _truth
+    assert _truth(vint(0)) is False and _truth(vint(3)) is True and _truth(vfloat("nan")) is True
+    assert _truth(venum(None, 0)) is False and _truth(vbool(True)) is True
+    assert _truth(vptr(0, "int")) is False and _truth(vptr(0x2000, "int")) is True
+    assert _truth(varray(ints(120, 0), string="x")) is True and _truth(varray(ints(0), string="")) is False
+    for value in (vstruct(enum=venum("A", 1), value=vint(1)), vna("optimized out"), varray(ints(1, 2))):
+        with pytest.raises(ValueError):
+            _truth(value)                       # 構造体のメンバー名が enum・value でも構造体（キーで推さない）
 
 
 def test_ignore_count_and_condition(probe):
@@ -124,3 +156,21 @@ def test_log_entries_have_no_time_without_a_recording(probe):
     probe.breakpoint_set(hex(BP), log=["1"])
     probe.run_until_halt(timeout_s=0.3)
     assert "t" not in probe.breakpoint_log()["entries"][0]
+
+
+def test_disabled_breakpoint_is_off_the_target_and_keeps_its_place_and_action(probe):
+    """無効にすると機器から外れ（当たらない）、一覧には enabled = false で場所と動作が残る。有効に戻すと置き直す"""
+    cpu = setup(probe)
+    probe.breakpoint_set(hex(BP), condition="1")
+    listed = probe.breakpoint_enable(hex(BP), False)["breakpoints"]
+    assert BP not in cpu.breakpoints
+    assert [(b["address"], b["enabled"], b["action"]["condition"]) for b in listed] == [(BP, False, "1")]
+    assert "kind" not in listed[0]
+    probe.breakpoint_enable(hex(BP), True)
+    assert BP in cpu.breakpoints
+    again = probe.breakpoint_list()["breakpoints"][0]
+    assert again["enabled"] is True and again["action"]["condition"] == "1"
+    with pytest.raises(KeyError):
+        probe.breakpoint_enable("0x20000400", False)
+    probe.breakpoint_enable(hex(BP), False)
+    assert probe.breakpoint_clear(hex(BP))["breakpoints"] == []                   # 無効のものも外せる

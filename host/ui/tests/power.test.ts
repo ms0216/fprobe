@@ -1,6 +1,7 @@
-// Power: 電圧の窓の統計・記録の電圧・低下の検出
+// Power: 電圧の履歴の描き方・記録の電圧（統計・低下の区間はデーモンの probe.voltage_history・recording.voltage）
+import { FakeConn } from "./fake-conn";
 import { describe, expect, it } from "vitest";
-import { findDips, formatVolts, measuredVolts, minIndex, recordingVolts, VoltageWindow } from "../src/lib/power";
+import { findPages, formatVolts, historyCsv, historySeries, measuredVolts, recordingVolts } from "../src/lib/power";
 
 const ok = (volts: number) => ({ volts, over_range: false, live: true });
 
@@ -13,53 +14,41 @@ describe("いまの電圧の表示（補助の Pico が無い・送っていな�
   });
 });
 
-describe("電圧の窓", () => {
-  it("最小・最大・平均（測れない読みは数えず、別に数える）", () => {
-    const w = new VoltageWindow(60);
-    w.add(0, ok(3.3));
-    w.add(1000, ok(3.1));
-    w.add(2000, { volts: null, over_range: true, live: true });
-    w.add(3000, { volts: 3.2, over_range: false, live: false });
-    const s = w.stats();
-    expect([s.count, s.min, s.max, s.overRange, s.notLive]).toEqual([2, 3.1, 3.3, 1, 1]);
-    expect(s.mean).toBeCloseTo(3.2);
-    const series = w.series("V", 0);
-    expect(series.x).toEqual([0, 1, 2, 3]);
+describe("デーモンが読んだ電圧の履歴（probe.voltage_history）の描き方", () => {
+  it("最初の読みからの秒の系列（測れない読みで線を切る）と CSV", () => {
+    const readings = [{ time: 100, ...ok(3.3) }, { time: 101, volts: null, over_range: true, live: true },
+                      { time: 102.5, volts: 3.2, over_range: false, live: false }];
+    const series = historySeries(readings, "V");
+    expect(series.x).toEqual([0, 1, 2.5]);
+    expect(series.y[0]).toBe(3.3);
+    expect(series.y[1]).toBeNaN();
     expect(series.y[2]).toBeNaN();
-    expect(w.csv().split("\n")[0]).toBe("time,volts,over_range,live");
-    expect(w.csv().split("\n")[3]).toContain(",,true,true");
-  });
-
-  it("窓の長さより古い読みは捨てる（短くすると即座に）", () => {
-    const w = new VoltageWindow(10);
-    for (let t = 0; t <= 20_000; t += 1000) w.add(t, ok(3.3));
-    expect(w.length).toBe(11);
-    w.setSpan(5);
-    expect(w.length).toBe(6);
-    w.clear();
-    expect(w.stats().count).toBe(0);
-    expect(w.stats().min).toBeNaN();
+    expect(historyCsv(readings).split("\n")[0]).toBe("time,volts,over_range,live");
+    expect(historyCsv(readings).split("\n")[2]).toContain(",,true,true");
   });
 });
 
-describe("記録の電圧と低下", () => {
+describe("記録の電圧", () => {
   it("aux の mV を V の列に（時刻の順）", () => {
     expect(recordingVolts([{ t: 20, b: 3290, kind: "mv" }, { t: 10, b: 3300, kind: "mv" }, { t: 5, b: 1, kind: "x" }]))
       .toEqual({ x: [10, 20], y: [3.3, 3.29] });
-  });
-
-  it("中央値より drop 以上下がった区間と、いちばん低い点", () => {
-    const xs = [0, 1, 2, 3, 4, 5, 6, 7];
-    const ys = [3.3, 3.3, 3.0, 2.9, 3.3, 3.3, 3.1, 3.3];
-    // 使う人が指定した電圧以下の区間（中央値を正常の水準とみなす基準は使わない）。under = 指定より下の深さ
-    expect(findDips(xs, ys, 3.2)).toEqual([
-      { t: 2, tEnd: 4, at: 3, min: 2.9, under: expect.closeTo(0.3) },
-      { t: 6, tEnd: 7, at: 6, min: 3.1, under: expect.closeTo(0.1) },
-    ]);
-    expect(findDips(xs, ys, 2.5)).toEqual([]);
-    expect(findDips([], [], 3)).toEqual([]);
-    expect(minIndex(ys)).toBe(3);
-    expect(minIndex([NaN])).toBe(-1);
     expect(formatVolts(3.2954)).toBe("3.295 V");
+    expect(formatVolts(null)).toBe("—");
+  });
+});
+
+describe("記録の電圧を読み足す（recording.find）", () => {
+  it("API の count（条件に合う数）だけ読み終えるまで続ける（1 ページの件数 1000 を仮定しない）。ページの上限で止めたら示す", async () => {
+    const all = Array.from({ length: 7 }, (_, k) => ({ t: k * 10, b: 3300, kind: "mv" }));
+    const conn = new FakeConn({ "recording.find": ({ query }: any) => {
+      const rest = all.filter((e) => query.t0 === undefined || e.t >= query.t0);
+      return { count: rest.length, events: rest.slice(0, 3) };              // 1 ページ 3 件のデーモン
+    } });
+    const r = await findPages(conn.call.bind(conn) as any, { stream: "aux", kind: "mv" }, 10);
+    expect(r.events.map((e) => e.t)).toEqual(all.map((e) => e.t));
+    expect(r).toMatchObject({ total: 7, complete: true });
+    const cut = await findPages(conn.call.bind(conn) as any, { stream: "aux", kind: "mv" }, 2);
+    expect(cut.events.length).toBe(6);
+    expect(cut).toMatchObject({ total: 7, complete: false });
   });
 });

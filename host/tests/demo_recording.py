@@ -5,7 +5,8 @@
 - 波形 8 ch（UART の TX / RX の線・SWD の時計とデータ・LED・センサの割り込み・I2C の SCL / SDA）。かたまり 2 つ（間に隙間）
 - rtos: タスク 5 つの実行（区間）・割り込み 4 つ（SysTick が USART2 の中に入れ子）・待ち・切り替え・カーネルの出来事
 - uart: TX（ログの行）・RX（コマンド）のバイト。annotation: UART と I2C の解読の箱、印、データの欠け
-- sample（変数 2 つ）・aux（電圧。途中で下がる）・user（値 2 つ・区間の入れ子・ボタンの出来事）: 値のグラフ
+- sample（変数 2 つと PC のサンプル = DWT_PCSR。止まっている間は 0xFFFFFFFF）・aux（電圧。途中で下がる）・
+  user（値 2 つ・区間の入れ子・ボタンの出来事）: 値のグラフ
 - host（AI と人の操作）・target（RUNNING / HALTED。ブレークポイントで止まる）・dap（AP / DP の転送）
 
 タスクの名前と TCB は fake_demo.TASKS と同じ（RTOS のパネルと揃う）。決まった乱数で、毎回同じ記録になる。
@@ -19,6 +20,7 @@ from array import array
 from pathlib import Path
 
 from fprobe.la import Transitions
+from fprobe.probe_elf_files import DEMO_ELF
 from fprobe.recording import Recorder
 
 HZ = 10_000_000                    # タイムベース（100 ns）
@@ -31,6 +33,11 @@ TASKS = [("main", 0x20002000), ("sensor", 0x20002060), ("comm", 0x200020C0), ("l
 ISRS = {15: "SysTick", 22: "EXTI0", 54: "USART2", 33: "DMA1_Stream6"}
 CHANNELS = ["UART_TX", "UART_RX", "SWCLK", "SWDIO", "LED", "SENSOR_IRQ", "I2C_SCL", "I2C_SDA"]
 COUNTER, SENSOR = 0x20000010, 0x20000014
+# PC のサンプル（DWT_PCSR、profile.start の method pcsr）: デモの ELF（sram_demo.elf）の命令の番地。100 µs ごと
+DWT_PCSR, PCSR_INVALID = 0xE000101C, 0xFFFFFFFF
+PCS = [0x20000054, 0x20000062, 0x20000066, 0x200000B0, 0x200000B4, 0x20000044, 0x2000006A]
+PC_PERIOD = 100 * HZ // 1_000_000
+STOP = {"pc": 0x2000006A, "where": "tick+26 (sram_demo.c:19)", "function": "tick", "file": "sram_demo.c", "line": 19}
 HALTS = [(int(0.80 * HZ), int(0.86 * HZ), "breakpoint"), (int(1.92 * HZ), None, "breakpoint")]
 
 
@@ -73,7 +80,7 @@ def _uart_bits(wave: _Wave, ch: int, t: int, byte: int) -> int:
 
 def write_demo_recording(directory: Path) -> None:
     rng = random.Random(20261018)
-    rec = Recorder(directory, HZ, meta={"name": "demo", "channel_names": CHANNELS})
+    rec = Recorder(directory, HZ, meta={"name": "demo", "channel_names": CHANNELS, "elf": str(DEMO_ELF)})
     wave = _Wave()
     rows: list[tuple] = []
 
@@ -176,6 +183,10 @@ def write_demo_recording(directory: Path) -> None:
             add("user", "interval", s, 0, 0, {"name": "process_sample", "duration": 180 * US, "depth": 0}, s + 180 * US)
             add("user", "interval", s + 40 * US, 0, 0, {"name": "filter", "duration": 90 * US, "depth": 1},
                 s + 130 * US)
+    pick = random.Random(7)                                   # 別の乱数（ほかの出来事の値を変えない）
+    for k in range(SPAN // PC_PERIOD):                         # 止まっている間の PCSR は 0xFFFFFFFF
+        t = k * PC_PERIOD + 37 * US + pick.randrange(0, 20 * US)
+        add("sample", "word", t, DWT_PCSR, PCSR_INVALID if halted(t) else pick.choice(PCS))
     for k in range(200):
         t = k * 10 * MS + 3 * MS
         dip = 350 * math.exp(-((t - 1.3 * HZ) / (0.03 * HZ)) ** 2)
@@ -185,9 +196,9 @@ def write_demo_recording(directory: Path) -> None:
 
     # --- ターゲットの状態・操作（AI と人）・印・DAP の転送 -------------------------------------------------
     add("target", "state", 0, body={"state": "RUNNING"})
-    pc = 0x08000188
     for h0, h1, reason in HALTS:
-        add("target", "state", h0, body={"state": "HALTED", "reason": reason, "pc": pc})
+        # 本文は target.status と同じ形（止まった PC と、その時の ELF で引いた場所）
+        add("target", "state", h0, body={"state": "HALTED", "halt_reason": reason, **STOP})
         add("host", "call", h0 - 200 * US, body={"client": "claude", "role": "ai", "method": "debug.breakpoint.set",
                                                 "params": {"location": "sram_demo.c:19"}})
         for j, (method, role) in enumerate((("target.status", "ai"), ("memory.read", "ai"), ("debug.backtrace", "human"),

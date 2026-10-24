@@ -1,17 +1,18 @@
 <script lang="ts">
   // 変数の木の 1 行と、開いていればその子（自分を入れ子に使う）。構造体・配列の子は値の中から、ポインタの先は
-  // 開いたときに `*式` を読む。値をダブルクリックすると書ける（基本型・列挙・ポインタ）。
+  // 開いたときに `*式` を読む。値をダブルクリックすると書ける（基本型・列挙・ポインタ。書く API は via）。
   import type { Snippet } from "svelte";
   import type { Debugger } from "../../lib/debugger";
   import { i18n } from "../../lib/i18n";
   import { childrenOf, derefExpr, display, editable, expandable, inputText, kindOf, parseInput, pointerChildren, structType,
-           pointeeType, type VarNode } from "../../lib/vartree";
+           pointeeType, truncated, type VarNode } from "../../lib/vartree";
   import type { Seen } from "./VarTree.svelte";
   import VarRow from "./VarRow.svelte";
 
-  let { node, depth = 0, dbg, open, seen, gen, stops, writable, ops }:
+  let { node, depth = 0, dbg, open, seen, gen, stops, via, ops }:
     { node: VarNode; depth?: number; dbg: Debugger; open: Set<string>; seen: Map<string, Seen>; gen: number; stops: number;
-      writable: boolean; ops?: Snippet<[VarNode]> } = $props();
+      via: string | null; ops?: Snippet<[VarNode]> } = $props();
+  const writable = $derived(via !== null);
 
   const MORE_LIMIT = 4096;               // debug.evaluate の max_elements の上限
   const isOpen = $derived(open.has(node.key));
@@ -27,7 +28,7 @@
   const shown = $derived({ ...node, value });
   const kind = $derived(kindOf(value));
   const pending = $derived(value === undefined && !node.error);           // まだ読んでいない（止まる前の Watch）
-  const text = $derived(node.error ? $i18n("watch.error") : pending ? "—" : display(value, 64, node.type));
+  const text = $derived(node.error ? $i18n("watch.error") : pending ? "—" : display(value, 64));
   const canOpen = $derived(!node.error && expandable(value));
   const children = $derived(!isOpen ? [] : kind === "pointer"
     ? (target ? pointerChildren(shown, target, targetMembers) : [])
@@ -118,7 +119,9 @@
   </td>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <td class="v" class:bad={!!node.error} class:muted={kind === "unavailable"} class:can-edit={writable && editable(shown)}
-      title={node.error ?? (writable && editable(shown) ? $i18n("vars.editTip") : text)} ondblclick={startEdit}>
+      title={node.error ?? (writable && editable(shown) ? `${$i18n("vars.editTip")}
+${$i18n("write.tip", { api: via ?? "" })}` : text)}
+      ondblclick={startEdit}>
     {#if editing !== null}
       <input class="mono edit" aria-label={$i18n("vars.edit")} bind:value={editing} use:focus onkeydown={onKey}
              onblur={() => (editing = null)} />
@@ -129,9 +132,9 @@
 </tr>
 {#if isOpen}
   {#each children as child (child.key)}
-    <VarRow node={child} depth={depth + 1} {dbg} {open} {seen} {gen} {stops} {writable} {ops} />
+    <VarRow node={child} depth={depth + 1} {dbg} {open} {seen} {gen} {stops} {via} {ops} />
   {/each}
-  {#if kind === "truncated" && more === undefined}
+  {#if truncated(value) && more === undefined}
     <tr><td style:padding-left="{22 + (depth + 1) * 14}px" colspan="3">
       <button class="link" onclick={loadMore}>{$i18n("vars.more", { n: (value as { length: number }).length })}</button>
     </td></tr>
@@ -148,7 +151,8 @@
            font-size: 11px; cursor: pointer; }
   td { overflow: hidden; text-overflow: ellipsis; }
   .v { white-space: nowrap; }
-  .can-edit { cursor: text; }
+  .can-edit { cursor: text; text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent);
+              text-underline-offset: 3px; }
   .type { white-space: nowrap; font-size: 12px; position: relative; overflow: visible; }
   .type > .muted { display: block; overflow: hidden; text-overflow: ellipsis; }
   .bad { color: var(--bad); }

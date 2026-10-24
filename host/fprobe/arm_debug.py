@@ -41,9 +41,10 @@ DSCR_INSTRCOMPL = 1 << 24
 DSCR_TXFULL, DSCR_RXFULL = 1 << 29, 1 << 30
 _DSCR_KEEP = DSCR_UDCCDIS | DSCR_MDBGEN                  # 止めても再開しても、ターゲットの設定のまま残すビット
 
-# 止まった理由（DSCR.MOE）
+# 止まった理由（DSCR.MOE。ARMv7-A ARM C11.11.20。8 = OS Unlock catch・9 = 同期の watchpoint（v7.1）以外の値は予約）。
+# 表に無い値は "unknown"（停止の要求等の名前を当てない）
 _MOE = {0: "halt_request", 1: "breakpoint", 2: "watchpoint", 3: "bkpt", 4: "external", 5: "vector_catch",
-        0xA: "watchpoint"}
+        8: "os_unlock_catch", 0xA: "watchpoint"}
 
 # --- CPSR ---------------------------------------------------------------------------------------------
 CPSR_T, CPSR_F, CPSR_I = 1 << 5, 1 << 6, 1 << 7
@@ -212,16 +213,18 @@ class ArmDebugCore:
             self._leave(mask_interrupts=mask_interrupts and self.v7)
             self.port.restart_request()
             deadline = time.monotonic() + self.timeout_s
+            requested = False
             while not self.port.dscr() & DSCR_HALTED:
                 if time.monotonic() >= deadline:              # WFI 等で次の命令に進まない: 止めて終える
                     self.port.halt_request()
                     self._wait(DSCR_HALTED, "ステップの後に止まらない")
+                    requested = True
                     break
                 time.sleep(0.001)
         finally:
             self.port.write_breakpoint(slot, 0, 0)
         self._ensure_entered(self.port.dscr())
-        self._stepped = True
+        self._stepped = not requested                         # 要求で止めたら理由は DSCR.MOE のまま（step と言わない）
         if masked is not None:
             cpsr = self._cache["cpsr"]
             self._set_cached("cpsr", (cpsr & ~(CPSR_I | CPSR_F)) | masked)
@@ -231,7 +234,7 @@ class ArmDebugCore:
             return None
         if self._stepped:
             return "step"
-        return _MOE.get(self._moe, "halt_request")
+        return _MOE.get(self._moe, "unknown")
 
     def _require_halted(self) -> dict[str, int]:
         if self._cache is None:

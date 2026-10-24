@@ -6,7 +6,7 @@ ORUNDETECT・ターンアラウンドの長さ・AP の読みの先送りを解�
 """
 
 from ..la import Transitions
-from .core import Annotation, Decoding
+from .core import Annotation, Channel, Decoding
 
 __all__ = ["DORMANT_ALERT", "decode_swd"]
 
@@ -55,10 +55,11 @@ class _State:
         self.pending: str | None = None              # 先送りの AP の読み（次の AP の読みか RDBUFF で値が返る）
 
 
-def decode_swd(tr: Transitions, *, swclk: int, swdio: int, drive: int | None = None, turnaround: int = 1,
-               orundetect: bool = False) -> Decoding:
-    """SWD を解読する。drive（プローブが SWDIO を駆動中）を与えると、各相の駆動側を検査する（誤りは "direction"）。
-    turnaround・orundetect は捕捉の先頭での値（後は DLCR・CTRL/STAT の書き込みから追う）。"""
+def decode_swd(tr: Transitions, *, swclk: Channel, swdio: Channel, drive: Channel | None, turnaround: int,
+               orundetect: bool) -> Decoding:
+    """SWD を解読する。drive（プローブが SWDIO を駆動中。つながなければ None を明示）を与えると、各相の駆動側を
+    検査する（誤りは "direction"）。turnaround・orundetect は捕捉の先頭での値（後は DLCR・CTRL/STAT の書き込みから
+    追う）。捕捉の先頭がリセット直後の値（1・False）とは限らないので既定を持たない。"""
     if not 1 <= turnaround <= 4:
         raise ValueError(f"ターンアラウンドは 1〜4（{turnaround}）")
     pos, bits, drv = _extract(tr, swclk, swdio, drive)

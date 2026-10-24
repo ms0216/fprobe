@@ -59,6 +59,7 @@ def test_values_take_their_time_from_the_mark_backwards_and_forwards():
     out = no_groups(samples(events, nominal_ratio=2.0))
     assert [(s.target_cycles, s.value) for s in out] == [(0, 0x11), (10, 0x22), (16_415, 0x33)]
     assert [s.time_fprobe for s in out] == pytest.approx([970, 990, 1000 + 2 * 16_400])
+    assert {s.time_basis for s in out} == {"nominal_ratio"}             # 印 1 つと申告の比で決めた（?22）
 
 
 def test_values_wait_for_the_first_mark():
@@ -267,6 +268,24 @@ def test_open_reports_a_core_that_does_not_answer():
     dev.write32 = stuck
     with pytest.raises(RuntimeError, match="答えない"):
         FpgaObs(dev).open(chain={}, user_ir=2, half_period=5)
+
+
+
+def test_open_passes_the_id_wait_limit_and_says_when_it_ran_out():
+    # ID の応答を待つ上限は使う側が渡す（CSR id_scans。0 = 上限なし）。上限で止まったら、そう言う（答えが違うと分ける）
+    dev = FakeDevice()
+    orig = dev.write32
+
+    def timeout(address, v):
+        orig(address, v)
+        if address == g.OBS_CONTROL and v & 1:
+            dev.regs[g.OBS_STATUS] = 1 << g.OBS_STATUS_STUCK[0] | 1 << g.OBS_STATUS_ID_TIMEOUT[0]
+    dev.write32 = timeout
+    with pytest.raises(RuntimeError, match="id_scans = 3"):
+        FpgaObs(dev).open(chain={}, user_ir=2, half_period=5, id_scans=3)
+    assert dev.regs[g.OBS_ID_SCANS] == 3
+    with pytest.raises(ValueError):
+        FpgaObs(dev).open(chain={}, user_ir=2, half_period=5, id_scans=256)
 
 
 def test_close_waits_until_the_pins_are_released():

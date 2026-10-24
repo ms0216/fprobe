@@ -40,6 +40,7 @@ def test_live_watch_reads_globals_while_running(probe):
 
 
 def test_fatal_loop_in_the_fault_handler_is_detected_without_halting(probe):
+    probe.liveness_set(functions=["default_handler"])                           # 見張る関数は使う側が明示する
     probe.target_halt()
     probe.write_register("pc", probe._symbols.symbol("default_handler").address)
     probe.target_resume()                                                       # 故障の処理の無限ループを回る
@@ -48,7 +49,7 @@ def test_fatal_loop_in_the_fault_handler_is_detected_without_halting(probe):
     while fatal is None and time.monotonic() < deadline:
         fatal = probe.target_status().get("fatal")
         time.sleep(0.5)
-    assert fatal is not None and fatal["kind"] == "fault_loop" and fatal["function"] == "default_handler", fatal
+    assert fatal is not None and fatal["kind"] == "pc_in" and fatal["function"] == "default_handler", fatal
     assert probe.target_status()["state"] in ("RUNNING", "SLEEPING")
     probe.target_halt()
     assert "fatal" not in probe.target_status()

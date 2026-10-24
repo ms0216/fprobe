@@ -77,7 +77,7 @@ def test_call_runs_a_function_and_restores_the_core(probe):
     cpu.program.update({0x200: ("do", lambda c: c.regs.update(r0=c.regs["r0"] * 3)), 0x202: ("ret",)})
     before = dict(cpu.regs)
     out = probe.call_function("0x200", [14])
-    assert out["returned"] and out["return"]["value"] == 42 and out["restored"]
+    assert out["returned"] and out["return"]["r0"] == 42 and out["restored"]          # 型が分からない: r0 のまま
     assert cpu.regs == before and not cpu.breakpoints
     out = probe.call_function("square", [14])                              # 名前（DWARF の無い偽の ELF: 型は分からない）
-    assert out["return"]["value"] == 42
+    assert out["return"]["r0"] == 42

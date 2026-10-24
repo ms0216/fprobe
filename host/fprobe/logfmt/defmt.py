@@ -28,7 +28,7 @@ from pathlib import Path
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
 
-from .framing import ZeroDelimited, rzcobs_decode
+from .framing import FRAME_LIMIT, Dropped, ZeroDelimited, dropped_text, rzcobs_decode
 from .record import LogRecord
 
 __all__ = ["DefmtDecoder", "DefmtEntry", "DefmtError", "DefmtTable", "Hint", "Param", "parse_format"]
@@ -36,6 +36,7 @@ __all__ = ["DefmtDecoder", "DefmtEntry", "DefmtError", "DefmtTable", "Hint", "Pa
 LOG_TAGS = ("trace", "debug", "info", "warn", "error", "println")
 VERSIONS = ("3", "4")
 _INTS = {f"{s}{b}": (b, s == "i") for s in "ui" for b in (8, 16, 32, 64, 128)}
+# usize・isize はターゲットの大きさによらず 4 バイトで送る（ワイヤ形式。decoder/src/decoder.rs の Type::Usize = read_u32）
 _INTS.update(usize=(32, False), isize=(32, True))
 _HINT_KINDS = ("x", "X", "b", "o", "a", "?", "cbor", "us", "ms", "tus", "tms", "ts", "iso8601ms", "iso8601s")
 
@@ -161,7 +162,7 @@ _FRAGMENTS: dict[str, list[str | Param]] = {}
 class DefmtTable:
     entries: dict[int, DefmtEntry]
     timestamp: str | None = None
-    encoding: str = "rzcobs"
+    encoding: str | None = None         # 枠（ELF の _defmt_encoding_）。無ければ None（使う側が明示する）
     version: str | None = None
     bitflags: dict[str, list[tuple[str, int]]] = field(default_factory=dict)   # 型の名前 → [(フラグ, 値)]
     path: str | None = None
@@ -228,7 +229,7 @@ class DefmtTable:
             parts = str(meta.get("data", "")).split("::")
             if len(parts) == 3:
                 bitflags.setdefault(parts[0], []).append((parts[2], value))
-        return cls(entries, timestamp, encoding or "rzcobs", version, bitflags, str(path))
+        return cls(entries, timestamp, encoding, version, bitflags, str(path))
 
     # --- 解読 -------------------------------------------------------------------------------
 
@@ -635,12 +636,14 @@ class DefmtDecoder:
     """流れ（RTT・SWO・UART のバイト）→ ログの行。rzcobs は 0x00 で区切ったかたまりごと（壊れたかたまりは
     undecoded にして次へ進む）。raw は枠が無いので、1 つでも合わなければ同期を失う（synced = False。以後は捨てる）。"""
 
-    def __init__(self, table: DefmtTable):
+    def __init__(self, table: DefmtTable, frame_limit: int = FRAME_LIMIT):
         self.table = table
         self.encoding = table.encoding
+        if self.encoding is None:
+            raise DefmtError("ELF に枠の記録（_defmt_encoding_）が無い: framing（rzcobs / raw）で明示する")
         if self.encoding not in ("rzcobs", "raw"):
             raise DefmtError(f"知らない枠 {self.encoding}（rzcobs / raw）")
-        self._frames = ZeroDelimited()
+        self._frames = ZeroDelimited(frame_limit)
         self._raw = bytearray()
         self.synced = True
         self.frames = 0
@@ -650,6 +653,10 @@ class DefmtDecoder:
         if self.encoding == "rzcobs":
             out = []
             for frame in self._frames.feed(data):
+                if isinstance(frame, Dropped):
+                    self.errors += 1
+                    out.append(LogRecord("", "defmt", error=dropped_text(frame), cut_at=frame.limit))
+                    continue
                 try:
                     content = rzcobs_decode(frame)
                 except ValueError as e:

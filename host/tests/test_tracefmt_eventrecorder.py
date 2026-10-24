@@ -91,12 +91,28 @@ def test_rtx_events_with_threads(rtx):
     trace, nxt = r.decode(rtx, ScvdContext(symbol_name=names.get))
     assert nxt == r.index and trace.ts_hz == 1e6 and trace.lost == 0
     assert {t.id: t.name for t in trace.tasks.values()} == {0x2000_1000: "worker", 0x2000_2000: "osRtxIdleThread"}
-    assert trace.idle == {0x2000_2000}
+    assert not getattr(trace, "idle", set())       # 名前でアイドルを決めない（使う側が idle_tasks で渡す）
     assert [(e.kind, e.ts, e.task) for e in trace.events if e.kind.startswith("task_")] == [
         ("task_create", 100, 0x2000_1000), ("task_create", 110, 0x2000_2000), ("task_in", 200, 0x2000_1000),
         ("task_in", 300, 0x2000_2000), ("task_delete", 400, 0x2000_1000)]
     alloc = next(e for e in trace.events if e.name == "MemoryAlloc")
     assert alloc.text == "mem=0x20008000, size=64, type=0, block=0x20008100"
+
+
+def test_task_lifecycle_is_judged_by_switches_not_by_the_component_name(rtx):
+    """作成・削除（SCVD の tracking = Start / Stop）をタスクのものとするのは、その handle が同じ読みの中で切り替え
+    （unique の状態）に出たときだけ。成分の名前に "Thread" を含むかでは決めない。"""
+    r = Recorder()
+    r.record2(0xFF00, 10, 1, 1_000_000)
+    r.record2(0xF203, 100, 0x2000_1000, 0x0800_0101)                     # ThreadCreated（後で切り替えに出る）
+    r.record2(0xF203, 110, 0x2000_3000, 0x0800_0301)                     # ThreadCreated（切り替えに出ない）
+    r.record2(0xF219, 200, 0x2000_1000, 0)                               # ThreadSwitched
+    r.record2(0xF21C, 300, 0x2000_3000, 0)                               # ThreadDestroyed
+    trace, _ = r.decode(rtx, ScvdContext(symbol_name={0x0800_0101: "worker", 0x0800_0301: "never"}.get))
+    kinds = [(e.kind, e.task, e.args.get("tracking")) for e in trace.events if e.task is not None]
+    assert kinds == [("task_create", 0x2000_1000, "Start"), ("object", 0x2000_3000, "Start"),
+                     ("task_in", 0x2000_1000, None), ("object", 0x2000_3000, "Stop")]
+    assert {t.id: t.name for t in trace.tasks.values()} == {0x2000_1000: "worker"}
 
 
 def test_data_records_and_stdout(rtx):
@@ -110,6 +126,8 @@ def test_data_records_and_stdout(rtx):
     trace, _ = r.decode()
     prints = [e.text for e in trace.events if e.kind == "print"]
     assert prints == ["hello world", "x=1"]
+    # stdout の行に記録に無い重要度（info）を付けない
+    assert all(e.args["level"] is None for e in trace.events if e.kind == "print")
     data = {e.args["id"]: e.args.get("data") for e in trace.events if e.kind == "other"}
     assert data == {0x0101: payload.hex(), 0x0102: bytes(range(16)).hex(), 0x0103: b"abc".hex()}
 
@@ -145,7 +163,7 @@ def test_timestamps_wrap_32_bits():
     r.record2(0x0101, 0xFFFF_FF00, 0, 0)
     r.record2(0x0101, 0x0000_0100, 0, 0)
     trace, _ = r.decode()
-    assert [e.ts for e in trace.events] == [0xFFFF_FF00, 0x1_0000_0100]
+    assert [e.ts for e in trace.events] == [0xFFFF_FF00, 0x1_0000_0100] and trace.ts_wraps == 1
 
 
 def test_bad_control_blocks():

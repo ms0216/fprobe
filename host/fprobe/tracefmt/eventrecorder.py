@@ -17,9 +17,9 @@
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from .model import Trace, TraceEvent, is_rtos_idle_name, unwrap32
+from .model import Trace, TraceEvent
 from .scvd import Scvd, ScvdContext
 
 __all__ = ["INFO_SIZE", "INFO_SYMBOL", "RECORD_SIZE", "STATUS_SIZE", "EventRecorderError", "decode_event_recorder",
@@ -130,7 +130,7 @@ def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: by
         ts = ts & 0x7FFF_FFFF | (word >> 28 & 1) << 31
         v1 = v1 & 0x7FFF_FFFF | (word >> 29 & 1) << 31
         v2 = v2 & 0x7FFF_FFFF | (word >> 30 & 1) << 31
-        ts_last = unwrap32(ts_last, ts)
+        ts_last = trace.unwrap(ts_last, ts)
         event_id, ctx_no, irq = word & 0xFFFF, word >> 16 & 7, bool(word & _IRQ)
         first_rec, last_rec = bool(word & _FIRST), bool(word & _LAST)
         raw = struct.pack("<II", v1, v2)
@@ -169,21 +169,35 @@ def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: by
             stdout += text.encode("latin-1")
             while b"\n" in stdout:
                 line, _, rest = bytes(stdout).partition(b"\n")
-                trace.events.append(TraceEvent(stdout_ts, "print", "stdout", None, {"level": "info"},
+                trace.events.append(TraceEvent(stdout_ts, "print", "stdout", None, {"level": None},
                                                line.decode("utf-8", errors="replace").rstrip("\r")))
                 stdout, stdout_ts = bytearray(rest), (ts_ev if rest else None)
             continue
         trace.events.append(_event(trace, event_id, irq, ts_ev, values, data, scvd, ctx))
     if stdout:
-        trace.events.append(TraceEvent(stdout_ts, "print", "stdout", None, {"level": "info", "partial": True},
+        trace.events.append(TraceEvent(stdout_ts, "print", "stdout", None, {"level": None, "partial": True},
                                        stdout.decode("utf-8", errors="replace")))
     if pending:
         trace.notes.append(f"終わりの記録の無い複数の記録の出来事 {len(pending)} 個（書きかけ）")
     if torn:
         trace.lost += torn
         trace.notes.append(f"読めなかった記録 {torn} 個（書きかけ・上書き・始まりを失った続き）")
+    _task_lifecycle(trace)
     trace.events.sort(key=lambda e: e.ts)
     return trace, end
+
+
+def _task_lifecycle(trace: Trace) -> None:
+    """作成・削除（SCVD の tracking = Start / Stop）を、その handle がこの読みの中で切り替え（unique の状態 = task_in）
+    に出たときだけ task_create / task_delete にする（成分の名前では決めない）。出なければ object のまま。"""
+    switched = {e.task for e in trace.events if e.kind == "task_in"}
+    for i, e in enumerate(trace.events):
+        tracking = e.args.get("tracking")
+        if e.kind != "object" or tracking not in ("Start", "Stop") or e.task not in switched:
+            continue
+        trace.events[i] = replace(e, kind="task_create" if tracking == "Start" else "task_delete")
+        if e.args.get("name"):
+            trace.task(e.task).name = e.args["name"]
 
 
 def _event(trace: Trace, event_id: int, irq: bool, ts: int, values: list[int], data: bytes | None,
@@ -206,22 +220,21 @@ def _event(trace: Trace, event_id: int, irq: bool, ts: int, values: list[int], d
     if out is None:
         return TraceEvent(ts, "other", f"0x{event_id:04X}", None, args)
     args.update(level=out["level"], component_name=out["component"])
+    if out.get("notes"):                                       # 書式で分かった事実（文字列を上限で切った等）
+        args["notes"] = out["notes"]
     handle = out.get("handle")
     kind = "other"
-    if out.get("tracking") == "Start":
-        kind = "task_create" if out.get("component") and "Thread" in out["component"] else "object"
-    elif out.get("tracking") == "Stop":
-        kind = "task_delete" if out.get("component") and "Thread" in out["component"] else "object"
+    if out.get("tracking") in ("Start", "Stop"):
+        kind = "object"                                        # タスクのものかは _task_lifecycle が切り替えで決める
+        args["tracking"] = out["tracking"]
     elif out.get("unique"):
         kind = "task_in"
     elif out.get("state") or handle is not None:
         kind = "object"
-    if kind in ("task_create", "task_in", "task_delete") and handle is not None:
+    if kind == "task_in" and handle is not None:
         info = trace.task(handle)
         if out.get("name"):
             info.name = out["name"]
-            if is_rtos_idle_name(info.name):
-                trace.idle.add(handle)
     if out.get("state"):
         args["state"] = out["state"]
     if out.get("name"):

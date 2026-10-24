@@ -9,20 +9,19 @@ convention: "ieee"（IEEE 802.3: 中央の立ち上がりが 1）/ "thomas"（G.
 """
 
 from ..la import Transitions
-from .core import Annotation, ChannelLevels, Decoding
+from .core import Annotation, Channel, ChannelLevels, Decoding
 
 __all__ = ["decode_manchester"]
 
 CONVENTIONS = ("ieee", "thomas")
 
 
-def decode_manchester(tr: Transitions, channel: int, *, bitrate: float, tolerance: float | None = None,
-                      convention: str = "ieee", word_bits: int = 8, msb_first: bool = True) -> Decoding:
-    """Manchester を解読する。ビットを word_bits ごとの語にまとめる（フレームの最後の半端は error="incomplete"）。"""
+def decode_manchester(tr: Transitions, channel: Channel, *, bitrate: float, tolerance: float, convention: str,
+                      word_bits: int, msb_first: bool) -> Decoding:
+    """Manchester を解読する。ビットを word_bits ごとの語にまとめる（フレームの最後の半端は error="incomplete"）。
+    設定はすべて既定を持たない。"""
     if bitrate <= 0:
         raise ValueError(f"ビットレートが正でない（{bitrate}）")
-    if tolerance is None:
-        raise ValueError("tolerance（1 ビットに対する許容のずれ。0 より大きく 0.25 以下）を渡す（既定の値は持たない）")
     if not 0 < tolerance <= 0.25:
         raise ValueError(f"tolerance は 0 より大きく 0.25 以下（短と長の窓が重ならない。{tolerance}）")
     if convention not in CONVENTIONS:

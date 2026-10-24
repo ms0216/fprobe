@@ -19,9 +19,9 @@ from __future__ import annotations
 
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
-from .base import KernelAwareness
+from .base import NAME_LIMIT, KernelAwareness, stopped_note
 from .cortexm import THREAD_PSP_EXC_RETURN, SavedContext, read_fp_first_context
-from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo
+from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .rtx5_objects import RTX5Objects
 from .stackcheck import check_stack
 from .structs import StructLayout
@@ -31,7 +31,6 @@ __all__ = ["FILL_BYTE", "ID_KINDS", "MAGIC_WORD", "RTX5"]
 MAGIC_WORD = 0xE25A2EA5           # osRtxStackMagicWord（スタックの底）
 FILL_BYTE = 0xCC                  # osRtxStackFillPattern
 MAX_THREADS = 256
-NAME_LIMIT = 64
 ID_THREAD = 0xF1
 ID_KINDS = {0xF2: "timer", 0xF3: "event_flags", 0xF5: "mutex", 0xF6: "semaphore", 0xF7: "memory_pool",
             0xFA: "message_queue"}
@@ -50,8 +49,8 @@ class RTX5(KernelAwareness):
     name = "RTX5"
     priority_order = 1            # 大きい方が高い（osPriorityIdle = 1 〜 osPriorityISR = 56）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, name_limit: int = NAME_LIMIT):
+        super().__init__(info, access, symbols, name_limit)
         self.thread = StructLayout.of(info, "osRtxThread_t", "struct osRtxThread_s")
         self.os = StructLayout.of(info, "osRtxInfo_t")
         self.object = StructLayout.of(info, "osRtxObject_t")
@@ -89,7 +88,7 @@ class RTX5(KernelAwareness):
         if not pointer:
             return None
         try:
-            return self.mem.cstring(pointer, NAME_LIMIT) or None
+            return self.mem.cstring(pointer, self.name_limit) or None
         except AccessError:
             return None
 
@@ -110,7 +109,7 @@ class RTX5(KernelAwareness):
 
     def version(self) -> str | None:
         pointer = self._os("os_id")
-        return self.mem.cstring(pointer, NAME_LIMIT) if pointer else None
+        return self.mem.cstring(pointer, self.name_limit) if pointer else None
 
     # --- リスト ------------------------------------------------------------------------------------
 
@@ -119,7 +118,7 @@ class RTX5(KernelAwareness):
         out: list[int] = []
         while head:
             if head in out or len(out) >= MAX_THREADS:
-                self.warnings.append(f"{what} のリストが壊れている（{len(out)} 個で止めた）")
+                self.warnings.append(stopped_note(f"{what} のリスト", len(out), "cycle" if head in out else "limit", MAX_THREADS))
                 break
             out.append(head)
             head = self._field(head, link)
@@ -187,8 +186,11 @@ class RTX5(KernelAwareness):
         if stack.overflow and stack.base:
             notes.append(f"スタックの底の osRtxStackMagicWord（0x{MAGIC_WORD:08X}）が壊れているか、SP が底より下")
         priority = self._field(handle, "priority", True)
-        return Task(handle, self.thread_name(handle), priority, state, stack, wait,
+        task = Task(handle, self.thread_name(handle), priority, state, stack, wait,
                     self._field(handle, "priority_base", True), notes=notes)
+        task.locations["priority"] = field_location(self.thread, handle, "priority")
+        task.locations["base_priority"] = field_location(self.thread, handle, "priority_base")
+        return task
 
     def _wait(self, handle: int, wait_type: int, remaining: int | None, tick: int | None) -> WaitInfo:
         wait = WaitInfo(WAITS.get(wait_type, "unknown"), kind=WAIT_KINDS.get(wait_type))
@@ -253,6 +255,9 @@ class RTX5(KernelAwareness):
             magic = self.mem.u32(base)
         except AccessError:
             return StackInfo(base, end, pointer)
+        # RTX5 の svcRtxThreadNew（rtx_thread.c）はスタックの検査・水位の設定によらず必ず底に osRtxStackMagicWord を
+        # 書き、osRtxThreadStackCheck はこの語が変わったか SP が底以下で osRtxErrorStackOverflow にする。同じ定義で
+        # overflow とする（RTX5 自身の判定。fprobe の経験則ではない）
         if magic != MAGIC_WORD:
             info = check_stack(self.access.read_memory, base, end, pointer, FILL_BYTE)
             info.overflow = True

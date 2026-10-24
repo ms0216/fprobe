@@ -157,6 +157,9 @@ def test_step_and_watchpoint_stop(gdb, core):
     assert gdb.request("Z2,20000400,4") == "OK"
     gdb.send("c")
     wait_for(lambda: core.state == Target.State.RUNNING)
+    core.write32(probe_gdb.DWT_CTRL, 4 << 28)                     # DWT の比較器 0 が成立した（MATCHED）
+    core.write32(probe_gdb.DWT_COMP0, 0x2000_0400)
+    core.write32(probe_gdb.DWT_FUNCTION0, probe_gdb.DWT_MATCHED | 6)
     core.hit(0x0800_0300, Target.HaltReason.WATCHPOINT)
     assert "watch:20000400;" in gdb.receive(5).decode()
     assert gdb.request("Z3,20000401,3").startswith("E.")           # DWT が取れない大きさ
@@ -391,7 +394,8 @@ def test_clearing_all_breakpoints_stops_the_trace_with_a_reason(gdb, ai, core):
     assert ai.call("debug.breakpoint.list")["breakpoints"] == []
 
 
-def test_a_risky_target_needs_permission_to_halt(probe, core, daemon):
+def test_names_in_the_elf_do_not_refuse_tracepoints_by_default(probe, core, daemon):
+    # 名前の一致（halt_risk）だけを根拠に既定で断らない: 断るかは使う側が monitor trace deny-halt で明示する
     _, d = daemon
     probe._symbols = SimpleNamespace(names=lambda: [Symbol("RADIO_IRQHandler", 0x100, 4, "function")],
                                      path="radio.elf")
@@ -399,11 +403,23 @@ def test_a_risky_target_needs_permission_to_halt(probe, core, daemon):
         gdb.request("qSupported:error-message+")
         gdb.request("?")
         define_tracepoint(gdb)
+        assert gdb.request("QTStart") == "OK" and TP in core.breakpoints
+        gdb.request("QTStop")
+
+
+def test_deny_halt_given_by_the_user_refuses_tracepoints(probe, core, daemon):
+    _, d = daemon
+    with RspClient("127.0.0.1", d.gdb_port) as gdb:
+        gdb.request("qSupported:error-message+")
+        gdb.request("?")
+        define_tracepoint(gdb)
+        text, reply = gdb.monitor("trace deny-halt")
+        assert reply == "OK" and '"deny_halt": true' in text
         reply = gdb.request("QTStart")
-        assert reply.startswith("E.") and "allow-halt" in reply and "radio" in b"".join(gdb.console).decode()
+        assert reply.startswith("E.") and "deny-halt" in b"".join(gdb.console).decode()
         assert TP not in core.breakpoints and gdb.request("qTStatus").startswith("T0;")
         text, reply = gdb.monitor("trace allow-halt")
-        assert reply == "OK" and "allow_halt" in text
+        assert reply == "OK" and '"deny_halt": false' in text
         assert gdb.request("QTStart") == "OK" and TP in core.breakpoints
         text, _ = gdb.monitor("trace")
         assert '"running": true' in text
@@ -476,6 +492,30 @@ def test_rtos_tasks_are_gdb_threads(rtos_daemon):
         assert rsp.from_le_hex(gdb.request("g")[:8]) == 99          # 実行中のタスクは実レジスタ
         text, _ = gdb.monitor("threads off")
         assert "threads off: 1" in text and gdb.request("qfThreadInfo") == "m1"
+
+
+def test_without_a_current_task_the_core_is_its_own_thread(tmp_path):
+    """実行中のタスクが無い（スケジューラの前等）とき、先頭のタスクを「いま」としない: コアそのもののスレッド
+    （ID 1、実レジスタ）を足していまのスレッドにする。"""
+    k = FreeRTOSBuilder()
+    h = {name: k.task(name, prio) for name, prio in [("ctrl", 3), ("IDLE", 0)]}
+    k.put_state(h["ctrl"], k.ready(3))
+    k.put_state(h["IDLE"], k.ready(0))
+    k.set_current(0)
+    k.initial_context(h["ctrl"], "ctrl_task", 0x1234)
+    core = FakeCore(memory=k.memory)
+    core.registers.update(r0=99)
+    url, d, stop = serve(make_probe(core, shared()[1]), tmp_path)
+    try:
+        with RspClient("127.0.0.1", d.gdb_port) as gdb:
+            gdb.request("qSupported:swbreak+")
+            assert gdb.request("qC") == "QC1"
+            ids = sorted(int(i, 16) for i in gdb.request("qfThreadInfo")[1:].split(","))
+            assert ids == sorted([1, *h.values()])
+            assert bytes.fromhex(gdb.request("qThreadExtraInfo,1")).decode() == "no current task"
+            assert rsp.from_le_hex(gdb.request("g")[:8]) == 99              # コアの実レジスタ
+    finally:
+        stop()
 
 
 # --- 本物の GDB（あれば） -------------------------------------------------------------------------------

@@ -8,19 +8,18 @@
 -- ホスト（pyOCD 等）がキャッシュしている SELECT・CSW・TAR を元に戻すので、ホストからは割り込みが見えない。
 -- dap_monitor がホストの書いた CSW・TAR を控えていれば（shadow_valid）、読んで保存する転送（CSW・TAR・RDBUFF）を省き、
 -- 控えを戻す（停止の書き込みまで 4 転送。仕様 §5）。戻す値はホストのキャッシュそのもの。
--- WAIT は RETRIES 回まで繰り返す。FAULT・プロトコル異常・パリティ異常なら中止し、SELECT だけ戻す
+-- WAIT は wait_retry 回（ホストが DAP_TransferConfigure で設定）まで繰り返す。FAULT・プロトコル異常・パリティ異常なら中止し、SELECT だけ戻す
 -- （ponytail: FAULT 後は CSW・TAR を戻せない。スティッキーエラーはホストが次の転送で見て処理する）。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity swd_injector is
-  generic (
-    RETRIES : positive := 255
-  );
   port (
     clk           : in  std_logic;
     rst           : in  std_logic;
+    -- WAIT の再試行の回数（ホストが DAP_TransferConfigure で設定した値。dap_processor の wait_retry_out）
+    wait_retry    : in  unsigned(15 downto 0);
     -- 要求と設定
     request       : in  std_logic;                       -- 1 周期のパルス（実行中に来た要求は捨てる）
     enable        : in  std_logic;                       -- SWD が接続中（dap_processor の swd_enable）
@@ -80,7 +79,11 @@ architecture rtl of swd_injector is
   signal mine        : boolean := false;                 -- PHY を借りている
   signal dap_pending : boolean := false;                 -- DAP の命令が PHY に残っている
   signal step        : natural range 0 to LAST_STEP := 0;
-  signal tries       : natural range 0 to RETRIES := 0;
+  signal tries       : unsigned(15 downto 0) := (others => '0');
+  -- 再試行の回数はいったん受けて（めったに変わらない）、比べた結果もレジスタに。WAIT の応答は数十周期ごとなので、
+  -- 1 周期前の tries との比べで足りる（DAP の処理部からの長い経路と 16 ビットの比べを、応答の判定の経路から外す）
+  signal retry_r     : unsigned(15 downto 0) := (others => '0');
+  signal retry_more  : std_logic := '0';
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
   signal fast        : boolean := false;                 -- 控えを使う（CSW・TAR を読まない）
   signal req_r       : std_logic_vector(3 downto 0) := (others => '0');
@@ -93,6 +96,18 @@ architecture rtl of swd_injector is
   signal issued      : unsigned(7 downto 0) := (others => '0');   -- 借りてから出した転送の数
   signal transfers_r : unsigned(7 downto 0) := (others => '0');
 begin
+  retry_i : process (clk)
+  begin
+    if rising_edge(clk) then
+      retry_r <= wait_retry;
+      if tries < retry_r then
+        retry_more <= '1';
+      else
+        retry_more <= '0';
+      end if;
+    end if;
+  end process;
+
   -- PHY の命令の切り替え（mine は境界でしか変わらない）
   phy_cmd_valid <= valid_r when mine else dap_cmd_valid;
   phy_cmd_op    <= OP_TRANSFER when mine else dap_cmd_op;
@@ -161,7 +176,7 @@ begin
               mine  <= true;
               issued <= (others => '0');
               step  <= 0;
-              tries <= 0;
+              tries <= (others => '0');
               fast  <= shadow_valid = '1';
               csw   <= csw_shadow;
               tar   <= tar_shadow;
@@ -179,7 +194,7 @@ begin
             if phy_rsp_valid = '1' then
               ack_r <= phy_rsp_ack;
               if phy_rsp_ack = ACK_OK and phy_rsp_par = '0' then
-                tries <= 0;
+                tries <= (others => '0');
                 if step = 2 then
                   csw <= phy_rsp_data;
                 elsif step = 3 then
@@ -200,7 +215,7 @@ begin
                   step  <= step + 1;
                   state <= S_ISSUE;
                 end if;
-              elsif phy_rsp_ack = ACK_WAIT and tries < RETRIES then
+              elsif phy_rsp_ack = ACK_WAIT and retry_more = '1' then
                 tries <= tries + 1;
                 state <= S_ISSUE;
               else

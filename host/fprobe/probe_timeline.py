@@ -6,6 +6,7 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _capture_wave�
 仕様: docs/superpowers/specs/2026-10-18-timeline-tiles-design.md
 """
 
+from .api import NoData
 from .api.binary import BinaryResult
 from .timeline import DEFAULT_MAX_EDGES, DEFAULT_MAX_EVENTS, capture_tile, name_rows, recording_tile
 
@@ -27,7 +28,7 @@ class TimelineTools:
         if t1 is None:
             span = rec.span()
             if span is None:
-                raise RuntimeError("記録が空")
+                raise NoData("記録が空")
             t1 = span[1] + 1
         tile = recording_tile(rec, t0, t1, channels, streams, bin, max_edges, max_events)
         name_rows(tile.result, "sample", self._sample_name)            # サンプラの語の段は式・変数の名前で

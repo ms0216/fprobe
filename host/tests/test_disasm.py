@@ -5,11 +5,12 @@ sram_demo.elf（Cortex-M4、movw/movt で定数を作る）と disasm_demo.elf�
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from fprobe.disasm import Disassembler
-from fprobe.memview import BytesMemory, ElfImage
+from fprobe.memview import BytesMemory, CodeMap, ElfImage
 from fprobe.symbols import Symbols
 
 FIRMWARE = Path(__file__).resolve().parents[1] / "firmware"
@@ -138,20 +139,58 @@ def test_pc_relative_loads_show_value_and_name(demo):
     assert load.literal_value == 0x40020000
 
 
-def test_literal_pool_is_found_without_mapping_symbols():
+def test_without_mapping_symbols_the_body_does_not_guess_literal_pools():
+    # 「ldr [pc] が読む先はデータ」は推定なので本体ではしない（3 回目の点検 ?14）。ldr の読む先と値（事実）は返す
     image = ElfImage(DISASM_DEMO)
     raw = BytesMemory(0x20000014, image.read_memory(0x20000014, 0x50))      # 実機から読んだメモリ相当
     listing = Disassembler(raw).range(0x20000014, 0x20000064)
+    assert not any(i.data_basis == "pc_load" for i in listing.instructions)
+    load = next(i for i in listing.instructions if i.mnemonic == "ldr" and i.literal is not None)
+    assert (load.literal, load.literal_value) == (0x2000002C, 0xDEADBEEF)
+
+
+def test_literal_pools_given_by_the_caller_are_data():
+    # 使う側が渡した data_ranges（プラグイン heuristics.literal_pool_ranges が ldr [pc] の読む先から作れる）をデータに
+    from fprobe.plugins import heuristics as h
+    image = ElfImage(DISASM_DEMO)
+    raw = BytesMemory(0x20000014, image.read_memory(0x20000014, 0x50))
+    first = Disassembler(raw).range(0x20000014, 0x20000064)
+    guess = h.literal_pool_ranges(first.instructions)
+    assert guess["heuristic"] and guess["assumption"]
+    ranges = [(r["address"], r["size"]) for r in guess["data_ranges"]]
+    listing = Disassembler(raw, data_ranges=ranges).range(0x20000014, 0x20000064)
     data = [(i.address, i.literal_value) for i in listing.instructions if i.kind == "data"]
     assert data == POOL + [(0x2000004C, 0x40020000)]
     assert listing.instructions[-1].mnemonic == "b"                         # 最後まで命令の境界がずれない
+    pool = [i for i in listing.instructions if i.kind == "data"]
+    assert {i.data_basis for i in pool} == {"given"} and pool[0].as_dict()["data_basis"] == "given"
+
+
+def test_data_basis_is_the_mapping_symbol_when_the_elf_has_one(demo):
+    data = [i for i in demo.function("mix").instructions if i.kind == "data"]
+    assert {i.data_basis for i in data} == {"mapping"}                      # ARM ELF の $d（規格の情報）
+    assert all("推定" not in i.comment() for i in data)
+    assert all(i.data_basis is None for i in demo.function("mix").instructions if i.kind == "code")
+
+
+def test_given_data_ranges_do_not_override_the_mapping_symbols():
+    # 渡された区間（0x1004）も、$t がコードと書いていればコードとして読む（ELF の事実が先）
+    code = bytes.fromhex("004800bf00bf00bf")
+    raw = BytesMemory(0x1000, code)
+    given = Disassembler(raw, data_ranges=[(0x1004, 4)]).range(0x1000, 0x1008)
+    assert [(i.address, i.kind, i.data_basis) for i in given.instructions][2] == (0x1004, "data", "given")
+    marked = SimpleNamespace(code_map=CodeMap([(0x1000, "t")], [(0x1000, 0x1008)]), name_of=lambda a: None,
+                             symbol_at=lambda a, kind: None)
+    listing = Disassembler(raw, image=marked, data_ranges=[(0x1004, 4)]).range(0x1000, 0x1008)
+    assert [(i.address, i.mnemonic) for i in listing.instructions] == [(0x1000, "ldr"), (0x1002, "nop"),
+                                                                       (0x1004, "nop"), (0x1006, "nop")]
 
 
 def test_undecodable_bytes_become_data():
     listing = Disassembler(BytesMemory(0x1000, bytes.fromhex("ffff00bf"))).range(0x1000, 0x1004)
     # 0xffff だけでは 32 ビット命令の前半で、続く 00bf と組んでも解読できない → 2 バイトのデータ
     assert [(i.kind, i.mnemonic) for i in listing.instructions][-1] == ("code", "nop")
-    assert listing.instructions[0].kind == "data"
+    assert listing.instructions[0].kind == "data" and listing.instructions[0].data_basis == "undecodable"
 
 
 def test_symbols_alone_are_enough_to_name(sram):
@@ -169,20 +208,31 @@ def test_it_block_conditions_survive_around(sram):
     assert str(listing.instructions[listing.pc_index]).startswith("20000068: 80bd")
 
 
-def test_tbb_table_is_data_found_from_the_compare():
-    code = bytes.fromhex(
-        "0228"        # 0x00 cmp r0, #2
-        "04d8"        # 0x02 bhi #0x0e
-        "dfe800f0"    # 0x04 tbb [pc, r0]
-        "02030400"    # 0x08 表（3 項目 + 揃えの 1 バイト）
-        "7047"        # 0x0c bx lr
-        "7047")       # 0x0e bx lr
-    listing = Disassembler(BytesMemory(0x100, code)).range(0x100, 0x110)
+TBB_CODE = bytes.fromhex(
+    "0228"        # 0x00 cmp r0, #2
+    "04d8"        # 0x02 bhi #0x0e
+    "dfe800f0"    # 0x04 tbb [pc, r0]
+    "02030400"    # 0x08 表（3 項目 + 揃えの 1 バイト）
+    "7047"        # 0x0c bx lr
+    "7047")       # 0x0e bx lr
+
+
+def test_tbb_table_size_is_not_guessed_from_the_compare():
+    # 表の大きさを直前の cmp（コンパイラの慣用句）から推さない。大きさは使う側が branch_tables で明示する
+    # （推定はプラグイン fprobe.plugins.heuristics.tbb_table_sizes）
+    listing = Disassembler(BytesMemory(0x100, TBB_CODE)).range(0x100, 0x110)
+    assert not any(i.mnemonic == ".byte" for i in listing.instructions)
+    assert not hasattr(Disassembler, "_table_entries")
+
+
+def test_tbb_table_is_data_when_the_caller_gives_its_size():
+    listing = Disassembler(BytesMemory(0x100, TBB_CODE), branch_tables={0x104: 3}).range(0x100, 0x110)
     kinds = [(i.address - 0x100, i.kind, i.mnemonic) for i in listing.instructions]
     assert kinds == [(0, "code", "cmp"), (2, "code", "bhi"), (4, "code", "tbb"),
                      (8, "data", ".byte"), (9, "data", ".byte"), (10, "data", ".byte"), (11, "data", ".byte"),
                      (12, "code", "bx"), (14, "code", "bx")]
     assert listing.instructions[-1].flow == "return"
+    assert {i.data_basis for i in listing.instructions if i.kind == "data"} == {"branch_table"}
 
 
 def test_without_a_known_boundary_the_listing_starts_at_pc():
@@ -192,3 +242,16 @@ def test_without_a_known_boundary_the_listing_starts_at_pc():
     listing = Disassembler(BytesMemory(0x1000, code)).around(0x1010, before=4, after=2)
     assert listing.sync == "start" and listing.pc_index == 0
     assert listing.instructions[0].address == 0x1010
+
+
+def test_around_says_why_it_did_not_align_from_the_function_start(sram):
+    """確かな境界から PC まで読む量の上限（sync_limit）で前を読まなかったら、そう言う（点検 2 回目 ?: disasm.py:27）。"""
+    pc = sram.function("tick").instructions[3].address
+    listing = sram.around(pc, before=2, after=1, sync_limit=2)
+    assert listing.sync == "start" and listing.pc_index == 0
+    start = sram.function("tick").instructions[0].address
+    assert listing.sync_skipped == {"from": start, "kind": "function", "reason": "too_far", "distance": pc - start,
+                                    "limit": 2}
+    assert listing.as_dict()["sync_skipped"]["reason"] == "too_far"
+    aligned = sram.around(pc, before=2, after=1)
+    assert aligned.sync == "function" and aligned.sync_skipped is None

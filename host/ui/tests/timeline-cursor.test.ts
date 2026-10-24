@@ -119,3 +119,17 @@ describe("TimelineState の縦線の値と「時刻へ」", () => {
     tl.dispose();
   });
 });
+
+describe("頼まれずに隠したピンの段（変化の無いピン）", () => {
+  it("隠した段を覚えて知らせ、ワンクリックで見せ直す（前から隠していた段は見せない）", () => {
+    const { tl, get } = setup();
+    tl.setConfig({ ...get().config, hidden: ["wave:1"] });
+    tl.arrangeForSystem([1, 2, 3]);
+    expect(get().config.hidden).toEqual(expect.arrayContaining(["wave:1", "wave:2", "wave:3"]));
+    expect(get().autoHidden).toEqual(["wave:2", "wave:3"]);
+    tl.showAutoHidden();
+    expect(get().config.hidden).toEqual(["wave:1"]);
+    expect(get().autoHidden).toEqual([]);
+    tl.dispose();
+  });
+});

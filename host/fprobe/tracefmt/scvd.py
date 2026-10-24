@@ -27,10 +27,10 @@ from pathlib import Path
 __all__ = ["Scvd", "ScvdContext", "ScvdError", "ScvdEvent", "evaluate"]
 
 LIST_LIMIT = 1024                         # readlist・list の回数の上限（壊れたリストで止まらないように）
+STRING_LIMIT = 128                        # %N・%t で番地から読む C 文字列の上限（バイト。切ったら印と notes）
 _SCALARS = {"uint8_t": (1, "B"), "int8_t": (1, "b"), "uint16_t": (2, "H"), "int16_t": (2, "h"),
             "uint32_t": (4, "I"), "int32_t": (4, "i"), "uint64_t": (8, "Q"), "int64_t": (8, "q"),
             "float": (4, "f"), "double": (8, "d")}
-LEVELS = {"Error": "error", "API": "info", "Op": "info", "Detail": "debug"}
 
 
 class ScvdError(Exception):
@@ -267,21 +267,26 @@ class _Ref:
 
 class ScvdContext:
     """式の評価に要るもの: メモリの読み（read(番地, 長さ) → bytes）・シンボル（名前 → 番地・大きさ）・番地 → 名前・
-    ELF の文字列・レジスタ。どれも無ければ None（その関数・書式は 0 や 16 進になる）。"""
+    ELF の文字列・レジスタ。どれも無ければ None（その関数・書式は 0 や 16 進になる）。list_limit = readlist・list を
+    回す数の上限（壊れたリストで止まらないように。止めたら view の notes にその事実）。string_limit = %N・%t で
+    番地から読む C 文字列の上限（バイト。その中に NUL が無ければ切って、値の中に印・notes に番地と上限）。"""
 
     def __init__(self, read: Callable[[int, int], bytes] | None = None,
                  symbol: Callable[[str], tuple[int, int] | None] | None = None,
                  symbol_name: Callable[[int], str | None] | None = None,
                  string: Callable[[int], str | None] | None = None,
-                 register: Callable[[str], int | None] | None = None, running: bool = False):
+                 register: Callable[[str], int | None] | None = None, running: bool = False,
+                 list_limit: int = LIST_LIMIT, string_limit: int = STRING_LIMIT):
         self.read, self.symbol, self.symbol_name = read, symbol, symbol_name
         self.string, self.register, self.running = string, register, running
+        self.list_limit, self.string_limit = list_limit, string_limit
 
 
 class _Env:
     def __init__(self, scvd: "Scvd", ctx: ScvdContext, values: dict | None = None):
         self.scvd, self.ctx = scvd, ctx
         self.vars: dict[str, object] = dict(values or {})
+        self.notes: list[str] = []                             # 書式の評価で分かった事実（文字列を上限で切った等）
 
     def parse(self, text: str):
         return _Parser(text, set(self.scvd.typedefs)).expression()
@@ -666,7 +671,7 @@ class Scvd:
 
     def format_event(self, event_id: int, values: dict, ctx: ScvdContext | None = None) -> dict | None:
         """出来事の ID（16 ビット）と val1〜val4 → {property, value, level, component, handle, name, state,
-        tracking}。SCVD に無ければ None。"""
+        tracking}。level は SCVD の level の名前のまま（Error / API / Op / Detail。fprobe の重要度に写さない）。SCVD に無ければ None。"""
         ev = self.events.get(event_id)
         if ev is None:
             return None
@@ -682,7 +687,7 @@ class Scvd:
                 break
         comp = self.component(event_id >> 8)
         out = {"property": self.format(property_text, env), "value": self.format(value_text, env),
-               "level": LEVELS.get(ev.level or "", ev.level), "component": comp.name if comp else None}
+               "level": ev.level, "component": comp.name if comp else None}
         if ev.handle:
             try:
                 out["handle"] = int(env.eval(env.parse(ev.handle)))
@@ -696,6 +701,8 @@ class Scvd:
                 out["unique"] = True
         if ev.tracking:
             out["tracking"] = ev.tracking
+        if env.notes:
+            out["notes"] = env.notes
         return out
 
     # --- Component Viewer --------------------------------------------------------------------
@@ -711,6 +718,7 @@ class Scvd:
             notes: list[str] = []
             items: list[dict] = []
             self._statements(obj, env, notes, items)
+            notes.extend(env.notes)
             node = {"property": obj.get("name", ""), "value": "", "children": items}
             if notes:
                 node["notes"] = notes
@@ -742,9 +750,9 @@ class Scvd:
                 elif tag == "read":
                     self._read(el, env)
                 elif tag == "readlist":
-                    self._readlist(el, env)
+                    self._readlist(el, env, notes)
                 elif tag == "list":
-                    self._loop(el, env, lambda: self._statements(el, env, notes, items))
+                    self._loop(el, env, lambda: self._statements(el, env, notes, items), notes)
                 elif tag == "out":
                     for child in el:
                         self._out(child, env, notes, items)
@@ -780,7 +788,7 @@ class Scvd:
                                   for i in range(count)])
         env.vars[el.get("name")] = readout
 
-    def _readlist(self, el: ET.Element, env: _Env) -> None:
+    def _readlist(self, el: ET.Element, env: _Env, notes: list[str]) -> None:
         kind = el.get("type", "uint32_t")
         size = self._type_size(kind)
         name = el.get("name")
@@ -796,16 +804,25 @@ class Scvd:
         elif el.get("next"):
             addresses = []
             address, seen = base, set()
-            while address and address not in seen and len(addresses) < (count or LIST_LIMIT):
+            most = count or env.ctx.list_limit                       # count は SCVD が決める数、無ければ上限
+            while address and address not in seen and len(addresses) < most:
                 seen.add(address)
                 addresses.append(address)
                 element = _Element(kind, address, env.read(address, size))
                 address = int(env.member(element, el.get("next")).value)
+            if address and address in seen:
+                notes.append(f"<readlist {name}>: {len(addresses)} 個の後、前に読んだ項目 0x{address:08X} に戻った（輪）。"
+                             "そこで止めた")
+            elif address and not count:
+                notes.append(f"<readlist {name}>: 辿る上限 {most} 個に達したので止めた（続きは読んでいない）")
             for a in addresses:
                 readout.elements.append(_Element(kind, a, env.read(a, size)))
             return
         else:
-            addresses = [base + i * size for i in range(min(count if count is not None else 1, LIST_LIMIT))]
+            wanted = count if count is not None else 1
+            if wanted > env.ctx.list_limit:
+                notes.append(f"<readlist {name}>: count {wanted} のうち上限 {env.ctx.list_limit} 個だけ読んだ")
+            addresses = [base + i * size for i in range(min(wanted, env.ctx.list_limit))]
         if addresses and el.get("next") is None and el.get("based") != "1":
             data = env.read(addresses[0], size * len(addresses))
             readout.elements.extend(_Element(kind, a, data[i * size:(i + 1) * size]) for i, a in enumerate(addresses))
@@ -813,13 +830,13 @@ class Scvd:
         for a in addresses:
             readout.elements.append(_Element(kind, a, env.read(a, size)))
 
-    def _loop(self, el: ET.Element, env: _Env, body: Callable[[], None]) -> None:
+    def _loop(self, el: ET.Element, env: _Env, body: Callable[[], None], notes: list[str]) -> None:
         name = el.get("name")
         start = int(env.eval(env.parse(el.get("start", "0"))))
         limit = el.get("limit")
         cond_while = el.get("while")
         env.vars[name] = start
-        for _ in range(LIST_LIMIT):
+        for _ in range(env.ctx.list_limit):
             if limit is not None and env.vars[name] >= int(env.eval(env.parse(limit))):
                 break
             if cond_while is not None and not env.eval(env.parse(cond_while)):
@@ -827,12 +844,14 @@ class Scvd:
             body()
             if cond_while is None:
                 env.vars[name] = int(env.vars[name]) + 1
+        else:                                                         # 終わりの条件の前に上限で止めた
+            notes.append(f"<list {name}>: 回す上限 {env.ctx.list_limit} 回に達したので止めた（続きは回していない）")
 
     def _out(self, el: ET.Element, env: _Env, notes: list[str], items: list[dict]) -> None:
         if not self._cond(el, env, notes):
             return
         if el.tag == "list":
-            self._loop(el, env, lambda: [self._out(c, env, notes, items) for c in el])
+            self._loop(el, env, lambda: [self._out(c, env, notes, items) for c in el], notes)
             return
         if el.tag != "item":
             return
@@ -853,9 +872,15 @@ class Scvd:
         items.append(node)
 
 
-def _c_string(env: _Env, address: int, limit: int = 128) -> str:
+def _c_string(env: _Env, address: int) -> str:
+    limit = env.ctx.string_limit
     try:
         data = env.read(address, limit)
     except Exception:                                          # 読めない番地: 16 進で
         return f"0x{address:08X}"
-    return data.split(b"\0", 1)[0].decode("latin-1")
+    text, nul, _ = data.partition(b"\0")
+    if nul:
+        return text.decode("latin-1")
+    note = f"上限 {limit} バイトで切った"                       # 上限の中に NUL が無い: 続きは読んでいない
+    env.notes.append(f"0x{address:08X} の文字列: {note}（続きは読んでいない。string_limit）")
+    return text.decode("latin-1") + f"<{note}>"

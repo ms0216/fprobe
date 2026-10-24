@@ -48,7 +48,7 @@ class StackTools:
 
     def _init_stack(self) -> None:
         self._stack_paint: _Paint | None = None
-        self._stack_graph: tuple[object, CallGraph] | None = None          # (読んだ Symbols, グラフ)
+        self._stack_graph: tuple[object, tuple, CallGraph] | None = None   # (読んだ Symbols, ベクタ表, グラフ)
 
     # --- 共通 ----------------------------------------------------------------------------------
 
@@ -99,24 +99,32 @@ class StackTools:
 
     # --- 静的な最大 ----------------------------------------------------------------------------
 
-    def _call_graph(self) -> CallGraph:
+    def _call_graph(self, vector_table: int | None = None, vector_table_size: int | None = None,
+                    branch_tables: list[dict] | None = None) -> CallGraph:
         if self._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
+        tables = {int(t["address"]): int(t["entries"]) for t in branch_tables or []}
+        key = (vector_table, vector_table_size, tuple(sorted(tables.items())))
         cached = self._stack_graph
-        if cached is not None and cached[0] is self._symbols:
-            return cached[1]
+        if cached is not None and cached[0] is self._symbols and cached[1] == key:
+            return cached[2]
         image = self._elf_image()                          # 読み込み済みの名前・行の表を使い回す（DWARF を読み直さない）
-        graph = CallGraph.build(Disassembler(image, self._symbols, image))
-        self._stack_graph = (self._symbols, graph)
+        graph = CallGraph.build(Disassembler(image, self._symbols, image, tables), vector_table=vector_table,
+                                vector_table_size=vector_table_size)
+        self._stack_graph = (self._symbols, key, graph)
         return graph
 
     def stack_static(self, su_paths: list[str] | None = None, indirect: dict[str, list[str]] | None = None,
                      assume_address_taken: bool = False, roots: list[str] | None = None, entry: str | None = None,
-                     exception_frame: int | None = None, function: str | None = None, top: int = 50) -> dict:
+                     exception_frame: int | None = None, function: str | None = None, top: int = 50,
+                     vector_table: int | None = None, vector_table_size: int | None = None,
+                     branch_tables: list[dict] | None = None) -> dict:
         """静的な最大のスタック: 関数ごとの枠（.su か逆アセンブル）と呼び先を含む最大・最深の経路、根（リセット・例外・
         呼ばれない関数）、MSP の見積もり。再帰・関数ポインタ・可変長の確保は bounded=false と理由（max は下限）。
-        su_paths を省くと ELF のディレクトリの下の .su。indirect = {関数: [関数ポインタの呼び先の候補]}。"""
-        graph = self._call_graph()
+        su_paths を省くと ELF のディレクトリの下の .su。indirect = {関数: [関数ポインタの呼び先の候補]}。
+        vector_table: ベクタ表の番地（使う側が渡す。名前で探さない）。無ければ例外の根と msp は無い。
+        branch_tables: tbb / tbh の表の大きさ [{address, entries}]（使う側が渡す。無い表の分かれ先はたどらない）。"""
+        graph = self._call_graph(vector_table, vector_table_size, branch_tables)
         if su_paths is None:
             su_paths = [str(self._symbols.path.parent)]
         su = load_su([_local_file(p, " .su ") for p in su_paths])
@@ -138,19 +146,22 @@ class StackTools:
             if function not in graph.functions:
                 raise KeyError(f"関数 {function!r} が ELF に無い")
             rows = [r for r in rows if r["function"] == function]
-        report.update(functions=rows[:top], functions_total=len(rows),
-                      su_files=sorted({e.source for e in su}), address_taken=sorted(graph.address_taken))
+        report.update(functions=rows[:top], functions_total=len(rows), su_paths=list(su_paths),   # 探した所（?48）
+                      su_files=sorted({e.source for e in su}), address_taken=sorted(graph.address_taken),
+                      vector_table=None if graph.vector_table is None else
+                      {"address": graph.vector_table[0], "size": graph.vector_table[1]})
         return report
 
     # --- 塗り・実測 ----------------------------------------------------------------------------
 
-    def _stack_bounds(self, bottom: int | None, top: int | None, nominal: bool) -> StackBounds:
+    def _stack_bounds(self, bottom: int | None, top: int | None, names: dict) -> StackBounds:
+        """names: top_symbol・vector_table・limit_symbol・size_symbol（使う側が渡す。fprobe.elfsize.stack_bounds）。"""
         if bottom is not None and top is not None:
             return StackBounds(top, bottom, None, "argument", "argument")
         if self._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load か bottom・top を指定）")
         found, _ = self._regions(None, None, None)
-        bounds = stack_bounds(ElfLayout.from_elf(self._symbols.path), found, nominal=nominal)
+        bounds = stack_bounds(ElfLayout.from_elf(self._symbols.path), found, top=top, **names)
         if top is not None:
             bounds.top, bounds.top_source = top, "argument"
         if bottom is not None:
@@ -158,16 +169,19 @@ class StackTools:
         return bounds
 
     def stack_paint(self, fill: int = DEFAULT_FILL, bottom: int | None = None, top: int | None = None,
-                    margin: int = 64, nominal: bool = True) -> dict:
-        """ベアメタルの MSP のスタックを塗る（止めて。リセット直後が最適）。範囲は ELF（_estack・_Min_Stack_Size・
-        __StackLimit・ベクタ表）から、nominal=false なら上端の下の RAM の空き全部。いまの MSP − margin より上は塗らない。"""
+                    margin: int = 64, top_symbol: str | None = None, vector_table: int | None = None,
+                    limit_symbol: str | None = None, size_symbol: str | None = None) -> dict:
+        """ベアメタルの MSP のスタックを塗る（止めて。リセット直後が最適）。範囲は top / bottom か、使う側が名前を
+        渡す ELF のシンボル（上端 top_symbol か vector_table = ベクタ表の番地、下端 limit_symbol か上端 − size_symbol、
+        無ければ上端の下の RAM の空き全部）。いまの MSP − margin より上は塗らない。"""
         if not 0 <= fill <= 0xFF:
             raise ValueError("fill は 1 バイト（0〜255）")
         with self._lock:
             target = self.target
             if target.get_state() != Target.State.HALTED:
                 raise RuntimeError("コアを止めてから塗る（走行中は割り込みが塗る所を使うかもしれない）")
-            bounds = self._stack_bounds(bottom, top, nominal)
+            bounds = self._stack_bounds(bottom, top, {"top_symbol": top_symbol, "vector_table": vector_table,
+                                                      "limit_symbol": limit_symbol, "size_symbol": size_symbol})
             sp = target.read_core_register("msp")
             start, end = paint_range(bounds.bottom, bounds.top, sp=sp, margin=margin)
             pattern = bytes([fill]) * _CHUNK
@@ -176,20 +190,27 @@ class StackTools:
             target.flush()
             self._stack_paint = _Paint(bounds, end, fill)
         return {"bottom": start, "end": end, "top": bounds.top, "fill": fill, "bytes": end - start, "msp": sp,
-                "bounds": bounds.as_dict()}
+                "margin": margin, "bounds": bounds.as_dict()}                  # margin: MSP の下で塗らなかった幅
 
     def stack_usage(self, threshold: float | None = None, fill: int | None = None, bottom: int | None = None,
-                    top: int | None = None) -> dict:
+                    top: int | None = None, top_symbol: str | None = None, vector_table: int | None = None,
+                    limit_symbol: str | None = None, size_symbol: str | None = None) -> dict:
         """MSP のスタックの使用量の実測: 底から塗りが残っているバイト数から、使った最大の深さ・割合（事実。
         reached_bottom = 塗りが残っていない、overflow = SP が下端より下、warning は threshold を明示したときだけ）。止まっていれば いまの深さ（current）も。走行中でも読める。
-        範囲・塗りの値は stack_paint のもの（無ければ ELF の範囲と fill）。"""
+        範囲は stack_paint のもの（無ければ stack_paint と同じ引数の範囲）。塗りの値は fill か、stack_paint の記録の値
+        （記録が無く fill も無ければ誤り: 塗りの値を慣習の値で仮定しない）。"""
         with self._lock:
             target = self.target
             paint = self._stack_paint
-            if paint is not None and bottom is None and top is None:
-                bounds, value = paint.bounds, paint.fill if fill is None else fill
+            names = {"top_symbol": top_symbol, "vector_table": vector_table, "limit_symbol": limit_symbol,
+                     "size_symbol": size_symbol}
+            if fill is None and paint is None:
+                raise ValueError("stack_paint で塗った記録が無い: 塗りの値 fill（ファームが塗った値）を渡す")
+            value = paint.fill if fill is None else fill
+            if paint is not None and bottom is None and top is None and not any(v is not None for v in names.values()):
+                bounds = paint.bounds
             else:
-                bounds, value = self._stack_bounds(bottom, top, True), DEFAULT_FILL if fill is None else fill
+                bounds = self._stack_bounds(bottom, top, names)
             halted = target.get_state() == Target.State.HALTED
             sp = target.read_core_register("msp") if halted else None
 

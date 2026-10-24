@@ -3,7 +3,9 @@
 バイトの間の無音が gap_s 秒以上の所でフレームを区切る。既定は規格（Modbus over Serial Line 2.5.1.1）の t3.5: 19200 bps
 以下は 3.5 文字（1 文字 = UART の設定のスタート + データ + パリティ + ストップのビット ÷ ボー）、それより速いときは固定の
 1.75 ms。gap_chars（文字数）か gap_s（秒）を渡せば、それで区切る。
-フレーム = [スレーブ] [機能] [データ…] [CRC-16（下位バイトが先）]。要求と応答は形と直前の要求で見分け、
+フレーム = [スレーブ] [機能] [データ…] [CRC-16（下位バイトが先）]。要求と応答は形（規格で長さが決まる機能）と、
+前のフレーム（スレーブは要求なしに送らない・応答は同じスレーブと機能）で見分ける。どちらでも決まらないフレーム
+（捕捉の始まりの FC5/6 のエコー等）は kind="frame"・direction=None にする（要求とみなさない）。
 応答には要求からの遅れ（latency_s）を付ける。
 """
 
@@ -60,60 +62,90 @@ def decode_modbus(lower: Decoding, *, gap_chars: float | None = None, gap_s: flo
             frames.append([a])
         else:
             frames[-1].append(a)
-    request: tuple[int, int, list[int], int] | None = None      # (スレーブ, 機能, データ, 終わり)
+    state: _State = None
     for frame in frames:
         if frame[0].kind == "break":
             continue
-        ann, request = _frame(frame, request, lower.sample_period_s)
+        ann, state = _frame(frame, state, lower.sample_period_s)
         out.append(ann)
     return lower.derive("modbus", out, params)
 
 
-def _frame(frame: list[Annotation], request, period: float):
+# 次のフレームについて分かっていること: None = 分からない、MASTER = 主の送るもの（要求）、
+# (スレーブ, 機能, データ, 終わり) = その要求の後（応答か、応答が無く主が次の要求を送ったか）
+MASTER = "master"
+_State = tuple[int, int, list[int], int] | str | None
+
+
+def _frame(frame: list[Annotation], state: _State, period: float) -> tuple[Annotation, _State]:
     raw = [a.value for a in frame]
     start, end = frame[0].start, frame[-1].end
     uart_error = next((a.error for a in frame if a.error), None)
     if len(raw) < 4 or None in raw:
         return Annotation(start, end, "frame", "? " + " ".join(f"{b:02X}" for b in raw if b is not None),
-                          error=uart_error or "short", fields={"bytes": [b for b in raw if b is not None]}), request
+                          error=uart_error or "short", fields={"bytes": [b for b in raw if b is not None]}), state
     body, crc = raw[:-2], raw[-2] | raw[-1] << 8
     crc_ok = modbus_crc(body) == crc
     slave, function, payload = body[0], body[1], body[2:]
     base = function & 0x7F
+    request = state if isinstance(state, tuple) else None
     fields: dict = {"slave": slave, "function": base, "function_name": FUNCTIONS.get(base), "crc_ok": crc_ok,
                     "payload": payload}
     error = uart_error or (None if crc_ok else "crc")
+    after = MASTER if crc_ok else None                   # 応答の後は主が送る（スレーブは要求なしに送らない）
     if function & 0x80:
         code = payload[0] if payload else None
-        fields.update(exception_code=code, exception_name=EXCEPTIONS.get(code))
+        fields.update(direction="response", exception_code=code, exception_name=EXCEPTIONS.get(code))
         kind, text = "exception", f"← {slave:02X} {fields['function_name'] or base} ! {EXCEPTIONS.get(code, code)}"
         fields["latency_s"] = _latency(request, slave, base, start, period)
-        return Annotation(start, end, kind, text, value=slave, error=error or "exception", fields=fields), None
-    answered = request is not None and request[0] == slave and request[1] == base
-    is_response = _is_response(base, payload, answered, request)
+        return Annotation(start, end, kind, text, value=slave, error=error or "exception", fields=fields), after
+    direction = _direction(slave, base, payload, state)
+    fields["direction"] = direction
     name = fields["function_name"] or f"FC{base}"
-    if is_response:
+    if direction == "response":
         fields["latency_s"] = _latency(request, slave, base, start, period)
         _response_fields(base, payload, fields)
         text = f"← {slave:02X} {name}" + _summary(fields)
-        return Annotation(start, end, "response", text, value=slave, error=error, fields=fields), None
+        return Annotation(start, end, "response", text, value=slave, error=error, fields=fields), after
+    if direction is None:                                # 形からも前のフレームからも決まらない（要求とみなさない）
+        return Annotation(start, end, "frame", f"? {slave:02X} {name}", value=slave, error=error, fields=fields), None
     _request_fields(base, payload, fields)
     text = f"→ {slave:02X} {name}" + _summary(fields)
-    return Annotation(start, end, "request", text, value=slave, error=error, fields=fields), \
-        ((slave, base, payload, end) if slave != 0 and crc_ok else None)
+    if not crc_ok:
+        after = None
+    elif slave != 0:
+        after = (slave, base, payload, end)
+    return Annotation(start, end, "request", text, value=slave, error=error, fields=fields), after  # 0: 応答の無い一斉
 
 
-def _is_response(fc: int, p: list[int], answered: bool, request) -> bool:
+def _shapes(fc: int, p: list[int]) -> set[str]:
+    """規格で長さが決まる機能について、データの形から取りうる向き（どちらも取りうるなら両方、どちらでもなければ空）。"""
     if fc in (1, 2, 3, 4):
-        fits = bool(p) and p[0] == len(p) - 1
-        return fits and (answered or len(p) != 4)
+        return {d for d, ok in (("request", len(p) == 4), ("response", bool(p) and p[0] == len(p) - 1)) if ok}
     if fc in (5, 6):
-        return answered and p == request[2]
+        return {"request", "response"} if len(p) == 4 else set()            # 応答は要求のエコー
     if fc in (15, 16):
-        return len(p) == 4 and answered
+        return {d for d, ok in (("request", len(p) >= 5 and p[4] == len(p) - 5), ("response", len(p) == 4)) if ok}
     if fc == 23:
-        return bool(p) and p[0] == len(p) - 1 and answered
-    return answered
+        return {d for d, ok in (("request", len(p) >= 9 and p[8] == len(p) - 9),
+                                ("response", bool(p) and p[0] == len(p) - 1)) if ok}
+    return {"request", "response"}                                          # 形を調べない機能
+
+
+def _direction(slave: int, fc: int, p: list[int], state: _State) -> str | None:
+    """要求か応答か。形で 1 つに決まればそれ。両方を取りうるときは前のフレームで決める（規格: スレーブは要求なしに
+    送らず、応答は要求と同じスレーブ・機能、FC5/6 は要求のエコー）。決まらなければ None（推定しない）。"""
+    shapes = _shapes(fc, p)
+    if slave == 0:                                                           # 一斉（応答は無い）
+        shapes &= {"request"}
+    if len(shapes) != 2:
+        return next(iter(shapes), None)
+    if state == MASTER:
+        return "request"
+    if isinstance(state, tuple):
+        answered = state[0] == slave and state[1] == fc and (fc not in (5, 6) or p == state[2])
+        return "response" if answered else "request"
+    return None
 
 
 def _request_fields(fc: int, p: list[int], f: dict) -> None:

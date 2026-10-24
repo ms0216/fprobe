@@ -42,7 +42,8 @@ def test_uart_bytes_and_baud_are_decoded(probe):
         t.write32(USART1_DR, b)
     t.flush()
     probe.la_collect(timeout_s=3)
-    d = probe.la_decode("uart", {"channel": 5, "baud": 115_200})               # ボーは推定しない（必須）
+    d = probe.la_decode("uart", {"channel": 5, "baud": 115_200, "data_bits": 8, "parity": "none",
+                                  "stop_bits": 1, "invert": False, "lsb_first": True})               # ボーは推定しない（必須）
     assert d["errors"] == 0, d["params"]
     data = bytes(a["value"] for a in d["annotations"] if a["kind"] == "data")
     assert data.startswith(b"Hello"[:len(data)]) and len(data) >= 3, data                       # 窓に入った分
@@ -52,7 +53,7 @@ def test_swd_transfers_match_the_host_read(probe):
     probe.la_arm(rate_hz=100e6, pretrigger=64, fall=1 << 0)
     probe.read_memory(0x20000000, 16)
     probe.la_collect(timeout_s=3)
-    d = probe.la_decode("swd", {"swclk": 0, "swdio": 3, "drive": 8}, limit=100)
+    d = probe.la_decode("swd", {"swclk": 0, "swdio": 3, "drive": 8, "turnaround": 1, "orundetect": False}, limit=100)
     transfers = [a["text"] for a in d["annotations"] if a["kind"] == "transfer" and not a["text"].endswith("WAIT")]   # WAIT はやり直し
     # 16 バイトの読み: TAR を書き、DRW を 4 回（ポスト: 値は 1 つ後で返る）、最後に RDBUFF
     assert transfers[0].startswith("AP0 W TAR 0x20000000 OK"), transfers

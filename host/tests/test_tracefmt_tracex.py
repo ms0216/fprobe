@@ -48,12 +48,15 @@ def test_registry_and_events_in_order():
     assert {t.id: (t.name, t.priority, t.stack_size) for t in trace.tasks.values()} == {
         T1: ("sensor", 5, 1024), T2: ("logger", 10, 2048)}
     kinds = [(e.kind, e.ts, e.task) for e in trace.events]
-    assert kinds == [("task_in", 10, T1), ("task_create", 10, T2), ("object", 20, T1), ("task_block", 30, T1),
-                     ("task_in", 35, T2), ("info", 35, None), ("isr_enter", 40, None), ("isr_exit", 45, None),
-                     ("task_ready", 50, T1), ("task_in", 60, T1), ("marker", 60, None)]
-    sem = trace.events[2]
+    # 切り替えの出来事は TraceX に無い: 文脈の変化から task_in を推定して足さない（各出来事の文脈は args.context）
+    assert kinds == [("task_create", 10, T2), ("object", 20, T1), ("task_block", 30, T1),
+                     ("info", 35, None), ("isr_enter", 40, None), ("isr_exit", 45, None),
+                     ("task_ready", 50, T1), ("marker", 60, None)]
+    assert [e.args["context"] for e in trace.events] == [T1, T1, T1, T2, ISR_CONTEXT, ISR_CONTEXT, T2, T1]
+    sem = trace.events[1]
     assert sem.name == "SEMAPHORE_GET" and sem.args["object"] == "sem_rx"
-    assert trace.events[3].args["state"] == "semaphore" and trace.events[6].args["number"] == 27
+    assert trace.events[2].args["state"] == "semaphore" and trace.events[4].args["number"] == 27
+    assert not any("inferred" in e.args for e in trace.events)
     assert trace.ts_hz == 1e6
 
 
@@ -67,7 +70,7 @@ def test_a_wrapped_ring_starts_at_current():
 def test_timestamps_wrap_with_the_mask():
     events = [ev(T1, 6, 0xFFF0), ev(T1, 6, 0x0010)]
     trace = decode_tracex(image(events, REGISTRY, mask=0xFFFF))
-    assert [e.ts for e in trace.events if e.kind == "info"] == [0xFFF0, 0x1_0010]
+    assert [e.ts for e in trace.events if e.kind == "info"] == [0xFFF0, 0x1_0010] and trace.ts_wraps == 1
 
 
 def test_big_endian_targets():

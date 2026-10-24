@@ -84,6 +84,14 @@ def test_memory_map_xml():
     assert ram.get("type") == "ram" and ram.find("property") is None
 
 
+def test_flash_without_a_known_blocksize_is_not_given_a_guessed_one():
+    # 消去の単位が分からない Flash に 1 KB 等を推さない。GDB の DTD は flash に blocksize が要るので、書けない rom として
+    # 申告する（GDB は書き込みを断る。誤った単位で消して書くよりよい）
+    xml = d.memory_map_xml([d.Region("flash", 0x0800_0000, 0x8_0000)])
+    flash, = ET.fromstring(xml.split("\n", 2)[2]).findall("memory")
+    assert flash.get("type") == "rom" and flash.find("property") is None and "0x400" not in xml
+
+
 def test_gaps_are_filled_with_ram_so_gdb_can_read_peripherals():
     flash = d.Region("flash", 0x0800_0000, 0x8_0000, 0x4000)
     ram = d.Region("ram", 0x2000_0000, 0x1_8000)

@@ -17,7 +17,7 @@
   import { onTimeline } from "../../lib/timeline/events";
   import TabBar from "./TabBar.svelte";
   import {
-    BAUDS, LINE_ENDINGS, SWO_BAUDS, clockTime, emptyScreen, feed, lineAtTime, lines, loadSources, plain,
+    BAUDS, LINE_ENDINGS, SWO_BAUDS, TERMINAL_KEEP_CHARS, clockTime, swoConfigureParams, emptyScreen, feed, lineAtTime, lines, loadSources, plain,
     readSource, screenKey, splitTerminals, stampAt, terminalTabs, writeCall, type LineEnding, type Screen,
     type TerminalSource,
   } from "../../lib/terminal";
@@ -54,7 +54,9 @@
   let follow = true;
   let picked = $state<number | null>(null);         // 選んだ行（時間軸の選択・クリック）
   let swoForm = $state(false);
-  let swoBaud = $state(Number(load("terminal.swoBaud", "2000000")));
+  // SWO の速さ・ITM のポートは使う人が入れる（空から。2 MHz・ポート 0〜3 を暗黙に使わない）
+  let swoBaud = $state(load("terminal.swoBaud", ""));
+  let swoPorts = $state(load("terminal.swoPorts", ""));
   let swoSetup = $state(load("terminal.swoSetup", "0") === "1");
   let coreClock = $state(load("terminal.coreClock", ""));      // 既定の値を推測しない（使う側が入れる）
   const next: Record<string, number> = {};
@@ -179,12 +181,15 @@
   async function startSwo(e: Event) {
     e.preventDefault();
     if (!(await allowed(app))) return;
-    save("terminal.swoBaud", String(swoBaud));
+    save("terminal.swoBaud", swoBaud);
+    save("terminal.swoPorts", swoPorts);
     save("terminal.swoSetup", swoSetup ? "1" : "0");
     save("terminal.coreClock", coreClock);
+    const configure = swoConfigureParams(swoPorts, swoBaud, coreClock);
+    if (swoSetup ? !configure : !(Number(swoBaud) > 0)) return;
     const done = swoSetup
-      ? await app.act("swo.configure", { ports: [0, 1, 2, 3], swo_baud: swoBaud, core_clock_hz: Number(coreClock) || null })
-      : await app.act("swo.start", { baud: swoBaud });
+      ? await app.act("swo.configure", configure!)
+      : await app.act("swo.start", { baud: Number(swoBaud) });
     if (done !== undefined || !swoSetup) swoForm = false;
     await refresh();
   }
@@ -300,15 +305,22 @@
     {#if swoForm && !swo}
       <form class="swo" onsubmit={startSwo}>
         <label>{$i18n("terminal.swoBaud")}
-          <select bind:value={swoBaud}>{#each SWO_BAUDS as b (b)}<option value={b}>{b.toLocaleString()}</option>{/each}</select>
+          <select bind:value={swoBaud} aria-required="true"><option value=""></option>{#each SWO_BAUDS as b (b)}<option value={String(b)}>{b.toLocaleString()}</option>{/each}</select><span
+            class="req" aria-hidden="true">*</span>
         </label>
         <label title={$i18n("terminal.swoSetupTip")}><input type="checkbox" bind:checked={swoSetup} /> {$i18n("terminal.swoSetup")}</label>
         {#if swoSetup}
+          <label title={$i18n("terminal.swoPortsTip")}>{$i18n("terminal.swoPorts")} <input class="num mono" bind:value={swoPorts}
+            aria-required="true" spellcheck="false" /><span class="req" aria-hidden="true">*</span></label>
           <label>{$i18n("terminal.coreClock")} <input class="num mono" bind:value={coreClock} inputmode="numeric" /></label>
         {/if}
-        <button class="primary small">{$i18n("terminal.startSwo")}</button>
+        <button class="primary small" disabled={swoSetup ? !swoConfigureParams(swoPorts, swoBaud, coreClock) : !(Number(swoBaud) > 0)}>
+          {$i18n("terminal.startSwo")}</button>
         <button type="button" class="small" onclick={() => (swoForm = false)}>{$i18n("common.cancel")}</button>
       </form>
+    {/if}
+    {#if screen.discarded}
+      <div class="muted small">{$i18n("terminal.discarded", { n: screen.discarded.toLocaleString(), limit: TERMINAL_KEEP_CHARS.toLocaleString() })}</div>
     {/if}
     <div class="out mono" bind:this={box} bind:clientHeight={viewHeight} onscroll={() => box && (scrollTop = box.scrollTop)}>
       <div style:height="{rows.length * ROW}px" class="space">

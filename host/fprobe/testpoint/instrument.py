@@ -11,7 +11,6 @@
 import fnmatch
 import hashlib
 import os
-import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +26,6 @@ __all__ = ["FileResult", "InstrumentResult", "Options", "WatchVar", "header_path
 RETURN_VAR = "fprobe_tp_r"
 _ASSIGN_OPS = frozenset({"=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|="})
 _SIDE_EFFECTS = _ASSIGN_OPS | {"++", "--", "("}
-_MACRO_LIKE = re.compile(r"^[A-Z_][A-Z0-9_]+$")
 
 FunctionKey = tuple[str, str, int]
 
@@ -61,11 +59,14 @@ class Options:
     only_changed: bool = False           # 前回（baseline）から変わった・新しい関数にだけ入れる
     macro: str = "FPROBE_TP"
     value_macro: str = "FPROBE_TP_VALUE"
+    # 戻り値の型の中の、型でない語（記憶域・属性のマクロ等。例 STATIC_INLINE）。出口の前に戻り値を置く一時変数の型から
+    # 除く。語がマクロかは写しの側から分からないので、使う側が明示する（名前の形では決めない）
+    non_type_words: tuple[str, ...] = ()
 
     def signature(self) -> str:
         """指紋に混ぜる（挿入の形を変える設定が変われば入れ直す）。"""
         return repr((self.entry_exit, self.branches, sorted((v.name, v.value) for v in self.variables), self.macro,
-                     self.value_macro))
+                     self.value_macro) + ((sorted(self.non_type_words),) if self.non_type_words else ()))
 
     def selects(self, name: str) -> bool:
         if self.include and not any(fnmatch.fnmatchcase(name, p) for p in self.include):
@@ -260,8 +261,10 @@ class _FunctionInstrumenter:
             self.edits.replace(kw.start, kw_end, "{ (void)(")
             self.edits.replace(semi.start, semi.end, f"); {self.tp(exit_id)} return; }}")
         else:                                   # 式を先に評価する（式の中の呼び出しが子として入れ子になる）
-            rtype = self.fn.return_type
-            if rtype is None or any(_MACRO_LIKE.match(w) for w in rtype.split()):
+            rtype = self.fn.return_type             # 宣言どおり（取れない複雑な宣言子なら __auto_type）
+            if rtype is not None and self.o.non_type_words:
+                rtype = " ".join(w for w in rtype.split() if w not in self.o.non_type_words) or None
+            if rtype is None:
                 rtype = "__auto_type"
             self.edits.replace(kw.start, kw_end, f"{{ {rtype} {RETURN_VAR} = (")
             self.edits.replace(semi.start, semi.end, f"); {self.tp(exit_id)} return {RETURN_VAR}; }}")

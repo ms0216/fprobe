@@ -1,64 +1,64 @@
-"""fprobe.halt_risk: 止めると壊れうるターゲットの見分け（ELF のシンボルだけ。機器固有の名前は使わない）。"""
+"""fprobe.halt_risk: 止める前の手がかり（ELF のシンボルだけ）。本体は、使う側が明示して渡した名前・正規表現に合う
+シンボルが ELF にあるか、の事実だけを返す。名前の慣習（接頭辞 ll_・名前に wdt を含む 等）で種類を決める表を本体に
+持たない（CLAUDE.md。慣習の表はプラグイン fprobe.plugins.heuristics）。"""
 
 from pathlib import Path
 
-from fprobe.halt_risk import assess
+import pytest
+
+from fprobe import halt_risk
+from fprobe.halt_risk import scan
 from fprobe.symbols import Symbol, Symbols
 
 DEMO = Path(__file__).resolve().parents[1] / "firmware" / "sram_demo" / "sram_demo.elf"
 
 
-def f(name):
-    return Symbol(name, 0x1000, 4, "function")
+def f(name, address=0x1000):
+    return Symbol(name, address, 4, "function")
 
 
-def v(name):
-    return Symbol(name, 0x20000000, 4, "object")
+def v(name, address=0x20000000):
+    return Symbol(name, address, 4, "object")
 
 
-def kinds(result):
-    return [r["kind"] for r in result["matches"]]
+def test_without_names_nothing_is_matched_even_for_conventional_names():
+    # 既定の名前の表を持たない: 渡されなければ、無線・USB・ウォッチドッグ・RTOS らしい名前があっても何も言わない
+    r = scan([f("RADIO_IRQHandler"), f("ll_adv_enable"), f("tud_task"), f("wdt_feed"), v("pxCurrentTCB")])
+    assert r == {"names": [], "patterns": [], "matched": False, "matches": [], "monitor_in_elf": False}
 
 
-def test_plain_bare_metal_matches_nothing():
-    r = assess([f("main"), f("tick"), v("counter")])
-    assert r == {"matched": False, "matches": [], "monitor_in_elf": False}
+def test_no_kind_table_in_the_core():
+    assert not hasattr(halt_risk, "KINDS") and not hasattr(halt_risk, "RTOS_GLOBALS")
 
 
-def test_radio_interrupt_and_bluetooth_controller_are_radio():
-    r = assess([f("main"), f("RADIO_IRQHandler"), f("ll_adv_enable"), f("lll_conn_isr_rx"), f("hci_driver_open")])
-    assert r["matched"] and kinds(r) == ["radio"]
-    assert set(r["matches"][0]["symbols"]) >= {"RADIO_IRQHandler", "ll_adv_enable"}
+def test_given_names_are_matched_exactly_with_the_symbols_as_facts():
+    r = scan([f("main"), f("RADIO_IRQHandler", 0x1234), v("_kernel", 0x20000010), f("radio_init")],
+             names=["RADIO_IRQHandler", "_kernel", "absent"])
+    assert r["matched"] is True and r["names"] == ["RADIO_IRQHandler", "_kernel", "absent"]
+    assert r["matches"] == [
+        {"query": "RADIO_IRQHandler", "by": "name", "count": 1,
+         "symbols": [{"name": "RADIO_IRQHandler", "kind": "function", "address": 0x1234}]},
+        {"query": "_kernel", "by": "name", "count": 1,
+         "symbols": [{"name": "_kernel", "kind": "object", "address": 0x20000010}]},
+    ]
 
 
-def test_rtos_kernels_are_recognized_from_their_globals():
-    for name in ("pxCurrentTCB", "_kernel", "_tx_thread_current_ptr", "osRtxInfo"):
-        r = assess([f("main"), v(name)])
-        assert kinds(r) == ["rtos"], name
+def test_given_patterns_return_every_matching_symbol_without_cutting():
+    syms = [f(f"ll_func_{i:02}", 0x1000 + i) for i in range(40)] + [f("all_done")]
+    r = scan(syms, patterns=[r"^ll_"])
+    (m,) = r["matches"]
+    assert m["query"] == "^ll_" and m["by"] == "pattern" and m["count"] == 40 and len(m["symbols"]) == 40
+    assert [s["name"] for s in m["symbols"]] == sorted(s.name for s in syms[:40])
 
 
-def test_usb_and_watchdog_are_reasons_too():
-    r = assess([f("tud_task"), f("wdt_feed")])
-    assert kinds(r) == ["usb", "watchdog"]
-
-
-def test_matches_come_in_a_fixed_order_and_evidence_is_short():
-    names = [f(f"ll_func_{i}") for i in range(40)] + [v("pxCurrentTCB"), f("USBD_IRQHandler")]
-    r = assess(names)
-    assert kinds(r) == ["radio", "usb", "rtos"]
-    assert len(r["matches"][0]["symbols"]) <= 5 and r["matches"][0]["count"] == 40
+def test_a_bad_pattern_is_an_error():
+    with pytest.raises(ValueError):
+        scan([f("main")], patterns=["("])
 
 
 def test_monitor_in_elf_is_reported():
-    r = assess([f("fprobe_monitor_init"), f("DebugMon_Handler"), v("pxCurrentTCB")])
-    assert r["monitor_in_elf"] is True
+    assert scan([f("fprobe_monitor_init")])["monitor_in_elf"] is True
 
 
-def test_unrelated_names_that_merely_contain_the_words_are_not_matched():
-    r = assess([f("fill_buffer"), f("all_done"), v("radiometer_gain"), f("usb_cable_table_lookup_x")])
-    assert r["matched"] is False
-
-
-def test_demo_elf_matches_nothing():
-    r = assess(Symbols(DEMO).names())
-    assert r["matched"] is False
+def test_demo_elf_with_no_names_matches_nothing():
+    assert scan(Symbols(DEMO).names())["matched"] is False

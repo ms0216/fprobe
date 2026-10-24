@@ -1,18 +1,20 @@
 // 接続の診断（段階 B §3 の 1）: target.diagnose（電源 → ピン → SWD/JTAG → DP → AP → コア → 部品 → 保護の手順ごとの
-// status と message、結論、提案の接続の引数）と probe.pins.read（ピンの状態）を読む。順も中身も API の事実のまま。Svelte に依らない
+// status（ok 読めた / fail 読めなかった / skip）と message、DP に届いたか・応答した速さ・部品の候補）と probe.pins.read
+// （ピンの状態）を読む。順も中身も API の事実のまま（良し悪し・結論・おすすめの接続は本体も画面も決めない）。Svelte に依らない
 import { errorText, type DaemonConnection } from "./api";
 
 export interface DiagnoseStep {
   name: string;
-  status: "ok" | "warn" | "fail" | "skip";
+  status: "ok" | "fail" | "skip";
   message: string;
 }
 
 export interface DiagnoseReport {
-  ok: boolean;
-  verdict: string;
-  frequency_hz: number;
-  suggested_connect: Record<string, unknown> | null;
+  reached: boolean;                  // DP に届き、デバッグ電源の要求に応答があった
+  frequencies_hz: number[];          // 試した速さ
+  protocol: string | null;           // 応答した線
+  frequency_hz: number | null;       // 応答した速さ
+  part: { name: string; candidates: string[] } | null;
   steps: DiagnoseStep[];
 }
 
@@ -23,12 +25,12 @@ export interface Pins {
   not_reported?: string[];
 }
 
-export async function diagnose(conn: Pick<DaemonConnection, "call">, frequencyHz: number):
+export async function diagnose(conn: Pick<DaemonConnection, "call">, frequenciesHz: number[]):
   Promise<{ report: DiagnoseReport | null; pins: Pins | null; error: string | null }> {
   let report: DiagnoseReport | null = null;
   let error: string | null = null;
   try {
-    report = await conn.call("target.diagnose" as never, { frequency_hz: frequencyHz } as never);
+    report = await conn.call("target.diagnose" as never, { frequencies_hz: frequenciesHz } as never);
   } catch (e) {
     error = errorText(e);
   }
@@ -43,6 +45,12 @@ export async function diagnose(conn: Pick<DaemonConnection, "call">, frequencyHz
 
 export function pinsText(p: Pins): string {
   return `SWCLK ${p.swclk} · SWDIO ${p.swdio} · nRESET ${p.nreset}`;
+}
+
+/** 診断で試す速さの欄（MHz のカンマ区切り。書いた順に試す）を Hz の並びに。どれかが正の数でなければ null */
+export function mhzListToHz(text: string): number[] | null {
+  const out = text.split(",").map(mhzToHz);
+  return out.every((v): v is number => v !== null) ? out : null;
 }
 
 /** 接続の周波数の欄（MHz）を Hz に。正の数でなければ null（欄の誤りとして出し、デーモンに送らない） */

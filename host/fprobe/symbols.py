@@ -10,9 +10,10 @@
 """
 
 import bisect
+import os
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
@@ -89,6 +90,11 @@ def is_line_location(location: str) -> bool:
     return bool(sep and file and line.isdigit())
 
 
+def _normal_path(path: Path) -> Path:
+    """同じファイルの違う書き方（a/../a/x.c 等。CU ごとに書き方が違う）を 1 つに。"""
+    return Path(os.path.normpath(path))
+
+
 def is_network_path(path: str | Path) -> bool:
     """外の共有（UNC。円記号 2 つか // で始まる）。開くと認証が外へ出るので、ELF・ソースでは開かない。
     ただし Windows のローカルの長いパス（円記号 2 つ + "?" + 円記号 + ドライブ名）は除く。"""
@@ -109,7 +115,9 @@ class Symbols:
             self._symbols = self._read_symbols(elf)
             self._overloads: dict[str, list[str]] = {}
             linked = self._name_from_source(elf)
-            self._lines, self._sources, self._prologue_ends = self._read_lines(elf)
+            rows, sources, self._prologue_ends = self._read_lines(elf)
+            self._set_lines(rows, sources)
+            self._relocated: dict[str, dict[str, Path]] = {}
             self._relocate_sources()
             self.segments = tuple(Segment(seg["p_paddr"], seg.data()) for seg in elf.iter_segments()
                                   if seg["p_type"] == "PT_LOAD" and seg["p_filesz"] > 0)
@@ -117,10 +125,21 @@ class Symbols:
         functions = sorted((s for s in named if s.kind == "function"), key=lambda s: s.address)
         self._function_starts = [s.address for s in functions]
         self._functions = functions
-        everything = sorted(named, key=lambda s: (s.address, -s.size))
+        self._index_all(named)
+
+    def _set_lines(self, rows: list[tuple[int, str, int, Path]], sources: dict[str, list[Path]]) -> None:
+        """行表（番地順の (番地, ファイル名, 行, 場所)）と、ファイル名 → 場所（同じ名前の別のファイルはすべて、出た順）。"""
+        self._lines = rows
+        self._source_paths = {name: list(paths) for name, paths in sources.items()}
+        self._sources = {name: paths[0] for name, paths in self._source_paths.items()}
+        self._line_addresses = [row[0] for row in rows]
+
+    def _index_all(self, symbols) -> None:
+        """symbol_at の索引（番地の順。同じ番地は大きいほうが先）。"""
+        everything = sorted(symbols, key=lambda s: (s.address, -s.size))
         self._all_starts = [s.address for s in everything]
         self._all = everything
-        self._line_addresses = [row[0] for row in self._lines]
+        self._all_extent = max((max(s.size, 1) for s in everything), default=1)   # 後ろを探す距離（最大の大きさ）
 
     # --- 読み込み ------------------------------------------------------------------
 
@@ -176,14 +195,14 @@ class Symbols:
         return set(found)
 
     @staticmethod
-    def _read_lines(elf: ELFFile) -> tuple[list[tuple[int, str, int, Path]], dict[str, Path], list[int]]:
-        """(番地, ファイル名, 行, 場所) を番地順に（is_stmt の行だけ = 文の始まり）と、ファイル名 → 場所と、
-        前置きの終わり（prologue_end）の番地の一覧（番地順）。"""
+    def _read_lines(elf: ELFFile) -> tuple[list[tuple[int, str, int, Path]], dict[str, list[Path]], list[int]]:
+        """(番地, ファイル名, 行, 場所) を番地順に（is_stmt の行だけ = 文の始まり）と、ファイル名 → 場所（同じ名前の
+        別のファイルはすべて）と、前置きの終わり（prologue_end）の番地の一覧（番地順）。"""
         if not elf.has_dwarf_info():
             return [], {}, []
         dwarf = elf.get_dwarf_info()
         rows: list[tuple[int, str, int, Path]] = []
-        sources: dict[str, Path] = {}
+        sources: dict[str, list[Path]] = {}
         prologue_ends: set[int] = set()
         for cu in dwarf.iter_CUs():
             program = dwarf.line_program_for_CU(cu)
@@ -202,8 +221,11 @@ class Symbols:
                 path = Path(directory) / f.name.decode()
                 if not path.is_absolute() and comp_dir:
                     path = Path(_text(comp_dir.value)) / path
+                path = _normal_path(path)
                 paths.append(path)
-                sources.setdefault(path.name, path)                 # 同じ名前が 2 つあれば先のもの（場所の書き方と同じ）
+                same = sources.setdefault(path.name, [])
+                if path not in same:                                # 同じ名前の別のファイルも残す（どちらとも決めない）
+                    same.append(path)
             for entry in program.get_entries():
                 state = entry.state
                 if state is None or state.end_sequence or not state.is_stmt:
@@ -223,17 +245,42 @@ class Symbols:
         """ビルドした場所に無いソースが ELF の隣にあれば、そちらを使う（ELF とソースを一緒に別の場所へ移したとき。
         例: リポジトリを別の PC・場所に置いた同梱のデモ）。"""
         moved = {}
-        for name, path in self._sources.items():
+        for name, paths in self._source_paths.items():
             here = self.path.parent / name
-            if not path.exists() and here.is_file():
-                moved[path] = here
+            if len(paths) == 1 and not paths[0].exists() and here.is_file():   # 同じ名前が複数ならどれとも決めない
+                moved[paths[0]] = here
         if moved:
-            self._sources = {name: moved.get(p, p) for name, p in self._sources.items()}
-            self._lines = [(a, f, line, moved.get(p, p)) for a, f, line, p in self._lines]
+            self._set_lines([(a, f, line, moved.get(p, p)) for a, f, line, p in self._lines],
+                            {name: [moved.get(p, p) for p in paths] for name, paths in self._source_paths.items()})
+            self._relocated = {here.name: {"built": built, "used": here} for built, here in moved.items()}
+
+    def relocated(self) -> dict[str, dict[str, Path]]:
+        """ビルドした場所に無く、ELF の隣の同じ名前のファイルに置き換えたソース: 名前 → {built（行表の場所）, used}。
+        同じ名前なら同じソースとみなしている（中身は確かめていない）。"""
+        return {name: dict(v) for name, v in getattr(self, "_relocated", {}).items()}
 
     def sources(self) -> dict[str, Path]:
-        """行番号の情報が参照するソース: ファイル名 → 場所（ビルドした PC の上の場所。無いこともある）。"""
+        """行番号の情報が参照するソース: ファイル名 → 場所（ビルドした PC の上の場所。無いこともある）。同じ名前の
+        別のファイルがあれば、ここには最初に出たものだけ（ほかは source_conflicts）。"""
         return dict(self._sources)
+
+    def source_conflicts(self) -> dict[str, list[Path]]:
+        """同じファイル名の別のファイル: 名前 → 場所の一覧（出た順）。"ファイル:行" はディレクトリを添えて選ぶ。"""
+        return {name: list(paths) for name, paths in self._source_paths.items() if len(paths) > 1}
+
+    def _source_for(self, file: str) -> Path:
+        """"ファイル:行" のファイルの部分 → 行表の場所。名前の同じファイルが複数なら、添えたディレクトリ（後ろから
+        合わせる）で 1 つに決まるときだけ。決まらなければ候補を挙げて誤り（先に出たものを選ばない）。"""
+        parts = PurePosixPath(file.replace("\\", "/")).parts
+        candidates = self._source_paths.get(parts[-1] if parts else file, [])
+        if len(parts) > 1:
+            candidates = [p for p in candidates if PurePosixPath(p.as_posix()).parts[-len(parts):] == parts]
+        if not candidates:
+            raise KeyError(f"{file} はこの ELF の行表に無い")
+        if len(candidates) > 1:
+            raise KeyError(f"{file} は複数のファイルに当たる（ディレクトリを添えて選ぶ）: "
+                           + ", ".join(str(p) for p in candidates))
+        return candidates[0]
 
     def lines_of(self, file: str) -> list[int]:
         """そのファイルで命令のある行（ブレークポイントを置ける行）。"""
@@ -267,35 +314,43 @@ class Symbols:
             return int(text, 16)
         if is_line_location(text):
             file, _, line = text.rpartition(":")
-            return self._line_address(PurePath(file).name, int(line))
+            return self._line_address(file, int(line))
         return self.symbol(text).address
 
     def _line_address(self, file: str, line: int) -> int:
-        path = self._sources.get(file)
-        hits = [address for address, f, n, p in self._lines if f == file and n == line and p == path]
+        path = self._source_for(file)
+        hits = [address for address, _, n, p in self._lines if n == line and p == path]
         if not hits:
             raise KeyError(f"{file}:{line} に対応する命令が無い（最適化で消えたか、行が違う）")
         return min(hits)
 
     def after_prologue(self, address: int) -> int:
         """関数の先頭なら、前置き（スタックの用意）の後の番地。引数・ローカル変数が読める最初の場所（関数名の
-        ブレークポイントに使う。GDB と同じ）。行表の prologue_end があればそれ、無ければ次の行の始まり。
-        関数の先頭でなければそのまま。"""
-        i = bisect.bisect_right(self._function_starts, address) - 1
-        if i < 0 or self._function_starts[i] != address:
+        ブレークポイントに使う）。行表の prologue_end（コンパイラが書いた事実）があればそれ、無ければ関数の先頭のまま
+        （「次の行の始まり」を前置きの終わりと推定しない。GDB 流の経験則はプラグイン fprobe.plugins.heuristics の
+        after_first_line）。関数の先頭でなければそのまま。"""
+        end = self._function_end_at(address)
+        if end is None:
             return address
-        end = address + max(self._functions[i].size, 1)
         j = bisect.bisect_left(self._prologue_ends, address)
         if j < len(self._prologue_ends) and self._prologue_ends[j] < end:
             return self._prologue_ends[j]
-        k = bisect.bisect_left(self._line_addresses, address)
-        first_line = self._lines[k][2] if k < len(self._lines) and self._lines[k][0] == address else None
-        for row in self._lines[k:]:
-            if row[0] >= end:
-                break
-            if row[0] > address and row[2] != first_line:
-                return row[0]
         return address
+
+    def has_prologue_end(self, address: int) -> bool | None:
+        """関数の先頭 address の関数に、行表の prologue_end があるか（関数の先頭でなければ None）。"""
+        end = self._function_end_at(address)
+        if end is None:
+            return None
+        j = bisect.bisect_left(self._prologue_ends, address)
+        return j < len(self._prologue_ends) and self._prologue_ends[j] < end
+
+    def _function_end_at(self, address: int) -> int | None:
+        """address がちょうど関数の先頭なら、その関数の終わり（無ければ None）。"""
+        i = bisect.bisect_right(self._function_starts, address) - 1
+        if i < 0 or self._function_starts[i] != address:
+            return None
+        return address + max(self._functions[i].size, 1)
 
     def symbol_at(self, address: int) -> tuple[Symbol, int] | None:
         """番地を含むシンボル（関数・変数）と、その先頭からのバイト数。大きさ 0 のシンボルは先頭の番地だけ。"""
@@ -304,7 +359,7 @@ class Symbols:
             s = self._all[i]
             if address < s.address + max(s.size, 1):
                 return s, address - s.address
-            if address - s.address > 0x10000:
+            if address - s.address >= self._all_extent:          # これより前のシンボルは届かない（大きさの最大）
                 break
             i -= 1
         return None

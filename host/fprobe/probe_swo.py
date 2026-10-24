@@ -19,6 +19,7 @@ WindowTools（出来事の窓・write_registers）を使う。機器に触るの
 
 from dataclasses import dataclass, field
 
+from .api import NoData
 from .dwarf.typesys import type_name
 from .dwarf.values import decode
 from .itm import DecodeError, ExceptionTrace, Overflow, Timestamper
@@ -34,7 +35,6 @@ __all__ = ["ACCESS_LIMIT", "SwoTools"]
 ACCESS_LIMIT = 1 << 20                  # ためるアクセスの上限（超えた分は数えて捨てる）
 EXCEPTION_LIMIT = 1 << 16               # ためる例外トレースの上限
 _DATAVMATCH = 1 << 8
-_TRACE_PIN_REGISTERS = ("DBG.DBGMCU_CR", "DBGMCU.CR", "DBGMCU.DBGMCU_CR")
 
 
 class _PyocdDwt:
@@ -81,7 +81,7 @@ class _SwoRun:
     baud: float | None
     window: EventWindow | None
     synced: bool
-    trace_pin: str | None
+    trace_pin: dict | None               # 使う側が渡した SWO のピンのレジスタの欄（書いたもの）
     stream: TimedItmStream
     stamper: Timestamper | None                           # ローカルのタイムスタンプを付ける（有効なとき）
     assembler: DataTraceAssembler
@@ -89,6 +89,7 @@ class _SwoRun:
     accesses: list[DataAccess] = field(default_factory=list)
     dropped: int = 0
     exceptions: list[tuple[int, int, str]] = field(default_factory=list)
+    exceptions_dropped: int = 0                               # EXCEPTION_LIMIT を超えてためなかった例外の出来事
     exception_counts: dict[str, int] = field(default_factory=dict)
     overflows: int = 0
     errors: int = 0
@@ -111,14 +112,18 @@ class SwoTools:
     def swo_configure(self, ports: list[int] | None = None, timestamps: bool = False, timestamp_prescale: int = 1,
                       exception_trace: bool = False, counters: list[str] | None = None,
                       data_trace: list[dict] | None = None, value_watch: list[dict] | None = None,
-                      swo_baud: int | None = None, core_clock_hz: float | None = None, trace_pin: bool = True) -> dict:
+                      swo_baud: int | None = None, core_clock_hz: float | None = None,
+                      trace_pin: dict | None = None) -> dict:
         """ITM・DWT の出力を止めずに設定する（前の swo_configure の設定は戻してから）。ports: ITM のスティミュラス・
         ポート。timestamps: ローカルのタイムスタンプ（サイクルの精度。timestamp_prescale 1/4/16/64）。exception_trace:
         例外の入る・出る・戻る。counters: イベントカウンタ（cpi・exc・sleep・lsu・fold）の溢れ。data_trace: 変数への
         アクセス（{"expression", "access": read|write|rw, "pc", "value", "offset"}）。value_watch: 値一致
         （{"expression"（省略で番地を問わない）, "value", "size", "access", "action": halt|trace}）。swo_baud を渡すと
-        受信も始め、core_clock_hz も渡すと TPIU（SWO の速度）も設定する。trace_pin: SVD に DBGMCU_CR.TRACE_IOEN が
-        あれば SWO のピンを有効にする（STM32）。計画（比較器・書いたレジスタ・帯域の見積もり・警告）を返す。"""
+        受信も始め、core_clock_hz も渡すと TPIU（SWO の速度）も設定する。trace_pin: SWO のピンを有効にするチップ固有の
+        レジスタの欄（{"register": SVD の場所 "周辺.レジスタ", "fields": {欄: 値}}。例 STM32 は {"register":
+        "DBGMCU.CR", "fields": {"TRACE_IOEN": 1, "TRACE_MODE": 0}}。SVD が要る）。レジスタ名の慣習で探さないので、渡さ
+        なければ書かない（ピンはファームか target_peripheral_write で）。計画（比較器・書いたレジスタ・帯域の見積もり・
+        警告）を返す。"""
         traces = [self._data_trace_spec(d) for d in data_trace or []]
         watches = [self._value_watch_spec(w) for w in value_watch or []]
         request = TraceRequest(tuple(ports or ()), timestamps, timestamp_prescale, exception_trace,
@@ -144,7 +149,7 @@ class SwoTools:
             plan = plan_trace(request, info, core_clock_hz=core_clock_hz,
                               swo_baud=baud if baud is not None else self._swo_baud)
             plan.warnings[:0] = warnings
-            pin_writes, pin = self._trace_pin(plan) if trace_pin and plan.uses_swo else ([], None)
+            pin_writes = self._trace_pin(trace_pin) if trace_pin is not None else []
             itm_was_on = bool(target.read_memory(ITM_TCR) & 1) if plan.uses_swo else False
             before = write_registers(target, plan.setup + tpiu + pin_writes)
             window = None
@@ -161,12 +166,12 @@ class SwoTools:
                        if w.mask != 0xFFFFFFFF]
             restore[:0] = [RegisterWrite(dwt_function(u.index), 0, note="比較器を外す") for u in plan.comparators]
             run = _SwoRun(request, plan, core, targets, restore, [u.index for u in plan.comparators],
-                          baud if plan.uses_swo else None, window, not itm_was_on, pin, TimedItmStream(not itm_was_on),
+                          baud if plan.uses_swo else None, window, not itm_was_on, trace_pin, TimedItmStream(not itm_was_on),
                           Timestamper() if timestamps else None, DataTraceAssembler(plan.comparators),
                           timebase_hz=self.session.device.capabilities().timebase_hz)
             self._swo_run = run
         return {"running": True, "core": {"name": core.name, "arch": core.arch, "cpuid": core.cpuid},
-                "plan": plan.as_dict(), "swo_baud": run.baud, "synced": run.synced, "trace_pin": pin,
+                "plan": plan.as_dict(), "swo_baud": run.baud, "synced": run.synced, "trace_pin": trace_pin,
                 "t0": window.t0 if window else None,
                 "notes": [] if run.synced else ["ITM は前から有効だった: 最初の同期パケット（CYCCNT[24] ごと）までの"
                                                  "パケットは捨てる"]}
@@ -185,7 +190,9 @@ class SwoTools:
             raise ValueError(f"value_watch の項目は expression・value・size・access・action・pc: {sorted(unknown) or d}")
         expression = d.get("expression")
         w = self._watch_target(expression) if expression else None
-        size = d.get("size") or (w.size if w is not None else 4)
+        size = d.get("size") or (w.size if w is not None else None)
+        if size is None:
+            raise ValueError("value_watch に expression が無ければ size が要る（大きさを仮定しない）")
         name = expression or f"value=={d['value']:#x}"
         return ValueWatch(name, int(d["value"]), size, w.address if w is not None else None, d.get("access"),
                           d.get("action", "halt"), d.get("pc", True)), w
@@ -215,34 +222,26 @@ class SwoTools:
         return DwtInfo(numcomp, core.arch, not ctrl & NOTRCPKT, not ctrl & NOPRFCNT, frozenset(busy),
                        frozenset(value_match), frozenset(linkable), max_mask)
 
-    def _trace_pin(self, plan: TracePlan) -> tuple[list[RegisterWrite], str | None]:
-        """SVD に DBGMCU_CR.TRACE_IOEN があれば、SWO のピンを有効に（TRACE_MODE = 0: 非同期）。無ければ何もしない。"""
-        try:
-            device = self._device()
-        except Exception as e:                                   # SVD が無い: ピンはファームか target_peripheral_write で
-            plan.warnings.append(f"SWO のピンの設定を確かめられない（{e}）: STM32 等はファームか "
-                                 "target_peripheral_write で DBGMCU_CR.TRACE_IOEN を 1 に")
-            return [], None
-        for path in _TRACE_PIN_REGISTERS:
-            try:
-                reg = device.register(path)
-                ioen = reg.field("TRACE_IOEN")
-            except KeyError:
-                continue
-            mask, value = ioen.mask, ioen.insert(0, 1)
-            try:
-                mask |= reg.field("TRACE_MODE").mask
-            except KeyError:
-                pass
-            return [RegisterWrite(reg.address, value, mask, f"{reg.path}.TRACE_IOEN: SWO のピンを有効に")], reg.path
-        return [], None
+    def _trace_pin(self, spec: dict) -> list[RegisterWrite]:
+        """使う側が渡した SWO のピンのレジスタの欄（{"register", "fields"}）を、SVD で番地・ビットにして書く。"""
+        if not isinstance(spec, dict) or set(spec) != {"register", "fields"} or not isinstance(spec["fields"], dict) \
+                or not spec["fields"]:
+            raise ValueError(f"trace_pin は {{\"register\": \"周辺.レジスタ\", \"fields\": {{欄: 値}}}}（{spec!r}）")
+        reg = self._device().register(spec["register"])           # SVD が無い・レジスタが無ければ誤り
+        mask = value = 0
+        for name, v in spec["fields"].items():
+            field = reg.field(name)                                # 欄が無ければ KeyError
+            mask |= field.mask
+            value = field.insert(value, int(v))
+        names = "・".join(f"{k}={v}" for k, v in spec["fields"].items())
+        return [RegisterWrite(reg.address, value, mask, f"{reg.path}: {names}（trace_pin）")]
 
     def swo_unconfigure(self) -> dict:
         """swo_configure の設定を戻す（比較器を外し、DWT_CTRL・ITM の変えたビットを元に）。SWO の受信・TPIU は残す
         （ファームの printf 等も使うため）。届いている分まで組み立てた結果（swo_trace と同じ形）を返す。"""
         with self._lock:
             if self._swo_run is None or not self._swo_run.running:
-                raise RuntimeError("swo_configure で設定していない")
+                raise NoData("swo_configure で設定していない")
             run = self._swo_finish()
         return self._trace_dict(run, 0, 0, None)
 
@@ -279,7 +278,7 @@ class SwoTools:
         イベントカウンタの合計（溢れ × 256）、例外の回数。記録中なら記録の stream "swo" にも入れる。"""
         run = self._swo_run
         if run is None:
-            raise RuntimeError("swo_configure で設定していない")
+            raise NoData("swo_configure で設定していない")
         if run.running:
             with self._lock:
                 if run.window is not None:
@@ -310,6 +309,8 @@ class SwoTools:
                     run.exception_counts[name] = run.exception_counts.get(name, 0) + 1
                 if len(run.exceptions) < EXCEPTION_LIMIT:
                     run.exceptions.append((t, p.number, p.action.name.lower()))
+                else:
+                    run.exceptions_dropped += 1
             run.overflows += isinstance(p, Overflow)
             run.errors += isinstance(p, DecodeError)
         run.counters.feed(p for _, _, p in items)
@@ -341,7 +342,8 @@ class SwoTools:
     def _access_dict(self, run: _SwoRun, a: DataAccess) -> dict:
         out = {"t": a.t, "time_us": (a.t - run.window.t0) * 1e6 / run.timebase_hz if run.window else None,
                "name": a.name, "role": a.role, "comparator": a.comparator, "write": a.write,
-               "address": a.address, "size": a.size, "raw": a.value, "value": a.value, "complete": a.complete}
+               "address": a.address, "size": a.size, "raw": a.value,
+               "value": None if a.value is None else {"kind": "int", "value": a.value}, "complete": a.complete}
         if a.local_time is not None:
             out["local_time"] = a.local_time
         w = run.targets.get(a.name)
@@ -349,7 +351,7 @@ class SwoTools:
             try:
                 out["value"] = decode(w.type, a.value.to_bytes(a.size, "little"))
                 out["type"] = type_name(w.type)
-            except Exception:                                    # 解釈できない型: 生の値のまま
+            except Exception:                                    # 解釈できない型: 生の値（符号なし整数）のまま
                 pass
         if a.pc is not None:
             out["pc"] = a.pc
@@ -362,7 +364,8 @@ class SwoTools:
         out = {"running": run.running, "core": run.core.name, "total": len(accesses),
                "accesses": [self._access_dict(run, a) for a in accesses[offset:offset + limit]],
                "counters": run.counters.as_dict() if run.request.counters else {},
-               "exceptions": {"counts": dict(run.exception_counts), "events": len(run.exceptions)},
+               "exceptions": {"counts": dict(run.exception_counts), "events": len(run.exceptions),
+                              "events_dropped": run.exceptions_dropped, "events_limit": EXCEPTION_LIMIT},
                "lost": run.assembler.lost, "outside": run.assembler.outside, "unknown": run.assembler.unknown,
                "overflows": run.overflows, "decode_errors": run.errors, "dropped": run.dropped,
                "comparators": [c.as_dict() for c in run.plan.comparators], "warnings": list(run.plan.warnings)}

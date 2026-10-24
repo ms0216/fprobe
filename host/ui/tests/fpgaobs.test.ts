@@ -2,8 +2,9 @@
 // TCK と半周期の換算・状態の文言
 import { describe, expect, it } from "vitest";
 import {
-  editableGroups, formatBits, formatEnum, parseBits, parseEnum, signalsChanged, statusKey, tckToHalfPeriod,
-  validateSignals, type SignalDef,
+  editableGroups, formatBits, formatEnum, OBS_REGISTERS, parseBits, parseEnum, registerWriteCall, signalsChanged, statusKeys,
+  tckToHalfPeriod,
+  type SignalDef,
 } from "../src/lib/fpgaobs";
 
 const sig = (name: string, bits: string, format: SignalDef["format"] = "hex", enumText = ""): SignalDef =>
@@ -33,32 +34,6 @@ describe("ビットの範囲", () => {
   });
 });
 
-describe("定義の検査（デーモンと同じ規則。保存の前に画面で知らせる）", () => {
-  it("正しい定義は誤り無し", () => {
-    expect(validateSignals({ "0": [sig("mark", "0"), sig("state", "5:4", "enum", "0=IDLE, 1=RUN")] })).toEqual([]);
-  });
-  it("重なり・16 ビットの外・名前の重複・空の名前・列挙の値が幅の外", () => {
-    const errors = validateSignals({
-      "0": [sig("a", "3:0"), sig("b", "2"), sig("a", "8"), sig("", "9"),
-            { name: "wide", lsb: 12, width: 8, format: "hex", enum: {} }, sig("e", "11:10", "enum", "4=X")],
-    });
-    expect(errors.map(e => e.key).sort()).toEqual(
-      ["fpgaObs.err.duplicate", "fpgaObs.err.emptyName", "fpgaObs.err.enumRange", "fpgaObs.err.overlap",
-       "fpgaObs.err.range"].sort());
-    expect(errors.find(e => e.key === "fpgaObs.err.overlap")?.params).toEqual({ group: "0", name: "b" });
-  });
-  it("デーモン（fpga_signals.py）と同じ検査: 名前は 64 文字まで・列挙の値は 0 以上の整数・列挙の名前は空でない（R17）", () => {
-    const errors = validateSignals({
-      "0": [sig("x".repeat(65), "0"),
-            { name: "neg", lsb: 1, width: 2, format: "enum", enum: { "-1": "A" } },
-            { name: "frac", lsb: 3, width: 2, format: "enum", enum: { "1.5": "A" } },
-            { name: "blank", lsb: 5, width: 2, format: "enum", enum: { "1": " " } }],
-    });
-    expect(errors.map(e => e.key).sort()).toEqual(
-      ["fpgaObs.err.enumName", "fpgaObs.err.enumValue", "fpgaObs.err.enumValue", "fpgaObs.err.longName"].sort());
-  });
-});
-
 describe("TCK と半周期", () => {
   it("sys 100 MHz: 10 MHz → 半周期 5、12.5 MHz → 4、上限は半周期 2（25 MHz）・下限 65535", () => {
     expect(tckToHalfPeriod(10, 100e6)).toEqual({ half: 5, mhz: 10 });
@@ -72,15 +47,18 @@ describe("TCK と半周期", () => {
 });
 
 describe("状態の文言", () => {
-  it("答えない・溢れ・止まっている・動いている", () => {
-    expect(statusKey({ running: false, stuck: true, id_ok: false, overflow_seen: false, driving: false }))
-      .toBe("fpgaObs.state.stuck");
-    expect(statusKey({ running: true, stuck: false, id_ok: true, overflow_seen: true, driving: true }))
-      .toBe("fpgaObs.state.overflow");
-    expect(statusKey({ running: true, stuck: false, id_ok: true, overflow_seen: false, driving: true }))
-      .toBe("fpgaObs.state.running");
-    expect(statusKey({ running: false, stuck: false, id_ok: false, overflow_seen: false, driving: false }))
-      .toBe("fpgaObs.state.off");
+  it("答えない・溢れ・動いている・始めている・止まっている: 立っている事実を全部（優先順で 1 つに畳まない）", () => {
+    expect(statusKeys({ running: false, stuck: true, id_ok: false, overflow_seen: false, driving: false }))
+      .toEqual(["fpgaObs.state.stuck"]);
+    expect(statusKeys({ running: true, stuck: false, id_ok: true, overflow_seen: true, driving: true }))
+      .toEqual(["fpgaObs.state.overflow", "fpgaObs.state.running"]);
+    expect(statusKeys({ running: true, stuck: false, id_ok: true, overflow_seen: false, driving: true }))
+      .toEqual(["fpgaObs.state.running"]);
+    expect(statusKeys({ running: false, stuck: false, id_ok: false, overflow_seen: false, driving: false }))
+      .toEqual(["fpgaObs.state.off"]);
+    // 答えなくなったときも、それまでの溢れを落とさない
+    expect(statusKeys({ running: false, stuck: true, id_ok: false, overflow_seen: true, driving: true }))
+      .toEqual(["fpgaObs.state.stuck", "fpgaObs.state.overflow", "fpgaObs.state.starting"]);
   });
 });
 
@@ -113,12 +91,63 @@ describe("開いた設定を画面の欄へ", () => {
     const { configToFields, tckToHalfPeriod } = await import("../src/lib/fpgaobs");
     const f = configToFields({ chain: { ir_len: 6, ir_before: 4, dr_after: 1 }, user_ir: 0x22, half_period: 20, words: 1,
                                sync_period: 0 }, 100e6);
-    expect(f).toEqual({ irLen: 6, irBefore: 4, irAfter: 0, drBefore: 0, drAfter: 1, userIr: "0x22", tckMhz: 2.5,
-                        words: 1, syncPeriod: 0 });
+    expect(f).toEqual({ irLen: 6, irBefore: 4, irAfter: null, drBefore: null, drAfter: 1, userIr: "0x22", tckMhz: 2.5,
+                        halfPeriod: 20, words: 1, syncPeriod: 0, idScans: null });
     for (let half = 2; half <= 200; half++) {                            // 欄から開き直すと同じ半周期（丸めの誤差でずれない）
       const back = configToFields({ chain: {}, user_ir: 2, half_period: half, words: 1, sync_period: 0 }, 100e6);
-      expect(tckToHalfPeriod(back.tckMhz, 100e6)!.half).toBe(half);
+      expect(tckToHalfPeriod(back.tckMhz!, 100e6)!.half).toBe(half);
     }
-    expect(configToFields({ chain: null, user_ir: 2, half_period: 3, words: 64, sync_period: 20 }, 100e6).irLen).toBe(4);
+    // 開いた設定に chain が無い: 欄は空（4 等の値を仮定して見せない）
+    expect(configToFields({ chain: null, user_ir: 2, half_period: 3, words: 64, sync_period: 20 }, 100e6).irLen).toBeNull();
+    // プローブがシステムのクロックを申告しない: TCK は分からない（null）。半周期はそのまま
+    const unknown = configToFields({ chain: null, user_ir: 2, half_period: 3, words: 64, sync_period: 20 }, null);
+    expect([unknown.tckMhz, unknown.halfPeriod]).toEqual([null, 3]);
+  });
+});
+
+describe("fpga_obs.open の引数", () => {
+  const base = { irLen: null, irBefore: null, irAfter: null, drBefore: null, drAfter: null, userIr: "0x2",
+                 tckMhz: 10, halfPeriod: null, words: 64, syncPeriod: 20, idScans: null, autoReopen: false };
+  it("クロックの申告があれば TCK から半周期。無ければ仮定せず、半周期を直接入れたときだけ", async () => {
+    const { openParams } = await import("../src/lib/fpgaobs");
+    expect(openParams(base, 100e6)).toEqual({ chain: null, user_ir: 2, half_period: 5, words: 64, sync_period: 20,
+                                               auto_reopen: false });
+    expect(openParams(base, null)).toBeNull();                                // 100 MHz 等を仮定しない
+    expect(openParams({ ...base, halfPeriod: 7 }, null)!.half_period).toBe(7);
+    expect(openParams({ ...base, halfPeriod: 1 }, null)).toBeNull();          // 範囲の外
+  });
+  it("チェーンは入れた欄だけ（全部空なら null）。User IR が読めなければ null", async () => {
+    const { openParams } = await import("../src/lib/fpgaobs");
+    expect(openParams({ ...base, irLen: 6, drAfter: 1 }, 100e6)!.chain).toEqual({ ir_len: 6, dr_after: 1 });
+    expect(openParams({ ...base, userIr: "x" }, 100e6)).toBeNull();
+  });
+  it("語数・印の周期・User IR・TCK は使う人が入れる（空なら開かない。画面の既定を持たない）", async () => {
+    const { openParams } = await import("../src/lib/fpgaobs");
+    expect(openParams({ ...base, words: null }, 100e6)).toBeNull();
+    expect(openParams({ ...base, syncPeriod: null }, 100e6)).toBeNull();
+    expect(openParams({ ...base, userIr: "" }, 100e6)).toBeNull();
+    expect(openParams({ ...base, tckMhz: null }, 100e6)).toBeNull();
+  });
+});
+
+describe("観測の回路のレジスタ（CONTROL・SELECT）を書く", () => {
+  it("番地は API の説明の 14 CONTROL・15 SELECT。値は 16 ビットに収まる整数", () => {
+    expect(OBS_REGISTERS).toEqual([{ name: "CONTROL", addr: 14 }, { name: "SELECT", addr: 15 }]);
+    expect(registerWriteCall(15, "0x2")).toEqual({ method: "fpga_obs.register_write", params: { addr: 15, value: 2 } });
+    expect(registerWriteCall(14, "70000")).toEqual({ error: "range" });
+    expect(registerWriteCall(14, "-1")).toEqual({ error: "range" });
+    expect(registerWriteCall(14, "on")).toEqual({ error: "value" });
+  });
+});
+
+describe("ID の応答を待つ上限（使う側が渡す）", () => {
+  it("入れたときだけ id_scans を送り、開いた設定から欄に写す", async () => {
+    const { configToFields, openParams } = await import("../src/lib/fpgaobs");
+    const f = { irLen: null, irBefore: null, irAfter: null, drBefore: null, drAfter: null, userIr: "0x2", tckMhz: 10,
+                halfPeriod: null, words: 64, syncPeriod: 20, autoReopen: false };
+    expect(openParams({ ...f, idScans: null }, 100e6)).not.toHaveProperty("id_scans");
+    expect(openParams({ ...f, idScans: 16 }, 100e6)).toMatchObject({ id_scans: 16 });
+    expect(configToFields({ chain: null, user_ir: 2, half_period: 3, words: 64, sync_period: 20, id_scans: 8 }, null).idScans)
+      .toBe(8);
   });
 });

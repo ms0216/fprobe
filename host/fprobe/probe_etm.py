@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .memview import TargetMemory
 from .symbols import is_network_path
-from .trace import decoder_for
+from .trace import Etmv4Config, decoder_for
 from .trace import elements as el
 from .trace.coresight import ETM_BASE, TPIU_BASE, Etmv4, Etmv4Info, Etmv4Setup, Funnel, Tpiu, enable_trace
 from .trace.reconstruct import Flow, Reconstructor
@@ -22,6 +22,15 @@ __all__ = ["EtmTools", "HISTORY_NOTE"]
 
 HISTORY_NOTE = ("ETM が出した命令の列（実行した命令は確実）。M-profile の ETM にはデータの値が無いので、レジスタ・"
                 "メモリの過去の値は含まない（要るならスナップショットから前へ模擬した推定になる）。")
+ERRORS_LIMIT = 20                        # 返す解読の誤りの数の既定（表示の量。総数・切った印・使った値も返す）
+
+
+def _errors(errors: list[str], limit: int) -> dict:
+    """解読の誤りの先頭 limit 件と、総数・切ったか・使った limit（切ったことを黙らない）。"""
+    if limit < 0:
+        raise ValueError("errors_limit は 0 以上")
+    return {"errors": list(errors[:limit]), "errors_total": len(errors), "errors_truncated": len(errors) > limit,
+            "errors_limit": limit}
 
 
 @dataclass
@@ -103,6 +112,18 @@ class EtmTools:
         ring = bytes(self.target.read_memory_block8(address, length))
         return ring[oldest:] + ring[:oldest]                         # リングを古い順に並べ直す
 
+    def _etm_config(self, given: dict | None) -> tuple[Etmv4Config, str]:
+        """解読の構成と出どころ（"etm_config" = 使う側が渡した / "id_registers" = trace.etm.start で読んだ TRCIDRn）。"""
+        if given is not None:
+            missing = [k for k in ("commit_opt1", "vmid_bytes", "cid_bytes") if k not in given]
+            if missing:
+                raise ValueError(f"etm_config に {', '.join(missing)} が無い（commit_opt1・vmid_bytes・cid_bytes をすべて渡す）")
+            return Etmv4Config(bool(given["commit_opt1"]), int(given["vmid_bytes"]), int(given["cid_bytes"])), "etm_config"
+        if self._etm_session is not None:
+            return self._etm_session.info.decoder_config(), "id_registers"
+        raise ValueError("ETM の構成（TRCIDR0.COMMOPT・TRCIDR2 の VMID / Context ID の大きさ）が分からない: trace_etm_start で"
+                         " ID レジスタを読むか、etm_config = {commit_opt1, vmid_bytes, cid_bytes} を渡す")
+
     def _etm_code(self, from_elf: bool | None):
         """命令を読むもの: ELF があれば ELF（from_elf=False なら実機）、無ければ実機。(読み手, "elf" / "target")。"""
         image = self._elf_image()
@@ -116,10 +137,14 @@ class EtmTools:
 
     def etm_decode(self, data_hex: str | None = None, path: str | None = None, address: int | None = None,
                    length: int | None = None, oldest: int = 0, formatted: bool = True, align: str = "auto",
-                   trace_id: int | None = None, protocol: str = "etmv4", from_elf: bool | None = None) -> dict:
+                   trace_id: int | None = None, protocol: str = "etmv4", from_elf: bool | None = None,
+                   errors_limit: int = ERRORS_LIMIT, etm_config: dict | None = None) -> dict:
         """トレースのバイト列を解読し、命令の流れを再構成する（結果は trace.etm.packets / instructions / history）。
+        誤りは先頭 errors_limit 件（errors_total = 総数、errors_truncated = 切ったか、errors_limit = 使った値）。
         formatted: TPIU のフォーマッタの枠付き（trace_id の流れを取り出す。省略時は trace.etm.start の ID、
-        それが無ければ最も多い ID）か、ETM のバイト列そのものか。"""
+        それも無ければ、流れが 1 つだけならその ID。複数なら選ばずに断る: 量の多さで選ばない）か、ETM のバイト列そのものか。
+        etm_config = {commit_opt1, vmid_bytes, cid_bytes}: ETM の構成（TRCIDR0.COMMOPT・TRCIDR2 の VMID / Context ID の
+        大きさ）。渡さなければ trace.etm.start で読んだ ID レジスタの値（どちらも無ければ断る。暗黙の値で解読しない）。"""
         with self._lock:
             raw = self._etm_bytes(data_hex, path, address, length, oldest)
             out: dict = {"bytes": len(raw), "protocol": protocol}
@@ -130,25 +155,30 @@ class EtmTools:
                 out["deformat"] = frames.as_dict()
                 out["streams"] = out["deformat"].pop("streams")
                 if trace_id is None:
-                    session_id = self._etm_session.trace_id if self._etm_session else None
-                    trace_id = session_id if session_id in streams else \
-                        max(streams, key=lambda i: len(streams[i])) if streams else None
+                    trace_id = self._etm_session.trace_id if self._etm_session else None
+                if trace_id is None and len(streams) > 1:
+                    sizes = ", ".join(f"0x{i:02X}: {len(streams[i])} バイト" for i in sorted(streams))
+                    raise ValueError(f"トレース ID の流れが複数ある（{sizes}）: trace_id で選ぶ")
+                if trace_id is None and streams:
+                    trace_id = next(iter(streams))                       # 流れが 1 つだけ
                 stream = streams.get(trace_id, b"")
                 out["trace_id"] = trace_id
-            config = self._etm_session.info.decoder_config() if self._etm_session else None
+            config, origin = self._etm_config(etm_config)
+            out["etm_config"] = {"commit_opt1": config.commit_opt1, "vmid_bytes": config.vmid_bytes,
+                                 "cid_bytes": config.cid_bytes, "from": origin}
             elements = decoder_for(protocol, config).decode(stream)
             memory, origin = self._etm_code(from_elf)
             flow = Reconstructor(memory, self._symbols).run(elements)
             self._etm_result = _EtmResult(elements, flow)
             addresses = flow.addresses()
-            errors = list(flow.errors[:20])
+            errors = list(flow.errors)
             if formatted and trace_id not in streams:
                 errors.insert(0, f"トレース ID {'' if trace_id is None else f'0x{trace_id:02X} '}の流れが無い"
                                  f"（あるのは {sorted(out['streams']) or 'なし'}。FSYNC が無ければ align を確かめる）")
             out.update({
                 "code": origin, "packets": len(elements), "instructions": flow.count,
                 "exceptions": sum(1 for m in flow.markers if m.kind == "exception"),
-                "unresolved_atoms": flow.unresolved_atoms, "errors": errors,
+                "unresolved_atoms": flow.unresolved_atoms, **_errors(errors, errors_limit),
                 "first": {"address": addresses[0], **self._place_of(addresses[0])} if addresses else None,
                 "last": {"address": addresses[-1], **self._place_of(addresses[-1])} if addresses else None,
                 "next_address": flow.next_address,
@@ -178,13 +208,14 @@ class EtmTools:
                 rows, total = matched[offset:offset + limit], len(matched)
             return {"total": total, "offset": offset, "instructions": rows, "markers": self._etm_markers(flow, rows)}
 
-    def etm_history(self, count: int = 32) -> dict:
-        """事後の命令履歴: トレースの最後（止まった所の直前）の count 命令（古い順）と、その間の出来事。"""
+    def etm_history(self, count: int = 32, errors_limit: int = ERRORS_LIMIT) -> dict:
+        """事後の命令履歴: トレースの最後（止まった所の直前）の count 命令（古い順）と、その間の出来事。解読の誤りは
+        先頭 errors_limit 件（errors_total・errors_truncated・errors_limit）。"""
         with self._lock:
             flow = self._etm().flow
             rows = flow.history(count)
             return {"total": flow.count, "instructions": rows, "markers": self._etm_markers(flow, rows),
-                    "next_address": flow.next_address, "errors": flow.errors[:20], "note": HISTORY_NOTE}
+                    "next_address": flow.next_address, **_errors(flow.errors, errors_limit), "note": HISTORY_NOTE}
 
     @staticmethod
     def _etm_markers(flow: Flow, rows: list[dict]) -> list[dict]:

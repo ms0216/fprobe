@@ -19,7 +19,8 @@ import random
 import time
 from pathlib import Path
 
-from .flash import FlashMemory, Image, Progress, Rate, Segment, add_flm_region, crc32, remove_region, save_image
+from .flash import (FlashMemory, Image, Progress, Rate, RegisterGuard, Segment, add_flm_region, crc32, remove_region,
+                    save_image)
 from .packs import Packs
 
 __all__ = ["FlashTools"]
@@ -32,6 +33,7 @@ class FlashTools:
     def _init_flash(self) -> None:
         self._publish = None                                   # 通知の送り先 publish(topic, data)（デーモン）
         self._flash_algos: dict[str, dict] = {}                # 名前 → add_flm_region の引数
+        self._flash_guard: dict | None = None                  # 書き込みアルゴリズムの間の守り（使う側が渡す）
         self._packs: Packs | None = None
 
     def attach_publisher(self, publish) -> None:
@@ -49,7 +51,27 @@ class FlashTools:
         for name, spec in self._flash_algos.items():
             if name not in present:
                 add_flm_region(target, name=name, **spec)
-        return FlashMemory(target)
+        return FlashMemory(target, guards=self._flash_guards())
+
+    def _flash_guards(self) -> list[RegisterGuard]:
+        return [RegisterGuard.from_dict(self._flash_guard)] if self._flash_guard is not None else []
+
+    def flash_algorithm_guard_set(self, guard: dict | None = None) -> dict:
+        """書き込みアルゴリズムを動かす間だけチップのレジスタを決めた状態にし、抜けるときに戻す手順（fprobe.flash
+        .RegisterGuard の {enter, exit}。None で外す）。機器固有の守り（例: STM32F2 / F4 / F7 で走っていたプログラムの
+        PLL のままアルゴリズムを動かさない）は本体に持たず、使う側が渡す（プラグイン fprobe.plugins.stm32_flash_clock）。"""
+        if guard is not None:
+            RegisterGuard.from_dict(guard)                     # 形を確かめる（誤りは ValueError）
+        with self._lock:
+            self._flash_guard = guard
+            fbp = getattr(self, "_flash_bp", None)
+            if fbp is not None:
+                fbp._memory.guards = self._flash_guards()
+            return {"guard": guard}
+
+    def flash_algorithm_guard_get(self) -> dict:
+        """flash_algorithm_guard_set で渡した守り（無ければ None）。"""
+        return {"guard": self._flash_guard}
 
     def _note_flash(self, kind: str, body: dict) -> None:
         self._record_host("flash", kind, time.monotonic(), body=body)
@@ -260,10 +282,11 @@ class FlashTools:
             self._packs = Packs()
         return self._packs
 
-    def pack_find(self, pattern: str, update: bool = False) -> dict:
+    def pack_find(self, pattern: str, update: bool = False, limit: int = 200) -> dict:
         """CMSIS-Pack の索引を部品番号で探す（グロブ。ワイルドカードが無ければ部分一致）。索引が無いか update なら
-        取ってくる（ネットに出る）。部品・Pack・版・入れてあるか。"""
-        return {"parts": self.packs.find(pattern, update)}
+        取ってくる（ネットに出る）。部品・Pack・版・入れてあるか（名前の順に limit 個まで。総数 total・切ったか
+        truncated・使った上限 limit）。"""
+        return self.packs.find(pattern, update, limit)
 
     def pack_install(self, pattern: str, update: bool = False) -> dict:
         """部品番号に合う部品の CMSIS-Pack を落として入れる（ネットに出る）。以後 target_connect に targets の名前が

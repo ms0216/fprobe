@@ -5,6 +5,7 @@
 
 import pytest
 from rtos_kernel import FILL, PORT_MAX_DELAY, FreeRTOSBuilder, shared
+from value_kinds import vfloat, vint
 
 from fprobe.dwarf.access import AccessError, ImageAccess
 from fprobe.rtos import detect, open_rtos
@@ -63,6 +64,25 @@ def test_detect_and_layouts():
     assert tcb.length("pcTaskName") == 12
     rtos = open_rtos(info, ImageAccess.from_symbols(symbols), symbols)
     assert isinstance(rtos, FreeRTOS) and rtos.port == "armv7m_fp"      # ARM_CM4F の port（vPortEnableVFP がある）
+    assert rtos.port_basis == "vPortEnableVFP"
+
+
+def test_port_is_not_guessed_from_a_missing_function(kernel, monkeypatch):
+    """vPortEnableVFP が無いことからは port を決めない（「無いから ARM_CM3」は推定）。決まらなければ保存された
+    文脈は読まずに理由を言い、使う側が port を明示すればそれで読む。"""
+    real = FreeRTOS.function_address
+    monkeypatch.setattr(FreeRTOS, "function_address",
+                        lambda self, name: None if name == "vPortEnableVFP" else real(self, name))
+    rtos = rtos_of(kernel)
+    assert rtos.port is None and rtos.port_basis is None
+    snap = rtos.snapshot()
+    assert snap["port"] is None and snap["port_basis"] is None
+    assert {t["name"] for t in snap["tasks"]} >= {"ctrl", "worker"}           # 一覧は読める
+    with pytest.raises(ValueError, match="port"):
+        rtos.saved_context("worker")
+    info, symbols = shared()
+    explicit = FreeRTOS(info, kernel.memory, symbols, port="armv7m_fp")
+    assert explicit.port == "armv7m_fp" and explicit.port_basis == "explicit"
 
 
 def test_task_list_states(kernel):
@@ -76,6 +96,18 @@ def test_task_list_states(kernel):
         "IDLE": TaskState.READY}
     assert t["ctrl"].priority == 3 and t["IDLE"].priority == 0 and t["worker"].number == 3
     assert t["sensor"].handle == kernel.handles["sensor"]
+
+
+def test_priority_gives_where_it_was_read(kernel):
+    """書く側（画面・AI）が target.memory.write で書けるよう、優先度を読んだ TCB の番地と大きさを返す。"""
+    info, _ = shared()
+    tcb = StructLayout.of(info, "TCB_t")
+    rtos = rtos_of(kernel)
+    ctrl = by_name(rtos.tasks())["ctrl"]
+    where = ctrl.to_dict()["locations"]["priority"]
+    assert where == {"address": kernel.handles["ctrl"] + tcb.offset("uxPriority"), "size": tcb.member_size("uxPriority"),
+                     "member": "uxPriority"}
+    assert rtos.mem.uint(where["address"], where["size"]) == 3
 
 
 def test_waits(kernel):
@@ -191,10 +223,13 @@ def test_stack_overflow_marks(kernel):
     k.put_state(plain, k.ready(2))
     t = by_name(rtos_of(k).tasks())
     # 「底が塗りでなく、その上に塗りが残る → あふれた」と推定しない。事実（底は塗りでない・上に塗りがある）を返す
-    assert not t["smashed"].stack.overflow and t["smashed"].stack.fill == "none" and t["smashed"].stack.fill_above
+    assert not t["smashed"].stack.overflow and t["smashed"].stack.fill == "none"
+    # 底から上で最も長い塗りの続き（閾値で「残っている」と決めない）: 壊れた 8 バイトの上から
     assert t["under"].stack.overflow
     assert t["plain"].stack.fill == "none" and not t["plain"].stack.overflow and t["plain"].stack.peak_used is None
-    assert not t["plain"].stack.fill_above
+    run = t["smashed"].stack.fill_run_above
+    assert run["offset"] == 8 and run["length"] >= 8 and run["searched"] >= run["offset"] + run["length"]
+    assert t["plain"].stack.fill_run_above is None
 
 
 def test_snapshot(kernel):
@@ -212,7 +247,7 @@ def test_corrupt_list_stops(kernel):
     rtos = rtos_of(k)
     tasks = rtos.tasks()                                     # 止まる
     assert "IDLE" in [t.name for t in tasks]
-    assert any("壊れ" in w for w in rtos.warnings)
+    assert any("輪" in w for w in rtos.warnings)                  # 自分を指す = 前に通った項目に戻った（事実）
 
 
 def test_missing_kernel_is_reported():
@@ -255,9 +290,9 @@ def test_backtrace_of_preempted_task_in_recursion(kernel):
     frames = rtos.backtrace("worker", variables=True)
     assert functions(frames) == ["recurse"] * 4 + ["worker_task"]        # prvTaskExitError で止まる
     assert frames[0]["pc"] == pc
-    assert arguments(frames[0])["depth"] == 3
+    assert arguments(frames[0])["depth"] == vint(3)
     insp = rtos.inspector("worker")
-    assert insp.read("depth")["value"] == 3
+    assert insp.read("depth")["value"] == vint(3)
 
 
 def test_backtrace_with_fp_context(kernel):
@@ -277,7 +312,7 @@ def test_backtrace_with_fp_context(kernel):
     assert access.read_register("s0") == s0 and access.read_register("s17") == 0x4000_0001
     frames = rtos.backtrace("fpu", variables=True)
     assert functions(frames) == ["fpu_step", "fpu_task"]
-    assert arguments(frames[0])["x"] == 3.5
+    assert arguments(frames[0])["x"] == vfloat(3.5)
 
 
 def test_backtrace_of_task_blocked_in_queue_receive(kernel):
@@ -290,7 +325,7 @@ def test_backtrace_of_task_blocked_in_queue_receive(kernel):
     k.switch_out(h, b, pc)
     frames = rtos_of(k).backtrace("ctrl", variables=True)
     assert functions(frames) == ["xQueueReceive", "ctrl_task"]
-    assert arguments(frames[0])["xQueue"]["pointer"] == q
+    assert arguments(frames[0])["xQueue"]["address"] == q
 
 
 def test_backtrace_of_task_that_never_ran(kernel):
@@ -314,7 +349,10 @@ def test_backtrace_of_running_task_uses_real_registers(kernel):
     info, symbols = shared()
     rtos = FreeRTOS(info, access, symbols)
     assert rtos.task_access("sensor") is access and rtos.saved_context("sensor") is None
-    assert functions(rtos.backtrace("sensor")) == ["vTaskDelay", "sensor_task"]
+    frames = rtos.backtrace("sensor")
+    assert functions(frames) == ["vTaskDelay", "sensor_task"]
+    # 止めた理由は最後の段だけに: タスクの関数の戻り先の罠で止めた
+    assert "stop" not in frames[0] and frames[-1]["stop"] == {"reason": "stop_pc", "pc": exit_trap() & ~1}
     assert by_name(rtos.tasks())["sensor"].stack.pointer == b.regs["psp"]
 
 

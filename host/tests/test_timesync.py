@@ -1,7 +1,7 @@
 from fprobe import generated as g
 from fprobe.timesync import ParentTime, fit_parent, segments, to_parent
 
-RX, TX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_TICKS, g.SYNC_TX_LATENCY_TICKS
+RX, TX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_SPAN_TICKS, g.SYNC_TX_LATENCY_TICKS
 
 
 def pairs_for(ratio: float, offset: int, n: int = 10, step: int = 100_000) -> list[tuple[int, int]]:
@@ -32,8 +32,9 @@ def test_uncertainty_is_facts():
     pairs = pairs_for(1.0, 500)
     fit = fit_parent(pairs)
     got = to_parent(fit, pairs[3][0] + 7, [p[0] for p in pairs])
-    assert set(got) == {"t", "quantization_ticks", "residual_max_ticks", "nearest_pair_ticks", "cable_delay"}
-    assert got["quantization_ticks"] == 1 and got["cable_delay"] is None
+    assert set(got) == {"t", "quantization_ticks", "phase_span_ticks", "residual_max_ticks", "nearest_pair_ticks",
+                        "cable_delay"}
+    assert got["quantization_ticks"] == 1 and got["phase_span_ticks"] == 1 and got["cable_delay"] is None
     assert got["nearest_pair_ticks"] == 7
     assert got["residual_max_ticks"] == fit.residual_max < 1
 

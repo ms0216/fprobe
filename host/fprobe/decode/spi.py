@@ -1,7 +1,7 @@
 """SPI の解読。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md"""
 
 from ..la import Transitions
-from .core import Annotation, Decoding, project
+from .core import Annotation, Channel, Decoding, project
 
 __all__ = ["decode_spi"]
 
@@ -16,10 +16,10 @@ class _Word:
         self.miso = 0
 
 
-def decode_spi(tr: Transitions, *, sck: int, mosi: int | None = None, miso: int | None = None,
-               cs: int | None = None, mode: int = 0, msb_first: bool = True, word_bits: int = 8,
-               cs_active_low: bool = True) -> Decoding:
-    """SPI を解読する。mode = CPOL × 2 + CPHA。CS を省くと最初のクロックの辺から word_bits ごとに区切る。"""
+def decode_spi(tr: Transitions, *, sck: Channel, mosi: Channel | None, miso: Channel | None, cs: Channel | None, mode: int,
+               msb_first: bool, word_bits: int, cs_active_low: bool) -> Decoding:
+    """SPI を解読する。mode = CPOL × 2 + CPHA。設定はすべて既定を持たない（つながない線は None を明示）。
+    cs = None のときは最初のクロックの辺から word_bits ごとに区切る。"""
     if mode not in (0, 1, 2, 3):
         raise ValueError(f"モードは 0〜3（{mode}）")
     if mosi is None and miso is None:

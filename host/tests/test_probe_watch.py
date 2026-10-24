@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from test_probe_observe import FakeCpu, connect, wait_for
+from value_kinds import ints, varray, vbool, venum, vfloat, vint, vstruct
 
 from fprobe import generated as g
 from fprobe import probe_watch
@@ -22,12 +23,17 @@ DWARF_O0 = Path(__file__).resolve().parents[1] / "firmware" / "dwarf_demo" / "dw
 class FakeEventLog:
     events: list[DapEvent] = []
     started = 0
+    capacity = 1 << 16
+    overwritten = 0
 
     def __init__(self, dev):
         pass
 
     def ensure_started(self):
         FakeEventLog.started += 1
+
+    def counts(self):
+        return len(FakeEventLog.events), 0
 
     def read(self, last=None, end=None):
         return FakeEventLog.events[:end][-last:]
@@ -75,19 +81,45 @@ def test_expressions_become_slots_and_words_become_typed_values(probe):
              0x20000400: 0x11223344, 0x20000404: 0x55667788}
     FakeEventLog.events = [sample(1000 + i, a, v) for i, (a, v) in enumerate(words.items())]
     values = {v["name"]: v["value"] for v in probe.watch_values()["values"]}
-    assert values["sensors[1].mode"] == {"enum": "MODE_RUN", "value": 1}
-    assert values["big"] == 0x123456789ABCDEF0
-    assert values["negative"] == -5
-    assert values["0x20000400:8"] == 0x5566778811223344
+    assert values["sensors[1].mode"] == venum("MODE_RUN", 1)
+    assert values["big"] == vint(0x123456789ABCDEF0)
+    assert values["negative"] == vint(-5)
+    assert values["0x20000400:8"] == vint(0x5566778811223344)                 # 番地の式: 符号なし整数
 
 
 def test_series_follows_one_variable_over_rounds(probe):
     probe.watch_set(["0x20000000"], rate_hz=1000)
     FakeEventLog.events = [sample(100_000 * k, 0x20000000, k) for k in range(5)]
     got = probe.watch_series("0x20000000")["samples"]
-    assert [s["value"] for s in got] == [0, 1, 2, 3, 4] and got[1]["time_us"] == pytest.approx(1000)
+    assert [s["value"] for s in got] == ints(0, 1, 2, 3, 4) and got[1]["time_us"] == pytest.approx(1000)
     with pytest.raises(KeyError):
         probe.watch_series("nothing")
+
+
+def test_series_says_where_the_read_starts_when_older_values_were_not_read(probe):
+    """last で切って古い値を読まなかったら、読んだ範囲の始め（from_us）を返す（画面が抜けを示せる）。全部読めば None"""
+    probe.watch_set(["0x20000000"], rate_hz=1000)
+    FakeEventLog.events = [sample(100_000 * k, 0x20000000, k) for k in range(5)]
+    assert probe.watch_series("0x20000000", last=10)["from_us"] is None
+    cut = probe.watch_series("0x20000000", last=2)
+    assert [s["value"] for s in cut["samples"]] == ints(3, 4) and cut["from_us"] == pytest.approx(3000)
+
+
+def test_xy_pairs_each_x_with_the_latest_earlier_y_and_keeps_both_times(probe):
+    """XY: x の各値に、その時刻以前で最新の y。両方の時刻と差の最大を出す。y が前に無い x は unpaired。
+    max_dt_us は渡したときだけ外す（既定では外さない）"""
+    probe.watch_set(["0x20000000", "0x20000004"], rate_hz=1000)
+    FakeEventLog.events = [sample(0, 0x20000000, 0), sample(100, 0x20000004, 10),
+                           sample(100_000, 0x20000000, 1), sample(100_100, 0x20000004, 11),
+                           sample(500_000, 0x20000000, 2)]
+    got = probe.watch_xy("0x20000000", "0x20000004")
+    assert [(p["x"], p["y"]) for p in got["points"]] == [(vint(1), vint(10)), (vint(2), vint(11))]
+    assert got["points"][1]["x_time_us"] == pytest.approx(5000) and got["points"][1]["y_time_us"] == pytest.approx(1001)
+    assert got["dt_max_us"] == pytest.approx(3999) and got["unpaired"] == 1 and got["excluded"] == 0
+    cut = probe.watch_xy("0x20000000", "0x20000004", max_dt_us=1000)
+    assert [(p["x"], p["y"]) for p in cut["points"]] == [(vint(1), vint(10))] and cut["excluded"] == 1
+    with pytest.raises(KeyError):
+        probe.watch_xy("0x20000000", "nothing")
 
 
 def test_values_that_are_not_in_memory_are_refused(probe):
@@ -129,7 +161,7 @@ def test_sampler_counts_are_since_the_start(probe):
 
 
 def test_who_holds_the_sampler_is_reported_with_the_way_to_release_it(probe):
-    assert probe.sampler_status() == {"user": None, "release": None, "since": None}
+    assert probe.sampler_status() == {"user": None, "release": None, "since": None, "client": None}
     probe.watch_set(["0x20000000"])
     s = probe.sampler_status()
     assert s["user"] == "watch" and s["release"] == "watch.stop" and s["since"] > 0
@@ -137,6 +169,24 @@ def test_who_holds_the_sampler_is_reported_with_the_way_to_release_it(probe):
         probe._claim_sampler("profile")
     probe.watch_stop()
     assert probe.sampler_status()["user"] is None
+
+
+def test_who_started_the_sampler_and_the_watch_is_the_callers_fact(probe):
+    # 画面は操作の記録から推さない: デーモンが渡した呼び出し元を、使い始めた時刻（since）と組で残す
+    gui = {"id": 3, "name": "gui", "role": "human"}
+    ai = {"id": 4, "name": "claude", "role": "ai"}
+    assert probe.sampler_status()["client"] is None
+    probe.watch_set(["0x20000000"], caller=gui)
+    s = probe.sampler_status()
+    assert s["client"] == gui and probe.watch_status()["client"] == gui
+    probe.watch_set(["0x20000004"], caller=ai)            # 同じ道具のまま: 使い始めた時刻と者は変わらない
+    assert probe.sampler_status()["client"] == gui and probe.sampler_status()["since"] == s["since"]
+    assert probe.watch_status()["client"] == ai           # watch の一覧は最後に watch.set した者のもの
+    probe.watch_stop()
+    assert probe.sampler_status()["client"] is None
+    probe.watch_set(["0x20000000"])                       # デーモンを通さない呼び出し: 分からない = null
+    assert probe.sampler_status()["client"] is None and probe.watch_status()["client"] is None
+    probe.watch_stop()
 
 
 def test_the_sampler_is_not_taken_from_another_tool(probe):
@@ -215,10 +265,10 @@ def test_pointer_expressions_are_resolved_again_every_period(live):
     assert [w["method"] for w in got["watches"]] == ["host", "sampler"] and got["watches"][0]["address"] is None
     assert len(got["slots"]) == 1                                              # サンプラは決まった番地の式だけ
     wait_for(lambda: probe.watch_series("head->pos.x")["samples"])
-    assert probe.watch_series("head->pos.x")["samples"][-1]["value"] == 10
+    assert probe.watch_series("head->pos.x")["samples"][-1]["value"] == vint(10)
     sensor_size = probe._watch_target("sensors[0]").size
     poke32(cpu, syms.variable("head").address, syms.variable("sensors").address + sensor_size)   # head = &sensors[1]
-    wait_for(lambda: probe.watch_series("head->pos.x")["samples"][-1]["value"] == -1)
+    wait_for(lambda: probe.watch_series("head->pos.x")["samples"][-1]["value"] == vint(-1))
     poke32(cpu, syms.variable("head").address, 0)                              # NULL: その周期は値なし
     wait_for(lambda: "head->pos.x" in probe.watch_status()["chase_errors"])
     probe.watch_stop()
@@ -244,7 +294,7 @@ def test_a_value_condition_starts_and_post_ends_a_capture_with_pretrigger(live):
     result = probe.watch_capture(wait_s=5)
     assert result["state"] == "done" and result["reason"] == "post", result
     values = [s["value"] for s in result["samples"]["head->pos.x"]]
-    assert values[0] == 10 and values[-1] == -1                                # プリトリガの分（10）から
+    assert values[0] == vint(10) and values[-1] == vint(-1)                    # プリトリガの分（10）から
     assert result["t_end_us"] - result["t_start_us"] == pytest.approx(300)
 
 
@@ -259,7 +309,7 @@ def test_a_cross_trigger_event_starts_a_capture_of_sampled_words(live):
                        sample(170, 0x20000400, 6), sample(180, 0x20000400, 7), sample(190, 0x20000400, 8)]
     result = probe.watch_capture(wait_s=5)
     assert result["reason"] == "stop" and result["t_start_us"] == pytest.approx(1.65)
-    assert [s["value"] for s in result["samples"]["0x20000400"]] == [4, 5, 6, 7]   # 165 − 30 tick から
+    assert [s["value"] for s in result["samples"]["0x20000400"]] == ints(4, 5, 6, 7)   # 165 − 30 tick から
     with pytest.raises(ValueError):
         probe.watch_trigger(start={"variable": "nothing", "op": ">", "value": 1})
 
@@ -268,11 +318,11 @@ def test_writing_while_running(live):
     probe, cpu = live
     cpu.state = "running"                                                      # 止めずに書く
     done = probe.watch_write("sensors[1].mode", "MODE_IDLE")
-    assert done["value"] == {"enum": "MODE_IDLE", "value": 0} and done["atomic"]
-    assert probe.watch_write("head->pos.y", 5)["value"] == 5                   # ポインタをたどって書く
+    assert done["value"] == venum("MODE_IDLE", 0) and done["atomic"]
+    assert probe.watch_write("head->pos.y", 5)["value"] == vint(5)             # ポインタをたどって書く
     bits = probe.watch_write("sensors[0].flags.mode", 3)
-    assert bits["value"] == 3 and not bits["atomic"]
-    assert probe.watch_write("0x20000400:2", 0x1234)["value"] == 0x1234
+    assert bits["value"] == vint(3) and not bits["atomic"]
+    assert probe.watch_write("0x20000400:2", 0x1234)["value"] == vint(0x1234)
     assert bytes(cpu.ram[0x400:0x402]) == b"\x34\x12"
     with pytest.raises(ValueError):
         probe.watch_write("sensors[0].flags.mode", 99)
@@ -293,8 +343,11 @@ def test_a_target_side_buffer_is_drained_by_its_counter(live):
         poke32(cpu, ticks, count)
     wait_for(lambda: probe.watch_buffer_read(since=0)["total"] == 3)
     got = probe.watch_buffer_read()
-    assert [s["value"] for s in got["samples"]] == [11, 12, 13] and [s["seq"] for s in got["samples"]] == [0, 1, 2]
+    assert [s["value"] for s in got["samples"]] == ints(11, 12, 13) and [s["seq"] for s in got["samples"]] == [0, 1, 2]
     assert probe.watch_buffer_read()["samples"] == [] and got["next"] == 3
+    assert got["evicted"] == 0 and got["kept_limit"] == 200_000                # 持つ数の上限で捨てた分（?53）
+    probe._watch_buffer.samples.popleft()                                      # 最も古い 1 件を上限で捨てたことにする
+    assert probe.watch_buffer_read(since=0)["evicted"] == 1
     assert probe.watch_buffer_stop()["lost"] == 0
     with pytest.raises(ValueError):
         probe.watch_buffer_start("big", "s_ticks")
@@ -325,7 +378,7 @@ def test_names_label_the_watches_and_the_sample_rows(probe):
     probe._symbols = None
     probe.watch_set(["0x20040804", "0x20040808"], names=["count", "errors"])
     FakeEventLog.events = [sample(1000, 0x20040804, 7), sample(1001, 0x20040808, 2)]
-    assert {v["name"]: v["value"] for v in probe.watch_values()["values"]} == {"count": 7, "errors": 2}
+    assert {v["name"]: v["value"] for v in probe.watch_values()["values"]} == {"count": vint(7), "errors": vint(2)}
     assert probe._sample_name(0x20040808) == "errors"
     with pytest.raises(ValueError):
         probe.watch_set(["0x20040804", "0x20040808"], names=["x"])
@@ -347,3 +400,57 @@ def test_names_stay_with_the_recording(probe, tmp_path, monkeypatch):
     probe._watched = []
     assert probe._sample_name(0x20040808) == "errors"
     probe.recording_stop()
+
+
+def test_rates_from_the_status_counts():
+    """取りこぼしの割合 = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、実際の周期 = 巡回 ÷ 秒。数が無い・0 なら None"""
+    assert probe_watch.rates({"rounds": 90, "overruns": 10, "since_start_s": 0.9}) == {
+        "loss_ratio": 0.1, "measured_hz": pytest.approx(100)}
+    assert probe_watch.rates({}) == {"loss_ratio": None, "measured_hz": None}
+    assert probe_watch.rates({"rounds": 0, "overruns": 0, "since_start_s": 0}) == {"loss_ratio": None, "measured_hz": None}
+
+
+def test_status_counts_every_value_since_watch_set_with_what_was_not_read(probe):
+    """統計はホストが watch_set からの値をすべて数える（画面が読んだ分ではない）。数でない値は not_numeric"""
+    probe.watch_set(["0x20000000"], rate_hz=1000)
+    FakeEventLog.events = [sample(100 * k, 0x20000000, v) for k, v in enumerate([5, 3, 10])]
+    with probe._lock:
+        probe._stats_once()
+        probe._stats_once()                                            # 読んだ分は数え直さない
+    status = probe.watch_status()
+    assert status["stats"]["0x20000000"] == {"count": 3, "min": 3, "max": 10, "mean": 6, "not_numeric": 0}
+    assert status["stats_lost_events"] == 0
+
+
+def test_value_stats_counts_enums_and_skips_what_is_not_a_number():
+    st = probe_watch.ValueStats()
+    for v in (vint(1), venum("B", 3), vbool(True), vstruct(x=vint(1)), varray(ints(1, 2)), vfloat("nan")):
+        st.add(v)
+    assert st.as_dict() == {"count": 3, "min": 1, "max": 3, "mean": 5 / 3, "not_numeric": 3}
+    assert probe_watch.ValueStats().as_dict()["mean"] is None
+
+
+def test_measure_gives_the_held_value_with_its_own_time_and_the_stats_between():
+    """A・B の値は、その時刻以前で最後の値と、その値の時刻（測った時刻とは別）。区間の統計は両端を含む"""
+    m = probe_watch.measure({"speed": [(t, vint(v)) for t, v in [(10, 2), (20, 4), (30, 8), (40, 1)]],
+                             "flag": [(15, vstruct(x=vint(1)))], "none": []}, 35, 12)
+    speed, flag, none = m["rows"]
+    assert m["dt_us"] == -23
+    assert speed["a"] == {"time_us": 30, "value": vint(8)} and speed["b"] == {"time_us": 10, "value": vint(2)}
+    assert speed["delta"] == -6 and speed["stats"]["count"] == 2 and speed["stats"]["mean"] == 6
+    assert speed["first_us"] == 10
+    assert flag["a"]["value"] == vstruct(x=vint(1)) and flag["b"] is None and flag["delta"] is None
+    assert flag["stats"]["not_numeric"] == 1
+    assert none["a"] is None and none["first_us"] is None
+
+
+def test_watch_measure_reads_the_live_values(probe):
+    probe.watch_set(["0x20000000"], rate_hz=1000)
+    FakeEventLog.events = [sample(100_000 * k, 0x20000000, k) for k in range(5)]   # 0, 1000, … µs
+    m = probe.watch_measure(1500, 3000)
+    assert m["rows"][0]["a"] == {"time_us": pytest.approx(1000), "value": vint(1)}
+    assert m["rows"][0]["stats"]["count"] == 2
+    with pytest.raises(RuntimeError):
+        probe.watch_measure(0, 1, source="capture")
+    with pytest.raises(KeyError):
+        probe.watch_measure(0, 1, names=["nothing"])

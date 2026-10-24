@@ -13,7 +13,7 @@ from . import fault
 from .debug import Debugger
 from .dwarf.cexpr import UnknownNameError
 from .dwarf.inspector import LOCAL_HINT, check_expression
-from .disasm import Disassembler, Listing
+from .disasm import SYNC_LIMIT, Disassembler, Listing
 from .memview import ElfImage, TargetMemory, diff, format_hexdump, hexdump
 from .svd import Device, Register, find_svd, load_device
 from .symbols import is_network_path
@@ -24,9 +24,6 @@ SOURCE_LIMIT = 2 << 20               # 画面・混在表示に読むソース�
 VIEW_LIMIT = 4096                    # 1 回に逆アセンブル・表示するメモリの上限（バイト）
 VIEW_HISTORY = 16                    # compare のために覚えておく範囲の数
 FUNCTION_LIMIT = 64 << 10           # 関数の逆アセンブルの上限（これより大きければ range で）
-# 周辺の一括読みでは読まないレジスタ（SVD に readAction が無くても、読むと状態が変わるデータ・FIFO の口。
-# ST の SVD には readAction が無い。名前で 1 つを指定すれば読む）
-BULK_READ_HAZARDS = ("*.DR", "*.RDR", "*.RXDR", "*.RXDATA", "*.FIFO")
 
 
 class _NeedsMemory(Exception):
@@ -108,15 +105,17 @@ class InspectTools:
                 raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
             return Debugger(None, self._symbols).type_info(name)
 
-    def _backtrace(self, variables: bool, max_frames: int, max_elements: int) -> list[dict]:
+    def _backtrace(self, variables: bool, max_frames: int, max_elements: int, assume_leaf: bool = False) -> list[dict]:
         dbg = self.dbg
-        inspector = dbg.inspector(max_frames)
+        inspector = dbg.inspector(max_frames, assume_leaf)
         cfi = inspector is not None and len(inspector.unwinder.table) > 0
         frames = dbg.backtrace(max_frames, inspector if cfi else None)
         out = []
         for index, f in enumerate(frames):
             entry = {"index": index, "pc": f.pc, "where": str(f.where), "note": f.note, "cfa": f.cfa}
             entry.update({k: getattr(f.where, k) for k in ("function", "offset", "file", "line")})
+            if f.stop is not None:
+                entry["stop"] = f.stop
             if variables and inspector is not None and cfi:
                 variables_of = inspector.frame_variables(index, max_elements)
                 entry.update(arguments=variables_of["arguments"], locals=variables_of["locals"])
@@ -142,15 +141,29 @@ class InspectTools:
             return image, "elf"
         return TargetMemory(self.target), "target" if self._debug is not None else "snapshot"
 
-    def _disassembler(self, from_elf: bool) -> tuple[Disassembler, str]:
+    def _disassembler(self, from_elf: bool, branch_tables: list[dict] | None = None,
+                      data_ranges: list[dict] | None = None) -> tuple[Disassembler, str]:
+        """branch_tables: [{"address": tbb / tbh の命令の番地, "entries": 表の項目の数}]、data_ranges: [{"address",
+        "size"}]（データとして区切る区間）。どちらも使う側が明示する。"""
+        tables = {}
+        for t in branch_tables or []:
+            if not isinstance(t, dict) or set(t) != {"address", "entries"} or int(t["entries"]) < 1:
+                raise ValueError(f"branch_tables の項目は {{address, entries（1 以上）}}: {t!r}")
+            tables[int(t["address"])] = int(t["entries"])
+        ranges = []
+        for r in data_ranges or []:
+            if not isinstance(r, dict) or set(r) != {"address", "size"} or int(r["size"]) < 1:
+                raise ValueError(f"data_ranges の項目は {{address, size（1 以上）}}: {r!r}")
+            ranges.append((int(r["address"]), int(r["size"])))
         memory, origin = self._code_reader(from_elf)
-        return Disassembler(memory, self._symbols, self._elf_image()), origin
+        return Disassembler(memory, self._symbols, self._elf_image(), tables, ranges), origin
 
     @staticmethod
     def _listing_dict(listing: Listing, origin: str, offset: int, limit: int) -> dict:
         items = listing.instructions[offset:offset + limit]
         pc = listing.pc_index
-        return {"memory": origin, "sync": listing.sync, "total": len(listing.instructions), "offset": offset,
+        return {"memory": origin, "sync": listing.sync, "sync_skipped": listing.sync_skipped,
+                "total": len(listing.instructions), "offset": offset,
                 "pc_index": pc - offset if pc is not None and offset <= pc < offset + limit else None,
                 "instructions": [i.as_dict() for i in items]}
 
@@ -167,32 +180,40 @@ class InspectTools:
         return self.target.read_core_register("pc")
 
     def disasm_range(self, address: int, length: int, from_elf: bool = False, offset: int = 0,
-                     limit: int = 256) -> dict:
-        """番地 address から length バイト（4096 まで）を逆アセンブルする。命令は offset 番目から limit 件。"""
+                     limit: int = 256, branch_tables: list[dict] | None = None,
+                     data_ranges: list[dict] | None = None) -> dict:
+        """番地 address から length バイト（4096 まで）を逆アセンブルする。命令は offset 番目から limit 件。
+        branch_tables: tbb / tbh の表の大きさ、data_ranges: データの区間（使う側が明示する。_disassembler）。"""
         with self._lock:
-            dis, origin = self._disassembler(from_elf)
+            dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             return self._listing_dict(dis.range(address, address + length), origin, offset, limit)
 
-    def disasm_function(self, location: str, from_elf: bool = False, offset: int = 0, limit: int = 256) -> dict:
+    def disasm_function(self, location: str, from_elf: bool = False, offset: int = 0, limit: int = 256,
+                        branch_tables: list[dict] | None = None, data_ranges: list[dict] | None = None) -> dict:
         """関数の全体（関数名か "0x..." の関数の中の番地）を逆アセンブルする。"""
         with self._lock:
-            dis, origin = self._disassembler(from_elf)
+            dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             return self._listing_dict(self._function_listing(dis, location), origin, offset, limit)
 
     def disasm_around(self, address: int | None = None, before: int = 8, after: int = 8,
-                      from_elf: bool = False) -> dict:
-        """番地（省略時は PC）の前 before 命令・その命令・後ろ after 命令。前は関数の先頭から揃える。"""
+                      from_elf: bool = False, branch_tables: list[dict] | None = None,
+                      sync_limit: int = SYNC_LIMIT, data_ranges: list[dict] | None = None) -> dict:
+        """番地（省略時は PC）の前 before 命令・その命令・後ろ after 命令。前は関数の先頭から揃える（PC まで
+        sync_limit バイトより遠ければ揃えない。揃えなかった理由は sync_skipped）。"""
         with self._lock:
             pc = self._pc() if address is None else address
-            dis, origin = self._disassembler(from_elf)
-            return {"pc": pc, **self._listing_dict(dis.around(pc, before, after), origin, 0, before + after + 1)}
+            dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
+            return {"pc": pc, **self._listing_dict(dis.around(pc, before, after, sync_limit), origin, 0,
+                                                   before + after + 1)}
 
     def disasm_text(self, location: str | None = None, address: int | None = None, length: int | None = None,
-                    before: int = 8, after: int = 8, source: bool = True, from_elf: bool = False) -> dict:
+                    before: int = 8, after: int = 8, source: bool = True, from_elf: bool = False,
+                    branch_tables: list[dict] | None = None, sync_limit: int = SYNC_LIMIT,
+                    data_ranges: list[dict] | None = None) -> dict:
         """ソースの行を挟んだ逆アセンブルの文字列（AI 向け）。location なら関数、address と length なら範囲、
-        どちらも無ければ address（省略時は PC）の前後。"""
+        どちらも無ければ address（省略時は PC）の前後（sync・sync_skipped は disasm_around と同じ）。"""
         with self._lock:
-            dis, origin = self._disassembler(from_elf)
+            dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             if location is not None:
                 listing = self._function_listing(dis, location)
             elif length is not None:
@@ -200,10 +221,10 @@ class InspectTools:
                     raise ValueError("length には address が要る")
                 listing = dis.range(address, address + length)
             else:
-                listing = dis.around(self._pc() if address is None else address, before, after)
+                listing = dis.around(self._pc() if address is None else address, before, after, sync_limit)
             lines = self._source_lines() if source else None
             text = listing.text(source=(lambda f, n: lines(f, n)) if lines else None)
-            return {"memory": origin, "text": text}
+            return {"memory": origin, "sync": listing.sync, "sync_skipped": listing.sync_skipped, "text": text}
 
     def _source_lines(self):
         """(ファイル名, 行) → ソースの行。ELF が参照するファイルだけを読む（外の共有・大きすぎるものは読まない）。"""
@@ -225,33 +246,40 @@ class InspectTools:
 
     # --- 周辺レジスタ（SVD） ----------------------------------------------------------------
 
-    def svd_load(self, device: str | None = None, path: str | None = None) -> dict:
-        """周辺レジスタの定義（CMSIS-SVD）を読む。path（ファイル）か device（部品名。同梱・~/.fprobe/svd・
-        pyOCD の内蔵から探す）。どちらも無ければ target_connect のターゲット名から探す。"""
+    def svd_load(self, device: str | None = None, path: str | None = None, from_target: bool = False) -> dict:
+        """周辺レジスタの定義（CMSIS-SVD）を読む。path（ファイル）か device（SVD のファイル名。拡張子を除いて同じ
+        名前のファイルを同梱・~/.fprobe/svd・pyOCD の内蔵から探す）か from_target（接続中のターゲットの pyOCD の定義が
+        指す SVD = _svd_location のファイル。定義の事実で、名前から推さない）。ターゲット名から推して選ぶことはしない。"""
         with self._lock:
+            if from_target:
+                location = getattr(self.target, "_svd_location", None)
+                member = getattr(getattr(location, "filename", None), "name", None)
+                if not member:
+                    raise RuntimeError("接続中のターゲットの定義に SVD が無い（device か path を渡す）")
+                self._svd = Device.parse(_pyocd_builtin_svd(str(member)))         # 同名の別の置き場所のものは読まない
+                self._svd_info = {"source": str(member), "origin": "target"}
+                return self._svd_summary()
             if path is not None:
                 if is_network_path(path):
                     raise ValueError(f"外の共有の SVD は開かない: {path}")
                 self._svd = Device.load(path)
                 self._svd_info = {"source": str(Path(path)), "origin": "file"}
             else:
-                name = device or self._target_type
-                if not name or name == "cortex_m":
-                    raise RuntimeError("部品名が分からない（device か path を指定する）")
-                source = find_svd(name)
-                self._svd = load_device(name)
-                self._svd_info = {"source": source.name if source else name, "origin": source.origin if source else ""}
+                if not device:
+                    raise RuntimeError("device（SVD のファイル名。例 STM32F401）か path を渡す")
+                source = find_svd(device)
+                self._svd = load_device(device)
+                self._svd_info = {"source": source.name if source else device,
+                                  "origin": source.origin if source else ""}
             return self._svd_summary()
 
     def _svd_summary(self) -> dict:
         return {"name": self._svd.name, **self._svd_info, "peripherals": len(self._svd.peripherals)}
 
     def _device(self) -> Device:
-        """読み込んだ SVD。無ければターゲット名から読む。"""
+        """読み込んだ SVD（無ければ誤り。ターゲット名から推して読まない）。"""
         if self._svd is None:
-            if not self._target_type or self._target_type == "cortex_m":
-                raise RuntimeError("SVD が読み込まれていない（target_svd_load）")
-            self.svd_load()
+            raise RuntimeError("SVD が読み込まれていない（target_svd_load で device か path を渡す）")
         return self._svd
 
     def svd_peripherals(self, filter: str | None = None) -> dict:
@@ -271,10 +299,13 @@ class InspectTools:
             return {"peripheral": p.name, "base_address": p.base_address,
                     "registers": [r.as_dict() for r in p.registers]}
 
-    def peripheral_read(self, path: str, allow_side_effects: bool = False) -> dict:
+    def peripheral_read(self, path: str, allow_side_effects: bool = False, skip: list[str] | None = None) -> dict:
         """周辺レジスタを読んでフィールドに解読する。path は "RCC.CR"（1 つ）か "GPIOA"（周辺の全部）。
-        読むと状態が変わるもの（SVD の readAction、周辺の一括ではデータ・FIFO の口も）は allow_side_effects が
-        無ければ読まず skipped に入れる。"""
+        読むと状態が変わるもの（SVD の readAction）は allow_side_effects が無ければ読まず skipped に入れる。
+        SVD に readAction の無いレジスタ（ST の SVD 等）はレジスタの名前から推さずに読む。周辺の全部を読むとき、
+        ほかに読まないものは使う側が skip（"周辺.レジスタ" の glob。大文字小文字を区別しない）で渡す。"""
+        if skip and "." in path:
+            raise ValueError("skip は周辺の全部を読むときだけ（1 つを名指しで読むときは要らない）")
         with self._lock:
             dev, access = self._device(), TargetMemory(self.target)
             if "." in path:
@@ -282,7 +313,7 @@ class InspectTools:
                         "skipped": []}
             registers, skipped = [], []
             for r in dev.peripheral(path).registers:
-                reason = self._bulk_skip_reason(r, allow_side_effects)
+                reason = self._bulk_skip_reason(r, allow_side_effects, tuple(skip or ()))
                 if reason is None:
                     try:
                         registers.append(dev.read_register(access, r.path, allow_side_effects=True).as_dict())
@@ -293,15 +324,16 @@ class InspectTools:
             return {"registers": registers, "skipped": skipped}
 
     @staticmethod
-    def _bulk_skip_reason(r: Register, allow_side_effects: bool) -> str | None:
+    def _bulk_skip_reason(r: Register, allow_side_effects: bool, skip: tuple[str, ...]) -> str | None:
         if r.access in ("write-only", "writeOnce"):
             return "write-only"
+        for pattern in skip:
+            if fnmatch(r.path.upper(), pattern.upper()):
+                return f"skip {pattern}"
         if allow_side_effects:
             return None
         if r.has_read_side_effects:
             return "read side effects (SVD readAction)"
-        if any(fnmatch(r.path.upper(), pattern) for pattern in BULK_READ_HAZARDS):
-            return "data / FIFO register (reading may consume data; read it by name)"
         return None
 
     def peripheral_write(self, path: str, fields: dict | None = None, value: int | None = None,
@@ -365,3 +397,15 @@ class InspectTools:
             if self._svd is not None and (hit := self._svd.find(a)) is not None and hit.offset == 0:
                 names.append({"address": a, "name": str(hit), "kind": "register"})
         return names
+
+
+def _pyocd_builtin_svd(member: str) -> bytes:
+    """pyOCD の内蔵の SVD（ターゲットの定義の _svd_location が指すもの）を名前で読む。"""
+    import zipfile
+    from importlib import resources
+    from pyocd.debug.svd.loader import BUILTIN_SVD_DATA_PATH
+    try:
+        with resources.files("pyocd").joinpath(BUILTIN_SVD_DATA_PATH).open("rb") as f, zipfile.ZipFile(f) as z:
+            return z.read(member)
+    except KeyError:
+        raise FileNotFoundError(f"ターゲットの定義が指す SVD {member} が pyOCD の内蔵に無い") from None

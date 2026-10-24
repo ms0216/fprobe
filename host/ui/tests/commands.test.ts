@@ -66,8 +66,11 @@ describe("実行すると API を呼ぶ", () => {
     const conn = new FakeConn({ "debug.step": {}, "target.resume": {}, "target.halt": {}, "debug.breakpoint.set": {},
                                 "debug.breakpoint.list": { breakpoints: [], watchpoints: [] }, "debug.elf.load_demo":
                                   { path: "/demo.elf", files: [] }, "debug.source.list": { files: [] },
-                                "debug.halt_risk": { elf: "/x/app.elf", matched: true, monitor_in_elf: false,
-                                                     matches: [{ kind: "radio", count: 1, symbols: ["RADIO_IRQHandler"] }] } });
+                                "debug.halt_risk": { elf: "/x/app.elf", names: ["RADIO_IRQHandler"], patterns: [],
+                                                     matched: true, monitor_in_elf: false,
+                                                     matches: [{ query: "RADIO_IRQHandler", by: "name", count: 1,
+                                                                 symbols: [{ name: "RADIO_IRQHandler", kind: "function",
+                                                                             address: 0x100 }] }] } });
     const app = new AppState(conn as any);
     const dbg = new Debugger(conn as any, app);
     const ui = new UiState();
@@ -127,10 +130,12 @@ describe("実行すると API を呼ぶ", () => {
     expect(command("stepInstruction").blocked({ ...halted, target: "RUNNING" })).toBe("tip.notHalted");
   });
 
-  it("チップ全体のリセット（RP2040 の救済の DP）は RP2040 に接続中だけ。target.reset kind=rescue", async () => {
-    const rp = { ...halted, target: "RUNNING", part: "rp2040_core0" };
+  it("チップ全体のリセットは、ホストが救済の DP（target.status の rescue_dp）を申告したときだけ。target.reset kind=rescue", async () => {
+    // 画面は品種名（rp2040 等）で判断しない（考えない層）。ホストの部品の表の事実だけを見る
+    const rp = { ...halted, target: "RUNNING", rescueDp: 0xf1002927 };
     expect(command("rescueReset").blocked(rp)).toBeNull();
-    expect(command("rescueReset").blocked({ ...rp, part: "stm32f401xe" })).toBe("tip.noRescue");
+    expect(command("rescueReset").blocked({ ...rp, rescueDp: undefined })).toBe("tip.noRescue");
+    expect(command("rescueReset").blocked({ ...rp, rescueDp: undefined, part: "rp2040_core0" } as never)).toBe("tip.noRescue");
     expect(command("rescueReset").blocked({ ...rp, target: "DISCONNECTED" })).toBe("tip.notConnected");
     const { conn, ctx } = setup();
     conn.responders["target.reset"] = {};

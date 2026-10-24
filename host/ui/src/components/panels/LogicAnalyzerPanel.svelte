@@ -13,9 +13,9 @@
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
   import {
-    EVENTS, SOURCES, decodeMarks, emptyPattern, hiddenKinds, formatHz, lastApplied, measureCall, measureRange, measuredChannels, newForm,
+    EVENTS, SOURCES, decodeMarks, emptyPattern, hiddenKinds, formatHz, lastApplied, measureCall, measureRange, measuredChannels, missingSettings, invalidSettings, newForm,
     patternEmpty, patternForm, patternOf, settingsOf, stageForms, stageLabel, stageState, stagesOf,
-    type Annotation, type ChannelMeasure, type DecoderForm, type DecoderInfo, type PatternForm, type StageForm,
+    type Annotation, type ChannelMeasure, type DecoderForm, type DecoderInfo, type PatternForm, type SequenceStatus, type StageForm,
     type TriggerEvent, type TriggerSource, type WidthStats,
     laExportParams, type LaExportFormat,
   } from "../../lib/logic";
@@ -25,7 +25,10 @@
   import { nearestAtOrBefore, onTimeline } from "../../lib/timeline/events";
   import { originOf } from "../../lib/timeline/state";
   import { rowTitle } from "../../lib/timeline/titles";
-  import { channelChoices, channelName } from "../../lib/waveform";
+  import { channelChoices, channelName, laChannelCount } from "../../lib/waveform";
+  import type { FieldError, FieldValues } from "../../lib/apiform";
+  import { formCall, methodFields } from "../../lib/crosstrigger";
+  import ApiFields from "./ApiFields.svelte";
   import DecoderFields from "./DecoderFields.svelte";
   import TabBar from "./TabBar.svelte";
   import TimeLink from "./TimeLink.svelte";
@@ -39,7 +42,9 @@
   const { app, conn, tl, dock, reveal } = shared();
   let tab = $state<Tab>(load("logicAnalyzer.tab", "decode") as Tab);
   const linked = $derived($app.link === "open");          // つながってから読む（つなぎ直したら読み直す）
-  const channels = $derived<number>($app.probe?.capabilities?.la_channels ?? 10);
+  // ch の数はデバイスの申告だけ（届くまで null: 条件の表は空、覚えた条件の幅も変えない）
+  const declaredChannels = $derived(laChannelCount($app.probe?.capabilities));
+  const channels = $derived(declaredChannels ?? 0);
   $effect(() => save("logicAnalyzer.tab", tab));
 
   // --- Decode -----------------------------------------------------------------------------------
@@ -47,6 +52,10 @@
   let decoders = $state<DecoderInfo[]>([]);
   let protocol = $state(load("logicAnalyzer.protocol", "uart"));
   let form = $state<DecoderForm>({ protocol: "", values: {}, lower: null });
+  // 空の必須の欄（通信の設定は既定を持たない）。あれば解読を呼ばない
+  const missing = $derived(form.protocol ? missingSettings(form, decoders) : []);
+  // 解読器が申告した型で読めない欄（例 チャンネルに文字）。空でなければ解読を呼べない
+  const invalid = $derived(form.protocol ? invalidSettings(form, decoders) : []);
   let errorsOnly = $state(false);
   let kind = $state("");
   let result = $state<any>(null);
@@ -122,14 +131,15 @@
     return { protocol: fresh.protocol, values, lower };
   }
 
-  /** 解読する（auto = 新しい捕捉での解読し直し: 人の操作ではないので操作の記録に残さない） */
+  /** 解読する（auto = 新しい捕捉での解読し直し: 人の操作ではないので操作の記録に残さない）。必須の欄が空なら呼ばない */
   async function decode(auto = false) {
+    if (missing.length || invalid.length) return;
     save(formKey(protocol), JSON.stringify(form));
     try {
       // 種類: "" = 解読器の既定の種類、"*" = すべて（分かっている種類を全部渡す）、ほかはその種類だけ
       const all = Object.keys(result?.counts ?? {});
       const kinds = kind === "*" ? (all.length ? all : null) : kind ? [kind] : null;
-      result = await conn.call("la.decode", { protocol, settings: settingsOf(form), errors_only: errorsOnly,
+      result = await conn.call("la.decode", { protocol, settings: settingsOf(form, decoders), errors_only: errorsOnly,
                                               kinds, limit: DECODE_LIMIT }, auto ? { quiet: true } : undefined);
       decodeError = null;
       noCapture = false;
@@ -158,8 +168,7 @@
 
   async function capture() {
     if (!(await allowed(app))) return;
-    await tl.capture({ rate_hz: Number(load("la.rate", "25000000")), pretrigger: Number(load("la.pretrigger", "1024")),
-                      deep: false });
+    await tl.captureSaved({ deep: false });                // Timeline で入れて覚えた設定で（足りなければ理由を出す）
     await readCapture();
   }
 
@@ -172,24 +181,32 @@
       return fallback;
     }
   }
-  let stages = $state<StageForm[]>(restore("logicAnalyzer.stages", [{ when: ["pattern_a"], count: 1, withinUs: "" }]));
-  let patA = $state<PatternForm>(restore("logicAnalyzer.patternA", emptyPattern(10)));
-  let patB = $state<PatternForm>(restore("logicAnalyzer.patternB", emptyPattern(10)));
-  let match = $state(restore("logicAnalyzer.match", { address: "", addressMask: "0xFFFFFFFF", data: "0", dataMask: "0",
-                                                       onWrite: true, onRead: false }));
+  // 段の事象・回数は使う人が入れる（画面の既定を持たない）。覚えた回数は文字の欄に
+  const emptyStage = (): StageForm => ({ when: [], count: "", withinUs: "" });
+  let stages = $state<StageForm[]>(restore<StageForm[]>("logicAnalyzer.stages", [emptyStage()])
+    .map((s) => ({ ...s, count: s.count === undefined || s.count === null ? "" : String(s.count) })));
+  let patA = $state<PatternForm>(restore("logicAnalyzer.patternA", emptyPattern(0)));
+  let patB = $state<PatternForm>(restore("logicAnalyzer.patternB", emptyPattern(0)));
+  // 番地一致は Cross Trigger と同じく API の仕様の欄（必須は空から、省ける欄は空 = 送らない。既定はデーモンが決める）。
+  // 前の版は画面の既定（全ビットのマスク・値 0 等）を入れて覚えていたので、覚える名前を変えて空から始める
+  const matchFields = methodFields("xtrig.set_match");
+  let match = $state<FieldValues>({ ...Object.fromEntries(matchFields.map((f) => [f.name, ""])),
+                                    ...restore<FieldValues>("logicAnalyzer.matchFields", {}) });
+  let matchErrors = $state<Record<string, FieldError>>({});
   let toLa = $state<TriggerSource[]>(restore("logicAnalyzer.toLa", []));
   let toInject = $state<TriggerSource[]>(restore("logicAnalyzer.toInject", []));
   // 経路の表は、書き換えていない間は機器のレジスタの事実（xtrig.status の route）に合わせる。ほかの道具
   // （fpga_obs.trigger_set・sampler.trigger_set・ルール）が書いたビットを、表の適用で黙って消さない
   let routeEdited = $state(false);
-  let seqStatus = $state<{ stage: number; fired: boolean; time: number } | null>(null);
+  // 多段トリガの状態: 仕掛けているか（armed）・段ごとの状態もレジスタの事実（xtrig.sequence_status）をそのまま描く
+  let seqStatus = $state<SequenceStatus | null>(null);
   let xtStatus = $state<any>(null);
-  let armed = $state(false);
   let triggerError = $state<string | null>(null);
 
   // チャンネルの数に合わせる（覚えた条件がほかのボードのものでも）
   $effect(() => {
-    const n = channels;
+    const n = declaredChannels;
+    if (n === null) return;
     untrack(() => {
       if (patA.level.length !== n) patA = patternForm(patternOf(patA), n);
       if (patB.level.length !== n) patB = patternForm(patternOf(patB), n);
@@ -221,7 +238,7 @@
     save("logicAnalyzer.stages", JSON.stringify(stages));
     save("logicAnalyzer.patternA", JSON.stringify(patA));
     save("logicAnalyzer.patternB", JSON.stringify(patB));
-    save("logicAnalyzer.match", JSON.stringify(match));
+    save("logicAnalyzer.matchFields", JSON.stringify(match));
     save("logicAnalyzer.toLa", JSON.stringify(toLa));
     save("logicAnalyzer.toInject", JSON.stringify(toInject));
   }
@@ -239,24 +256,20 @@
       return;
     }
     if (!(await allowed(app))) return;
-    if (await app.act("xtrig.set_sequence", params) !== undefined) {
-      armed = true;
-      await readTrigger();
-    }
+    if (await app.act("xtrig.set_sequence", params) !== undefined) await readTrigger();
   }
 
   async function applyMatch() {
     keep();
-    const num = (s: string) => Number(s.trim().replace(/_/g, ""));
-    const address = num(match.address);
-    if (!match.address.trim() || !Number.isFinite(address)) {
-      triggerError = $i18n("logic.badAddress");
+    const c = formCall("xtrig.set_match", match);
+    if ("errors" in c) {
+      matchErrors = c.errors;
       return;
     }
+    matchErrors = {};
     triggerError = null;
     if (!(await allowed(app))) return;
-    await app.act("xtrig.set_match", { address, address_mask: num(match.addressMask), data: num(match.data),
-                                       data_mask: num(match.dataMask), on_write: match.onWrite, on_read: match.onRead });
+    await app.act("xtrig.set_match", c.params as any);
     await readTrigger();
   }
 
@@ -278,7 +291,6 @@
     stages = stageForms(p.stages);
     patA = patternForm(p.pattern_a, channels);
     patB = patternForm(p.pattern_b, channels);
-    armed = p.arm !== false;
   }
 
   function loadLastRoute() {
@@ -301,7 +313,8 @@
   const SOURCE_LABEL: Record<TriggerSource, "logic.srcTrigger" | "logic.dapMatch" | "logic.host" | "logic.srcSequence" | "logic.srcObsMatch" | "logic.srcSamplerMatch"> =
     { la_trigger: "logic.srcTrigger", dap_match: "logic.dapMatch", host: "logic.host", sequence: "logic.srcSequence",
       obs_match: "logic.srcObsMatch", sampler_match: "logic.srcSamplerMatch" };
-  const recordingTo = (t: number) => (t > 0 ? { source: "recording" as const, t } : null);
+  // 時刻 0 もタイムベースの事実の時刻（起きたかは回数・fired で決める。0 を「無い」とみなさない）
+  const recordingTo = (t: number) => ({ source: "recording" as const, t });
 
   // --- Measure ----------------------------------------------------------------------------------
 
@@ -412,7 +425,9 @@
           </select>
         </label>
         {#if form.protocol}<DecoderFields bind:form {decoders} channels={channelChoices($app.probe?.capabilities ?? {})} />{/if}
-        <button type="submit" class="primary" disabled={!form.protocol}>{$i18n("logic.run")}</button>
+        <button type="submit" class="primary" disabled={!form.protocol || missing.length > 0 || invalid.length > 0}
+                title={missing.length ? $i18n("logic.missing", { names: missing.join(", ") })
+                  : invalid.length ? $i18n("logic.invalid", { names: invalid.join(", ") }) : undefined}>{$i18n("logic.run")}</button>
         {#if result}<button type="button" class="small" onclick={clearDecode}>{$i18n("eventLog.clear")}</button>{/if}
       </form>
       {#if decodeError}<div class="error">{decodeError}</div>{/if}
@@ -473,7 +488,7 @@
             <path d="M0,0 L10,5 L0,10 z" class="head" /></marker></defs>
           {#each stages as s, i (i)}
             {@const l = stageLabel(s, i)}
-            <g class="stage {stageState(i, seqStatus, armed)}">
+            <g class="stage {stageState(i, seqStatus)}">
               <rect x={i * 150 + 4} y="6" width="118" height="44" rx="6" />
               <text x={i * 150 + 63} y="24" text-anchor="middle" class="ev">{l.events}</text>
               <text x={i * 150 + 63} y="40" text-anchor="middle" class="det">{l.detail || $i18n("logic.stageN", { n: i + 1 })}</text>
@@ -484,7 +499,8 @@
           {/each}
         </svg>
         <table class="grid stages">
-          <thead><tr><th>#</th><th>{$i18n("logic.when")}</th><th>{$i18n("logic.count")}</th><th>{$i18n("logic.within")}</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>{$i18n("logic.when")}<span class="req" aria-hidden="true">*</span></th>
+            <th>{$i18n("logic.count")}<span class="req" aria-hidden="true">*</span></th><th>{$i18n("logic.within")}</th><th></th></tr></thead>
           <tbody>
             {#each stages as s, i (i)}
               <tr>
@@ -493,7 +509,7 @@
                   <label class="chk"><input type="checkbox" checked={s.when.includes(ev)}
                                             onchange={() => (s.when = toggle(s.when, ev))} /> {$i18n(EVENT_LABEL[ev])}</label>
                 {/each}</td>
-                <td><input class="num" type="number" min="1" bind:value={s.count} /></td>
+                <td><input class="num" inputmode="numeric" aria-required="true" bind:value={s.count} /></td>
                 <td>{#if i > 0}<input class="num" bind:value={s.withinUs} placeholder="∞" inputmode="decimal" /> µs{/if}</td>
                 <td><button class="small" disabled={stages.length < 2} onclick={() => (stages = stages.filter((_, k) => k !== i))}
                             aria-label={$i18n("common.remove")}>×</button></td>
@@ -503,7 +519,7 @@
         </table>
         <div class="bar">
           <button class="small" disabled={stages.length >= 4}
-                  onclick={() => (stages = [...stages, { when: ["pattern_b"], count: 1, withinUs: "" }])}>{$i18n("logic.addStage")}</button>
+                  onclick={() => (stages = [...stages, emptyStage()])}>{$i18n("logic.addStage")}</button>
           <span class="spacer"></span>
           <button class="primary" onclick={applySequence}>{$i18n("logic.arm")}</button>
         </div>
@@ -517,7 +533,7 @@
         <h3>{$i18n("logic.status")}</h3>
         {#if seqStatus}
           <div class="status">
-            <span>{seqStatus.fired ? $i18n("logic.fired") : armed ? $i18n("logic.waitingStage", { n: seqStatus.stage + 1 }) : $i18n("logic.notArmed")}</span>
+            <span>{seqStatus.fired ? $i18n("logic.fired") : seqStatus.armed ? $i18n("logic.waitingStage", { n: seqStatus.stage + 1 }) : $i18n("logic.notArmed")}</span>
             {#if seqStatus.fired}<TimeLink to={recordingTo(seqStatus.time)} />{/if}
           </div>
         {/if}
@@ -532,12 +548,7 @@
 
         <h3>{$i18n("logic.match")}</h3>
         <form class="match" onsubmit={(e) => { e.preventDefault(); void applyMatch(); }}>
-          <label>{$i18n("common.address")} <input class="mono" bind:value={match.address} placeholder="0x20000010" size="12" /></label>
-          <label>{$i18n("logic.mask")} <input class="mono" bind:value={match.addressMask} size="12" /></label>
-          <label>{$i18n("common.value")} <input class="mono" bind:value={match.data} size="10" /></label>
-          <label title={$i18n("logic.dataMaskTip")}>{$i18n("logic.dataMask")} <input class="mono" bind:value={match.dataMask} size="10" /></label>
-          <label class="chk"><input type="checkbox" bind:checked={match.onWrite} /> {$i18n("logic.onWrite")}</label>
-          <label class="chk"><input type="checkbox" bind:checked={match.onRead} /> {$i18n("logic.onRead")}</label>
+          <ApiFields fields={matchFields} bind:values={match} errors={matchErrors} />
           <button type="submit">{$i18n("logic.apply")}</button>
         </form>
 

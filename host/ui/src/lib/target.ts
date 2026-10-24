@@ -21,14 +21,15 @@ export function linkOf(target: Record<string, any> | null | undefined): TargetLi
   };
 }
 
-/** コア クロックの既定: ELF に CMSIS の SystemCoreClock があればターゲットのその値（走行中でも読める）。無い・
- *  まだ初期化前（0 等）なら null（品種名から典型の値を推測しない。CLAUDE.md。使う側が入れる） */
+/** コア クロックの既定: ELF に CMSIS の SystemCoreClock があればターゲットのその値（走行中でも読める）を、読んだ値の
+ *  まま（丸めない・妥当な範囲という境界で捨てない。初期化前の 0 もそのまま）。使うかは利用者が欄で確かめる。
+ *  無い・読めない・数でなければ null（品種名から典型の値を推測しない。CLAUDE.md。使う側が入れる） */
 export async function coreClock(conn: Conn, _target?: string | undefined | null)
   : Promise<{ mhz: number; source: "SystemCoreClock" } | null> {
   try {
     const r = await conn.call("debug.variable.read", { name: "SystemCoreClock" }, { quiet: true });
-    const hz = Number(r?.value);
-    if (hz >= 1e6 && hz <= 2e9) return { mhz: Math.round(hz / 1e4) / 100, source: "SystemCoreClock" };
+    const hz = typeof r?.value === "number" ? r.value : Number.NaN;
+    if (Number.isFinite(hz)) return { mhz: hz / 1e6, source: "SystemCoreClock" };
   } catch {
     /* ELF に無い・読めない */
   }

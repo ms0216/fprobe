@@ -1,5 +1,6 @@
 """fprobe.api.daemon / client: 偽の機器（backend）でデーモンを動かし、2 つの利用者から使う。"""
 
+import json
 import threading
 import time
 
@@ -7,8 +8,8 @@ import pytest
 import uvicorn
 
 from fake_daemon import FakeProbe
-from fprobe.api import (E_DEVICE, E_INVALID_PARAMS, E_NO_DATA, E_NO_HELLO, E_NOT_CONNECTED, E_VERSION, NoData,
-                        NotConnected)
+from fprobe.api import (API_VERSION, E_DEVICE, E_INVALID_PARAMS, E_NO_DATA, E_NO_HELLO, E_NOT_CONNECTED, E_VERSION,
+                        NoData, NotConnected)
 from fprobe.api.client import ApiError, DaemonClient
 from fprobe.api.daemon import create_app
 
@@ -174,7 +175,7 @@ def test_lan_requires_the_token(tmp_path):
     app = create_app(FakeBackend(), token="s3cret", activity_dir=tmp_path)
     with TestClient(app) as tc, tc.websocket_connect("/api") as ws:
         ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "session.hello",
-                      "params": {"name": "x", "role": "ai", "api_version": 1}})
+                      "params": {"name": "x", "role": "ai", "api_version": API_VERSION}})
         assert ws.receive_json()["error"]["code"] == -32012
 
 
@@ -212,7 +213,7 @@ def test_browser_pages_from_other_origins_are_refused(tmp_path):
     from starlette.websockets import WebSocketDisconnect
     app = create_app(FakeBackend(), token=None, activity_dir=tmp_path)
     hello = {"jsonrpc": "2.0", "id": 1, "method": "session.hello",
-             "params": {"name": "x", "role": "human", "api_version": 1}}
+             "params": {"name": "x", "role": "human", "api_version": API_VERSION}}
     with TestClient(app, base_url="http://127.0.0.1:7820") as tc:
         with pytest.raises(WebSocketDisconnect):
             with tc.websocket_connect("/api", headers={"origin": "https://evil.example"}) as ws:
@@ -239,7 +240,7 @@ def test_a_second_hello_is_refused_so_the_pause_cannot_be_orphaned(daemon):
     url, _ = daemon
     gui = DaemonClient(url, "gui", "human")
     with pytest.raises(ApiError) as e:
-        gui.call("session.hello", name="gui2", role="human", api_version=1)
+        gui.call("session.hello", name="gui2", role="human", api_version=API_VERSION)
     assert e.value.code == E_NOT_ALLOWED
     gui.call("session.control.pause")
     gui.close()
@@ -254,7 +255,7 @@ def test_hello_reports_which_device_the_daemon_holds(tmp_path):
     app = create_app(FakeBackend(), token=None, activity_dir=tmp_path, device={"link": "eth", "address": "192.168.77.2"})
     with TestClient(app) as tc, tc.websocket_connect("/api") as ws:
         ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "session.hello",
-                      "params": {"name": "x", "role": "ai", "api_version": 1}})
+                      "params": {"name": "x", "role": "ai", "api_version": API_VERSION}})
         assert ws.receive_json()["result"]["device"] == {"link": "eth", "address": "192.168.77.2"}
 
 
@@ -319,7 +320,7 @@ def test_a_watch_error_other_than_disconnected_is_not_sent_and_the_daemon_surviv
     gui = DaemonClient(url, "gui", "human")
     gui.subscribe(["target.state"], lambda topic, data: seen.append(data))
     time.sleep(0.3)
-    assert seen == [] and gui.call("session.status")["api_version"] == 1
+    assert seen == [] and gui.call("session.status")["api_version"] == API_VERSION
     gui.close()
     stop()
 
@@ -413,7 +414,7 @@ def test_malformed_frames_get_json_rpc_errors_and_the_connection_survives(daemon
         assert reply["id"] is None and reply["error"]["code"] == -32600
         ws.send(json.dumps({"jsonrpc": "2.0", "method": "no.such"}))           # 通知（id なし）には応答しない
         ws.send(json.dumps({"jsonrpc": "2.0", "id": 7, "method": "session.hello",
-                            "params": {"name": "x", "role": "script", "api_version": 1}}))
+                            "params": {"name": "x", "role": "script", "api_version": API_VERSION}}))
         assert json.loads(ws.recv(timeout=2))["id"] == 7
 
 
@@ -422,7 +423,7 @@ def test_the_python_client_survives_an_error_reply_without_an_id(daemon):
     c = DaemonClient(url, "claude", "ai")
     c._ws.send("壊れた要求")                                        # デーモンは id: null の誤りで答える
     time.sleep(0.2)
-    assert c.call("session.status")["api_version"] == 1
+    assert c.call("session.status")["api_version"] == API_VERSION
     c.close()
 
 
@@ -440,6 +441,22 @@ def test_the_error_code_comes_from_the_exception_type_not_its_words(daemon):
     c.close()
 
 
+def test_device_errors_carry_the_exception_type_and_text_as_separate_fields(daemon):
+    # 画面は誤りの文の形（"RuntimeError: " の頭）を推して外さず、構造の欄 data.detail（例外の文そのまま）を出す
+    url, _ = daemon
+    c = DaemonClient(url, "claude", "ai")
+    reply = c.request("target.disconnect", {})
+    error = reply["error"]
+    assert error["code"] == E_DEVICE
+    assert error["data"]["exception"] == type_name(error["message"])
+    assert error["message"] == f"{error['data']['exception']}: {error['data']['detail']}"
+    c.close()
+
+
+def type_name(message: str) -> str:
+    return message.split(":", 1)[0]
+
+
 def test_quiet_reads_by_the_screen_stay_out_of_the_log_but_operations_never_do(daemon):
     # 画面の自動の読み（止まるたびのレジスタ等）で AI の作業の記録を埋めない。状態を変える操作は quiet でも記録する
     import json
@@ -449,7 +466,7 @@ def test_quiet_reads_by_the_screen_stay_out_of_the_log_but_operations_never_do(d
         def call(rid, method, params=None, **extra):
             ws.send(json.dumps({"jsonrpc": "2.0", "id": rid, "method": method, "params": params or {}, **extra}))
             return json.loads(ws.recv(timeout=3))
-        call(1, "session.hello", {"name": "gui", "role": "human", "api_version": 1})
+        call(1, "session.hello", {"name": "gui", "role": "human", "api_version": API_VERSION})
         call(2, "target.registers.read", quiet=True)               # 観測だけ（control だが状態を変えない）
         call(3, "probe.info", quiet=True)                          # read
         call(4, "target.halt", quiet=True)                         # 操作: quiet は効かない
@@ -478,8 +495,13 @@ def test_notifications_to_a_client_that_stopped_reading_are_capped(tmp_path):
             d.publish("activity", {"seq": i})
         for _ in range(5):
             await asyncio.sleep(0)
-        return conn.sending, conn.dropped                         # ループを閉じると送り途中は取り消される
-    assert asyncio.run(run()) == (NOTIFY_LIMIT, 50)
+        conn.client = d.new_client("ui", "human", "ws")
+        listed = next(c for c in d.clients() if c["name"] == "ui")
+        return conn.sending, conn.dropped, listed                 # ループを閉じると送り途中は取り消される
+    sending, dropped, listed = asyncio.run(run())
+    assert (sending, dropped) == (NOTIFY_LIMIT, 50)
+    # 捨てたことを黙らない: 利用者の一覧（session.status の clients）に捨てた数と使った上限
+    assert listed["notifications_dropped"] == 50 and listed["notify_limit"] == NOTIFY_LIMIT
 
 
 def test_a_base_exception_from_the_device_is_still_answered(daemon):
@@ -487,7 +509,7 @@ def test_a_base_exception_from_the_device_is_still_answered(daemon):
     c = DaemonClient(url, "claude", "ai")
     with pytest.raises(ApiError) as e:
         c.call("target.reset")
-    assert e.value.code == E_DEVICE and c.call("session.status")["api_version"] == 1
+    assert e.value.code == E_DEVICE and c.call("session.status")["api_version"] == API_VERSION
     c.close()
 
 
@@ -656,7 +678,10 @@ def test_stream_options_are_parsed():
     from fprobe.api.daemon import parse_stream, parse_stream_log
     assert parse_stream("rtt0=19021:telnet") == {"stream": "rtt0", "port": 19021, "protocol": "telnet"}
     assert parse_stream("swo=3443") == {"stream": "swo", "port": 3443, "protocol": "raw"}
-    assert parse_stream_log("rtt0=a.log") == {"stream": "rtt0", "path": "a.log", "timestamps": True}
+    # 行の頭の時刻は流れの名前から決めず（RTT にもバイナリの流れがある）、使う側が :time で明示したときだけ
+    assert parse_stream_log("rtt0=a.log") == {"stream": "rtt0", "path": "a.log", "timestamps": False}
+    assert parse_stream_log("rtt0=C:\\logs\\a.log:time") == {"stream": "rtt0", "path": "C:\\logs\\a.log",
+                                                             "timestamps": True}
     assert parse_stream_log("swo=a.bin")["timestamps"] is False
     for bad in ("rtt0", "rtt0=x", "=1"):
         with pytest.raises(ValueError):
@@ -803,3 +828,39 @@ def test_reading_a_recording_does_not_wait_for_a_slow_device_operation(tmp_path)
         reading.join()
     finally:
         stop()
+
+
+def _entries(app, method):
+    log = app.state.daemon.activity.path
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+        hits = [e for e in rows if e.get("method") == method]
+        if hits:
+            return hits
+        time.sleep(0.01)
+    return []
+
+
+def test_activity_records_where_the_call_came_from_and_whether_a_person_made_it(daemon):
+    # 使われ方の記録（docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.4）: どの窓から（要求の source）・
+    # つながり方（via）・自動操作か（hello の automated。画面は navigator.webdriver を申告する）を、事実として残す
+    url, app = daemon
+    gui = DaemonClient(url, "gui", "human", automated=True, source="panel:registers")
+    gui.call("target.halt")
+    entry = _entries(app, "target.halt")[0]
+    assert (entry["via"], entry["automated"], entry["source"]) == ("api", True, "panel:registers")
+    script = DaemonClient(url, "x", "script")
+    script.call("target.status")
+    entry = _entries(app, "target.status")[0]
+    assert entry["via"] == "api" and "automated" not in entry and "source" not in entry   # 申告の無いものは書かない
+    gui.close(); script.close()
+
+
+def test_a_malformed_source_is_refused(daemon):
+    url, _ = daemon
+    c = DaemonClient(url, "gui", "human")
+    for bad in (5, "", "x" * 65):
+        reply = c.request_with("target.status", {}, source=bad)
+        assert reply["error"]["code"] == -32600
+    c.close()

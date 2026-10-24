@@ -4,11 +4,12 @@ CPU 使用率とグループの推移、テストポイントの呼び出しの�
     w = window(samples, t0, t1)                                   # [t0, t1) のサンプルだけ（時刻はサンプルの単位）
     prof = Profiler(symbols).profile(w)
     group_profile(prof, Grouping("groups", {"Bluetooth": ["bt_*"], "HAL": ["file:Drivers/*"]}))
-    timeline(samples, profiler, bucket=1000, grouping=Grouping("prefix"))   # 区切りごとの負荷とグループの割合
+    timeline(samples, profiler, bucket=1000, grouping=Grouping("prefix", separator="_"))   # 区切りごとの負荷と割合
     call_stats(calls, t0, t1)                                     # テストポイントの呼び出しを区間で切った時間
 
 グループの決め方（by）: function（関数そのもの）/ file（ソースのファイル）/ directory（その上のディレクトリ）/
-prefix（名前の型: C++ は最後の :: の前、C は最初の _ の前。"HAL_GPIO_Init" → "HAL"）/ groups（名前 → パターンの
+prefix（関数名の、使う側が明示した区切り separator の最初の出現より前。separator "_" なら "HAL_GPIO_Init" → "HAL"、
+"::" なら "ns::Cls::f" → "ns"。区切りの無い名前はそのまま。名前の型の規則は本体に持たない）/ groups（名前 → パターンの
 一覧。パターンは関数名の glob、"file:" で始めるとファイルの glob。上から順に最初に合ったもの、どれにも合わなければ
 "(other)"）。ファイルで分けるときは行ごと（インライン展開された関数は展開先の行のファイル）。
 
@@ -23,7 +24,6 @@ from dataclasses import dataclass, field
 
 from .pcprofile import Profile, Profiler
 from .samples import PcSamples
-from .stats import wilson_interval
 
 __all__ = ["BY", "OTHER", "Grouping", "call_stats", "group_profile", "group_rows", "timeline", "window"]
 
@@ -36,6 +36,7 @@ UNKNOWN_FILE = "(unknown)"
 class Grouping:
     by: str = "function"
     groups: dict[str, list[str]] | None = None
+    separator: str | None = None            # by prefix の区切り（使う側が明示する）
     _patterns: tuple = field(default=(), init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -46,6 +47,8 @@ class Grouping:
                 raise ValueError("by groups には groups（{名前: [パターン]}）が要る")
             compiled = tuple((name, tuple(p for p in patterns)) for name, patterns in self.groups.items())
             object.__setattr__(self, "_patterns", compiled)
+        if self.by == "prefix" and not self.separator:
+            raise ValueError("by prefix には separator（関数名の区切り。例 \"_\"・\"::\"）が要る")
 
     @property
     def per_line(self) -> bool:
@@ -61,7 +64,7 @@ class Grouping:
             path = _norm(file)
             return (posixpath.dirname(path) or ".") if path else UNKNOWN_FILE
         if self.by == "prefix":
-            return prefix_of(function)
+            return prefix_of(function, self.separator)
         path = _norm(file)
         for name, patterns in self._patterns:
             for p in patterns:
@@ -77,14 +80,9 @@ def _norm(file: str | None) -> str | None:
     return None if file is None else file.replace("\\", "/")
 
 
-def prefix_of(name: str) -> str:
-    """名前の型: "ns::Cls::f" → "ns::Cls"、"HAL_GPIO_Init" → "HAL"、"__libc_init" → "libc"、区切りが無ければ名前。"""
-    if "::" in name:
-        return name.rsplit("::", 1)[0]
-    core = name.lstrip("_")
-    if "_" in core:
-        return core.split("_", 1)[0]
-    return name
+def prefix_of(name: str, separator: str) -> str:
+    """name の separator の最初の出現より前（先頭が区切りなら空）。区切りが無ければ name。"""
+    return name.split(separator, 1)[0]
 
 
 # --- 区間 ---------------------------------------------------------------------------------------
@@ -116,17 +114,19 @@ def _group_counts(profile: Profile, grouping: Grouping) -> tuple[Counter, dict[s
 
 
 def group_profile(profile: Profile, grouping: Grouping, *, top: int = 20, members: int = 5) -> dict:
-    """グループごとのサンプル数・割合（信頼区間つき）・眠り以外に対する割合と、多く使った関数（members 個）。"""
+    """グループごとのサンプル数・割合・眠り以外に対する割合と、多く使った関数（members 個。切る前の
+    数は functions_total）。行は top 個（切る前の数は groups_total、使った top・members も返す）。"""
     counts, parts = _group_counts(profile, grouping)
     rows = []
     for key, n in counts.items():
-        lo, hi = wilson_interval(n, profile.total, profile.confidence)
         rows.append({"group": key, "samples": n, "fraction": n / profile.total if profile.total else 0.0,
-                     "ci": [lo, hi], "active_fraction": n / profile.active if profile.active else 0.0,
-                     "functions": [{"function": f, "samples": c} for f, c in parts[key].most_common(members)]})
+                     "active_fraction": n / profile.active if profile.active else 0.0,
+                     "functions": [{"function": f, "samples": c} for f, c in parts[key].most_common(members)],
+                     "functions_total": len(parts[key])})
     rows.sort(key=lambda r: (-r["samples"], r["group"]))
     return {"by": grouping.by, "total": profile.total, "active": profile.active,
-            "categories": profile.category_table(), "groups_total": len(rows), "rows": rows[:top],
+            "categories": profile.category_table(), "groups_total": len(rows), "top": top, "members": members,
+            "rows": rows[:top],
             "notes": profile.notes()}
 
 
@@ -138,7 +138,7 @@ def timeline(samples: PcSamples, profiler: Profiler, *, bucket: int | float, gro
         raise ValueError("bucket は正")
     timed = window(samples, t0, None)
     if not timed.samples:
-        return {"bucket": bucket, "groups": [], "buckets": []}
+        return {"bucket": bucket, "top": top, "groups_total": 0, "groups": [], "buckets": []}
     whole = profiler.profile(timed)
     ranking, _ = _group_counts(whole, grouping)
     chosen = [k for k, _ in sorted(ranking.items(), key=lambda kv: (-kv[1], kv[0]))[:top]]
@@ -158,7 +158,7 @@ def timeline(samples: PcSamples, profiler: Profiler, *, bucket: int | float, gro
         buckets.append({"t0": origin + index * bucket, "samples": prof.total,
                         "load": prof.active / prof.total if prof.total else 0.0,
                         "sleep": prof.categories["sleep"] / prof.total if prof.total else 0.0, "groups": groups})
-    return {"bucket": bucket, "groups": chosen, "buckets": buckets}
+    return {"bucket": bucket, "top": top, "groups_total": len(ranking), "groups": chosen, "buckets": buckets}
 
 
 # --- テストポイントの呼び出し --------------------------------------------------------------------

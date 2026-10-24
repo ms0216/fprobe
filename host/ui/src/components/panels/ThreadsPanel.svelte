@@ -3,20 +3,28 @@
   // 1 秒ごとに走らせたまま読む（rtos.tasks の live。止めると BLE 等の接続が切れるターゲットでも見られる）。
   // 行を開くとそのタスクの呼び出し履歴（rtos.backtrace。フレームはソース・逆アセンブルへのリンク）。
   // 行のダブルクリックで時間軸のそのタスクの次の実行へ（記録があるとき）。時間軸で選んだ時刻に動いていたタスクを強調
+  // （時刻に連動。recording.code_at の task。窓ごとに外せる）。
+  // 優先度は値のダブルクリックで target.memory.write で書ける（番地と大きさは rtos.tasks の locations の事実）。
+  // 場所の無い値（状態・待ち・スタックの使用量。読んだ値から作ったもの）は書けないと示す
   import { errorText } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
   import { isRunning } from "../../lib/commands";
-  import { nextRun, runningAt, taskStateText, waitText } from "../../lib/rtos";
-  import { onTimeline } from "../../lib/timeline/events";
+  import { missingText } from "../../lib/codeat";
+  import { nextRun, taskStateText, waitText } from "../../lib/rtos";
+  import { timeText } from "../../lib/time";
+  import CodeAtToggle from "./CodeAtToggle.svelte";
   import { confirmer } from "../../lib/confirm";
   import { allowed } from "../../lib/guard";
   import { boundsParams, readUsage, usagePercent, type StackUsage } from "../../lib/stack";
   import { load, save } from "../../lib/prefs";
+  import { locationOf, memoryWriteCall, writeBuilt, type Location } from "../../lib/valuewrite";
+  import EditValue from "./EditValue.svelte";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
 
-  const { app, conn, tl, reveal, showAddress } = shared();
+  const { app, conn, tl, reveal, showAddress, codeAt } = shared();
+  const origins = tl.origins;
   let info = $state<any>(null);
   let failed = $state(false);
   let open = $state<Set<number>>(new Set());
@@ -46,16 +54,17 @@
     return () => clearInterval(timer);
   });
 
-  // 時間軸の 1 回クリック（記録）: その時刻に動いていたタスクの行を強調して見える位置へ
-  $effect(() => onTimeline({
-    select: (d) => {
-      if (d.source !== "recording") return;
-      void runningAt(conn, d.t).then((r) => {
-        atSelection = r?.handle ?? null;
-        if (r) document.getElementById(`task-${r.handle}`)?.scrollIntoView({ block: "nearest" });
-      }).catch(() => (atSelection = null));
-    },
-  }));
+  // 時刻に連動（時間軸の選択カーソルの記録の時刻 → recording.code_at の task）: その時刻に動いていたタスクの行を強調して
+  // 見える位置へ
+  let linked = $state(true);
+  const atTime = $derived(linked && $tl.source === "recording" ? $codeAt : null);
+  const atTask = $derived(atTime?.result?.task ?? null);
+  const atMissing = $derived(atTime?.result?.missing.task ?? null);
+  $effect(() => {
+    atSelection = atTask?.handle ?? null;
+    if (atTask) document.getElementById(`task-${atTask.handle}`)?.scrollIntoView({ block: "nearest" });
+  });
+  const atText = (t: number) => timeText($origins, { source: "recording", t }) ?? `t = ${t}`;
 
   async function read(live: boolean) {
     try {
@@ -102,9 +111,16 @@
     }
   }
 
+  /** タスクの値を読んだ番地に書き、読み直す */
+  async function writeAt(at: Location, input: string): Promise<string | null> {
+    const error = await writeBuilt(app, memoryWriteCall(at, input), $i18n);
+    if (!error) await read(running);
+    return error;
+  }
+
   const pct = (s: any) => (s?.size ? Math.round((100 * (s.peak_used ?? s.used ?? 0)) / s.size) : 0);
 
-  function mspBounds(): Record<string, number> | null {
+  function mspBounds(): Record<string, number | string> | null {
     const b = boundsParams(mspBottom, mspTop);
     if ("error" in b) {
       mspError = $i18n("stack.badBound", { field: b.error });
@@ -134,6 +150,22 @@
 </script>
 
 <div class="pane">
+  {#if $tl.source === "recording"}
+    <div class="pane-bar codeat">
+      <CodeAtToggle panel="threads" bind:linked />
+      {#if atTime && atTime.t !== null}
+        <span class="muted">{$i18n("codeAt.task", { time: atText(atTime.t) })}</span>
+        {#if atTask}
+          <span class="mono">{$i18n("codeAt.taskRun", { task: atTask.task ?? `0x${atTask.handle.toString(16)}`,
+                                                       from: atText(atTask.t0), to: atText(atTask.t1) })}</span>
+        {:else if atMissing}
+          <span class="muted">{missingText($i18n, "task", atMissing)}</span>
+        {:else if atTime.error}
+          <span class="bad">{atTime.error}</span>
+        {/if}
+      {/if}
+    </div>
+  {/if}
   {#if info && (halted || running)}
     <div class="pane-bar">
       <span class="mono">{info.rtos}</span>{#if info.tick !== undefined && info.tick !== null}<span class="muted">{$i18n("threads.tick", { n: info.tick })}</span>{/if}
@@ -145,6 +177,7 @@
         <th>{$i18n("threads.waiting")}</th><th>{$i18n("threads.stack")}</th></tr></thead>
       <tbody>
         {#each info.tasks as task (task.handle)}
+          {@const at = locationOf(task, "priority")}
           <tr id="task-{task.handle}" class="task" class:current={task.name === info.current}
               class:at={task.handle === atSelection} title={$i18n("threads.rowTip")}
               onclick={() => toggle(task.handle)} ondblclick={() => revealNext(task)}>
@@ -152,8 +185,10 @@
               <span class="caret">{open.has(task.handle) ? "▾" : "▸"}</span>{task.name === info.current ? "▶ " : ""}{task.name}
               {#if task.handle === atSelection}<span class="badge" title={$i18n("threads.runningAt")}>●</span>{/if}
             </td>
-            <td>{taskStateText(task.state, $i18n)}</td>
-            <td class="mono">{task.priority}</td>
+            <td><EditValue text={taskStateText(task.state, $i18n)} reason={$i18n("write.noLocation")} onwrite={async () => null} /></td>
+            <td class="mono"><EditValue text={String(task.priority)} via={at ? "target.memory.write" : null}
+              note={at ? $i18n("write.at", { address: hex32(at.address), size: at.size }) : ""}
+              reason={$i18n("write.noLocation")} onwrite={(input) => writeAt(at!, input)} /></td>
             <td class="muted">{waitText(task.wait, $i18n)}</td>
             <td class="mono stack" title="{task.stack.peak_used ?? "?"} / {task.stack.size ?? "?"}">
               <span class="bar"><span style:width="{pct(task.stack)}%" class:over={task.stack.overflow}></span></span>

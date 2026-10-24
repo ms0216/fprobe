@@ -178,6 +178,7 @@ entity fprobe_core is
 end entity;
 
 architecture rtl of fprobe_core is
+  signal wait_retry : unsigned(15 downto 0);                -- DAP_TransferConfigure の WAIT の再試行（サンプラ・割り込み書き込みも）
   signal bus_req, bus_we, bus_ack, bus_err : std_logic;
   signal bus_addr  : csr_addr_t;
   signal bus_wdata, bus_rdata : csr_word_t;
@@ -311,6 +312,8 @@ architecture rtl of fprobe_core is
   signal ev_request : std_logic_vector(3 downto 0);
   signal ev_ack : std_logic_vector(2 downto 0);
   signal ev_addr, ev_data : std_logic_vector(31 downto 0);
+  signal ev_addr_known : std_logic;                      -- 0 = DRW でメモリの番地を追えなかった（種類 12）
+  signal host_kind : std_logic_vector(7 downto 0);         -- ホストの転送のイベントの種類（1 か 12）
   signal route_to_la, route_to_inject, sources : std_logic_vector(5 downto 0);
   signal smp_match : std_logic;                     -- サンプラの値の一致（クロストリガの源 bit5。R21）
   signal obs_match : std_logic;                     -- FPGA の観測の値の一致（クロストリガの源 bit4）
@@ -408,6 +411,7 @@ begin
               swd_cmd_request => swd_cmd_request, swd_cmd_data => swd_cmd_data,
               swd_rsp_valid => dap_rsp_valid, swd_rsp_ack => swd_rsp_ack, swd_rsp_data => swd_rsp_data,
               swd_rsp_parity => swd_rsp_parity, nreset_low => nreset_low, nreset_in => nreset_i,
+              wait_retry_out => wait_retry,
               jtag => jtag, jtag_dr_before => jtag_dr_before, jtag_dr_after => jtag_dr_after,
               jtag_ir_before => jtag_ir_before, jtag_ir_after => jtag_ir_after, jtag_ir_len => jtag_ir_len,
               swo_run => swo_run, swo_divisor => swo_divisor, swo_manchester => swo_manchester,
@@ -431,7 +435,7 @@ begin
 
   xtrig_inject : if XTRIG and INJECTOR generate
   inject_i : entity work.swd_injector
-    port map (clk => clk, rst => rst, request => inj_request, enable => swd_enable, dap_busy => dap_busy,
+    port map (clk => clk, rst => rst, wait_retry => wait_retry, request => inj_request, enable => swd_enable, dap_busy => dap_busy,
               select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
               shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy, written => inj_written, result => inj_result, last_ack => inj_ack,
@@ -476,7 +480,7 @@ begin
   begin
     up_busy <= dap_busy or inj_busy;
     smp_i : entity work.dap_sampler
-      port map (clk => clk, rst => rst, run => smp_run, period => unsigned(period),
+      port map (clk => clk, rst => rst, wait_retry => wait_retry, run => smp_run, period => unsigned(period),
                 jitter => to_integer(unsigned(jitter)), ap => ap,
                 tbl_write => tbl_write, tbl_index => to_integer(unsigned(tbl_index)), tbl_addr => tbl_addr,
                 tbl_enable => tbl_enable, tbl_words => tbl_words,
@@ -554,6 +558,7 @@ begin
   end generate;
 
   dap_fire <= swd_cmd_valid and swd_cmd_ready;
+  host_kind <= x"01" when ev_addr_known = '1' else x"0C";
   monitor_i : entity work.dap_monitor
     port map (clk => clk, rst => rst, cmd_fire => dap_fire, cmd_op => swd_cmd_op, cmd_req => swd_cmd_request,
               cmd_data => swd_cmd_data(31 downto 0), rsp_valid => dap_rsp_valid, rsp_ack => swd_rsp_ack,
@@ -562,7 +567,8 @@ begin
               data_mask => match_data_mask, on_write => match_on_write, on_read => match_on_read,
               select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
               shadow_valid => shadow_valid, match => match, ev_valid => ev_valid, ev_request => ev_request,
-              ev_ack => ev_ack, ev_parity => ev_parity, ev_addr => ev_addr, ev_data => ev_data);
+              ev_ack => ev_ack, ev_parity => ev_parity, ev_addr => ev_addr, ev_addr_known => ev_addr_known,
+              ev_data => ev_data);
 
   port_i : entity work.debug_port
     generic map (HAS_JTAG => HAS_JTAG)
@@ -933,7 +939,8 @@ begin
     signal user_ir, read_value, id : std_logic_vector(31 downto 0);
     signal cmd : std_logic_vector(15 downto 0);
     signal words : std_logic_vector(8 downto 0);
-    signal running, id_ok, stuck, pending, overflow_seen, dropped, target_running, driving : std_logic;
+    signal running, id_ok, stuck, id_timeout, pending, overflow_seen, dropped, target_running, driving : std_logic;
+    signal id_scans : std_logic_vector(7 downto 0);
     signal scans : unsigned(31 downto 0);
     signal m_mask, m_value, m_change : std_logic_vector(15 downto 0);
     signal m_on : std_logic;
@@ -945,11 +952,11 @@ begin
                 sample_delay => 0, ir_len => unsigned(ir_len),   -- ponytail: 観測の口の TDO の遅れは High 相の終わり。遅れて届く対象が出たら CSR に
                 ir_before => unsigned(ir_before), ir_after => unsigned(ir_after), dr_before => unsigned(dr_before),
                 dr_after => unsigned(dr_after), user_ir => user_ir, words => unsigned(words),
-                sync_period => unsigned(sync_period), cmd_push => push, cmd_data => cmd,
+                sync_period => unsigned(sync_period), id_scans => unsigned(id_scans), cmd_push => push, cmd_data => cmd,
                 match_mask => m_mask, match_value => m_value, match_change => m_change, match_on => m_on,
                 match => obs_match, match_count => m_count,
                 running => running, target_running => target_running, driving => driving, id_ok => id_ok,
-                stuck => stuck, cmd_pending => pending,
+                stuck => stuck, id_timeout => id_timeout, cmd_pending => pending,
                 overflow_seen => overflow_seen, cmd_dropped => dropped, scans => scans, read_value => read_value,
                 id => id, ev_valid => obs_valid, ev_sync => obs_sync, ev_data => obs_data, ev_addr => obs_addr,
                 ev_time => obs_time, tck => obs_tck, tms => obs_tms, tdi => obs_tdi, tdo => obs_tdo, oe => obs_oe);
@@ -960,8 +967,8 @@ begin
                 control_enable => enable, control_release => free_pins, half_period => half_period,
                 chain_ir_len => ir_len, chain_ir_before => ir_before, chain_ir_after => ir_after,
                 chain_dr_before => dr_before, chain_dr_after => dr_after, user_ir => user_ir, words => words,
-                sync_period => sync_period, cmd => cmd, cmd_push => push,
-                status_running => running, status_id_ok => id_ok, status_stuck => stuck,
+                sync_period => sync_period, id_scans => id_scans, cmd => cmd, cmd_push => push,
+                status_running => running, status_id_ok => id_ok, status_stuck => stuck, status_id_timeout => id_timeout,
                 status_cmd_pending => pending, status_overflow_seen => overflow_seen, status_cmd_dropped => dropped,
                 status_target_running => target_running, status_driving => driving,
                 scans => std_logic_vector(scans), read_value => read_value, id => id,
@@ -994,7 +1001,8 @@ begin
   -- イベント（1 件 128 ビット）: [47:0] 時刻、[79:48] 番地、[111:80] データ、[114:112] ACK、[118:115] 要求、
   -- [119] パリティ異常、[127:120] 種類（1 = ホストの転送、2 = 割り込み書き込み（旧い形。今は 11）、3 = UART 受信（ターゲット → PC）、
   -- 4 = UART 送信（PC → ターゲット）、5 = SWO、6 = 補助マイコンの計測値、7 = DAP サンプラの 1 語（番地・値・ACK）、8・9 = FPGA の観測、10 = 時刻の同期の組、
-  -- 11 = 割り込み書き込み（[119:112] = 停止の書き込みまでの転送数。R20））。3〜5 はデータの下位 8 ビットがバイトで、
+  -- 11 = 割り込み書き込み（[119:112] = 停止の書き込みまでの転送数。R20）、12 = ホストの転送のうち DRW でメモリの番地を
+  -- 追えなかったもの（番地 = レジスタの番地。dap_monitor の ev_addr_known））。3〜5 はデータの下位 8 ビットがバイトで、
   -- 6 はデータ = ch << 16 | 値（mV）。時刻はブリッジ / 受信器との
   -- 受け渡しの周期。バイトは源ごとに 1 件保持し、DAP・割り込みのイベントが無い周期に出す（1 周期に 1 件）。
   -- 保持がまだ出ていないうちに次のバイトが来たら捨てて byte_lost に数える（events.lost に足す）
@@ -1024,7 +1032,7 @@ begin
       lost_n := 0;
       if ev_valid = '1' then
         event_valid <= '1';
-        event_data  <= x"01" & ev_parity & ev_request & ev_ack & ev_data & ev_addr & std_logic_vector(time_count(47 downto 0));
+        event_data  <= host_kind & ev_parity & ev_request & ev_ack & ev_data & ev_addr & std_logic_vector(time_count(47 downto 0));
         served := true;
       elsif inj_written = '1' then
         event_valid <= '1';

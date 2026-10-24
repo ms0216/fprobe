@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from dwarf_stack import StackBuilder
 from test_debug_dwarf import FakeTarget as DwarfTarget
+from value_kinds import venum, vint
 
 from fprobe.mcp_server import Probe
 from fprobe.svd import Device
@@ -96,19 +97,22 @@ def test_backtrace_keeps_its_fields_and_adds_function_line_and_variables(halted)
     assert {"pc", "where", "note"} <= set(first) and first["where"].startswith("probe_point")   # 既存の欄は同じ意味
     assert first["index"] == 0 and first["file"] == "dwarf_demo.c" and isinstance(first["line"], int)
     assert "arguments" not in first
+    # 止めた理由は最後の段だけ（呼び出し元の無い戻り先 0xFFFFFFFF）。上限で切ったら使った上限
+    assert "stop" not in first and plain[-1]["stop"] == {"reason": "return_address", "value": 0xFFFFFFFF}
+    assert halted.backtrace(max_frames=2)[-1]["stop"] == {"reason": "max_frames", "max_frames": 2}
     rich = halted.backtrace(variables=True)
-    assert [a["name"] for a in rich[0]["arguments"]] == ["marker"] and rich[0]["arguments"][0]["value"] == 77
+    assert [a["name"] for a in rich[0]["arguments"]] == ["marker"] and rich[0]["arguments"][0]["value"] == vint(77)
     depth = next(a for a in rich[3]["arguments"] if a["name"] == "depth")
-    assert depth["value"] == 1                                                  # 外側の walk(1)
+    assert depth["value"] == vint(1)                                            # 外側の walk(1)
     json.dumps(rich)                                                            # JSON にできる
 
 
 def test_evaluate_frame_variables_and_write_expression(halted):
     assert halted.evaluate("head->next->name")["value"]["string"] == "beta"
-    assert halted.evaluate("depth", frame=3)["value"] == 1
+    assert halted.evaluate("depth", frame=3)["value"] == vint(1)
     assert halted.frame_variables(0)["function"] == "probe_point"
     after = halted.write_expression("sensors[1].mode", "MODE_IDLE")
-    assert after["value"] == {"enum": "MODE_IDLE", "value": 0}
+    assert after["value"] == venum("MODE_IDLE", 0)
 
 
 def test_type_info_needs_only_the_elf(probe):
@@ -146,6 +150,36 @@ def test_disassembly_reads_the_target_around_the_pc(probe):
         probe.disasm_text(length=8)                                            # 範囲には番地が要る
 
 
+def test_branch_table_sizes_are_given_through_the_api(probe):
+    # tbb / tbh の表の大きさは使う側が明示する（Disassembler(branch_tables=...) と同じ）。API からも渡せる
+    code = bytes.fromhex("0228" "04d8" "dfe800f0" "02030400" "7047" "7047" "00bf00bf")   # cmp・bhi・tbb・表・bx・bx
+    connect(probe, BusTarget({0x100 + i: b for i, b in enumerate(code)}, pc=0x100))
+    plain = probe.disasm_range(0x100, 16)
+    assert not any(i["kind"] == "data" for i in plain["instructions"])
+    given = probe.disasm_range(0x100, 16, branch_tables=[{"address": 0x104, "entries": 3}])
+    table = [i for i in given["instructions"] if i["kind"] == "data"]
+    assert [i["address"] for i in table] == [0x108, 0x109, 0x10A, 0x10B]
+    assert {i["data_basis"] for i in table} == {"branch_table"}
+    tables = [{"address": 0x104, "entries": 3}]
+    assert probe.disasm_around(0x10C, before=0, after=0, branch_tables=tables)["instructions"][0]["mnemonic"] == "bx"
+    assert ".byte" in probe.disasm_text(address=0x100, length=16, source=False, branch_tables=tables)["text"]
+    with pytest.raises(ValueError):
+        probe.disasm_range(0x100, 16, branch_tables=[{"address": 0x104}])
+
+
+def test_data_ranges_are_given_through_the_api(probe):
+    # ldr [pc] の読む先をデータとするかは使う側が渡す（本体は推さない）
+    code = bytes.fromhex("004800bf" "efbeadde" "00bf00bf" "00bf00bf")    # ldr r0, [pc, #0]・nop・リテラル・nop
+    connect(probe, BusTarget({0x100 + i: b for i, b in enumerate(code)}, pc=0x100))
+    plain = probe.disasm_range(0x100, 12)
+    assert not any(i["kind"] == "data" for i in plain["instructions"])
+    given = probe.disasm_range(0x100, 12, data_ranges=[{"address": 0x104, "size": 4}])
+    data = [i for i in given["instructions"] if i["kind"] == "data"]
+    assert [(i["address"], i["data_basis"]) for i in data] == [(0x104, "given")]
+    with pytest.raises(ValueError):
+        probe.disasm_range(0x100, 12, data_ranges=[{"address": 0x104}])
+
+
 def test_without_target_or_elf_disassembly_is_an_error(probe):
     with pytest.raises(RuntimeError):
         probe.disasm_range(0x20000000, 4)
@@ -173,11 +207,17 @@ def test_svd_load_lists_peripherals_and_registers(mini):
     assert regs[0]["path"] == "TIMER0.CTRL" and regs[0]["fields"][0]["name"] == "EN"
 
 
-def test_svd_is_found_from_the_target_name(probe):
+def test_svd_is_not_guessed_from_the_target_name(probe):
+    # ターゲット名（stm32f401xe）とファイル名の前方一致で SVD を選ばない。使う側が名前（ファイル名）か path を渡す
     connect(probe, BusTarget(), target_type="stm32f401xe")
-    assert probe.svd_peripherals(filter="RCC")["device"].startswith("STM32F401")   # 自動で読む
-    with pytest.raises(RuntimeError):
-        connect(Probe("unused"), BusTarget()).svd_peripherals()                    # cortex_m では探せない
+    with pytest.raises(RuntimeError, match="svd_load"):
+        probe.svd_peripherals(filter="RCC")
+    with pytest.raises(RuntimeError, match="device"):
+        probe.svd_load()
+    with pytest.raises(FileNotFoundError):
+        probe.svd_load(device="stm32f401xe")
+    assert probe.svd_load(device="STM32F401")["origin"] == "bundled"
+    assert probe.svd_peripherals(filter="RCC")["device"].startswith("STM32F401")
 
 
 def test_peripheral_read_decodes_fields_and_skips_side_effects(mini):
@@ -192,6 +232,23 @@ def test_peripheral_read_decodes_fields_and_skips_side_effects(mini):
     uart = probe.peripheral_read("UART")
     assert "UART.DR" in {s["path"] for s in uart["skipped"]}
     assert {r["path"] for r in probe.peripheral_read("UART", allow_side_effects=True)["registers"]} >= {"UART.DR"}
+
+
+def test_bulk_read_skips_by_svd_read_action_or_the_callers_patterns_not_by_register_names(mini):
+    # 「*.DR・*.FIFO 等の名前なら読むと消費する」という名前の型の推定を本体に持たない。読むと状態が変わるのは SVD の
+    # readAction（仕様の情報）で決め、それ以外に読まないものは使う側が skip（glob）で明示する
+    from fprobe.probe_inspect import InspectTools
+    from fprobe.svd import Register
+    import fprobe.probe_inspect as inspect_module
+    assert not hasattr(inspect_module, "BULK_READ_HAZARDS")
+    fifo = Register("RXFIFO", "SPI", 0x40004000, 32, "read-only", 0, 0xFFFFFFFF)
+    assert InspectTools._bulk_skip_reason(fifo, False, ()) is None                 # readAction が無ければ読む
+    assert InspectTools._bulk_skip_reason(fifo, False, ("SPI.*FIFO",)) == "skip SPI.*FIFO"
+    probe, target = mini
+    uart = probe.peripheral_read("UART", skip=["uart.sr"])                         # 大文字小文字を区別しない
+    assert {s["path"]: s["reason"] for s in uart["skipped"]}["UART.SR"] == "skip uart.sr"
+    with pytest.raises(ValueError, match="skip"):
+        probe.peripheral_read("UART.SR", skip=["*"])                                # 1 つを名指しで読むときは要らない
 
 
 def test_peripheral_read_reports_bus_errors_per_register(probe):
@@ -256,3 +313,17 @@ def test_device_of_the_svd_survives_an_elf_reload(mini):
     assert isinstance(probe._svd, Device)
     probe.elf_load(str(SRAM_DEMO))
     assert probe._svd is not None and probe._image is None
+
+
+def test_svd_from_the_targets_definition_is_read_only_when_asked(probe):
+    # pyOCD のターゲットの定義が指す SVD（_svd_location のファイル名）から読む。名前から推さず、定義の事実として
+    import types
+    target = BusTarget()
+    target._svd_location = types.SimpleNamespace(filename=types.SimpleNamespace(name="nrf52840.svd"))
+    connect(probe, target, target_type="nrf52840")
+    out = probe.svd_load(from_target=True)
+    assert out["origin"] == "target" and out["source"] == "nrf52840.svd" and out["peripherals"] > 10
+    bare = BusTarget()
+    connect(probe, bare, target_type="cortex_m")
+    with pytest.raises(RuntimeError, match="定義に SVD"):
+        probe.svd_load(from_target=True)

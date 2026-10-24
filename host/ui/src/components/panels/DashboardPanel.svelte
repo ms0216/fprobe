@@ -3,7 +3,9 @@
   // 棒・グラフ・ボタン・スライダ・切り替え・ランプを並べて変数を読む・書く。配置はブラウザに覚え、JSON で書き出す・
   // 読み込む（読み込みは lib/dashboard の validateLayout で検証して直す）。
   // 読み: 走行中は watch.values（Live で部品の式を観測に足す。Data Sampling と同じ観測を分け合う）、止まっているときは
-  // debug.evaluate（止まるたび・書いた後）。書き: 走行中は watch.write、止まっているときは debug.write_expression。
+  // debug.evaluate（止まるたび・書いた後）。書き: 走行中は watch.write、止まっているときは debug.write_expression
+  // （lib/valuewrite の exprWriteCall。ほかの窓と同じ規則）。ボタン・スライダ・切り替えに加え、ゲージ・数値・棒・グラフ・
+  // ランプも部品のダブルクリックで同じ式に書ける。
   // 遠隔（--lan）の画面でも同じ（デーモンの API だけを使う）。配置はデーモンの画面の状態（ui.state の dashboard）で別の窓・
   // 遠隔の画面・AI と分け合う（lib/dashboard の SharedDashboard）
   import { untrack } from "svelte";
@@ -12,10 +14,12 @@
   import { shared } from "../../lib/context";
   import {
     addWidget, exampleLayout, expressionsOf, formatNumber, fraction, gaugeArc, KINDS, layoutJson, moveWidget, parseLayout,
-    readValues, removeWidget, SharedDashboard, sliderStep, truthOf, updateWidget, writeCall, writeValue, MAX_H, MAX_W,
+    readValues, removeWidget, SharedDashboard, sliderStep, truthOf, updateWidget, writeValue, MAX_H, MAX_W, WRITERS,
     type Layout, type Problem, type Reading, type Widget, type WidgetKind,
   } from "../../lib/dashboard";
   import { allowed } from "../../lib/guard";
+  import { exprWriteCall, exprWriteMethod } from "../../lib/valuewrite";
+  import { inputText, parseInput } from "../../lib/vartree";
   import { i18n, type Key } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import { displayValue, numberOf, SampleStore } from "../../lib/sampling";
@@ -24,7 +28,7 @@
   import Empty from "./Empty.svelte";
 
   const OWNER = "dashboard";
-  const POLL_MS = 300, STATUS_MS = 1000, LIVE_RATE = 100;
+  const POLL_MS = 300, STATUS_MS = 1000;
 
   const { app, conn, tl } = shared();
   // グラフの横軸（タイムベースの µs）は記録の始めからの秒（記録が無ければタイムベースの 0 から）
@@ -39,6 +43,9 @@
   let problems = $state<Problem[]>([]);
   let readings = $state(new Map<string, Reading>());
   let running = $state<string[]>([]);          // 観測している式（全員の）
+  let runningRate = $state(0);                 // 観測の組の周期（Hz。動いていなければ 0）
+  // Live の周期: 観測が動いていなければ使う人が入れる（画面の既定を持たない）。動いていれば組の周期のまま
+  let rateText = $state(load("dashboard.rate", ""));
   let live = $state(false);                    // このビューで Live にした
   let busy = $state(false);
   let gen = $state(0);
@@ -55,8 +62,11 @@
   // 部品の式がすべて観測の組にある（一部だけなら Live で足りない式を足す）
   const sampled = $derived(exprs.length > 0 && exprs.every((e) => running.includes(e)));
   const lost = $derived(live ? missing(running, exprs) : []);
+  const typedRate = $derived(rateText.trim() === "" ? null : Number(rateText));
+  const rateOk = $derived(typedRate !== null && Number.isFinite(typedRate) && typedRate > 0);
 
   $effect(() => save("dashboard.layout", JSON.stringify(layout)));
+  $effect(() => save("dashboard.rate", rateText));
 
   // 配置をデーモンの画面の状態で分け合う（別の窓・遠隔の画面・AI が同じ操作パネルを見る）
   let sharedReady = false;
@@ -102,9 +112,12 @@
 
   async function readRunning() {
     try {
-      running = (await readWatch(call)).names;
+      const w = await readWatch(call);
+      running = w.names;
+      runningRate = w.rate;
     } catch {
       running = [];
+      runningRate = 0;
     }
   }
 
@@ -134,7 +147,9 @@
         live = false;
       } else {
         const now = await readWatch(call);
-        live = await startWatch(call, act, OWNER, exprs, now.rate || LIVE_RATE);
+        const rate = now.rate || (rateOk ? typedRate : null);
+        if (!rate) return;                        // 周期が入っていない（ボタンは押せない）
+        live = await startWatch(call, act, OWNER, exprs, rate);
       }
       await readRunning();
     } finally {
@@ -143,12 +158,34 @@
   }
 
   async function write(w: Widget, input?: number) {
-    const value = writeValue(w, valueOf(w.expr), input);
-    if (value === null || !w.expr || !(await allowed(app))) return;
-    const { method, params } = writeCall(runningTarget, w.expr, value);
-    await app.act(method, params);
+    await writeExpr(w.expr, writeValue(w, valueOf(w.expr), input));
+  }
+
+  /** 部品の式に書く（使う API はターゲットの状態で決める）。AI の作業中は確かめる */
+  async function writeExpr(expr: string, value: number | string | boolean | null) {
+    const c = value === null || !expr ? null : exprWriteCall(target?.state, expr, value);
+    if (!c || !(await allowed(app))) return;
+    await app.act(c.method as "watch.write", c.params as any);
     await read();
   }
+
+  // 表示の部品（ゲージ・数値・棒・グラフ・ランプ）の書き込み: ダブルクリックで欄を出す
+  const via = $derived(exprWriteMethod(target?.state));
+  let typing = $state<{ id: string; text: string } | null>(null);
+  function startTyping(w: Widget) {
+    if (editing || !via || !w.expr || WRITERS.has(w.kind)) return;
+    const v = readings.get(w.expr)?.value;
+    typing = { id: w.id, text: v === undefined ? "" : inputText(v) };
+  }
+  async function commitTyping(w: Widget) {
+    const t = typing;
+    typing = null;
+    if (t && t.text.trim() !== "") await writeExpr(w.expr, parseInput(t.text));
+  }
+  const focusInput = (el: HTMLInputElement) => {
+    el.focus();
+    el.select();
+  };
 
   // --- 編集 ---------------------------------------------------------------------------------------
 
@@ -183,6 +220,11 @@
     const p = history.points(w.expr);
     return [{ name: titleOf(w), x: p.x.slice(), y: p.y.slice(), step: true }];
   }
+  // グラフの部品が上限を超えて捨てた古い点の数（黙って捨てない）
+  function discardedOf(w: Widget): number {
+    void gen;
+    return history.discarded(w.expr);
+  }
 </script>
 
 <div class="pane dash">
@@ -196,8 +238,14 @@
       <button onclick={() => (layout = addWidget(layout, newKind))}>{$i18n("dashboard.addWidget")}</button>
       <button title={$i18n("dashboard.exampleTip")} onclick={() => (layout = exampleLayout())}>{$i18n("dashboard.example")}</button>
     {/if}
-    <button class:on={sampled} disabled={busy || !connected || !exprs.length} title={$i18n("dashboard.liveTip")}
-            onclick={toggleLive}>{$i18n(sampled ? "dashboard.stopLive" : "dashboard.live")}</button>
+    {#if runningRate > 0}
+      <span class="mono muted small" title={$i18n("sampling.sharedRateTip")}>{$i18n("sampling.sharedRate", { rate: runningRate })}</span>
+    {:else}
+      <label class="small" title={$i18n("dashboard.rateTip")}>{$i18n("dashboard.rate")}<span class="req" aria-hidden="true">*</span>
+        <input class="mono rate" inputmode="decimal" aria-required="true" bind:value={rateText} /></label>
+    {/if}
+    <button class:on={sampled} disabled={busy || !connected || !exprs.length || (!sampled && runningRate <= 0 && !rateOk)}
+            title={$i18n("dashboard.liveTip")} onclick={toggleLive}>{$i18n(sampled ? "dashboard.stopLive" : "dashboard.live")}</button>
     <span class="spacer"></span>
     <button onclick={exportLayout} disabled={!layout.widgets.length}>{$i18n("dashboard.export")}</button>
     <button onclick={() => fileInput.click()}>{$i18n("dashboard.import")}</button>
@@ -231,7 +279,11 @@
         {@const r = readings.get(w.expr)}
         {@const v = valueOf(w.expr)}
         {@const notSampled = runningTarget && r !== undefined && !r.sampled}
-        <div class="card" style:grid-column="span {w.w}" style:grid-row="span {w.h}" class:editing>
+        {@const typeable = !editing && !!via && !!w.expr && !WRITERS.has(w.kind)}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="card" style:grid-column="span {w.w}" style:grid-row="span {w.h}" class:editing class:typeable
+             title={typeable ? $i18n("dashboard.writeAnyTip", { expr: w.expr, api: via ?? "" }) : undefined}
+             ondblclick={() => startTyping(w)}>
           <div class="title" title={w.expr}>{titleOf(w)}</div>
           <div class="body">
             {#if notSampled}
@@ -254,6 +306,8 @@
             {:else if w.kind === "chart"}
               <Chart series={chartOf(w)} yDomain={[w.min, w.max]} height={Math.max(60, w.h * 78 - 34)} legend={false} xFormat={fmtX}
                      label={titleOf(w)} />
+              {#if discardedOf(w)}<span class="muted small">{$i18n("dashboard.discarded",
+                { n: discardedOf(w), limit: history.limit })}</span>{/if}
             {:else if w.kind === "button"}
               <button class="primary" disabled={!connected || !w.expr}
                       title={$i18n("dashboard.writeTip", { expr: w.expr, value: w.value })}
@@ -277,6 +331,12 @@
               <span class="lamp" class:lit={truthOf(v) === true} class:unknown={truthOf(v) === null}></span>
             {/if}
           </div>
+          {#if typing?.id === w.id}
+            <input class="mono typing" aria-label={$i18n("vars.edit")} bind:value={typing.text} use:focusInput
+                   onblur={() => (typing = null)}
+                   onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); void commitTyping(w); }
+                                       else if (e.key === "Escape") { e.preventDefault(); typing = null; } }} />
+          {/if}
           {#if editing}
             <div class="edit">
               <select value={w.kind} aria-label={$i18n("dashboard.addWidget")}
@@ -326,12 +386,17 @@
   .warn { color: var(--warn); }
   .bad { color: var(--bad); }
   .small { font-size: 12px; }
+  .rate { width: 6em; margin-left: 3px; }
   button.on { border-color: var(--accent); color: var(--accent); }
   .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: minmax(78px, auto);
            gap: 8px; padding: 8px; }
   .card { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column;
           min-width: 0; background: var(--panel); }
   .card.editing { border-style: dashed; }
+  .card.typeable .body { cursor: text; }
+  .card.typeable .title { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent);
+                          text-underline-offset: 3px; }
+  .typing { width: 100%; font-size: 12px; margin-top: 4px; }
   .title { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 0; }
   .big { font-size: 22px; font-weight: 600; }

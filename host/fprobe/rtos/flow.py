@@ -6,10 +6,10 @@
     communication_flow(trace, names, objects)          # タスク・割り込み・オブジェクトの有向グラフ（DOT も）
     blocking(trace, names, objects, t_end)             # 待ちの区間（block / delay / suspend → ready）と結果
     queue_usage(trace, names, objects, t1)             # キュー・セマフォのメッセージ数の推移と使用率
-    inversions_from_ops(tl, trace, priorities)         # 持ち主と待ち手を出来事で追う逆転の区間（取りこぼし無し）
-    isr_activations(trace)                             # isr_enter / isr_exit → Activation
+    inversions_from_ops(tl, trace, priorities, order)         # 持ち主と待ち手を出来事で追う逆転の区間（取りこぼし無し）
+    isr_pairing(trace)                                 # isr_enter / isr_exit → Activation と対にできなかった数
     job_events(trace, task_events)                     # find_jobs（応答時間）に渡す ready / block の出来事
-    overhead(trace, duration, timebase_hz, baud, core_clock_hz)   # 語の数・SWO の帯域・CPU の負荷の見積もり
+    overhead(trace, duration, timebase_hz, baud, core_clock_hz, bits_per_byte)   # 語の数・SWO の帯域の使用率
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from .analysis import KernelEvent, inversion_episode, inversion_summary, runs_by
 from .kernel_trace import KernelOp, KernelTrace, object_table
 from .timeline import TaskEvent, Timeline, name_of
 
-__all__ = ["blocking", "communication_flow", "inversions_from_ops", "isr_activations", "job_events", "overhead",
-           "queue_usage"]
+__all__ = ["IsrPairs", "blocking", "communication_flow", "inversions_from_ops", "isr_activations", "isr_pairing",
+           "job_events", "overhead", "queue_usage"]
 
 _SUCCESS = frozenset({"send", "receive", "peek", "stream_send", "stream_receive"})
 _FAILED = frozenset({"send_failed", "receive_failed"})
@@ -148,8 +148,8 @@ class _Wait:
 def blocking(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[int, dict] | None = None,
              t_end: int | None = None, hz: float | None = None) -> dict:
     """待ちの区間: block（オブジェクト・通知を待った）/ delay / suspend から、そのタスクの次の ready まで。
-    outcome: 起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = failed（理由 = 時間切れ・待ちの中断等は推定しない。
-    分からなければ None）。観測の終わりで
+    outcome: 起きたタスクの次の操作（割り込みでない）が同じオブジェクトへの成功 = ok、失敗 = failed（理由 = 時間切れ・
+    待ちの中断等は推定しない）。次の操作が別のもの・無ければ None（後の同じオブジェクトへの操作は対応付けない）。観測の終わりで
     開いている待ちは truncated（統計に入れない）。lost（あふれ）で開いていた待ちは忘れる（forgotten）。"""
     table = object_table(trace, objects)
     open_waits: dict[int, _Wait] = {}
@@ -167,12 +167,9 @@ def blocking(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[int,
             awaiting.clear()
             continue
         if not op.isr and op.actor is not None and op.actor in awaiting:
-            w = awaiting[op.actor]
-            if op.kind == "block":
-                del awaiting[op.actor]
-            elif op.obj == w.obj and (op.kind in _SUCCESS or op.kind in _FAILED):
+            w = awaiting.pop(op.actor)                  # 起きたタスクの次の操作だけが待った呼び出しの結果
+            if op.obj == w.obj and (op.kind in _SUCCESS or op.kind in _FAILED):
                 w.outcome = "ok" if op.kind in _SUCCESS else "failed"
-                del awaiting[op.actor]
         if op.kind == "block" and not op.isr and op.actor is not None:
             on = _object_name(table, op.obj) if op.obj else "notify"
             begin(op.actor, op, on, op.obj, op.wait)
@@ -310,7 +307,7 @@ class _MutexState:
     inherited: dict | None = None
 
 
-def inversions_from_ops(tl: Timeline, trace: KernelTrace, priorities: Mapping[int, int], order: int = 1,
+def inversions_from_ops(tl: Timeline, trace: KernelTrace, priorities: Mapping[int, int], order: int,
                         names: Mapping[int, str] | None = None, objects: Mapping[int, dict] | None = None,
                         hz: float | None = None) -> dict:
     """ミューテックスごとに、持ち主（take した）と待ち手（block して、まだ ready でない）を出来事の並びで追い、持ち主の
@@ -384,25 +381,47 @@ def inversions_from_ops(tl: Timeline, trace: KernelTrace, priorities: Mapping[in
 
 # --- 割り込み・ジョブの出来事 -------------------------------------------------------------------------------
 
-def isr_activations(trace: KernelTrace) -> list[Activation]:
-    """isr_enter / isr_exit（IPSR で対にする。入れ子は自分の時間から子の時間を引く）→ 例外の回。入りの無い出
-    （portEND_SWITCHING_ISR だけを呼ぶ ISR）は数えない。"""
+@dataclass
+class IsrPairs:
+    """isr_enter / isr_exit を対にした結果と、対にできなかったものの数。"""
+    activations: list[Activation]
+    missing_exit: int = 0          # 出が欠けた回（外側の出が来たので捨てた内側の入り）
+    missing_enter: int = 0         # 入りの無い出（portEND_SWITCHING_ISR だけを呼ぶ ISR・捕捉の前に入った回）
+    lost_open: int = 0             # あふれ（lost）で忘れた開いていた回
+
+    def counts(self) -> dict:
+        return {"missing_exit": self.missing_exit, "missing_enter": self.missing_enter, "lost_open": self.lost_open}
+
+
+def isr_pairing(trace: KernelTrace) -> IsrPairs:
+    """isr_enter / isr_exit（IPSR で対にする。入れ子は自分の時間から子の時間を引く）→ 例外の回。対にできなかった
+    もの（出の欠けた内側の回・入りの無い出・あふれで忘れた回）は回に入れず、その数を返す。"""
     stack: list[list[int]] = []                                 # [番号, 入った時刻, 子の時間]
-    out: list[Activation] = []
+    out = IsrPairs([])
     for op in trace.ops:
         if op.kind == "lost":
+            out.lost_open += len(stack)
             stack.clear()
         elif op.kind == "isr_enter":
             stack.append([op.isr, op.t, 0])
-        elif op.kind == "isr_exit" and any(f[0] == op.isr for f in stack):
+        elif op.kind == "isr_exit":
+            if not any(f[0] == op.isr for f in stack):
+                out.missing_enter += 1
+                continue
             while stack[-1][0] != op.isr:
-                stack.pop()                                     # 出の欠けた内側の回は捨てる
+                stack.pop()                                     # 出の欠けた内側の回
+                out.missing_exit += 1
             number, start, child = stack.pop()
             inclusive = op.t - start
-            out.append(Activation(number, start, op.t, inclusive, inclusive - child))
+            out.activations.append(Activation(number, start, op.t, inclusive, inclusive - child))
             if stack:
                 stack[-1][2] += inclusive
     return out
+
+
+def isr_activations(trace: KernelTrace) -> list[Activation]:
+    """isr_pairing の回だけ。"""
+    return isr_pairing(trace).activations
 
 
 def job_events(trace: KernelTrace, task_events: Iterable[TaskEvent] = ()) -> list[KernelEvent]:
@@ -420,9 +439,10 @@ def job_events(trace: KernelTrace, task_events: Iterable[TaskEvent] = ()) -> lis
 # --- フックの負荷 -----------------------------------------------------------------------------------------
 
 def overhead(trace: KernelTrace, duration: int, timebase_hz: float, baud: float | None = None,
-             core_clock_hz: float | None = None) -> dict:
-    """トレースの語の数（ポート 31・見出し・中身）・SWO のバイト数と、帯域の使用率（送ったビット ÷ 帯域。baud が
-    あるとき）。数えた事実だけで、CPU の負荷は推定しない（命令数の見積もりは実機で 4 倍外れた。負荷は実測する:
+             core_clock_hz: float | None = None, bits_per_byte: int | None = None) -> dict:
+    """トレースの語の数（ポート 31・見出し・中身）・SWO のバイト数と、帯域の使用率（送ったビット ÷ 帯域。baud と
+    bits_per_byte があるとき。bits_per_byte は線の 1 バイトのビット数で、使う側が線の方式から渡す: UART 方式（NRZ）は
+    スタート + 8 + ストップ = 10）。数えた事実だけで、CPU の負荷は推定しない（命令数の見積もりは実機で 4 倍外れた。負荷は実測する:
     gateware/tests/hil/test_trace_hooks_hw.py = トレースの有無でアイドルの回る数を比べる）。core_clock_hz は使わない
     （互換のために受ける）。"""
     w = trace.words
@@ -433,6 +453,6 @@ def overhead(trace: KernelTrace, duration: int, timebase_hz: float, baud: float 
            "swo_share": None,
            "notes": ["CPU の負荷は推定しない（実測は gateware/tests/hil/test_trace_hooks_hw.py: トレースの有無で"
                      "アイドルの回る数を比べる）"]}
-    if baud and seconds:
-        out["swo_share"] = 5 * words * 10 / baud / seconds
+    if baud and seconds and bits_per_byte:
+        out["swo_share"] = 5 * words * bits_per_byte / baud / seconds
     return out

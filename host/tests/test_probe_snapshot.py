@@ -210,6 +210,8 @@ def test_save_reads_only_side_effect_free_peripheral_registers(live):
     assert "readAction" in skipped["TIMER0.DATA"] and "UART.DR" in skipped
     assert any(p.startswith("TIMER1.") and "read failed" in r for p, r in skipped.items())   # バスエラーでも続ける
     assert snap.info["svd"]["origin"] == "file"
+    out = probe.snapshot_save(skip_registers=["TIMER0.STATUS"])                  # 読まないものは使う側が明示する
+    assert {s["path"]: s["reason"] for s in out["skipped"]}["TIMER0.STATUS"] == "skip TIMER0.STATUS"
 
 
 def test_save_can_select_peripherals_or_none(live):

@@ -60,4 +60,4 @@ def test_ram_buffers_and_compact_format(syms):
     assert syms.variable("_tx_trace_header_ptr").size == 4
     fmt = syms.variable("compact_fmt").address
     strings = ElfStrings(ELF)
-    assert strings.is_start(fmt) and strings.get(fmt) == "compact seq=%u t=%u ms"
+    assert strings.has_string(fmt) and strings.get(fmt) == "compact seq=%u t=%u ms"

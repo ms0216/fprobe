@@ -61,7 +61,7 @@ def test_raw_lane_sections_carry_rows_labels_values_depths_tones_and_addresses(d
             assert any(o.t <= inner.t and inner.t_end <= o.t_end for o in (events[j] for j in isr if j != k))
     labels = lane["labels"]
     assert {labels[data[f"lane.{i}.label"][k]] for k in isr} >= {"SysTick", "USART2"}
-    assert data[f"lane.{i}.tone"][[e.kind for e in events].index("inversion")] == TONES["bad"]
+    assert data[f"lane.{i}.tone"][[e.kind for e in events].index("inversion")] == TONES["failure"]
 
 
 def test_uart_bytes_are_labelled_and_values_and_jumps_come_through(demo):
@@ -80,8 +80,8 @@ def test_uart_bytes_are_labelled_and_values_and_jumps_come_through(demo):
     i, lane = lanes["target"]
     states = [lane["labels"][data[f"lane.{i}.label"][k]] for k in range(lane["items"])]
     assert states[:2] == ["RUNNING", "HALTED breakpoint"]
-    assert math.isnan(data[f"lane.{i}.address"][0]) and data[f"lane.{i}.address"][1] == 0x08000188
-    assert data[f"lane.{i}.tone"][1] == TONES["warn"]
+    assert math.isnan(data[f"lane.{i}.address"][0]) and data[f"lane.{i}.address"][1] == 0x2000006A
+    assert data[f"lane.{i}.tone"][1] == TONES["stop"]
 
 
 @pytest.mark.parametrize("stream", ["rtos", "uart", "annotation", "sample", "user", "host", "dap", "aux", "target"])
@@ -188,7 +188,7 @@ def test_dap_accesses_to_debug_registers_are_named_and_halt_requests_stand_out()
     assert [c.labels[i] for i in c.label] == [
         "W DHCSR = 0xA05F0003 (halt)", "W DHCSR = 0xA05F0001 (run)", "W DHCSR = 0xA05F000D (step)",
         "R DHCSR = 0x00030003", "W AIRCR = 0x05FA0004", "R 0x20000000 = 0x00000007"]
-    assert c.tone[:2] == [TONES["warn"], TONES["normal"]]
+    assert c.tone[:2] == [TONES["stop"], TONES["plain"]]
 
 
 def test_injected_writes_are_marked_with_their_transfer_count():
@@ -198,7 +198,16 @@ def test_injected_writes_are_marked_with_their_transfer_count():
     c = classify("dap", events)
     assert [c.labels[i] for i in c.label] == ["xtrig W DHCSR = 0xA05F0003 (halt) [4 transfers]",
                                               "xtrig W DHCSR = 0xA05F0003 (halt)"]
-    assert c.tone == [TONES["warn"], TONES["warn"]]
+    assert c.tone == [TONES["stop"], TONES["stop"]]
+
+
+def test_tones_are_kinds_of_facts_not_good_or_bad():
+    # 色の意味は事実の種類（失敗・欠け / 走っている / 止める・止まった / 印 / その他）。良し悪しの言葉で決めない（?71）
+    assert set(TONES) == {"plain", "failure", "running", "stop", "mark", "other"}
+    states = [Event(t, "target", "state", 0, 0, {"state": s}) for t, s in
+              enumerate(["RUNNING", "HALTED", "LOCKUP", "DISCONNECTED", "SLEEPING"], 1)]
+    c = classify("target", states)
+    assert c.tone == [TONES["running"], TONES["stop"], TONES["failure"], TONES["failure"], TONES["plain"]]
 
 
 def test_a_failed_memory_read_has_no_value_on_the_timeline(tmp_path):

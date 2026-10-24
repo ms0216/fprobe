@@ -436,8 +436,41 @@ class SegmentedRecording(Recording):
         it = generate()
         return itertools.islice(it, limit) if limit is not None else it
 
+    def nearest(self, t: int, before: bool, stream: str, kind: str | None = None, a: int | None = None,
+                body: dict[str, Any] | None = None) -> Event | None:
+        """Recording.nearest と同じ。分割を t に近い順に読み、見つけた出来事より遠い分割は読まない（分割の時刻は重なりうる
+        ので、範囲で比べる）。"""
+        segs = [s for s in self._live() if s.t0 is not None and (s.t0 <= t if before else s.t1 > t)]
+        segs.sort(key=(lambda s: -s.t1) if before else (lambda s: s.t0))
+        best: Event | None = None
+        for s in segs:
+            if best is not None and (s.t1 < best.t if before else s.t0 > best.t):
+                break
+            r = Recording(self.directory / s.path)
+            try:
+                found = r.nearest(t, before, stream, kind, a, body)
+            finally:
+                r.close()
+            if found is not None and (best is None or (found.t > best.t if before else found.t < best.t)):
+                best = found
+        return best
+
     def count(self) -> int:
         return sum(s.events for s in self._live())
+
+    def count_events(self, t0: int | None = None, t1: int | None = None, streams: list[str] | None = None,
+                     kinds: list[str] | None = None) -> int:
+        """iter_events（limit なし）が返す出来事の数（範囲に重なる分割ごとに数えて足す）。"""
+        total = 0
+        for s in self._live():
+            if not s.overlaps(t0, t1):
+                continue
+            r = Recording(self.directory / s.path)
+            try:
+                total += r.count_events(t0, t1, streams, kinds)
+            finally:
+                r.close()
+        return total
 
     def distinct(self, column: str, streams: list[str] | None = None) -> list:
         values: set = set()
@@ -449,6 +482,25 @@ class SegmentedRecording(Recording):
                 r.close()
         return sorted(values)
 
+    def kind_counts(self, t0: int | None = None, t1: int | None = None) -> list[tuple[str, str, int, int, int]]:
+        """範囲に重なるすべての分割の stream・kind ごとの件数を足す（分割の数で切らない）。"""
+        total: dict[tuple[str, str], list[int]] = {}
+        for s in self._live():
+            if not s.overlaps(t0, t1):
+                continue
+            r = Recording(self.directory / s.path)
+            try:
+                for stream, kind, n, lo, hi in r.kind_counts(t0, t1):
+                    acc = total.get((stream, kind))
+                    if acc is None:
+                        total[(stream, kind)] = [n, lo, hi]
+                    else:
+                        acc[0] += n
+                        acc[1], acc[2] = min(acc[1], lo), max(acc[2], hi)
+            finally:
+                r.close()
+        return [(stream, kind, n, lo, hi) for (stream, kind), (n, lo, hi) in sorted(total.items())]
+
     def span(self) -> tuple[int, int] | None:
         segs = [s for s in self._live() if s.t0 is not None]
         if not segs:
@@ -458,8 +510,11 @@ class SegmentedRecording(Recording):
     # --- 件数（縮図） --------------------------------------------------------------------------
 
     def _counts(self, reads: _Reads, segs: list[_Segment], t0: int, t1: int,
-                streams: list[str] | None, inexact: list[bool]) -> dict[str, int]:
-        """[t0, t1) の stream ごとの件数。閉じた分割は縮図の和、開いている分割は生で数える。"""
+                streams: list[str] | None, unknown: dict) -> dict[str, int]:
+        """[t0, t1) の stream ごとの件数（残っている出来事。下限）。閉じた分割は縮図の和、開いている分割は生で数える。
+        数えられない所（間引いた stream の段 0 の bin に端がかかる・消した分割の細かい段）があれば unknown["any"] =
+        True。間引いた bin はその bin の件数を unknown["extra"] に足す（[t0, t1) の中の件数はその数以下）。消した分割は
+        上限も分からない（unknown["bounded"] = False）。按分等で推定しない。"""
         sealed = [s for s in segs if s.state == "sealed"]
         deleted = [s for s in segs if s.state == "deleted"]
         where_streams = f" AND stream IN ({','.join('?' * len(streams))})" if streams else ""
@@ -483,7 +538,7 @@ class SegmentedRecording(Recording):
                         f"SELECT stream, SUM(count) FROM summary WHERE level = ? AND bin >= ? AND bin < ?{where_streams} "
                         "GROUP BY stream", [level, lo, hi, *args_streams]))
             if any(seg.overlaps(lo * w, hi * w) for seg in deleted):
-                inexact[0] = True
+                unknown["any"], unknown["bounded"] = True, False
             return out
 
         def raw_count(a: int, b: int, _streams) -> dict[str, int]:
@@ -496,15 +551,16 @@ class SegmentedRecording(Recording):
                 keep = f" AND stream NOT IN ({','.join('?' * len(dropped))})" if dropped else ""
                 add(out, db.execute(f"SELECT stream, COUNT(*) FROM events WHERE t >= ? AND t < ?{where_streams}{keep} "
                                     "GROUP BY stream", [a, b, *args_streams, *dropped]))
-                if dropped:                                        # 間引いた stream: 段 0 の件数を幅で按分（近似）
+                if dropped:                                        # 間引いた stream: [a, b) の件数は分からない（bin の件数以下）
                     w0 = self.grid.w0
                     bin_ = a // w0
-                    for s, n in db.execute(f"SELECT stream, count FROM summary WHERE level = 0 AND bin = ? AND stream IN "
-                                           f"({','.join('?' * len(dropped))})", [bin_, *dropped]):
-                        out[s] = out.get(s, 0) + round(n * (b - a) / w0)
-                        inexact[0] = True
+                    for _s, n in db.execute(f"SELECT stream, count FROM summary WHERE level = 0 AND bin = ? AND stream IN "
+                                            f"({','.join('?' * len(dropped))})", [bin_, *dropped]):
+                        if n:
+                            unknown["any"] = True
+                            unknown["extra"] += n
             if any(seg.overlaps(a, b) for seg in deleted):
-                inexact[0] = True
+                unknown["any"], unknown["bounded"] = True, False
             return out
 
         out = self.grid.count(t0, t1, bins_count, raw_count, streams)
@@ -516,17 +572,26 @@ class SegmentedRecording(Recording):
         return out
 
     def density(self, t0: int, t1: int, width: int, streams: list[str] | None = None) -> list[int]:
-        """画素ごとの出来事の件数（縮図の和。正確。間引いた・消した部分に端がかかると近似: coverage で分かる）。"""
+        """画素ごとの出来事の件数（density_bounds の counts。数えられない画素は残っている出来事だけの下限）。"""
+        return self.density_bounds(t0, t1, width, streams)["counts"]
+
+    def density_bounds(self, t0: int, t1: int, width: int, streams: list[str] | None = None) -> dict:
+        """画素ごとの出来事の件数と、数えられない画素。counts: 縮図の和と残っている出来事（間引いた・消した部分に
+        端がかかる画素は、残っている出来事だけの下限）。inexact: そういう画素の [{"pixel", "max"}]（max = 件数の上限。
+        間引いた bin の件数を足したもの。消した分割にかかれば None = 上限も分からない）。按分等で推定しない。"""
         if t1 <= t0 or width < 1:
             raise ValueError("要約の区間が空")
         segs = self._all_with_ranges()
-        span, out = t1 - t0, []
-        inexact = [False]
+        span, counts, inexact = t1 - t0, [], []
         with self._reads() as reads:
             for px in range(width):
                 p0, p1 = t0 + px * span // width, t0 + (px + 1) * span // width
-                out.append(sum(self._counts(reads, segs, p0, p1, streams, inexact).values()) if p1 > p0 else 0)
-        return out
+                unknown = {"any": False, "extra": 0, "bounded": True}
+                n = sum(self._counts(reads, segs, p0, p1, streams, unknown).values()) if p1 > p0 else 0
+                counts.append(n)
+                if unknown["any"]:
+                    inexact.append({"pixel": px, "max": n + unknown["extra"] if unknown["bounded"] else None})
+        return {"counts": counts, "inexact": inexact}
 
     def event_bins(self, start: int, width: int, count: int, streams: list[str] | None = None) -> dict[str, array]:
         """Recording.event_bins と同じ。幅が縮図の段の幅で境がそろっていれば、閉じた分割は事前計算の縮図から
@@ -657,14 +722,14 @@ class SegmentedRecording(Recording):
         return self._index.execute("SELECT COALESCE(MAX(channels), 0) FROM wave").fetchone()[0]
 
     def waveform_view(self, t0: int, t1: int, width: int) -> list[str]:
-        """Recording.waveform_view と同じ（'0' / '1' / 'x' / '-'）。画素が丸ごと含むかたまりは事前計算の要約
-        （最初の値・変化したチャンネル）で、端のかかるかたまりはファイルを読んで正確に。ファイルを間引いたかたまりは
-        要約から（かたまりの中で変化したチャンネルは 'x'）。"""
+        """Recording.waveform_view と同じ（'0' / '1' / 'x' / '-'）に、'?' = ファイルを間引いたかたまりが画素より長く、
+        そのかたまりの中で変化したチャンネル（この画素の中で変わったかは分からない）。画素が丸ごと含むかたまりは事前計算の
+        要約（最初の値・変化したチャンネル）で、端のかかるかたまりはファイルを読んで正確に。"""
         if t1 <= t0 or width < 1:
             raise ValueError("要約の区間が空")
         channels = self._channel_count()
         full = (1 << channels) - 1
-        highs, lows = [0] * width, [0] * width
+        highs, lows, unknown = [0] * width, [0] * width, [0] * width
         span = t1 - t0
         for row in self._wave_rows(t0, t1, kept_only=False):
             c = _Chunk(*row[:6])
@@ -675,9 +740,14 @@ class SegmentedRecording(Recording):
                 p0, p1 = t0 + px * span // width, t0 - (-(px + 1) * span // width)
                 if c.t1 <= p0 or c.t0 >= p1:
                     continue
-                if (c.t0 >= p0 and c.t1 <= p1) or not kept:
+                if c.t0 >= p0 and c.t1 <= p1:                    # 画素の中のかたまり: 変化は画素の中
                     highs[px] |= first | toggles
                     lows[px] |= (~first | toggles) & full
+                    continue
+                if not kept:                                     # 間引いた: 変化したチャンネルはこの画素で分からない
+                    highs[px] |= first & ~toggles
+                    lows[px] |= ~first & ~toggles & full
+                    unknown[px] |= toggles
                     continue
                 s0 = max(0, int((p0 - c.t0) / c.ticks_per_sample))
                 s1 = min(c.length, max(s0 + 1, int(-(-(p1 - c.t0) // c.ticks_per_sample))))
@@ -689,8 +759,8 @@ class SegmentedRecording(Recording):
         rows = []
         for ch in range(channels):
             chars = []
-            for h, l in zip(highs, lows):
+            for h, l, u in zip(highs, lows, unknown):
                 hi, lo = h >> ch & 1, l >> ch & 1
-                chars.append("x" if hi and lo else "1" if hi else "0" if lo else NO_DATA)
+                chars.append("x" if hi and lo else "?" if u >> ch & 1 else "1" if hi else "0" if lo else NO_DATA)
             rows.append("".join(chars))
         return rows

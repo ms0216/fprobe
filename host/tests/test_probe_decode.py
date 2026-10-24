@@ -12,6 +12,7 @@ from fprobe.mcp_server import Probe
 from fprobe.sigrok import read_sr
 
 BAUD = 19200
+F8N1 = {"data_bits": 8, "parity": "none", "stop_bits": 1, "invert": False, "lsb_first": True}   # UART の枠の設定（必須）
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def modbus_capture():
 
 def test_stacked_decode_uses_the_cached_lower_decoding(probe):
     probe._keep_capture(modbus_capture(), "la.capture")
-    out = probe.la_decode("modbus", {"uart": {"channel": 5, "baud": BAUD}})
+    out = probe.la_decode("modbus", {"uart": {"channel": 5, "baud": BAUD, **F8N1}})
     assert [a["kind"] for a in out["annotations"]] == ["request", "response"]
     assert out["annotations"][1]["fields"]["values"] == [0x1234]
     assert out["params"]["uart"]["channel"] == 5
@@ -51,10 +52,11 @@ def test_default_kinds_come_from_the_registry(probe):
     w = Wave(channels=10, sample_rate_hz=500_000 * 16, idle={2: 1})
     t = can(w, 2, 12 / 500_000, bitrate=500_000, can_id=0x123, data=b"\x01")
     probe._keep_capture(w.build(end_s=t + 1e-5), "la.capture")
-    out = probe.la_decode("can", {"channel": 2, "bitrate": 500_000})
+    out = probe.la_decode("can", {"channel": 2, "bitrate": 500_000, "sample_point": 0.75, "invert": False})
     assert out["counts"]["frame"] == 1 and out["matched"] == out["total"]
     probe._keep_capture(w.build(end_s=t + 1e-5), "la.capture")
-    swd = probe.la_decode("swd", {"swclk": 0, "swdio": 3})
+    swd = probe.la_decode("swd", {"swclk": 0, "swdio": 3, "drive": None, "turnaround": 1,
+                                     "orundetect": False})
     assert swd["matched"] == 0                                      # SWD は transfer だけ（変わらない振る舞い）
     # 絞った種類を返す: 画面は「件数と表の食い違い」を、既定の種類の外として説明する
     assert swd["kinds"] == ["transfer"] and out["kinds"] is None
@@ -79,11 +81,11 @@ def test_decoders_list_and_user_decoder_file(probe, tmp_path):
         loaded = probe.la_decoder_load(str(path))
         assert loaded["loaded"] == ["frame_count"] and loaded["origin"] == str(path.resolve())
         probe._keep_capture(modbus_capture(), "la.capture")
-        out = probe.la_decode("frame_count", {"modbus": {"uart": {"channel": 5, "baud": BAUD}}, "label": "k"})
+        out = probe.la_decode("frame_count", {"modbus": {"uart": {"channel": 5, "baud": BAUD, **F8N1}}, "label": "k"})
         assert out["annotations"][0]["text"] == "k=2"                # 3 段の積み重ね
         path.write_text(path.read_text(encoding="utf-8").replace('f"{label}=', 'f"{label}:'), encoding="utf-8")
         probe.la_decoder_load(str(path))                            # 読み直すと前の結果を使わない
-        out = probe.la_decode("frame_count", {"modbus": {"uart": {"channel": 5, "baud": BAUD}}, "label": "k"})
+        out = probe.la_decode("frame_count", {"modbus": {"uart": {"channel": 5, "baud": BAUD, **F8N1}}, "label": "k"})
         assert out["annotations"][0]["text"] == "k:2"
         with pytest.raises(FileNotFoundError):
             probe.la_decoder_load(str(tmp_path / "missing.py"))
@@ -109,5 +111,5 @@ def test_export_and_load_sigrok_and_vcd(probe, tmp_path):
     loaded = probe.la_load(str(tmp_path / "full.sr"))
     assert loaded["capture"]["source"] == "file" and loaded["capture"]["length"] == tr.length
     assert loaded["names"]["5"] == "ch5"
-    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD})
+    out = probe.la_decode("uart", {"channel": 5, "baud": BAUD, **F8N1})
     assert out["capture"]["id"] == loaded["capture"]["id"] and out["errors"] == 0

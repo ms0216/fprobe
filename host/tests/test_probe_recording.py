@@ -54,6 +54,35 @@ def test_a_recording_takes_captures_and_marks_and_can_be_read_and_searched(probe
     assert not probe.recording_status()["recording"] and stopped["recording"] == started["recording"]
 
 
+def test_find_and_intervals_say_when_they_cut_the_list(probe):
+    # 黙って切らない（点検 2 回目）: 一覧を limit 件に切ったら、総数・切った印・使った上限を返す（上限は引数で渡せる）
+    probe.recording_start(name="切り")
+    for t in range(5):
+        probe.recording_mark(text="s", t=1000 * t)
+        probe.recording_mark(text="e", t=1000 * t + 10)
+    found = probe.recording_find({"stream": "annotation", "kind": "mark"}, limit=3)
+    assert len(found["events"]) == 3 and found["count"] == 10 and found["truncated"] and found["limit"] == 3
+    whole = probe.recording_find({"stream": "annotation", "kind": "mark"})
+    assert len(whole["events"]) == 10 and not whole["truncated"] and whole["limit"] == 1000
+    start = {"stream": "annotation", "body": {"text": "s"}}
+    end = {"stream": "annotation", "body": {"text": "e"}}
+    cut = probe.recording_intervals(start, end, limit=2)
+    assert len(cut["intervals"]) == 2 and cut["count"] == 5 and cut["intervals_truncated"] and cut["limit"] == 2
+
+
+def test_events_say_when_they_cut_the_list(probe):
+    # 黙って切らない（点検 3 回目 H2）: 範囲の総数・切った印・使った上限を返す
+    probe.recording_start(name="切り2")
+    for t in range(5):
+        probe.recording_mark(text="m", t=1000 * t)
+    cut = probe.recording_events(streams=["annotation"], limit=2)
+    assert len(cut["events"]) == 2 and cut["total"] == 5 and cut["truncated"] and cut["limit"] == 2
+    whole = probe.recording_events(streams=["annotation"])
+    assert len(whole["events"]) == 5 and whole["total"] == 5 and not whole["truncated"] and whole["limit"] == 1000
+    part = probe.recording_events(t0=1000, t1=3000, streams=["annotation"], limit=1)
+    assert part["total"] == 2 and part["truncated"]
+
+
 def test_saved_recordings_are_listed_opened_and_exported(probe, tmp_path):
     first = probe.recording_start(name="a")["recording"]
     probe.recording_mark(text="一つ目")
@@ -88,6 +117,23 @@ def test_a_mark_can_be_added_to_an_opened_recording_at_a_given_time(probe):
     probe.recording_open(name)                                    # 開き直しても残る（ファイルに書いた）
     found = probe.recording_find({"stream": "annotation", "kind": "mark"})["events"]
     assert [(e["t"], e["body"]["text"]) for e in found] == [(42, "後から見て気づいた")]
+
+
+def test_a_mark_keeps_who_placed_it(probe):
+    # 置いた者は画面が操作の記録から推さず、デーモンが渡した呼び出し元を印の本文に事実として残す
+    ai = {"id": 4, "name": "claude", "role": "ai"}
+    gui = {"id": 3, "name": "gui", "role": "human"}
+    name = probe.recording_start(name="who")["recording"]
+    probe.recording_mark(text="今の印", caller=ai)
+    probe.recording_mark(text="時刻の印", t=1_234_567, caller=gui)
+    probe.recording_mark(text="だれか分からない", t=1_234_568)
+    time.sleep(0.05)
+    probe.recording_stop()
+    probe.recording_open(name)
+    probe.recording_mark(text="開いた記録の印", t=42, caller=gui)
+    found = probe.recording_find({"stream": "annotation", "kind": "mark"})["events"]
+    by = {e["body"]["text"]: e["body"].get("client") for e in found}
+    assert by == {"今の印": ai, "時刻の印": gui, "だれか分からない": None, "開いた記録の印": gui}
 
 
 def test_a_mark_on_an_opened_recording_needs_a_time(probe):

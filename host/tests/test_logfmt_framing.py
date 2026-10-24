@@ -3,7 +3,7 @@ rzCOBS の試験の値は rzcobs クレートの試験（github.com/Dirbaio/rzco
 
 import pytest
 
-from fprobe.logfmt.framing import (ZeroDelimited, cobs_decode, cobs_encode, rzcobs_decode, rzcobs_encode,
+from fprobe.logfmt.framing import (Dropped, ZeroDelimited, cobs_decode, cobs_encode, rzcobs_decode, rzcobs_encode,
                                    tcobs_decode)
 
 RZCOBS = [
@@ -91,3 +91,10 @@ def test_tcobs_rejects_bad_sigils():
         tcobs_decode(bytes.fromhex("0102"))             # 00000ooo は予約
     with pytest.raises(ValueError):
         tcobs_decode(bytes.fromhex("aa3f"))             # オフセットが長さを超える
+
+
+def test_zero_delimited_reports_what_it_dropped_and_the_limit():
+    """区切りの来ないまま上限を超えて捨てたら、捨てた量と使った上限を返す（黙って数えるだけにしない）。"""
+    z = ZeroDelimited(limit=4)
+    out = z.feed(b"abcdef\x00gh\x00")
+    assert out[0] == Dropped(5, 4) and out[1:] == [b"f", b"gh"]

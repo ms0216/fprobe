@@ -60,7 +60,7 @@ describe("Poller", () => {
     expect(seen.at(-1)).toEqual({ loading: false, loaded: false, error: null });
     void p.refresh();
     expect(seen.at(-1)).toEqual({ loading: true, loaded: false, error: null });
-    calls[0].reject(new RpcError(-32020, "RuntimeError: 読めない"));
+    calls[0].reject(new RpcError(-32020, "RuntimeError: 読めない", { exception: "RuntimeError", detail: "読めない" }));
     await vi.advanceTimersByTimeAsync(0);
     expect(seen.at(-1)).toEqual({ loading: false, loaded: false, error: "読めない" });
     void p.refresh();

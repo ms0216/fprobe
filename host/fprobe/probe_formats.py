@@ -6,7 +6,7 @@ ObserveTools（RTT の受信 `rtt_start`・`_rtt_listen`・`_rtt`）、WindowToo
 `_rtos_last` = 解析の道具が読むもの）を使う。機器に触るのは必ず _lock の中。
 
 - ログ（fprobe.logfmt）: defmt・Trice・compact・memfault・text を RTT（listener）・SWO（ITM のポート）・UART の
-  流れから解読し、行の貯め場（log_read）と記録の stream "log" へ。本文の中のコードの番地は関数・ファイル:行に。
+  流れから解読し、行の貯め場（log_read）と記録の stream "log" へ。本文の中の 0x の数のうち実行区画に入る値は関数・ファイル:行に。
 - トレース（fprobe.tracefmt）: SystemView・Zephyr の CTF・Tracealyzer を流れから、Event Recorder を RAM から周期的に
   （止めずに）、SystemView・CTF・TraceX・Event Recorder を RAM から一度に（スナップショット・ポストモーテム）、
   ファイルから。結果は出来事（stream "trace"）と、タスクの出入りがあれば時間軸（stream "rtos" の run / switch /
@@ -40,8 +40,8 @@ from .recording import ClockMap
 from .rtos.timeline import timeline_from_events, write_timeline
 from .testpoint import TimedSwo
 from .tracefmt.model import TargetClock, Trace, TraceEvent, activations, task_events, write_trace
-from .tracefmt.scvd import Scvd, ScvdContext
-from .tracefmt.stream import (CHANNELS, SNAPSHOT_FORMATS, STREAM_FORMATS, TraceStream,
+from .tracefmt.scvd import LIST_LIMIT, STRING_LIMIT, Scvd, ScvdContext
+from .tracefmt.stream import (CHANNELS, SNAPSHOT_FORMATS, SNAPSHOT_LIMIT, STREAM_FORMATS, TraceStream,
                               decode_trace, snapshot)
 from .tracefmt.systemview import COMMAND_START as SV_START, COMMAND_STOP as SV_STOP
 from .tracefmt.tracealyzer import COMMAND_START as TZ_START, COMMAND_STOP as TZ_STOP, CONTROL_NAME as TZ_CONTROL
@@ -54,7 +54,28 @@ EVENTS_LIMIT = 200_000                   # トレースの出来事を持って�
 PULL_S = 0.1                             # SWO・UART の窓・Event Recorder の RAM を読む周期
 _START_COMMANDS = {"systemview": (CHANNELS["systemview"], bytes([SV_START]), bytes([SV_STOP])),
                    "tracealyzer": (TZ_CONTROL, TZ_START, TZ_STOP)}
-_PRIORITY_ORDER = {"ctf": -1, "tracex": -1}            # 優先度の向き（1 = 大きい方が高い）。Zephyr・ThreadX は小さい方
+# 優先度の向き（1 = 大きい方が高い）。形式そのものが 1 つの RTOS のもの（ctf = Zephyr の subsys/tracing/ctf、
+# tracex = ThreadX）だけ、その RTOS のソースで決まる向き（rtos.zephyr・rtos.threadx の priority_order と同じ）。
+# ほかの形式（SystemView の系の説明 O=... はアプリが書く自由な文字列）では OS 名から推さず、向きは不明（None）
+_PRIORITY_ORDER = {"ctf": -1, "tracex": -1}
+
+
+def _order_name(order: int | None) -> str | None:
+    """優先度の向きの名前（rtos.objects の priority_order と同じ書き方）。不明なら None。"""
+    if order is None:
+        return None
+    return "higher_is_more_urgent" if order > 0 else "lower_is_more_urgent"
+
+
+def _idle_tasks(names: dict[int, str], idle_tasks: list[str] | None) -> tuple[set[int], dict | None]:
+    """使う側が明示したアイドルのタスクの名前 → タスクの ID の集合と、結果に出す対応（名前 → ID、合わなかった名前）。
+    名前の完全一致だけ（同じ名前のタスクが複数なら全部）。idle_tasks が無ければアイドルは不明（空の集合と None）。"""
+    if idle_tasks is None:
+        return set(), None
+    matched = {n: sorted(i for i, name in names.items() if name == n) for n in idle_tasks}
+    found = {n: ids for n, ids in matched.items() if ids}
+    return ({i for ids in found.values() for i in ids},
+            {"matched": found, "unmatched": [n for n, ids in matched.items() if not ids]})
 
 
 @dataclass
@@ -152,6 +173,8 @@ class FormatTools:
 
         def listener(key, data: bytes, host_s: float, feed=feed) -> None:
             if key == feed.rtt_channel and feed.running:
+                if feed.host_clock is not None and self._recorder is None:
+                    self._clock_point(feed.host_clock)            # 背景のスレッドから、_lock の中で
                 self._feed_bytes(feed, data, host_s=host_s)
         feed.listener = listener
         self._rtt_listen(listener)
@@ -165,13 +188,18 @@ class FormatTools:
             if channel not in names:
                 raise ValueError(f"RTT の上りのチャンネル {channel} が無い（{sorted(names)}）")
             return channel
+        # 省けば、形式が決める名前（SEGGER の SystemView = "SysView"・Percepio の Tracealyzer・defmt-rtt = "defmt"）。
+        # その名前が無ければ誤り（ほかのチャンネルで代えない）。名前を決めていない形式は、SEGGER RTT の規定の端末の
+        # チャンネル 0（UM08001「channel 0 は端末の入出力」）
         wanted = channel or {"defmt": "defmt", **CHANNELS}.get(format)
+        if wanted is None:
+            if 0 not in names:
+                raise ValueError(f"RTT の上りにチャンネル 0 が無い: channel（番号か名前）を渡す（{names}）")
+            return 0
         for index, name in names.items():
-            if wanted is not None and name == wanted:
+            if name == wanted:
                 return index
-        if channel is not None:
-            raise ValueError(f"RTT の上りに {channel!r} という名前のチャンネルが無い（{names}）")
-        return 0
+        raise ValueError(f"RTT の上りに {wanted!r} という名前のチャンネルが無い: channel（番号か名前）を渡す（{names}）")
 
     def _send_command(self, feed: _Feed, start: bool) -> None:
         """SystemView・Tracealyzer: 下りのチャンネルに開始・停止のコマンドを書く。"""
@@ -252,14 +280,19 @@ class FormatTools:
             return None
 
     def _host_clock(self, hz: float) -> ClockMap:
-        """記録していないときのホストの時計 → タイムベース（いまのタイムベースを 1 回読む。_lock の中で）。"""
+        """記録していないときのホストの時計 → タイムベース（いまのタイムベースを 1 回読む。_lock の中で）。受けるたびに
+        _clock_point で組を足す（1 点から公称の速さで伸ばし続けない。ClockMap の不確かさは点の幅と距離で決まる）。"""
         clock = ClockMap(hz)
+        self._clock_point(clock)
+        return clock
+
+    def _clock_point(self, clock: ClockMap) -> None:
+        """いまのホストの時刻とタイムベースの組を足す（_lock の中で）。"""
         device = self.session.device
         h0 = time.monotonic()
         ticks = device.time()
         h1 = time.monotonic()
         clock.add((h0 + h1) / 2, ticks, h1 - h0)
-        return clock
 
     def _arrival(self, feed: _Feed, host_s: float | None, t: int | None) -> tuple[int | None, float | None]:
         """受けた時刻（タイムベース, 不確かさ）。"""
@@ -268,7 +301,7 @@ class FormatTools:
             return t, byte_s * (feed.timebase_hz or 0) or None
         if host_s is None:
             return None, None
-        poll = getattr(self, "poll_s", 0.01) * (feed.timebase_hz or 0)
+        poll = self.poll_s * (feed.timebase_hz or 0)              # RTT の読みの周期（ObserveTools の設定）
         rec = self._recorder
         try:
             if rec is not None:
@@ -292,20 +325,26 @@ class FormatTools:
     # --- ログ（U15） -------------------------------------------------------------------------------
 
     def _log_stream(self, format: str, elf: str | None, til: str | None, li: str | None, framing: str | None,
-                    big_endian: bool, transport: str | None, annotate: bool) -> LogStream:
+                    big_endian: bool, transport: str | None, annotate: bool,
+                    channel_levels: dict[str, str] | None = None) -> LogStream:
+        if channel_levels is not None and format != "trice":
+            raise ValueError("channel_levels は trice だけ（行頭のチャンネルのタグ → 重要度）")
         symbols = self._symbols if elf is None else None
         return LogStream.create(format, elf=elf, symbols=symbols, til=til, li=li, framing=framing,
-                                big_endian=big_endian, transport=transport, annotate=annotate)
+                                big_endian=big_endian, transport=transport, annotate=annotate,
+                                channel_levels=channel_levels)
 
     def log_start(self, format: str, source: str = "rtt", channel: int | str | None = None, port: int = 0,
                   elf: str | None = None, til: str | None = None, li: str | None = None, framing: str | None = None,
                   big_endian: bool = False, transport: str | None = None, annotate: bool = True,
-                  swo_baud: int | None = None, core_clock_hz: float | None = None) -> dict:
+                  swo_baud: int | None = None, core_clock_hz: float | None = None,
+                  channel_levels: dict[str, str] | None = None) -> dict:
         """ログの流れの解読を始める（止めずに。すぐ戻る）。format: defmt（ELF の .defmt の表）/ trice（til・li =
-        til.json・li.json、framing tcobs / cobs / none）/ compact（ELF の書式の番地 + 引数の語）/ memfault（ELF の
-        log_fmt、transport cbor / text）/ text（行）。source: rtt（channel は番号か名前。省略時は defmt なら "defmt"、
-        ほかは 0）/ swo（ITM の port。swo_baud・core_clock_hz で受信と TPIU も設定）/ uart（プローブの UART の受信）。
-        ELF は elf か読み込み済みのもの。annotate なら本文の中のコードの番地を関数・ファイル:行に。記録中なら
+        til.json・li.json、framing tcobs / cobs / none。channel_levels = チャンネルとする行頭のタグ → 重要度（なしは None）を使う側が
+        明示する。無ければチャンネル・重要度なし）/ compact（ELF の書式の番地 + 引数の語）/ memfault（ELF の
+        log_fmt、transport cbor / text）/ text（行）。source: rtt（channel は番号か名前。省略時は defmt なら "defmt"（無ければ
+        誤り）、ほかは SEGGER RTT の端末のチャンネル 0）/ swo（ITM の port。swo_baud・core_clock_hz で受信と TPIU も設定）/ uart（プローブの UART の受信）。
+        ELF は elf か読み込み済みのもの。annotate なら本文の中の 0x の数のうち実行区画に入る値を関数・ファイル:行に。記録中なら
         stream "log"（kind = 重要度、解読できないものは undecoded）。"""
         if format not in LOG_FORMATS:
             raise ValueError(f"format は {' / '.join(LOG_FORMATS)}")
@@ -313,7 +352,7 @@ class FormatTools:
             raise ValueError(f"source は {' / '.join(SOURCES)}")
         if self._log_feed is not None:
             raise RuntimeError("ログの受け取りが動いている（log_stop を先に）")
-        stream = self._log_stream(format, elf, til, li, framing, big_endian, transport, annotate)
+        stream = self._log_stream(format, elf, til, li, framing, big_endian, transport, annotate, channel_levels)
         feed = _Feed("log", format, source, {"channel": channel, "port": port, "framing": framing,
                                              "annotate": stream.annotator is not None}, stream, time.monotonic())
         self._feed_start(feed, channel, port, swo_baud, core_clock_hz)
@@ -385,14 +424,18 @@ class FormatTools:
 
     def log_read(self, since: int = 0, limit: int = 200, level: str | None = None, contains: str | None = None) -> dict:
         """解読したログの行（since の番号より後を limit 件）。level 以上の重要度だけ（重要度の無い行は常に）、
-        contains を含むものだけ。next を次の since に。t は受けた時刻（タイムベース）。"""
+        contains を含むものだけ。next を次の since に。t は受けた時刻（タイムベース）。more = limit で止めて、next より後に
+        まだ見ていない行が残っている（続けて読む）。"""
         feed = self._log_feed or self._log_last
         if feed is None:
             raise RuntimeError("ログが無い（log_start）")
         out, last = [], since
-        for seq, r, t, unc in list(feed.records):
+        records = list(feed.records)
+        for seq, r, t, unc in records:
             if seq <= since:
                 continue
+            if len(out) >= limit:                       # 上限に達した後に、まだ見ていない行がある
+                break
             last = seq
             if not level_at_least(r.level, level) or (contains and contains not in r.text):
                 continue
@@ -400,25 +443,26 @@ class FormatTools:
             if t is not None:
                 item["t"] = t
             out.append(item)
-            if len(out) >= limit:
-                break
+        more = any(seq > last for seq, *_ in records)
         dropped = max(0, feed.seq - len(feed.records) - since)
-        return {"records": out, "next": last, "dropped": dropped, "running": feed.running}
+        return {"records": out, "next": last, "more": more, "dropped": dropped, "running": feed.running}
 
     def log_decode(self, format: str, data_hex: str | None = None, path: str | None = None, elf: str | None = None,
                    til: str | None = None, li: str | None = None, framing: str | None = None,
-                   big_endian: bool = False, transport: str | None = None, limit: int = 1000) -> dict:
+                   big_endian: bool = False, transport: str | None = None, limit: int = 1000,
+                   channel_levels: dict[str, str] | None = None) -> dict:
         """ログのバイト（data_hex か path のファイル）を解読する（機器に触らない）。形式と引数は log_start と同じ。"""
         if (data_hex is None) == (path is None):
             raise ValueError("data_hex か path のどちらか 1 つ")
         data = bytes.fromhex(data_hex) if data_hex is not None else Path(path).read_bytes()
-        stream = self._log_stream(format, elf, til, li, framing, big_endian, transport, True)
+        stream = self._log_stream(format, elf, til, li, framing, big_endian, transport, True, channel_levels)
         records = stream.feed(data)
         return {"format": format, "bytes": len(data), "count": len(records), "errors": stream.errors,
                 "records": [r.to_dict() for r in records[:limit]], "truncated": len(records) > limit}
 
     def log_annotate(self, text: str, elf: str | None = None) -> dict:
-        """文字（UART のパニックの出力等）の中のコードの番地を、ELF で関数・ファイル:行にする（機器に触らない）。"""
+        """文字（UART のパニックの出力等）の中の 0x の数のうち、値が ELF の実行区画に入るものを関数・ファイル:行に
+        する（機器に触らない。番地として書かれた数かどうかは決めない。fprobe.logfmt.addresses）。"""
         from .symbols import Symbols
         symbols = Symbols(elf) if elf is not None else self._symbols
         if symbols is None:
@@ -441,10 +485,10 @@ class FormatTools:
         return Path(path).read_text(encoding="utf-8") if path else None
 
     def trace_start(self, format: str, source: str = "rtt", channel: int | str | None = None, port: int = 1,
-                    description: str | None = None, metadata: str | None = None, ctf_header: str = "ts32_id8",
+                    description: str | None = None, metadata: str | None = None, ctf_header: str | None = None,
                     send_start: bool = True, period_s: float = PULL_S, address: int | None = None,
                     swo_baud: int | None = None,
-                    core_clock_hz: float | None = None) -> dict:
+                    core_clock_hz: float | None = None, string_limit: int = STRING_LIMIT) -> dict:
         """トレースの流れの取り込みを始める（すぐ戻る）。format: systemview（RTT の "SysView"。send_start なら
         開始のコマンドを書く）/ ctf（Zephyr。metadata = ビルドの TSDL のファイル、無ければ組み込みの表と ctf_header
         ts32_id8 / ts32_id16 / ts64_id16 / id16）/ tracealyzer（RTT の "TzData"、開始のコマンドは "TzCtrl"）/
@@ -457,7 +501,7 @@ class FormatTools:
         if format == "eventrecorder":
             if source not in ("memory", "rtt"):
                 raise ValueError("eventrecorder は source memory（RAM を周期的に読む）")
-            return self._er_start(period_s, address)
+            return self._er_start(period_s, address, string_limit)
         if format not in STREAM_FORMATS:
             raise ValueError(f"流れで受けられる形式は {' / '.join(STREAM_FORMATS)} と eventrecorder（memory）")
         if source not in SOURCES:
@@ -490,10 +534,11 @@ class FormatTools:
             write_trace(rec, trace, feed.clock, events)
             feed.written += len(events)
 
-    def trace_stop(self, timeline: bool = True) -> dict:
+    def trace_stop(self, timeline: bool = True, idle_tasks: list[str] | None = None) -> dict:
         """トレースの取り込みを止める。要約（出来事の種類ごとの数・タスク・失った数・時刻の速さ）を返し、timeline なら
         タスクの出入りを時間軸にして rtos_timeline_get / rtos_timeline_load 等で解析できるようにする（記録中なら
-        stream "rtos" にも）。"""
+        stream "rtos" にも）。idle_tasks: アイドルとして扱うタスクの名前（完全一致。fprobe は名前でアイドルを決めない。
+        結果の timeline.idle_tasks に合った名前・合わなかった名前）。"""
         feed = self._trace_feed
         if feed is None:
             raise RuntimeError("トレースを取り込んでいない（trace_start）")
@@ -501,7 +546,7 @@ class FormatTools:
         self._trace_feed, self._trace_last = None, feed
         out = self._trace_state(feed)
         if timeline:
-            out["timeline"] = self._publish_timeline(feed)
+            out["timeline"] = self._publish_timeline(feed, idle_tasks)
         return out
 
     def _trace_state(self, feed: _Feed) -> dict:
@@ -513,7 +558,10 @@ class FormatTools:
         out["notes"] = list(trace.notes)
         if feed.clock is not None:
             out["clock"] = {"anchor_ts": feed.clock.anchor_ts, "anchor_t": feed.clock.anchor_t,
-                            "uncertainty": feed.clock.uncertainty, "timebase_hz": feed.timebase_hz}
+                            "uncertainty": feed.clock.uncertainty, "timebase_hz": feed.timebase_hz,
+                            "ts_hz": feed.trace.ts_hz, "basis": "one_anchor_declared_rate"}
+            out["notes"].append("時刻は 1 つの対応点（anchor）とトレースが申告した速さ（ts_hz）で写した: 速さの誤差は"
+                                "不確かさに入れていない（対応点から離れるほどずれうる）")
         elif trace.events:
             out["notes"].append("時刻の対応が無い（ターゲットの時刻の速さか受けた時刻が分からない）: 記録には書かない")
         if feed.error is not None:
@@ -550,8 +598,9 @@ class FormatTools:
             out.append(item)
         return {"format": feed.format, "total": len(events), "offset": offset, "events": out}
 
-    def _publish_timeline(self, feed: _Feed) -> dict:
-        """タスクの出入りを時間軸にし、RtosTools の最後の結果にする（解析の道具が読む）。記録中なら stream "rtos"。"""
+    def _publish_timeline(self, feed: _Feed, idle_tasks: list[str] | None = None) -> dict:
+        """タスクの出入りを時間軸にし、RtosTools の最後の結果にする（解析の道具が読む）。記録中なら stream "rtos"。
+        idle_tasks: アイドルとして扱うタスクの名前（使う側が明示する。名前の完全一致。無ければアイドルは不明）。"""
         from .probe_rtos import _TimelineResult, _TimelineRun
         trace = feed.trace
         clock = feed.clock
@@ -567,18 +616,18 @@ class FormatTools:
         if getattr(self, "_rtos_run", None) is not None:
             return {"made": False, "reason": "rtos_timeline_start の時間軸を取っている最中（止めてから）"}
         names = {k: v for k, v in trace.names().items()}
+        idle, given = _idle_tasks(names, idle_tasks)
         resolution = max(1.0, clock.ratio)
         tl = timeline_from_events(events, names, resolution=resolution,
                                   t_end=clock.to_timebase(trace.events[-1].ts) if trace.events else None)
         tl.method = trace.format
         isr = activations(trace.events, clock) if any(e.kind == "isr_enter" for e in trace.events) else None
         run = _TimelineRun(trace.format, EventWindow(tl.t0, False, t1=tl.t1), names, hz, resolution=resolution,
-                           order=_PRIORITY_ORDER.get(trace.format, self._priority_order(trace)),
+                           order=_PRIORITY_ORDER.get(trace.format),
                            priorities={t.id: t.priority for t in trace.tasks.values() if t.priority is not None},
-                           idle=set(trace.idle), exceptions=isr is not None)
-        if trace.idle:
-            idle_names = sorted(names.get(h, f"0x{h:08X}") for h in trace.idle)
-            run.warnings.append(f"アイドルのタスクは名前で決めた（RTOS が定める名前と完全に一致: {', '.join(idle_names)}）")
+                           idle=idle, exceptions=isr is not None)
+        if idle_tasks is not None:
+            run.warnings.append(f"アイドルのタスクは idle_tasks で渡された名前: {', '.join(idle_tasks) or '（なし）'}")
         run.warnings.append(f"取り込んだトレース（{trace.format}）から作った時間軸" +
                             ("" if feed.clock is not None else "（時刻はターゲットの時計のまま）"))
         self._rtos_last = _TimelineResult(tl, events, run, activations=isr)
@@ -588,12 +637,7 @@ class FormatTools:
             write_timeline(rec, tl, run.idle)
         return {"made": True, "runs": len(tl.runs), "switches": len(tl.switches), "gaps": len(tl.gaps),
                 "isr": len(isr) if isr is not None else None, "recorded": recorded, "timebase_hz": hz,
-                "stats": tl.stats()}
-
-    @staticmethod
-    def _priority_order(trace: Trace) -> int:
-        os_name = str(trace.system.get("O", "")).lower()
-        return -1 if "zephyr" in os_name or "threadx" in os_name else 1
+                "idle_tasks": given, "priority_order": _order_name(run.order), "stats": tl.stats()}
 
     # --- スナップショット・ファイル ---------------------------------------------------------------
 
@@ -611,13 +655,17 @@ class FormatTools:
 
     def trace_snapshot(self, format: str, address: int | None = None, size: int | None = None,
                        description: str | None = None,
-                       metadata: str | None = None, ctf_header: str = "ts32_id8", ts_hz: float | None = None,
-                       timeline: bool = True, rtt_address: int | None = None) -> dict:
+                       metadata: str | None = None, ctf_header: str | None = None, ts_hz: float | None = None,
+                       timeline: bool = True, rtt_address: int | None = None,
+                       max_bytes: int = SNAPSHOT_LIMIT, idle_tasks: list[str] | None = None,
+                       string_limit: int = STRING_LIMIT) -> dict:
         """ターゲットの RAM のトレースのバッファを吸い出して解読する（ポストモーテム・スナップショット。止めなくてよいが、
         止めた方が書きかけが無い）。format: systemview（RTT の "SysView" のリングを消費せずに。rtt_address 省略時は
         rtt_start の制御ブロック）/ ctf（Zephyr の ram_tracing。address なら size も）/ tracex（_tx_trace_header_ptr か address。ts_hz =
         時刻の速さ）/ eventrecorder（EventRecorderInfo か address。書式は scvd_load の SCVD）。スナップショットを
-        開いていれば（snapshot_open）その RAM から。最後の出来事を読んだ時刻に合わせて記録・時間軸にする（近似）。"""
+        開いていれば（snapshot_open）その RAM から。最後の出来事を読んだ時刻に合わせて記録・時間軸にする（近似）。
+        max_bytes = ctf・tracex のバッファを読む上限（ctf は切って read に size・max_bytes・truncated、tracex は誤り）。
+        idle_tasks は trace_stop と同じ。"""
         if format not in SNAPSHOT_FORMATS:
             raise ValueError(f"RAM から吸い出せる形式は {' / '.join(SNAPSHOT_FORMATS)}")
         with self._lock:
@@ -632,10 +680,13 @@ class FormatTools:
                                    memory=memory, address=address, size=size, description=self._text_file(description),
                                    metadata=self._text_file(metadata), ctf_header=ctf_header,
                                    strings=self._elf_strings(), ts_hz=ts_hz, scvd=self._scvd,
-                                   scvd_context=self._scvd_context(memory) if format == "eventrecorder" else None)
+                                   scvd_context=(self._scvd_context(memory, string_limit=string_limit)
+                                                 if format == "eventrecorder" else None),
+                                   max_bytes=max_bytes)
             hz = self._timebase_hz() if self._debug is not None else None
             now = self.session.device.time() if hz else None
-        feed = _Feed("trace", format, "memory", {"address": info.get("address"), "snapshot": True}, None,
+        feed = _Feed("trace", format, "memory", {"address": info.get("address"), "snapshot": True,
+                                                  "string_limit": string_limit if format == "eventrecorder" else None}, None,
                      time.monotonic(), timebase_hz=hz, trace=trace)
         feed.stopped = feed.started
         if hz and trace.ts_hz and trace.events:
@@ -647,14 +698,15 @@ class FormatTools:
         self._trace_last = feed
         out = {**self._trace_state(feed), "read": info}
         if timeline:
-            out["timeline"] = self._publish_timeline(feed)
+            out["timeline"] = self._publish_timeline(feed, idle_tasks)
         return out
 
     def trace_import(self, format: str, path: str, description: str | None = None, metadata: str | None = None,
-                     ctf_header: str = "ts32_id8", ts_hz: float | None = None, ram_buffer: bool = False,
-                     timeline: bool = True) -> dict:
+                     ctf_header: str | None = None, ts_hz: float | None = None, ram_buffer: bool = False,
+                     timeline: bool = True, idle_tasks: list[str] | None = None) -> dict:
         """トレースのファイル（SystemView の .SVDat・CTF のストリーム・Tracealyzer の PSF・TraceX のバッファのダンプ）を
-        解読する（機器に触らない）。時刻はターゲットの時刻のまま（記録には書かない）。timeline なら時間軸の解析にも。"""
+        解読する（機器に触らない）。時刻はターゲットの時刻のまま（記録には書かない）。timeline なら時間軸の解析にも。
+        idle_tasks は trace_stop と同じ。"""
         data = Path(path).read_bytes()
         trace = decode_trace(format, data, description=self._text_file(description),
                              metadata=self._text_file(metadata), ctf_header=ctf_header, strings=self._elf_strings(),
@@ -664,15 +716,18 @@ class FormatTools:
         self._trace_last = feed
         out = {**self._trace_state(feed), "bytes": len(data)}
         if timeline:
-            out["timeline"] = self._publish_timeline(feed)
+            out["timeline"] = self._publish_timeline(feed, idle_tasks)
         return out
 
     # --- Event Recorder を止めずに読む ---------------------------------------------------------------
 
-    def _er_start(self, period_s: float, address: int | None) -> dict:
+    def _er_start(self, period_s: float, address: int | None, string_limit: int = STRING_LIMIT) -> dict:
         if period_s <= 0:
             raise ValueError("period_s は正")
-        feed = _Feed("trace", "eventrecorder", "memory", {"period_s": period_s, "address": address}, None,
+        if string_limit < 1:
+            raise ValueError("string_limit は 1 以上")
+        feed = _Feed("trace", "eventrecorder", "memory",
+                     {"period_s": period_s, "address": address, "string_limit": string_limit}, None,
                      time.monotonic(),
                      trace=Trace("eventrecorder"))
         with self._lock:
@@ -698,7 +753,8 @@ class FormatTools:
             memory = PyocdAccess(self.target)
             part, info = snapshot("eventrecorder", memory.read_memory, self._symbol_lookup,
                                   address=feed.settings.get("address"), scvd=self._scvd,
-                                  scvd_context=self._scvd_context(memory), since=feed.since)
+                                  scvd_context=self._scvd_context(memory, string_limit=feed.settings["string_limit"]),
+                                  since=feed.since)
             now = self.session.device.time() if feed.timebase_hz else None
         trace = feed.trace
         trace.ts_hz = trace.ts_hz or part.ts_hz
@@ -708,7 +764,6 @@ class FormatTools:
         for task in part.tasks.values():
             info_t = trace.task(task.id)
             info_t.name = task.name or info_t.name
-        trace.idle |= part.idle
         if feed.since is not None and part.events:
             last = trace.events[-1].ts if trace.events else None
             if last is not None:                                   # 32 ビットの時刻を前の読みから続ける
@@ -737,7 +792,7 @@ class FormatTools:
         return {"files": list(self._scvd_files), "components": scvd.names, "typedefs": len(scvd.typedefs),
                 "events": len(scvd.events), "objects": [o.get("name") for o in scvd.objects]}
 
-    def _scvd_context(self, memory) -> ScvdContext:
+    def _scvd_context(self, memory, list_limit: int = LIST_LIMIT, string_limit: int = STRING_LIMIT) -> ScvdContext:
         symbols = self._symbols
 
         def symbol_name(address: int) -> str | None:
@@ -757,14 +812,21 @@ class FormatTools:
         except Exception:
             pass
         return ScvdContext(read=memory.read_memory, symbol=self._symbol_lookup, symbol_name=symbol_name,
-                           string=self._elf_strings(), register=register, running=running)
+                           string=self._elf_strings(), register=register, running=running, list_limit=list_limit,
+                           string_limit=string_limit)
 
-    def scvd_view(self) -> dict:
+    def scvd_view(self, list_limit: int = LIST_LIMIT, string_limit: int = STRING_LIMIT) -> dict:
         """SCVD の objects（Component Viewer）を評価して、ターゲットのメモリから表示の木（property・value・children）を
-        作る（止めずに読める。一貫させたいなら止めて）。読めない・式の誤りは notes。"""
+        作る（止めずに読める。一貫させたいなら止めて）。読めない・式の誤り・readlist / list を上限 list_limit や輪で
+        止めたこと・番地から読む文字列を上限 string_limit バイトで切ったこと（値の中にも印）は notes。"""
         if self._scvd is None:
             raise RuntimeError("SCVD が読み込まれていない（scvd_load）")
+        if list_limit < 1:
+            raise ValueError("list_limit は 1 以上")
+        if string_limit < 1:
+            raise ValueError("string_limit は 1 以上")
         with self._lock:
             memory = PyocdAccess(self.target)
-            view = self._scvd.view(self._scvd_context(memory))
-        return {"files": list(self._scvd_files), "objects": view}
+            view = self._scvd.view(self._scvd_context(memory, list_limit, string_limit))
+        return {"files": list(self._scvd_files), "objects": view, "list_limit": list_limit,
+                "string_limit": string_limit}

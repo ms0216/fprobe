@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectParams, LinuxEvents, probeParams, type ConnectForm, type ProbeForm } from "../src/lib/linux";
+import { connectParams, LinuxEvents, probeParams, syncParams, traceStartParams, type ConnectForm, type ProbeForm } from "../src/lib/linux";
 import { FakeConn } from "./fake-conn";
 
 const conn: ConnectForm = { target: "pynq", host: "192.168.77.2", user: "xilinx", port: "22", key: "", sudo: false, sudoPasswordEnv: "" };
@@ -12,6 +12,21 @@ describe("connectParams", () => {
   });
   it("port が数でなければその欄を返す", () => {
     expect(connectParams({ ...conn, port: "x" })).toEqual({ error: "port" });
+    expect(connectParams({ ...conn, port: "" })).toEqual({ error: "port" });
+    expect(connectParams({ ...conn, target: " " })).toEqual({ error: "target" });
+    expect(connectParams({ ...conn, host: "" })).toEqual({ error: "host" });
+    expect(connectParams({ ...conn, user: "" })).toEqual({ error: "user" });
+  });
+});
+
+describe("時刻合わせの回数・間隔（使う人が入れる。空を 0 として送らない）", () => {
+  it("回数は 1 以上の整数、間隔は正の秒", () => {
+    expect(syncParams("pi", "8")).toEqual({ params: { target: "pi", count: 8 } });
+    expect(syncParams("pi", "")).toEqual({ error: "count" });
+    expect(syncParams("pi", "0")).toEqual({ error: "count" });
+    expect(traceStartParams("pi", "1.5")).toEqual({ params: { target: "pi", sync_interval_s: 1.5 } });
+    expect(traceStartParams("pi", "")).toEqual({ error: "interval" });
+    expect(traceStartParams("pi", "-1")).toEqual({ error: "interval" });
   });
 });
 
@@ -19,6 +34,9 @@ describe("probeParams", () => {
   it("書いた欄だけ。regs・fetchargs は空白で分ける", () => {
     expect(probeParams("pynq", probe)).toEqual({ params: { target: "pynq", name: "tick", binary: "/tmp/tick",
       method: "ptrace", symbol: "tick", regs: ["r0", "r1"], pid: 812 } });
+  });
+  it("方式は使う人が選ぶ（空なら送らない。ptrace を既定にしない）", () => {
+    expect(probeParams("pynq", { ...probe, method: "" })).toEqual({ error: "method" });
   });
   it("symbol と address の両方はエラー", () => {
     expect(probeParams("pynq", { ...probe, address: "0x10" })).toEqual({ error: "address" });
@@ -166,5 +184,17 @@ describe("perf", () => {
   it("record は duration_s・frequency_hz・max_samples を明示", () => {
     expect(perfRecordParams("pi", { ...perf, pid: "" })).toEqual({ params: { target: "pi", duration_s: 0.5, frequency_hz: 499, max_samples: 10000 } });
     expect(perfRecordParams("pi", { ...perf, maxSamples: "" })).toEqual({ error: "max_samples" });
+  });
+});
+
+describe("LinuxEvents の画面の上限", () => {
+  it("画面に持つ上限を超えたら古い記録を捨て、捨てた数を数える（黙って捨てない）", async () => {
+    const { LINUX_KEEP } = await import("../src/lib/linux");
+    const n = LINUX_KEEP + 2;
+    const fake = new FakeConn({ "linux.events.read": { records: Array.from({ length: n }, (_, k) => ({ seq: k + 1 })), next: n, dropped: 0 } });
+    const ev = new LinuxEvents(fake as any);
+    await ev.more("pynq");
+    expect(ev.records.length).toBe(LINUX_KEEP);
+    expect(ev.discarded).toBe(2);
   });
 });

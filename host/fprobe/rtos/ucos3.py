@@ -22,22 +22,24 @@ from __future__ import annotations
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.typesys import PointerType, strip
-from .base import KernelAwareness
+from .base import NAME_LIMIT, KernelAwareness
 from .cortexm import SavedContext, arm_baseline, read_saved_context
-from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo
-from .objects import typed_variables
+from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .stackcheck import check_stack
 from .structs import StructLayout
 from .ucos3_objects import KINDS, TYPE_IDS, UCOS3Objects
 
 __all__ = ["UCOS3"]
 
-NAME_LIMIT = 64
 OS_STATE_OS_RUNNING = 1
 # TaskState のビットと値（os.h）
 BIT_DLY, BIT_PEND, BIT_SUSPENDED = 0x1, 0x2, 0x4
 STATE_RDY, STATE_DEL = 0, 255
 OPT_TASK_STK_CLR = 0x0002
+# µC/OS-III が os.h で定める、オブジェクト・タスクを指す変数（kernel_pointers。名前に使わない）
+KERNEL_POINTERS = frozenset({"OSTCBCurPtr", "OSTCBHighRdyPtr", "OSTmrListPtr", "OSIntQInPtr", "OSIntQOutPtr",
+                             "OSTaskDbgListPtr", "OSFlagDbgListPtr", "OSMemDbgListPtr", "OSMutexDbgListPtr",
+                             "OSQDbgListPtr", "OSSemDbgListPtr", "OSTmrDbgListPtr"})
 # PendOn（os.h の OS_TASK_PEND_ON_*）→ (共通の言葉 WaitInfo.reason, 待つものの種類)
 PEND_ON = {1: ("event", "event_flags"), 2: ("receive", "task_queue"), 3: ("pend", "cond"), 4: ("receive", "mutex"),
            5: ("receive", "queue"), 6: ("receive", "semaphore"), 7: ("notification", "task_semaphore")}
@@ -48,8 +50,8 @@ class UCOS3(KernelAwareness):
     name = "uC/OS-III"
     priority_order = -1           # 小さい方が高い（0 〜 OS_CFG_PRIO_MAX - 1）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, name_limit: int = NAME_LIMIT):
+        super().__init__(info, access, symbols, name_limit)
         self.tcb = StructLayout.of(info, "OS_TCB", "struct os_tcb")
         self.list = StructLayout.of(info, "OS_RDY_LIST", "struct os_rdy_list")
         self.layouts: dict[str, StructLayout] = {}
@@ -91,7 +93,7 @@ class UCOS3(KernelAwareness):
         if not pointer:
             return None
         try:
-            return self.mem.cstring(pointer, NAME_LIMIT) or None
+            return self.mem.cstring(pointer, self.name_limit) or None
         except AccessError:
             return None
 
@@ -182,15 +184,14 @@ class UCOS3(KernelAwareness):
                 found.update(self.chain(self.mem.u32(rdy + prio * self.list.size + self.list.offset("HeadPtr")),
                                         self.tcb.offset("NextPtr"), f"OSRdyList[{prio}]"))
         found.update(self.tick_list())
-        for f in typed_variables(self.info, self.mem, {"OS_TCB": "task", "os_tcb": "task"},
-                                 exclude=self.kernel_pointers()):
+        for f in self.typed_objects({"OS_TCB": "task", "os_tcb": "task"}, exclude=self.kernel_pointers()):
             found.add(f.address)
         return sorted(found)
 
     def kernel_pointers(self) -> frozenset[str]:
-        """カーネルの、オブジェクト・タスクを指す変数（OSTCBCurPtr・OS*DbgListPtr・OSTmrListPtr 等）。名前に使わない。"""
-        return frozenset(v.name for v in self.info.global_variables()
-                         if v.name.startswith("OS") and v.name.endswith("Ptr"))
+        """カーネルの、オブジェクト・タスクを指す変数のうち ELF にあるもの。名前に使わない。µC/OS-III が os.h で
+        定める名前（KERNEL_POINTERS）だけで、名前の形（OS で始まり Ptr で終わる等）では決めない。"""
+        return frozenset(v.name for v in self.info.global_variables() if v.name in KERNEL_POINTERS)
 
     # --- タスク ------------------------------------------------------------------------------------
 
@@ -224,7 +225,11 @@ class UCOS3(KernelAwareness):
         if stack.overflow:
             notes.append("SP がスタックの底（StkBasePtr）より下")
         base = self._field(handle, "BasePrio") if self.tcb.has("BasePrio") else None
-        return Task(handle, self.task_name(handle), self._field(handle, "Prio"), state, stack, wait, base, notes=notes)
+        task = Task(handle, self.task_name(handle), self._field(handle, "Prio"), state, stack, wait, base, notes=notes)
+        task.locations["priority"] = field_location(self.tcb, handle, "Prio")
+        if base is not None:
+            task.locations["base_priority"] = field_location(self.tcb, handle, "BasePrio")
+        return task
 
     def _wait(self, handle: int, state_value: int, tick: int | None, remaining: dict[int, int]) -> WaitInfo:
         if state_value & BIT_PEND:

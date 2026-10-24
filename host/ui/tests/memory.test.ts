@@ -2,15 +2,16 @@
 import { describe, expect, it } from "vitest";
 import { parseCell, resolveAddress, rowBytes, textEdit, unitHex } from "../src/lib/memory";
 import { FakeConn } from "./fake-conn";
+import { ints, varray, vint, vptr } from "./value-kinds";
 
 function conn() {
   return new FakeConn({
     "debug.evaluate": ({ expression }: any) => {
       const table: Record<string, any> = {
-        counter: { type: "uint32_t", address: 0x200000d4, value: 42 },
-        active: { type: "struct Sensor *", address: 0x20000480, value: { pointer: 0x20000420, to: "struct Sensor" } },
-        "0x20000000 + 16": { type: "int", value: 0x20000010 },
-        dead: { type: "uint8_t[4]", address: 0x20000600, value: [1, 2, 3, 4] },
+        counter: { type: "uint32_t", address: 0x200000d4, value: vint(42) },
+        active: { type: "struct Sensor *", address: 0x20000480, value: vptr(0x20000420, "struct Sensor") },
+        "0x20000000 + 16": { type: "int", value: vint(0x20000010) },
+        dead: { type: "uint8_t[4]", address: 0x20000600, value: varray(ints(1, 2, 3, 4)) },
       };
       if (!(expression in table)) throw new Error(`シンボル ${expression} が無い`);
       return table[expression];
@@ -32,8 +33,9 @@ describe("Memory", () => {
     expect(await resolveAddress(call, "active")).toBe(0x20000420);
     expect(await resolveAddress(call, "0x20000000 + 16")).toBe(0x20000010);
     expect(await resolveAddress(call, "main")).toBe(0x08000100);
-    expect(await resolveAddress(call, "dead")).toBe(0x20000600);        // 16 進にも読めるが、変数があれば変数
-    expect(await resolveAddress(call, "beef")).toBe(0xbeef);            // 変数もシンボルも無ければ 16 進
+    expect(await resolveAddress(call, "dead")).toBe(0x20000600);        // 英字で始まる語は名前（C の識別子）
+    await expect(resolveAddress(call, "beef")).rejects.toThrow();       // 名前が無ければ誤り（16 進と推し直さない）
+    expect(await resolveAddress(call, "2000A0FC")).toBe(0x2000a0fc);    // 数字で始まる 16 進の並びは番地（名前になりえない）
     await expect(resolveAddress(call, "nope")).rejects.toThrow();
     expect(c.calls.find(([m]) => m === "debug.evaluate")?.[1]).toEqual({ expression: "counter", frame: 0 });
   });

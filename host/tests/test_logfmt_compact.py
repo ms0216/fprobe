@@ -26,9 +26,23 @@ def words(*values: int) -> bytes:
 def test_strings_are_read_from_the_elf(syms):
     s = ElfStrings(ELF)
     assert s.get(syms.variable("fmt_temp").address) == "temp=%d.%02u C"
-    assert s.is_start(syms.variable("name_run").address)
-    assert not s.is_start(syms.variable("fmt_temp").address + 2)
-    assert s.get(0x2000_0000) is None
+    assert s.has_string(syms.variable("name_run").address)
+    assert s.get(0x2000_0000) is None and not s.has_string(0x2000_0000)
+
+
+def test_a_format_address_is_judged_by_the_elf_contents_not_by_how_the_text_looks(syms):
+    """書式の番地かは「読み込む区画の中で、区画の終わりまでに NUL で終わる 1 文字以上の列がある」だけで決める。
+    文字の見た目（印字できるか）・暗黙の長さの上限・前のバイトが NUL か（末尾を共有して文字列の途中を指す書式も
+    ある）では決めない。"""
+    s = ElfStrings(ELF)
+    temp = syms.variable("fmt_temp").address
+    assert s.has_string(temp + 2) and s.get(temp + 2) == "mp=%d.%02u C"   # 末尾を共有した書式
+    weird = "\x01\x02" + "y" * 600                                         # 印字できない文字と 512 バイトより長い書式
+    s._ranges, s._starts = [(0x1000, b"\0" + weird.encode() + b"\0" + b"abc")], [0x1000]
+    assert s.has_string(0x1001) and s.get(0x1001) == weird
+    assert not s.has_string(0x1000)                                       # 空の列
+    assert not s.has_string(0x1000 + len(weird) + 2)                      # 区画の終わりまでに NUL が無い
+    assert s.get(0x1000 + len(weird) + 2) is None
 
 
 def test_address_logs(syms):
@@ -76,6 +90,7 @@ def test_cbor_known_bytes():
 
 def test_memfault_table_from_the_elf():
     t = MemfaultTable.from_elf(ELF)
+    assert t.pointer_bits == 32                                 # ELF の EI_CLASS（ELFCLASS32）から。決め打ちしない
     assert t.entries[8] == (1, "app/main.c", 21, "boot count %d")
     sensor = next(i for i, e in t.entries.items() if e[3] == "%s: %d (%f)")
     assert sensor == 8 + len("1;app/main.c;21;boot count %d") + 1

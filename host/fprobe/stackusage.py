@@ -165,7 +165,8 @@ def analyze_stack(graph: CallGraph, su: Sequence[SuEntry] = (), *, indirect: dic
                   assume_address_taken: bool = False, roots: Iterable[str] = (), entry: str | None = None,
                   exception_frame: int | None = None, file_of: Callable[[str], str | None] | None = None) -> dict:
     """静的な最大のスタック。indirect: 関数 → その中の関数ポインタの呼び先の候補。roots: 根に足す関数。
-    entry: リセットの関数（省略でベクタ表の 1）。exception_frame: 例外の枠（省略で FPU の命令があれば 108、無ければ 36）。
+    entry: リセットの関数（省略でベクタ表の 1。ベクタ表は CallGraph.build の vector_table で使う側が渡す。無ければ
+    例外の根は無く、msp は None）。exception_frame: 例外の枠（省略で FPU の命令があれば 108、無ければ 36）。
     file_of: 関数 → ソースのファイル（.su の同じ名前の static 関数を見分ける）。"""
     notes: list[str] = []
     indirect = dict(indirect or {})
@@ -191,21 +192,22 @@ def analyze_stack(graph: CallGraph, su: Sequence[SuEntry] = (), *, indirect: dic
                     reasons.append(f"可変長の確保（.su: {entry_su.qualifier}）")
                 elif entry_su.qualifier != "static":
                     notes.append(f"{name}: .su が {entry_su.qualifier}（コンパイラが上限を決めた可変の確保）")
-                if frame != flow.frame and not flow.dynamic:
+                if frame != flow.frame_bound and not (flow.dynamic or flow.truncated):
                     mismatched.append(name)
             else:
-                frame, source, bounded = flow.frame, "disasm", not flow.dynamic
-                if flow.dynamic:
+                frame, source, bounded = flow.frame_bound, "disasm", not (flow.dynamic or flow.truncated)
+                if flow.dynamic or flow.truncated:
                     reasons += flow.reasons
             if flow.uncertain:
-                notes.append(f"{name}: 分岐の先が分からない所がある（枠は多めに見積もった）")
+                notes.append(f"{name}: 分岐の先が分からない所がある（枠はたどれた {flow.frame} に、たどれない命令の "
+                             f"SP を下げる量の和 {flow.unreached_frame} を足した）")
             if name in cyclic:
                 bounded = False
                 cycle = next(c for c in cycles if name in c)
                 reasons.append("再帰: " + " → ".join(cycle + [cycle[0]]))
             best, path, unknown_from = frame, [name], set()
             for site in flow.calls:
-                depth = _site_depth(site, frame, source, flow.frame)
+                depth = _site_depth(site, frame, source, flow.frame_bound)
                 callees, why = _callees(graph, name, site, indirect, assume_address_taken)
                 if why is not None:
                     bounded = False
@@ -234,10 +236,20 @@ def analyze_stack(graph: CallGraph, su: Sequence[SuEntry] = (), *, indirect: dic
         notes.append(f"読めなかった関数: {', '.join(sorted(graph.failed))}")
     frame_size = exception_frame if exception_frame is not None else (
         EXTENDED_FRAME if graph.uses_fpu() else BASIC_FRAME)
+    # 例外の枠の大きさの出どころ（使う側が渡した / ELF に浮動小数点の命令がある → 拡張の枠 / 無い → 基本の枠）
+    frame_source = ("argument" if exception_frame is not None else
+                    "fpu_instructions" if graph.uses_fpu() else "no_fpu_instructions")
     root_rows = _roots(graph, results, roots, entry, frame_size)
+    if graph.vector_table is None:
+        # 例外の処理が分からないので、例外の分を足す MSP の見積もりは出さない（0 と見せない）
+        notes.append("ベクタ表を渡していない（vector_table）: 例外の処理の根と MSP の見積もり（msp）は無い"
+                     + ("" if entry is not None else "。リセットの根は entry で渡せる"))
+        msp = None
+    else:
+        msp = _msp(root_rows, frame_size, graph, frame_source)
     return {"functions": [_row(name, results[name]) for name in
                           sorted(results, key=lambda n: (-results[n].max, graph.functions[n].address))],
-            "roots": root_rows, "msp": _msp(root_rows, frame_size, graph), "cycles": cycles, "notes": notes}
+            "roots": root_rows, "msp": msp, "cycles": cycles, "notes": notes}
 
 
 def _site_depth(site: CallSite, frame: int, source: str, disasm_frame: int) -> int:
@@ -300,13 +312,14 @@ def _roots(graph: CallGraph, results: dict[str, _Result], extra: Iterable[str], 
     return rows
 
 
-def _msp(roots: list[dict], exception_frame: int, graph: CallGraph) -> dict:
+def _msp(roots: list[dict], exception_frame: int, graph: CallGraph, frame_source: str) -> dict:
     thread = next((r for r in roots if r["kind"] == "reset"), None)
     handlers = [r for r in roots if r["kind"] == "exception"]
     base = thread["max"] if thread else 0
     worst = max((h["total"] for h in handlers), default=0)
     bounded = (thread is None or thread["bounded"]) and all(h["bounded"] for h in handlers)
     return {"thread": thread["root"] if thread else None, "thread_max": base, "exception_frame": exception_frame,
+            "exception_frame_source": frame_source,
             "fpu": graph.uses_fpu(), "one_level": base + worst, "all_nested": base + sum(h["total"] for h in handlers),
             "bounded": bounded,
             "notes": ["one_level = スレッドの最大 + 最も深い例外の処理 1 つ。all_nested = 例外の処理がすべて入れ子になる"

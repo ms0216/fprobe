@@ -16,7 +16,7 @@ def bus(trst=False):
 
 
 def run(w, b, **kw):
-    return decode_jtag(w.build(end_s=b.t + 2e-6), tck=TCK, tms=TMS, tdi=TDI, tdo=TDO, **kw)
+    return decode_jtag(w.build(end_s=b.t + 2e-6), tck=TCK, tms=TMS, tdi=TDI, tdo=TDO, **({"trst": None} | kw))
 
 
 def test_reset_ir_and_dr_scans():
@@ -62,7 +62,7 @@ def test_initial_state_given_and_trst_and_truncation():
     (dr,) = d.of("dr")
     assert dr.error == "truncated"
     with pytest.raises(ValueError):
-        decode_jtag(tr, tck=TCK, tms=TMS, initial_state="nowhere")
+        decode_jtag(tr, tck=TCK, tms=TMS, initial_state="nowhere", tdi=None, tdo=None, trst=None)
 
 
 def test_arm_dp_on_top_reads_dpacc_and_apacc_with_posted_reads():
@@ -75,7 +75,8 @@ def test_arm_dp_on_top_reads_dpacc_and_apacc_with_posted_reads():
     b.shift_dr((0 << 3) | (0xC >> 2 << 1) | 1, 35, tdo_value=(0x1122_3344 << 3) | 0b001)  # WAIT
     b.shift_ir(0xA, 4)
     b.shift_dr((0 << 3) | (0xC >> 2 << 1) | 1, 35, tdo_value=(0xCAFE_F00D << 3) | 0b010)  # R RDBUFF
-    d = decode("jtag_arm", w.build(end_s=b.t + 2e-6), jtag={"tck": TCK, "tms": TMS, "tdi": TDI, "tdo": TDO})
+    d = decode("jtag_arm", w.build(end_s=b.t + 2e-6),
+               jtag={"tck": TCK, "tms": TMS, "tdi": TDI, "tdo": TDO, "trst": None}, ir_offset=0, dr_offset=0)
     acc = d.of("access")
     assert [a.fields["port"] for a in acc] == ["DP", "AP", "AP", "DP"]
     assert acc[0].text == "DP W SELECT = 0x05000000" and acc[0].error is None
@@ -83,7 +84,7 @@ def test_arm_dp_on_top_reads_dpacc_and_apacc_with_posted_reads():
     assert acc[3].fields["previous"] == ["AP", "0xC"] and acc[3].fields["returned"] == 0xCAFE_F00D
     assert d.params["jtag"]["tck"] == TCK
     with pytest.raises(ValueError):
-        decode_jtag_arm(d)
+        decode_jtag_arm(d, ir_offset=0, dr_offset=0)
 
 
 def test_arm_dp_in_a_chain_with_a_bypassed_tap_on_the_tdi_side():
@@ -94,7 +95,8 @@ def test_arm_dp_in_a_chain_with_a_bypassed_tap_on_the_tdi_side():
     b.shift_dr(0, 33, tdo_value=0x4BA00477)
     b.shift_ir(0x1F << 4 | 0xA, 9)
     b.shift_dr((0x0000_00F0 << 3) | (0x8 >> 2 << 1), 36, tdo_value=0b010)
-    d = decode("jtag_arm", w.build(end_s=b.t + 2e-6), jtag={"tck": TCK, "tms": TMS, "tdi": TDI, "tdo": TDO})
+    d = decode("jtag_arm", w.build(end_s=b.t + 2e-6),
+               jtag={"tck": TCK, "tms": TMS, "tdi": TDI, "tdo": TDO, "trst": None}, ir_offset=0, dr_offset=0)
     assert d.of("idcode")[0].value == 0x4BA00477
     (acc,) = d.of("access")
     assert acc.text == "DP W SELECT = 0x000000F0"

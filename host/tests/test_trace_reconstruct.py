@@ -16,8 +16,10 @@ import pytest
 import etm_encoder as enc
 from fprobe.memview import BytesMemory, ElfImage
 from fprobe.symbols import Symbols
-from fprobe.trace.etmv4 import Etmv4Decoder
+from fprobe.trace.etmv4 import Etmv4Config, Etmv4Decoder
 from fprobe.trace.reconstruct import Reconstructor
+
+CONFIG = Etmv4Config(commit_opt1=True, vmid_bytes=1, cid_bytes=4)          # M-profile（VMID・CID を出さない）
 
 ELF = Path(__file__).resolve().parents[1] / "firmware" / "etm_demo" / "etm_demo.elf"
 B = 0x1000_0000
@@ -29,7 +31,7 @@ def recon():
 
 
 def run(recon, data: bytes):
-    return recon.run(Etmv4Decoder().decode(data))
+    return recon.run(Etmv4Decoder(CONFIG).decode(data))
 
 
 def addr(a: int) -> bytes:
@@ -138,7 +140,7 @@ def test_target_memory_instead_of_elf():
     # 実機のメモリ（ここではバイト列）でも同じ: leaf の 2 命令
     image = ElfImage(ELF)
     memory = BytesMemory(B, image.read_memory(B, 0x54))
-    flow = Reconstructor(memory).run(Etmv4Decoder().decode(enc.async_() + addr(0x24) + enc.atoms("E") + addr(0x06)))
+    flow = Reconstructor(memory).run(Etmv4Decoder(CONFIG).decode(enc.async_() + addr(0x24) + enc.atoms("E") + addr(0x06)))
     assert flow.addresses() == [B + 0x24, B + 0x26]
     assert flow.instructions()[0].get("function") is None                   # シンボルが無ければ名前は無い
 

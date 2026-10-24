@@ -3,13 +3,13 @@
 
 - スクリプトは pyOCD の作法のまま（`will_connect` / `did_init_target` / `will_reset` 等の関数を定義する。名前空間に
   session・target・probe・dp・aps・LOG 等がある）。target_connect の script で渡すと pyOCD の user_script になる。
-- check_script: 実行せずに（ast で）読み、定義された手順・名前の誤り（似た名前の提案）・引数の名前の誤り・構文の誤りを返す。
+- check_script: 実行せずに（ast で）読み、定義された手順・pyOCD が呼ばない関数（手順の名前でないもの）・引数の名前の
+  誤り・構文の誤りを返す（事実だけ。似た名前の提案は fprobe.plugins.heuristics.connect_script_name_hints）。
   手順の一覧と引数は pyOCD の TargetDelegateInterface から取る（pyOCD が増やせば追従する）。
 - 内蔵の手順（"builtin:<名前>"）: fprobe/data/connect_scripts/*.py。
 """
 
 import ast
-import difflib
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +41,7 @@ class ScriptCheck:
     path: str
     hooks: list[dict] = field(default_factory=list)          # 定義された手順（name・line・params）
     commands: list[str] = field(default_factory=list)        # @command で足したコマンド
+    functions: list[dict] = field(default_factory=list)      # 手順の名前でない関数（pyOCD は呼ばない。name・line）
     problems: list[str] = field(default_factory=list)
     error: str | None = None                                 # 構文の誤り
 
@@ -50,7 +51,7 @@ class ScriptCheck:
 
     def as_dict(self) -> dict:
         return {"path": self.path, "ok": self.ok, "hooks": self.hooks, "commands": self.commands,
-                "problems": self.problems, "error": self.error}
+                "functions": self.functions, "problems": self.problems, "error": self.error}
 
 
 def builtin_scripts() -> list[dict]:
@@ -103,10 +104,7 @@ def check_script(script: str) -> ScriptCheck:
                 result.problems.append(f"{node.name}（{node.lineno} 行）の引数 {', '.join(unknown)} を pyOCD は渡さない"
                                        f"（渡すのは {', '.join(known)}。名前で選んで渡される）")
             continue
-        close = difflib.get_close_matches(node.name, HOOKS, n=1, cutoff=0.8)
-        if close or node.name.startswith(("will_", "did_")):
-            hint = f"。{close[0]} のつもり？" if close else ""
-            result.problems.append(f"{node.name}（{node.lineno} 行）は pyOCD の手順の名前ではない（呼ばれない）{hint}")
+        result.functions.append({"name": node.name, "line": node.lineno})
     return result
 
 

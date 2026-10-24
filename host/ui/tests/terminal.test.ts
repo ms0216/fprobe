@@ -1,4 +1,4 @@
-// 端末: 源の一覧・読み（古いデーモンでは rtt.* に落とす）・送る操作・制御コード
+// 端末: 源の一覧・読み・送る操作・制御コード
 import { describe, expect, it } from "vitest";
 import { RpcError } from "../src/lib/api";
 import {
@@ -7,7 +7,6 @@ import {
 } from "../src/lib/terminal";
 import { FakeConn } from "./fake-conn";
 
-const missing = (m: string) => () => { throw new RpcError(-32601, `${m} は無い`); };
 
 describe("端末の源", () => {
   it("terminal.sources・terminal.read で読む", async () => {
@@ -26,21 +25,20 @@ describe("端末の源", () => {
     expect(c.calls.at(-1)).toEqual(["terminal.read", { source: "uart", since: 5, times: true }]);
   });
 
-  it("terminal.* の無い古いデーモンでは RTT とセミホスティングを rtt.* で読む", async () => {
+  it("誤りの文の語（「は無い」・not found・terminals）で別の経路に落とさない: 誤りはそのまま返す", async () => {
     const c = new FakeConn({
-      "terminal.sources": missing("terminal.sources"),
-      "terminal.read": missing("terminal.read"),
+      "terminal.sources": () => { throw new RpcError(-32601, "terminal.sources は無い"); },
+      "terminal.read": () => { throw new RpcError(-32020, "terminals: not found"); },
       "rtt.status": { running: true },
-      "rtt.read": ({ channel, since }: any) => ({ channel, data: "x", start: since, next: since + 1, lost: 0 }),
     });
     const call = c.call.bind(c) as any;
-    const list = await loadSources(call);
-    expect(list.sources.map((s) => s.id)).toEqual(["rtt0", "semihosting"]);
-    expect(await readSource(call, list.sources[1], 3)).toEqual({ data: "x", next: 4, lost: 0 });
-    expect(c.calls.at(-1)).toEqual(["rtt.read", { channel: "semihosting", since: 3 }]);
+    await expect(loadSources(call)).rejects.toThrow("terminal.sources は無い");
+    const rtt: TerminalSource = { id: "rtt0", kind: "rtt", name: "Terminal", writable: true, channel: 0 };
+    await expect(readSource(call, rtt, 0)).rejects.toThrow("terminals: not found");
+    expect(c.calls.map(([m]) => m)).toEqual(["terminal.sources", "terminal.read"]);   // rtt.* に落とさない・頼み直さない
   });
 
-  it("RTT は仮想端末の切り替えも頼む（terminals の無い古いデーモンでは頼まずに読み直す）", async () => {
+  it("RTT は仮想端末の切り替えも頼む", async () => {
     const rtt: TerminalSource = { id: "rtt0", kind: "rtt", name: "Terminal", writable: true, channel: 0 };
     const c = new FakeConn({
       "terminal.read": ({ source, since }: any) => ({ source, data: "ab", start: since, next: since + 2, lost: 0,
@@ -49,12 +47,6 @@ describe("端末の源", () => {
     const call = c.call.bind(c) as any;
     expect(await readSource(call, rtt, 0)).toEqual({ data: "ab", next: 2, lost: 0, terminals: [{ at: 1, id: 2 }] });
     expect(c.calls.at(-1)).toEqual(["terminal.read", { source: "rtt0", since: 0, terminals: true }]);
-    c.responders["terminal.read"] = ({ source, since, terminals }: any) => {
-      if (terminals) throw new RpcError(-32602, "terminal.read: Additional properties are not allowed ('terminals' was unexpected)");
-      return { source, data: "ab", start: since, next: since + 2, lost: 0 };
-    };
-    expect(await readSource(call, rtt, 0)).toEqual({ data: "ab", next: 2, lost: 0 });
-    expect(c.calls.at(-1)).toEqual(["terminal.read", { source: "rtt0", since: 0 }]);
   });
 
   it("送るのは RTT の下り・セミホスティングの標準入力（rtt.write）、UART（uart.write）", () => {
@@ -101,6 +93,8 @@ describe("制御コード", () => {
     expect(s.spans.at(-1)).toEqual({ text: "b", fg: 1, bold: false });
     expect(plain(feed(s, "\x1b[2Jnew"))).toBe("new");
     expect(plain(feed(emptyScreen(), "0123456789", 4))).toBe("6789");
+    expect(feed(feed(emptyScreen(), "0123456789", 4), "ab", 4).discarded).toBe(8);   // 捨てた文字の数（黙って捨てない）
+    expect(emptyScreen().discarded).toBe(0);
   });
 });
 
@@ -134,3 +128,15 @@ describe("行の時刻", () => {
   });
 });
 
+
+describe("SWO の設定の引数（swo.configure）", () => {
+  it("ITM のポート・速さは使う人が入れたものだけ（0〜3・2 MHz を暗黙に使わない）。足りなければ null", async () => {
+    const { swoConfigureParams } = await import("../src/lib/terminal");
+    expect(swoConfigureParams("", "2000000", "")).toBeNull();
+    expect(swoConfigureParams("0, 2", "", "")).toBeNull();
+    expect(swoConfigureParams("0, 32", "2000000", "")).toBeNull();          // ITM のポートは 0〜31
+    expect(swoConfigureParams("0 x", "2000000", "")).toBeNull();
+    expect(swoConfigureParams("0, 2 5", "2000000", "")).toEqual({ ports: [0, 2, 5], swo_baud: 2000000, core_clock_hz: null });
+    expect(swoConfigureParams("1", "6000000", "72000000")).toEqual({ ports: [1], swo_baud: 6000000, core_clock_hz: 72000000 });
+  });
+});

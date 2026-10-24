@@ -28,7 +28,59 @@ from .location import (EvalContext, NotAvailable, Place, Unavailable, ValuePlace
                        evaluate_value)
 from .typesys import BaseType, CType, EnumType, TypeLoader, strip
 
-__all__ = ["DebugInfo", "FrameView", "Function", "Scope", "Variable"]
+__all__ = ["AmbiguousNameError", "DebugInfo", "FrameView", "Function", "Scope", "Variable"]
+
+
+
+_FORM_SIZES = {"DW_FORM_data1": 1, "DW_FORM_data2": 2, "DW_FORM_data4": 4, "DW_FORM_data8": 8, "DW_FORM_data16": 16}
+
+
+def _const_bytes(value: int, t, form: str | None) -> bytes:
+    """DW_AT_const_value の整数 → 型の大きさのバイト列。型に大きさが無ければ属性の形式の大きさ（data1〜data16）、
+    それも無ければ（sdata・udata）値の入る最小のバイト数（4 バイト等で補わない。値は欠けない）。"""
+    size = t.size or _FORM_SIZES.get(form)
+    if size is None:
+        size = max(1, (value.bit_length() + (8 if value < 0 else 7)) // 8)
+    signed = (isinstance(t, (BaseType, EnumType)) and t.signed) or value < 0
+    if signed or value >= 0:
+        return value.to_bytes(size, "little", signed=signed)
+    return (value & ((1 << size * 8) - 1)).to_bytes(size, "little")
+
+
+class AmbiguousNameError(LookupError):
+    """同じ名前の変数が複数あって 1 つに決まらない（黙って 1 つを選ばない）。candidates = 候補（name・kind・
+    function・file・line）。"<ファイル>::<名前>"・"<ファイル>::<関数>::<名前>" で選べる。"""
+
+    def __init__(self, name: str, candidates: list[Variable]):
+        self.name = name
+        self.candidates = [{"name": v.name, "kind": v.kind, "function": v.function, "file": v.decl_file,
+                            "line": v.decl_line} for v in candidates]
+        where = ", ".join(f"{c['file'] or '?'}:{c['line'] or '?'}" for c in self.candidates)
+        examples = " / ".join(dict.fromkeys(
+            f"{c['file'] or '?'}::{c['function'] + '::' if c['function'] else ''}{c['name']}" for c in self.candidates))
+        super().__init__(f"{name!r} は {len(candidates)} 個ある（{where}）。ファイルで選ぶ: {examples}")
+
+    def __str__(self) -> str:                    # KeyError と違い、引用符を付けずに文で
+        return self.args[0]
+
+
+def _in_file(variable: Variable, file: str) -> bool:
+    """変数の宣言のファイルが file（パスの末尾の一致。区切りは / と \\ を同じに）か。"""
+    path = (variable.decl_file or "").replace("\\", "/")
+    want = file.replace("\\", "/")
+    return path == want or path.endswith("/" + want)
+
+
+def _location_key(variable: Variable) -> object:
+    """同じ実体かを見分ける鍵: 位置式のバイト列（番地を含む）。無ければその変数だけ。"""
+    attributes = getattr(variable.die, "attributes", None) or {}
+    attr = attributes.get("DW_AT_location")
+    return tuple(attr.value) if attr is not None and isinstance(attr.value, (list, bytes)) else id(variable)
+
+
+def _is_file(qualifier: str) -> bool:
+    """"<ファイル>::<名前>" の前置きか（C の名前に無い . / \\ を含む）。"""
+    return any(ch in qualifier for ch in "./\\")
 
 
 @dataclass
@@ -299,18 +351,39 @@ class DebugInfo:
         return Scope(function, parameters, locals_, statics)
 
     def global_variable(self, name: str) -> Variable:
-        """大域・ファイルの static（同じ名前が複数あれば外部のものを先に）。"関数名::名前" で関数の中の static。"""
+        """大域・ファイルの static。外部結合（global）が 1 つあればそれ（C のプログラム全体でその名前が指すもの）。
+        外部結合が無く static が複数あれば選ばずに AmbiguousNameError（候補の一覧）。
+        "関数名::名前" で関数の中の static、"ファイル::名前"・"ファイル::関数名::名前" でファイルを選ぶ（ファイルは
+        宣言のファイルのパスの末尾）。同じ名前の関数が複数あるときも選ばない。"""
         self._index()
-        if "::" in name:
-            function, _, inner = name.rpartition("::")
-            for v in self._function_statics.get(function, []):
-                if v.name == inner:
-                    return v
-            raise KeyError(f"関数 {function} の中に static {inner!r} は無い")
-        found = self._globals.get(name)
+        *qualifiers, inner = name.split("::")
+        if len(qualifiers) > 2 or (len(qualifiers) == 2 and not _is_file(qualifiers[0])):
+            raise KeyError(f"{name!r} は 名前・関数::名前・ファイル::名前・ファイル::関数::名前 のどれか")
+        file = qualifiers[0] if qualifiers and _is_file(qualifiers[0]) else None
+        function = qualifiers[-1] if qualifiers and not _is_file(qualifiers[-1]) else None
+        if function is not None:
+            found = [v for v in self._function_statics.get(function, [])
+                     if v.name == inner and (file is None or _in_file(v, file))]
+            if not found:
+                raise KeyError(f"関数 {function} の中に static {inner!r} は無い" + (f"（{file}）" if file else ""))
+            return self._one(name, found)
+        found = [v for v in self._globals.get(inner, []) if file is None or _in_file(v, file)]
         if not found:
-            raise KeyError(f"変数 {name!r} が {self.path.name} の DWARF に無い")
-        return sorted(found, key=lambda v: v.kind != "global")[0]
+            raise KeyError(f"変数 {inner!r} が {self.path.name} の DWARF に無い" + (f"（{file}）" if file else ""))
+        # 外部結合の同じ実体が複数の CU にあることがある（-fcommon の仮定義等）: 同じ位置式は 1 つに数える
+        same: dict[object, Variable] = {}
+        for v in found:
+            if v.kind == "global":
+                same.setdefault(_location_key(v), v)
+        external = list(same.values())
+        return self._one(name, external if len(external) == 1 else found)
+
+    @staticmethod
+    def _one(name: str, found: list[Variable]) -> Variable:
+        """候補が 1 つならそれ。複数なら選ばない（AmbiguousNameError）。"""
+        if len(found) > 1:
+            raise AmbiguousNameError(name, found)
+        return found[0]
 
     def global_variables(self) -> list[Variable]:
         self._index()
@@ -366,10 +439,10 @@ class DebugInfo:
             return self._const_place(die)
         attr = attrs.get("DW_AT_location")
         if attr is None:
-            return Unavailable("最適化で消えた")
+            return Unavailable("DWARF に位置（DW_AT_location）が無い")
         ops = self.location_ops(attr, die, frame.pc if frame else None)
         if ops is None:
-            return Unavailable("この番地では最適化で消えている")
+            return Unavailable("この番地は位置リストの範囲の外（DWARF にこの番地での位置が無い）")
         return evaluate_location(ops, self.eval_context(die, frame))
 
     def location_ops(self, attr, die, pc: int | None):
@@ -396,14 +469,10 @@ class DebugInfo:
         return self.parser(cu).parse_expr(default.loc_expr) if default is not None else None
 
     def _const_place(self, die) -> Place:
-        value = die.attributes["DW_AT_const_value"].value
-        if isinstance(value, int):
-            t = strip(self.types.type_of(die))
-            size = t.size or 4
-            signed = (isinstance(t, (BaseType, EnumType)) and t.signed) or value < 0
-            return ValuePlace(value.to_bytes(size, "little", signed=signed) if signed or value >= 0
-                              else (value & ((1 << size * 8) - 1)).to_bytes(size, "little"))
-        return ValuePlace(bytes(value))
+        attr = die.attributes["DW_AT_const_value"]
+        if isinstance(attr.value, int):
+            return ValuePlace(_const_bytes(attr.value, strip(self.types.type_of(die)), attr.form))
+        return ValuePlace(bytes(attr.value))
 
     def eval_context(self, die, frame: FrameView | None) -> EvalContext:
         cu = die.cu

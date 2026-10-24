@@ -101,7 +101,8 @@ class FrameState:
     cfa: int | None               # このフレームの CFA（呼び出し元の sp）。分からなければ None
     registers: RegisterFile = field(repr=False)
     note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した、"lr_without_cfi" = 最内の
-                                  # 関数に CFI が無く、葉と仮定して LR から呼び出し元を出した（確かめていない）
+                                  # 関数に CFI が無く、葉と仮定して LR から呼び出し元を出した（assume_leaf のときだけ）
+    stop: dict | None = None      # 最後のフレームだけ: その先へ巻き戻さなかった理由（Unwinder.unwind の説明）
 
 
 @dataclass(frozen=True)
@@ -162,12 +163,24 @@ class CallFrameTable:
 
 
 class Unwinder:
-    def __init__(self, table: CallFrameTable, max_frames: int = MAX_FRAMES):
+    """assume_leaf: CFI の無い最内の関数（フレーム 0）を「葉（何も積んでいない）」と仮定し、LR を戻り先とする。
+    仮定なので使う側が明示したときだけ使い、出したフレームの note を "lr_without_cfi" にする（関数が LR を積んで
+    いれば偽の呼び出し元になる）。既定は仮定せず、そのフレームで止めて stop に "no_cfi" を書く。"""
+
+    def __init__(self, table: CallFrameTable, max_frames: int = MAX_FRAMES, assume_leaf: bool = False):
         self.table = table
         self.max_frames = max_frames
+        self.assume_leaf = assume_leaf
 
     def unwind(self, access: TargetAccess) -> list[FrameState]:
-        """フレーム 0（いまの PC）から、呼び出し元へ巻き戻せるところまで。"""
+        """フレーム 0（いまの PC）から、呼び出し元へ巻き戻せるところまで。最後のフレームの stop に止めた理由:
+        - {"reason": "max_frames", "max_frames": N}: 上限の段数に達した（その先は辿っていない）
+        - {"reason": "no_cfi", "pc": 番地}: その番地に CFI（呼び出し元の求め方）が無い
+        - {"reason": "not_available", "detail": 文}: 要るレジスタかスタックが読めない
+        - {"reason": "return_address", "value": 値}: 戻り先が 0 か 0xFFFFFFFF（リセット直後の LR 等。呼び出し元が無い）
+        - {"reason": "cfa_below_sp", "cfa": 値, "sp": 値}: 呼び出し元の SP（CFA）がいまの SP より下（スタックの向きと逆）
+        - {"reason": "pc_zero"}: 呼び出し元の PC が 0
+        - {"reason": "repeated_frame", "pc": 値, "sp": 値}: 前に出したフレームと同じ (pc, sp) に戻った"""
         registers = RegisterFile(access=access)
         try:
             pc = registers.read(PC)
@@ -175,12 +188,20 @@ class Unwinder:
             return []
         frames = [FrameState(0, pc, pc, None, registers)]
         seen = {(pc, registers.try_read(SP))}
-        while len(frames) < self.max_frames:
-            caller = self._step(frames[-1], access)
+        while True:
+            if len(frames) >= self.max_frames:
+                frames[-1].stop = {"reason": "max_frames", "max_frames": self.max_frames}
+                break
+            caller, stop = self._step(frames[-1], access)
             if caller is None:
+                frames[-1].stop = stop
                 break
             key = (caller.pc, caller.registers.try_read(SP))
-            if caller.pc == 0 or key in seen:
+            if caller.pc == 0:
+                frames[-1].stop = {"reason": "pc_zero"}
+                break
+            if key in seen:
+                frames[-1].stop = {"reason": "repeated_frame", "pc": key[0], "sp": key[1]}
                 break
             seen.add(key)
             frames.append(caller)
@@ -188,15 +209,16 @@ class Unwinder:
 
     # --- 1 段 ----------------------------------------------------------------------------
 
-    def _step(self, frame: FrameState, access: TargetAccess) -> FrameState | None:
+    def _step(self, frame: FrameState, access: TargetAccess) -> tuple[FrameState | None, dict | None]:
+        """(呼び出し元のフレーム, None) か、巻き戻せないなら (None, 止めた理由)。"""
         regs = frame.registers
         found = self.table.row_at(frame.lookup_pc)
         note = ""
         try:
             if found is None:
-                if frame.index != 0:
-                    return None                           # デバッグ情報の無い関数の中: これ以上は推測しない
-                cfa = regs.read(SP)                       # 葉と仮定する（何も積んでいない）: 結果のフレームに書く
+                if frame.index != 0 or not self.assume_leaf:
+                    return None, {"reason": "no_cfi", "pc": frame.lookup_pc}
+                cfa = regs.read(SP)                       # 葉と仮定する（使う側が明示した）: 結果のフレームに書く
                 restored = RegisterFile({SP: cfa, LR: regs.read(LR)}, parent=regs)
                 return_register = LR
                 note = "lr_without_cfi"
@@ -206,17 +228,18 @@ class Unwinder:
                 restored = self._restore(row, regs, cfa, access, parser)
             frame.cfa = cfa
             return_address = restored.read(return_register)
-        except NotAvailable:
-            return None
+        except NotAvailable as e:
+            return None, {"reason": "not_available", "detail": str(e)}
         if return_address == 0xFFFFFFFF or return_address == 0:
-            return None                                   # リセット直後の LR・呼び出し元の無い関数
+            return None, {"reason": "return_address", "value": return_address}
         if is_exc_return(return_address):
             return self._exception(frame, restored, cfa, return_address, access)
-        if cfa < (regs.try_read(SP) or 0):
-            return None                                   # スタックが逆向き: 壊れている
+        sp = regs.try_read(SP)
+        if cfa < (sp or 0):
+            return None, {"reason": "cfa_below_sp", "cfa": cfa, "sp": sp}
         pc = return_address & ~1
         restored.known[PC] = pc
-        return FrameState(frame.index + 1, pc, pc - 1, None, restored, note)
+        return FrameState(frame.index + 1, pc, pc - 1, None, restored, note), None
 
     @staticmethod
     def _context(regs: RegisterFile, access: TargetAccess, cfa: int | None = None) -> EvalContext:
@@ -272,17 +295,17 @@ class Unwinder:
             raise NotAvailable(f"スタック 0x{address & 0xFFFFFFFF:08X} が読めない（{e}）") from None
 
     def _exception(self, frame: FrameState, restored: RegisterFile, cfa: int, exc_return: int,
-                   access: TargetAccess) -> FrameState | None:
+                   access: TargetAccess) -> tuple[FrameState | None, dict | None]:
         """例外の入口で積まれたフレームから、中断された処理のレジスタを復元する。"""
         on_psp = bool(exc_return & 0x4)
         specials = restored.specials()
         stack = specials["psp"] if on_psp else cfa        # MSP: ハンドラの CFA = 例外の入口の MSP
         if stack is None:
-            return None
+            return None, {"reason": "not_available", "detail": "psp が読めない（例外のフレームの場所）"}
         try:
             words = self._memory(access, stack, 32)
-        except NotAvailable:
-            return None
+        except NotAvailable as e:
+            return None, {"reason": "not_available", "detail": str(e)}
         r0, r1, r2, r3, r12, lr, pc, xpsr = (int.from_bytes(words[i:i + 4], "little") for i in range(0, 32, 4))
         known = {0: r0, 1: r1, 2: r2, 3: r3, 12: r12, LR: lr, PC: pc & ~1}
         size = 0x20
@@ -296,7 +319,7 @@ class Unwinder:
                    "xpsr": xpsr}
         registers = RegisterFile(known, parent=restored, inherit=CALLEE_SAVED - {SP, LR}, special=special)
         frame.cfa = cfa
-        return FrameState(frame.index + 1, pc & ~1, pc & ~1, None, registers, "exception")
+        return FrameState(frame.index + 1, pc & ~1, pc & ~1, None, registers, "exception"), None
 
     def _stacked_fp(self, access: TargetAccess, stack: int) -> dict[int, int]:
         """FP の拡張フレームの s0〜s15。遅延退避がまだ（FPCCR.LSPACT = 1）・FPCCR が読めないなら分からないとする。"""

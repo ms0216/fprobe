@@ -37,14 +37,16 @@ describe("Confirmer", () => {
   });
 });
 
-describe("allowed（AI の作業中の確認）", () => {
-  it("AI が作業していなければ聞かない。作業中なら画面の中で聞く", async () => {
+describe("allowed（AI がつながっていて一時停止していないときの確認）", () => {
+  it("AI がつながっていない・一時停止中なら聞かない。そうでなければ画面の中で聞く", async () => {
     const c = new Confirmer();
-    expect(await allowed({ aiWorking: false } as any, c)).toBe(true);
+    expect(await allowed({ aiConnectedUnpaused: false } as any, c)).toBe(true);
     let shown: ConfirmRequest | null = null;
     c.subscribe((r) => (shown = r));
-    const asked = allowed({ aiWorking: true } as any, c);
+    const asked = allowed({ aiConnectedUnpaused: true } as any, c);
     expect(shown).not.toBeNull();
+    // 事実（AI がつながっていて一時停止していない）だけを言い、「作業中」とは判定しない
+    expect(shown!.message).not.toMatch(/作業中|working/i);
     c.answer(true);
     expect(await asked).toBe(true);
   });

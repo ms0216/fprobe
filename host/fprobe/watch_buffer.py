@@ -41,7 +41,7 @@ class TargetRing:
     def _read_head(self, read: Callable[[int, int], bytes]) -> int:
         return int.from_bytes(read(self.head_address, self.head_size), "little")
 
-    def poll(self, read: Callable[[int, int], bytes]) -> list[tuple[int, object]]:
+    def poll(self, read: Callable[[int, int], bytes]) -> list[tuple[int, dict]]:
         """前回から増えた要素を (通し番号, 値) の並びで返す。最初の poll は位置を合わせるだけ（それより前は読まない）。"""
         head = self._read_head(read)
         if self._head is None:

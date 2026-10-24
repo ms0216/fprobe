@@ -68,9 +68,11 @@ describe("AppState", () => {
     expect(get().hasOlder).toBe(false);
   });
 
-  it("つなぎ直しで番号が戻っていたら（デーモンの再起動）一覧を置き換える", async () => {
+  it("つなぎ直しでデーモンの起動（session.status の boot）が変わっていたら一覧を置き換える（番号の戻りから推さない）", async () => {
     let restarted = false;
     const { conn, get } = setup({
+      "session.status": () => ({ boot: restarted ? "b" : "a", device: null, control: { paused: false, paused_by: null, held: 0 },
+                                 clients: [], target: null }),
       "session.activity.list": () => ({ entries: restarted ? [entry(1, { method: "probe.info" })] : [entry(7), entry(8)] }),
     });
     conn.link!("open", {});
@@ -96,17 +98,18 @@ describe("AppState", () => {
     expect(get().activity.map((e) => e.seq)).toEqual([7, 8, 9]);
   });
 
-  it("操作権・利用者・ターゲットの通知を反映し、AI の作業中かが分かる", async () => {
+  it("操作権・利用者・ターゲットの通知を反映し、AI がつながっていて一時停止していないかの事実が分かる（作業中とは判定しない）", async () => {
     const { conn, state, get } = setup();
     conn.link!("open", {});
     await settle();
-    expect(state.aiWorking).toBe(true);
+    expect(state).not.toHaveProperty("aiWorking");
+    expect(state.aiConnectedUnpaused).toBe(true);
     conn.emit("control", { paused: true, paused_by: "gui", held: 2 });
     expect(get().control).toEqual({ paused: true, paused_by: "gui", held: 2 });
-    expect(state.aiWorking).toBe(false);
+    expect(state.aiConnectedUnpaused).toBe(false);
     conn.emit("clients", { clients: [{ id: 1, name: "gui", role: "human" }] });
     conn.emit("control", { paused: false, paused_by: null, held: 0 });
-    expect(state.aiWorking).toBe(false);
+    expect(state.aiConnectedUnpaused).toBe(false);
     conn.emit("target.state", { state: "HALTED", where: "main+4" });
     expect(get().target).toEqual({ state: "HALTED", where: "main+4" });
   });

@@ -8,10 +8,12 @@
 - 1 つの Trice: u16 の上位 2 ビットがセレクタ（01 = 時刻無し、10 = 16 ビットの時刻、11 = 32 ビットの時刻、
   00 = 利用者の定義 typeX0）、下位 14 ビットが ID。続いて時刻、u16 の NC（bit15 = 0 なら bit14..8 が長さ・
   bit7..0 が回の番号、bit15 = 1 なら bit14..0 が長さで回の番号なし）、ペイロード。すべて転送のエンディアン。
-- 回の番号（cycle）は 0xC0 から 1 ずつ増える。飛んだら失った Trice があった（cycle_errors）。0xC0 はターゲットの
-  リセットとみなして合わせ直す。最初の Trice の番号には合わせる（途中から受け始めた流れのため）。
+- 回の番号（cycle）は 0xC0 から 1 ずつ増える（8 ビットで回る）。前の番号 + 1 でなければ飛び（cycle_errors に数え、
+  待った番号と来た番号を notes に）。飛びの原因（取りこぼし・ターゲットのリセット等）は番号だけでは区別できないので
+  解釈しない（0xC0 への飛びも同じく数える）。最初の Trice の番号には合わせる（途中から受け始めた流れのため）。
 - 書式は Go の fmt に近い（%u は符号なし、%x・%o・%b は既定で符号なし、%t は真偽、%p は %x、C の長さの修飾は
-  無視）。行の先頭の `xxx:` はチャンネル（小文字だけのものは本文から除く。err・wrn・inf・dbg 等は重要度にする）。
+  無視）。行の先頭の `xxx:` をチャンネルとするのは、使う側が levels（タグ → 重要度。重要度なしは None）で明示した
+  タグだけ（名前の形では決めない。写しの表を本体に持たない）。本文は書き換えない（タグも本文に残る）。
 確かでない点: typeX0（利用者の定義）の中身は解読しない（undecoded）。-d16（ID を 2 回送る形）は d16=True で読む。
 `_F`（関数呼び出し）・`_C` の型はペイロードを 16 進で出すだけ。
 """
@@ -24,17 +26,13 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-from .framing import ZeroDelimited, cobs_decode, tcobs_decode
-from .record import LogRecord
+from .framing import FRAME_LIMIT, Dropped, ZeroDelimited, cobs_decode, dropped_text, tcobs_decode
+from .record import LEVELS, LogRecord
 
 __all__ = ["TriceDecoder", "TriceError", "TriceTable", "go_format", "trice_type"]
 
-CYCLE_START = 0xC0
 FRAMINGS = ("tcobs", "cobs", "none")
 _TAG = re.compile(r"^([A-Za-z][A-Za-z0-9_]*):")
-_LEVELS = {"err": "error", "error": "error", "fatal": "error", "ftl": "error", "e": "error", "assert": "error",
-           "wrn": "warn", "warn": "warn", "warning": "warn", "w": "warn", "inf": "info", "info": "info", "i": "info",
-           "dbg": "debug", "debug": "debug", "d": "debug", "trace": "trace", "tr": "trace"}
 _SPEC = re.compile(r"%([-+# 0]*)(\d+)?(?:\.(\d+))?(hh|h|ll|l|j|z|L)?([a-zA-Z%])")
 
 
@@ -172,13 +170,20 @@ class TriceDecoder:
     """流れ → ログの行（改行で終わる Trice までを 1 行にまとめる）。"""
 
     def __init__(self, table: TriceTable, framing: str = "tcobs", big_endian: bool = False, default_width: int = 32,
-                 unsigned: bool = True, d16: bool = False):
+                 unsigned: bool = True, d16: bool = False, levels: dict[str, str | None] | None = None,
+                 frame_limit: int = FRAME_LIMIT):
+        """levels: チャンネルのタグ（行頭の `xxx:` の xxx。完全一致）→ 重要度（LEVELS のどれか。チャンネルとして
+        出すだけで重要度なしは None）。使う側が明示する。ここに無いタグはチャンネルとしない。"""
         if framing not in FRAMINGS:
             raise TriceError(f"枠は {' / '.join(FRAMINGS)}")
+        bad = {k: v for k, v in (levels or {}).items() if v is not None and v not in LEVELS}
+        if bad:
+            raise TriceError(f"levels の重要度は {' / '.join(LEVELS)} のどれか: {bad}")
+        self.levels = dict(levels or {})
         self.table, self.framing = table, framing
         self.endian = ">" if big_endian else "<"
         self.default_width, self.unsigned, self.d16 = default_width, unsigned, d16
-        self._frames = ZeroDelimited()
+        self._frames = ZeroDelimited(frame_limit)
         self._raw = bytearray()
         self._cycle: int | None = None
         self.cycle_errors = 0
@@ -205,6 +210,10 @@ class TriceDecoder:
                     out.append(record)
             return out
         for frame in self._frames.feed(data):
+            if isinstance(frame, Dropped):
+                self.errors += 1
+                out.append(LogRecord("", "trice", error=dropped_text(frame), cut_at=frame.limit))
+                continue
             try:
                 content = tcobs_decode(frame) if self.framing == "tcobs" else cobs_decode(frame)
             except ValueError as e:
@@ -281,12 +290,11 @@ class TriceDecoder:
         expected, self._cycle = self._cycle, (cycle + 1) & 0xFF
         if expected is None:
             return []
-        if cycle == CYCLE_START and expected != CYCLE_START:
-            return ["回の番号が 0xC0 に戻った（ターゲットのリセットとみなして合わせ直した）"]
         if cycle != expected:
             self.cycle_errors += 1
-            missing = (cycle - expected) & 0xFF
-            return [f"回の番号が飛んだ: {missing} 個の Trice を失った（0x{expected:02X} を待って 0x{cycle:02X}）"]
+            gap = (cycle - expected) & 0xFF
+            return [f"回の番号が飛んだ: 0x{expected:02X} を待って 0x{cycle:02X}（差 {gap}。番号は 8 ビットで回るので "
+                    "256 を法とした差。原因は番号からは分からない）"]
         return []
 
     def _format(self, fmt: TriceFormat, payload: bytes) -> tuple[str, tuple]:
@@ -325,11 +333,9 @@ class TriceDecoder:
         full = "".join(p[0] for p in pieces).rstrip("\n")
         first_id, first_fmt, first_ts = pieces[0][1], pieces[0][2], pieces[0][4]
         channel = level = None
-        if m := _TAG.match(full):
+        if (m := _TAG.match(full)) and m[1] in self.levels:
             channel = m[1]
-            level = _LEVELS.get(channel.lower())
-            if channel.islower():
-                full = full[m.end():].lstrip()
+            level = self.levels[channel]
         args = tuple(v for p in pieces for v in p[3])
         all_notes = tuple(n for p in pieces for n in p[5])
         return LogRecord(full, "trice", level, first_id, first_fmt.strg, args, first_ts, None,

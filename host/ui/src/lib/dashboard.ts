@@ -335,10 +335,3 @@ export async function readValues(call: Call, exprs: string[], running: boolean):
   }));
   return out;
 }
-
-/** 書く操作: 走行中は watch.write（止めない）、止まっているときは debug.write_expression（真偽は 1 / 0） */
-export function writeCall(running: boolean, expression: string, value: number | string | boolean):
-  { method: "watch.write" | "debug.write_expression"; params: { expression: string; value: number | string | boolean } } {
-  if (running) return { method: "watch.write", params: { expression, value } };
-  return { method: "debug.write_expression", params: { expression, value: typeof value === "boolean" ? Number(value) : value } };
-}

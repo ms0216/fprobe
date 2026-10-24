@@ -41,7 +41,10 @@ def is_exc_return(value: int) -> bool:
 
 
 def dfsr_reason(dfsr: int, stepping: bool) -> str | None:
-    """DFSR → 止まった理由。1 命令の実行（HALTED だけ）は stepping なら None、走らせた後なら外からの停止 "user"。"""
+    """DFSR → 止まった理由。1 命令の実行（HALTED だけ）は stepping なら None、走らせた後なら外からの停止 "user"
+    （DFSR.HALTED = 停止の要求かステップ。ARMv7-M ARM C1.6.1）。走らせた後にビットが 1 つも無ければ "unknown"
+    （外からの停止とみなさない）。複数のビットが立っていれば vector_catch・watchpoint・breakpoint・external の順の 1 つ
+    （立っていたビットは全部、Runner.dfsr（読んだ値）から fprobe.fault.dfsr_bits で添える）。"""
     if dfsr & _VCATCH:
         return "vector_catch"
     if dfsr & _DWTTRAP:
@@ -50,7 +53,9 @@ def dfsr_reason(dfsr: int, stepping: bool) -> str | None:
         return "breakpoint"
     if dfsr & _EXTERNAL:
         return "external"
-    return None if stepping else "user"
+    if stepping:
+        return None
+    return "user" if dfsr & _HALTED else "unknown"
 
 
 @dataclass(frozen=True)
@@ -68,7 +73,7 @@ class Regs:
 @dataclass(frozen=True)
 class Halt:
     """止まった様子。reason: stepped（1 命令・行のステップを終えた）/ arrived（踏み台に着いた）/ breakpoint /
-    watchpoint / vector_catch / external / user / fault / timeout。"""
+    watchpoint / vector_catch / external / user / unknown（DFSR に印が無い）/ fault / timeout。"""
     reason: str
     regs: Regs
 
@@ -88,6 +93,7 @@ class Runner:
         self.on_breakpoint = on_breakpoint
         self.poll_s = poll_s
         self.temporary: set[int] = set()
+        self.dfsr: int | None = None                     # 最後の停止で読んだ DFSR（立っていたビットを全部返すため）
 
     # --- 読む ----------------------------------------------------------------------------------
 
@@ -127,7 +133,8 @@ class Runner:
         finally:
             if lifted:
                 target.set_breakpoint(pc, Target.BreakpointType.AUTO)
-        return dfsr_reason(target.read32(DFSR), stepping=True)
+        self.dfsr = target.read32(DFSR)
+        return dfsr_reason(self.dfsr, stepping=True)
 
     # --- 踏み台まで走らせる ------------------------------------------------------------------------
 
@@ -181,7 +188,8 @@ class Runner:
         while True:
             with self.lock:
                 if self.target.get_state() == Target.State.HALTED:
-                    return dfsr_reason(self.target.read32(DFSR), stepping=False)
+                    self.dfsr = self.target.read32(DFSR)
+                    return dfsr_reason(self.dfsr, stepping=False)
                 if self.timed_out():
                     self.target.halt()
                     return "timeout"

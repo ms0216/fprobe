@@ -5,9 +5,9 @@
     終わり方で判定:
       セミホスティングの SYS_EXIT        終了コードをそのまま（0 でも試験の行に失敗があれば 1）
       故障（HardFault 等・LOCKUP）       125。故障の解析・呼び出し履歴・スナップショット・コアファイルを残す
-      BKPT 命令で止まった（probe-rs 流） 試験の行に失敗があれば 1、無ければ 0
+      終わりの BKPT（--end-bkpt の即値）  試験の行に失敗があれば 1、無ければ 0（probe-rs 流の約束。即値を渡したときだけ）
       試験の結果のまとめの行             その合否（ターゲットは走らせたまま）
-      ほかの理由で止まった               125（スナップショットを残す）
+      ほかの理由で止まった               125（スナップショットを残す。ほかの即値の BKPT・即値を渡さない BKPT も）
       時間切れ                           124（止めて、呼び出し履歴とスナップショットを残す）
       プローブ・書き込みの失敗           3
 
@@ -49,7 +49,8 @@ SEMIHOSTING_BKPT = 0xBEAB                  # BKPT 0xAB
 class TestCase:
     __test__ = False                  # pytest に試験の組と見なさせない
     name: str
-    status: str                       # passed / failed / skipped / error / running
+    status: str                       # passed / failed / skipped / error / running / returned（defmt-test: 次の試験が
+                                      # 始まった = 関数は戻った。合否の行が無いので passed とは書かない）
     message: str = ""
     suite: str = ""
     file: str | None = None
@@ -134,11 +135,12 @@ class TestLog:
             self._finish("passed" if m[1] == "SUCCESSFUL" else "failed")
         elif m := _DEFMT_RUNNING.match(line):
             if (running := self._running()) is not None:
-                running.status = "passed"                         # 次の試験が始まった = 前の試験は通った
+                running.status = "returned"                       # 次の試験が始まった = 前の試験の関数が戻った（合否の行は無い）
             self.cases.append(TestCase(m[3], "running"))
         elif _DEFMT_PASSED.match(line):
-            if (running := self._running()) is not None:
-                running.status = "passed"
+            for case in self.cases:                               # defmt-test のまとめの行: 全部が通った
+                if case.status in ("running", "returned"):
+                    case.status = "passed"
             self._finish("failed" if self.failures() else "passed")
         elif m := _TAP_PLAN.match(line):
             self._tap_plan = int(m[1])
@@ -187,6 +189,7 @@ def junit_xml(suite: str, cases: list[TestCase], output: str = "", duration_s: f
         if c.line is not None:
             attrs["line"] = str(c.line)
         e = ET.SubElement(s, "testcase", attrs)
+        # returned（defmt-test の戻った試験）は JUnit に当たる状態が無いので印を付けない（result.json に元の状態がある）
         tag = {"failed": "failure", "error": "error", "skipped": "skipped", "running": "error"}.get(c.status)
         if tag:
             ET.SubElement(e, tag, message=_clean(c.message or c.status))
@@ -207,7 +210,9 @@ class RunOptions:
     load: str = "auto"                       # auto / ram / flash / none（書き込まない）
     reset: bool = True                       # flash / none: リセットして最初から（ram は読み込みで必ず最初から）
     set_values: dict[str, str] = field(default_factory=dict)    # 走らせる前に書く変数（C の式 → 値）
-    set_at: str | None = None                # set_values を書く場所（起動のコードの後。省略時は main があれば main）
+    set_at: str | None = None                # set_values を書く場所（起動のコードの後。省略時は今すぐ書く: main を探さない）
+    vector_table: int | None = None          # load ram の起動に使うベクタ表の番地（省略時は ELF の入口 e_entry から）
+    set_timeout_s: float | None = None       # set_at まで待つ秒（省略時は timeout_s）
     catch_faults: bool = True                # 故障の入口でコアを止める（ベクタキャッチ）: 故障のハンドラが回り続けても分かる
     timeout_s: float = 60.0
     rtt: bool | None = None                  # None: ELF に _SEGGER_RTT があれば
@@ -221,6 +226,7 @@ class RunOptions:
     junit: Path | None = None
     snapshot: bool = True                    # 故障・時間切れ・思いがけない停止でスナップショットを残す
     poll_s: float = 0.02
+    end_bkpt: int | None = None              # 終わりの合図とする BKPT の即値（ファームとの約束。None: BKPT で終わりとしない）
 
 
 @dataclass
@@ -236,6 +242,8 @@ class RunResult:
     warnings: list[str] = field(default_factory=list)
     stop: dict | None = None
     elf: str = ""
+    bkpt: int | None = None                  # 止まった所の命令が BKPT ならその即値（測った事実）
+    settings: dict = field(default_factory=dict)   # 使った設定（既定のときも。target・frequency_hz・timeout_s 等）
 
     def junit_cases(self) -> list[TestCase]:
         """JUnit の試験: 読んだ試験の結果。無ければ（または失敗の試験が無いのに異常に終わったら）実行そのものを 1 件。"""
@@ -295,6 +303,11 @@ class Runner:
             result = self._execute(started)
         result.duration_s = round(time.monotonic() - started, 3)
         result.output, result.cases, result.elf = "".join(self.output), self.log.cases, str(self.o.elf)
+        o = self.o
+        result.settings = {"target": o.target, "frequency_hz": o.frequency_hz, "connect_mode": o.connect_mode,
+                           "load": o.load, "reset": o.reset, "timeout_s": o.timeout_s, "end_bkpt": o.end_bkpt,
+                           "rtt": o.rtt, "swo_baud": o.swo_baud, "swo_port": o.swo_port,
+                           "stop_on_summary": o.stop_on_summary, "catch_faults": o.catch_faults}
         result.warnings = self.warnings + result.warnings
         self._write(result)
         return result
@@ -305,7 +318,7 @@ class Runner:
             p.target_connect(o.target, frequency_hz=o.frequency_hz, connect_mode=o.connect_mode)
         load = o.load if o.load != "auto" else choose_load(o.elf, self._ram_ranges())
         if load == "ram":
-            p.program_ram(str(o.elf))
+            p.program_ram(str(o.elf), vector_table=o.vector_table)
         elif load == "flash":
             p.flash(str(o.elf))
             p.target_reset(halt=True)                         # 書き込み後は走っている: 最初から見るため止める
@@ -329,31 +342,25 @@ class Runner:
 
     def _write_values(self) -> None:
         """--set の値を書く。起動のコードは .bss を 0 にし .data を写すので、そこの変数は起動の後に書かないと消える。
-        set_at（省略時は main があれば main）まで走らせてから書く。どちらも無ければ今書いて注意を残す。"""
+        set_at（使う側が明示する場所。名前の慣習で main 等を探さない）まで走らせてから書く。待つのは set_timeout_s
+        （省略時は timeout_s）秒。set_at が無ければ今書いて注意を残す。"""
         p, o = self.probe, self.o
         at = o.set_at
-        if at is None and self._has_symbol("main"):
-            at = "main"
         if at is not None:
+            wait_s = o.timeout_s if o.set_timeout_s is None else o.set_timeout_s
             p.breakpoint_set(at)
             try:
-                stop = p.run_until_halt(timeout_s=min(o.timeout_s, 10.0))
+                stop = p.run_until_halt(timeout_s=wait_s)
             finally:
                 p.breakpoint_clear(at)
             if stop.get("reason") != "breakpoint":
-                raise RuntimeError(f"--set の場所 {at} に着かなかった（{stop.get('reason')} at {stop.get('where')}）")
+                raise RuntimeError(f"--set の場所 {at} に {wait_s:g} 秒で着かなかった（{stop.get('reason')} at "
+                                   f"{stop.get('where')}）")
         else:
             self.warnings.append("--set を起動のコードの前に書いた: .bss・.data の変数は起動のコードが上書きする"
                                  "（--set-at で起動の後の場所を指定する）")
         for expression, value in o.set_values.items():
             p.write_expression(expression, _value(value))
-
-    def _has_symbol(self, name: str) -> bool:
-        try:
-            Symbols(self.o.elf).symbol(name)
-            return True
-        except KeyError:
-            return False
 
     def _ram_ranges(self) -> list[tuple[int, int]]:
         try:
@@ -459,13 +466,15 @@ class Runner:
             result = RunResult("fault", EXIT_ABNORMAL, reason, 0, stop=status)
             self._keep_state(result, fault=report)
             return result
-        if self._at_bkpt(status):
+        bkpt = self._bkpt_immediate(status)
+        if bkpt is not None and bkpt == self.o.end_bkpt:
             if self.log.failures() or self.log.verdict == "failed":
-                return RunResult("bkpt", EXIT_FAILED, self._failures_text() or "試験の失敗", 0, stop=status)
-            return RunResult("bkpt", EXIT_OK, "BKPT 命令で止まった（終わり）", 0, stop=status)
-        reason = f"思いがけない停止 at {status.get('where', hex(status.get('pc', 0)))}"
+                return RunResult("bkpt", EXIT_FAILED, self._failures_text() or "試験の失敗", 0, stop=status, bkpt=bkpt)
+            return RunResult("bkpt", EXIT_OK, f"終わりの BKPT 0x{bkpt:02X} で止まった", 0, stop=status, bkpt=bkpt)
+        what = "思いがけない停止" if bkpt is None else f"BKPT 0x{bkpt:02X} で止まった（終わりの合図として渡した即値ではない）"
+        reason = f"{what} at {status.get('where', hex(status.get('pc', 0)))}"
         self.log.abort(reason)
-        result = RunResult("halted", EXIT_ABNORMAL, reason, 0, stop=status)
+        result = RunResult("halted", EXIT_ABNORMAL, reason, 0, stop=status, bkpt=bkpt)
         self._keep_state(result, fault=False)
         return result
 
@@ -489,9 +498,10 @@ class Runner:
             self.warnings.append(f"故障の解析ができない: {type(e).__name__}: {e}")
             return {"faulted": False}
 
-    def _at_bkpt(self, status: dict) -> bool:
+    def _bkpt_immediate(self, status: dict) -> int | None:
+        """止まった所の命令が BKPT（0xBExx）ならその即値。"""
         half = self._instruction(status)
-        return half is not None and half & 0xFF00 == 0xBE00
+        return half & 0xFF if half is not None and half & 0xFF00 == 0xBE00 else None
 
     # --- 残すもの --------------------------------------------------------------------------------
 

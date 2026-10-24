@@ -61,6 +61,20 @@ def test_a_plain_recording_is_not_segmented(probe):
     assert probe.recording_status()["segmented"] is False
 
 
+def test_unchanged_channels_are_the_waveforms_with_one_level_and_no_change():
+    from fprobe.probe_longrec import unchanged_channels
+    # 0 のまま・1 のまま（波形の無い画素 '-' は数えない）は変化が無い。画素の中の変化 'x'・画素の間で値が違う・波形が無いは入れない
+    assert unchanged_channels(["0000", "11-1", "0x00", "0011", "----", ""]) == [0, 1]
+    assert unchanged_channels(["00?0", "0000"]) == [1]                    # 間引いた所の ? はかたまりの中で変化
+
+
+def test_the_overview_says_which_channels_did_not_change(probe):
+    probe.recording_start(name="plain2")
+    probe.recording_mark(text="a")
+    ov = probe.recording_overview(width=4)
+    assert ov["unchanged_channels"] == []                     # 波形が無い記録: どの ch も入れない
+
+
 def test_a_closed_segmented_recording_does_not_take_marks_afterwards(probe):
     name = probe.recording_start(name="long", segment_s=60)["recording"]
     probe.recording_stop()
@@ -80,6 +94,8 @@ def test_a_segmented_recording_rotates_and_reports_segments(probe):
     assert len(seg["segments"]) >= 2 and seg["segments"][-1]["state"] == "open"
     marks = probe.recording_find({"stream": "annotation"})
     assert [e["body"]["text"] for e in marks["events"]] == ["一つ目", "二つ目"]
+    cut = probe.recording_events(streams=["annotation"], limit=1)     # 分割をまたいでも総数を数える
+    assert cut["total"] == 2 and cut["truncated"] and len(cut["events"]) == 1
     ov = probe.recording_overview(width=8)
     assert sum(ov["streams"]["annotation"]) == 2
     span = probe.recording_status()["span"]

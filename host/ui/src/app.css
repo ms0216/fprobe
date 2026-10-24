@@ -43,6 +43,8 @@ input, select {
 }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
 .muted { color: var(--muted); }
+/* 要る欄の印（空欄から始め、使う人が入れる） */
+.req { color: var(--bad); margin-left: 1px; }
 section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 section.panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
 
@@ -83,3 +85,11 @@ button.link { border: none; background: none; padding: 0; color: var(--accent); 
   --dv-paneview-header-border-color: var(--line);
   --dv-active-sash-color: var(--accent);
 }
+
+/* 窓の見出しの右のボタン（浮かせる・別のウィンドウで開く。lib/dockwindows.ts） */
+.dock-actions { display: flex; align-items: center; gap: 2px; height: 100%; padding: 0 4px; }
+.dock-actions button {
+  border: none; background: transparent; color: var(--muted, inherit); cursor: pointer;
+  font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 3px;
+}
+.dock-actions button:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); color: inherit; }

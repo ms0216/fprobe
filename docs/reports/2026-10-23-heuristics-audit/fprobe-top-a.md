@@ -1,0 +1,1933 @@
+# ヒューリスティックの監査: host/fprobe 直下（前半 `__init__.py`〜`probe_heap.py`）
+
+- 日付: 2026-10-23（ブランチ audit/heuristics-2 の作業ツリー。コードは変えていない）
+- 担当範囲: `ls host/fprobe/*.py` の 1〜65 番目（`__init__.py` から `probe_heap.py` まで。下位フォルダは担当外）
+- 原則: CLAUDE.md「fprobe 本体にヒューリスティックを入れない」。台帳 `.superpowers/sdd/heuristics-ledger.md` で「済」「Ruling」とされたものも今のコードで見直した。
+- 分類: H = ヒューリスティック / F = 事実・仕様の規則 / E = 使う側が明示して渡す引数 / O = 操作の既定 / D = 見せ方 / ? = 判断がつかない
+
+## 1. 対象のファイル（65 個。全部を検索の対象にした）
+
+`__init__.py` `__main__.py` `arm11_debug.py` `arm_a_target.py` `arm_debug.py` `armv7a_debug.py` `aux_flash.py` `aux_mcu.py`
+`bitstreams.py` `callgraph.py` `calling.py` `caps.py` `collector.py` `connect_scripts.py` `control.py` `coresight_id.py`
+`correlate.py` `debug.py` `device.py` `diagnose.py` `disasm.py` `elfsize.py` `eth_link.py` `events.py` `fault.py` `flash.py`
+`flash_bp.py` `fpga_obs.py` `fpga_signals.py` `frame_link.py` `generated.py` `gpio.py` `halt_risk.py` `heap.py` `hooks.py`
+`inject.py` `itm.py` `jtag_chain.py` `la.py` `la_measure.py` `liveness.py` `mcp_server.py` `memory.py` `memview.py` `merge.py`
+`monitor.py` `multidrop.py` `packs.py` `probe_analysis.py` `probe_breakpoints.py` `probe_connect.py` `probe_cycles.py`
+`probe_decode.py` `probe_design.py` `probe_elf_files.py` `probe_elf_watch.py` `probe_etm.py` `probe_execution.py`
+`probe_flash.py` `probe_flash_bp.py` `probe_formats.py` `probe_gdb.py` `probe_gdb_trace.py` `probe_gpio.py` `probe_heap.py`
+
+合計 19,578 行。どの検索にも当たらなかったのは `__init__.py`（13 行、import と `__all__` だけ）の 1 個。残り 64 個に当たりがある。
+
+## 2. 実行した検索と件数
+
+すべて ripgrep で 65 ファイルを名前で渡して実行（6・7 は大文字小文字を区別しない `-i`）。件数は当たった行の数。
+11 の検索の当たりを行で重ねると **1,850 行**（うち `generated.py` が 335 行）。この 1,850 行を 1 行ずつ分類した（下の 4・5 節に全部ある）。
+「機械的に除外」は H の候補から外した理由で、外した行も 5 節に F・D として 1 行ずつ載せている。
+
+| # | パターン | 当たり | 機械的に除外 | 除外の内訳と理由 | 個別に見た |
+|---|---|---|---|---|---|
+| 1a | `[<>]=?\s*-?\d*\.?\d+` | 275 | 234 | シフト演算子 `<<` `>>` だけ（比較でない）165・0 / 1 / 長さとの比較だけ 68・説明文 1 | 41 |
+| 1b | `-?\d*\.?\d+\s*[<>]=?` | 156 | 146 | シフトだけ 98・0 / 1 / 長さとの比較だけ 46・説明文 2 | 10 |
+| 2a | `\b\d+\.\d+\b` | 164 | 89 | 初期値・番兵の 0.0 / 1.0 だけ 73・説明文（版・章番号・URL）14・生成物 2 | 75 |
+| 2b | `\*\s*\d+(\.\d+)?\b` | 11 | 10 | 単位換算・大きさの計算（×1000・×1024・語数 ×4 等）10 | 1 |
+| 3a | `:\s*\w+[^,)]*=\s*-?\d` | 231 | 12 | 生成物 2・説明文 10 | 219 |
+| 3b | `=\s*-?\d+(\.\d+)?\s*[,)]` | 223 | 6 | 説明文 6 | 217 |
+| 3c | `^[A-Z_]+\s*=\s*` | 597 | 333 | `generated.py`（gateware の `fprobe_gw gen` の生成物。CSR・プロトコル・ケイパビリティの定義）333 | 264 |
+| 4 | ` in \(\| in \{\| in \[\|startswith\|endswith\|re\.(match\|search)` | 178 | 0 | — | 178 |
+| 5 | `sorted\(\|\.sort\(\|max\(\|min\(\|\[:\d+\]\|most_common` | 193 | 0 | — | 193 |
+| 6 | `推定\|経験\|目安\|典型\|typical\|guess\|heuristic\|likely\|probably\|assume\|みなす\|とみなし\|らしい\|疑い\|suspect\|verdict\|healthy\|risk\|warn` | 98 | 11 | 説明文 11（どれも中身は読んだ） | 87 |
+| 7 | `timeout\|retry\|retries\|sleep\(` | 196 | 20 | 説明文 20 | 176 |
+
+補足:
+- `generated.py:393 SYNC_RX_PHASE_TICKS = 0.5` は生成物だが中身が推定に当たりうるので除外せず ? にした。
+- 検索のほかに、当たりの周りを読んで同じ判断の続き（例: `inject.py` の判定の流れ、`probe_gdb_trace.py` の断る処理、`disasm.py` の表の推定）を確かめた。行番号は当たった行を挙げ、関連の行は本文で示す。
+- 分類の作業は、まず当たり 1,850 行をすべて目で読み、H・? と注記の要る行を手で決め、残りを規則（説明文・シフト・範囲の検査・生成物・時間切れ等）で分けてから、規則の結果も目で見直した。
+
+## 3. 集計
+
+| 分類 | 行 | 件（同じ判断をまとめた数） |
+|---|---|---|
+| H | 14 | 5 |
+| ? | 22 | 10 |
+| F | 1,143 | — |
+| E | 190 | — |
+| O | 271 | — |
+| D | 210 | — |
+| 計 | 1,850 | |
+
+## 4. H と ? の全件
+
+### 4.1 H（ヒューリスティック）
+
+| # | ファイル:行 | コード（抜き出し） | 何をしているか | なぜ H か |
+|---|---|---|---|---|
+| H1 | inject.py:62, 63, 233, 243（判定は 307〜331） | `timeout_s: float = 2.0` / `observe_s: float = 0.2` / `raw.get("timeout_s", 2.0)` | 故障注入の台本で試行ごとの待ち時間を省いたときの既定。`timeout_s` の間に書き込みが起きなければ `verdict = "not_triggered"`、起きたら `observe_s` 待って `expect` を調べ（rules の窓も `observe_s`）`pass` / `fail` | 判定（not_triggered・pass・fail）を決める境界の値が暗黙の既定になっている。結果の dict（`out`）に使った `timeout_s`・`observe_s` が出ないので、使う側は 0.2 秒で見たことに気づけない。境界は明示の引数にする原則に反する |
+| H2 | probe_gdb_trace.py:12, 23, 140（処理は 133〜142） | `report = assess(self._symbols.names())` → `if not report["matched"]: return None` → 断る文 | ELF に halt_risk の名前の形が 1 つでもあれば、GDB のトレースポイントを既定で断る（`monitor trace allow-halt` で許せる） | 名前の形からの推定（H3）を根拠に、道具の動作（断る）を本体が既定で決めている。halt_risk の docstring 自身が「壊れるとは判定しない」と書くのと食い違う |
+| H3 | halt_risk.py:29, 31（表は 29〜41） | `re.compile(r"^(ll\|lll\|ull\|radio\|bt_ctlr\|...\|sdc\|mpsl\|...)_\w")`、`re.compile(r"(^\|_)(wdt\|iwdg\|wwdg\|wdog\|watchdog)(_\|$)", re.I)` | 関数名の接頭辞・部分一致で `radio` / `usb` / `watchdog` の種類を付けて返す | 台帳では aef148e で「事実だけ」に直したとされるが、種類づけは命名の慣習に頼る推定（`ll_` で始まる関数 = BLE コントローラ、名前に `wdt` を含む = ウォッチドッグ）。完全一致の表（RTOS_GLOBALS・liveness の Ruling）と違い、接頭辞・部分一致は別のターゲットで外れうる。結果の `kind` を AI はそのまま信じやすい |
+| H4 | disasm.py:344, 349, 375（関数は 370〜379） | `entries = self._table_entries(...)` / `for i in reversed(previous[-4:]): if i.mnemonic.startswith("cmp")` | `tbb` / `tbh` の分岐表の大きさを、直前 4 命令の中の `cmp 添字, #n` から n + 1 と推定し、その範囲を `.byte` / `.short` のデータとして表示 | コンパイラの慣用句（cmp の直後に tbb）と「4 命令以内」という経験則に頼る推定。外れると命令をデータに・データを命令に見せる。出力の命令に「推定した」の印が無い（`literal` の ldr pc の参照はアーキテクチャから決まるので F） |
+| H5 | connect_scripts.py:106, 107 | `difflib.get_close_matches(node.name, HOOKS, n=1, cutoff=0.8)` / `if close or node.name.startswith(("will_", "did_"))` | 接続スクリプトの検査で、pyOCD の手順名に無い関数を「問題」に入れるかを、名前の似ている度合い 0.8 以上か接頭辞で決める | 似ている度合いの閾値 0.8 は経験則。0.8 未満の綴り違いは問題に出ず、0.8 以上の無関係な関数は問題に出る。影響は小さい（入力の検査で、測定の結果ではない） |
+
+### 4.2 ?（判断がつかない）
+
+| # | ファイル:行 | コード（抜き出し） | 何をしているか | 判断がつかない理由 |
+|---|---|---|---|---|
+| Q1 | correlate.py:28, 386（引数は 336）、mcp_server.py:1313 | `AUTO_LIMIT = 20` / `out_causes = _merge_same(out_causes)[:limit]` | 自動で作った原因の候補を、先行率の順（事実の順）で上位 20 に切る | 並べ方は事実の順で H ではない。ただし切ったこと・候補の総数が結果に出ないので、21 番目以降があったことが分からない（「欠けを明示」の原則に触れうる）。既定の件数を明示の引数にするか、総数を返すかは利用者の判断 |
+| Q2 | correlate.py:610, 636、mcp_server.py:1419 | `ranked = sorted(held, key=lambda v: -held[v])[:limit]` | `durations` が値ごとの続いた時間の合計の順で上位 20 の値だけを返す | Q1 と同じ（値の総数が出ない） |
+| Q3 | heap.py:526, 543、probe_heap.py:181 | `callers = sorted(...)[:top]` | `live_by_caller` を確保のバイトの順で上位 20 の呼び出し元に切る | Q1 と同じ（live の合計の数・バイトはあるが、呼び出し元の総数は出ない） |
+| Q4 | probe_etm.py:144, 187 | `errors = list(flow.errors[:20])` | ETM の解読の誤りを先頭 20 件だけ返す | Q1 と同じ（誤りの総数が出ない） |
+| Q5 | coresight_id.py:8, 247, 306（関数は 281〜334） | `for address in _DBGMCU: value = _try(read, address) ... part = STM32_PARTS.get(value & 0xFFF)` | 部品の判別。ROM テーブル・TARGETID の設計者が分からなければ STM32 → nRF → RP の順に全部試し、STM32 は DBGMCU の候補の番地の値の下位 12 ビットが表にあれば STM32 と決める | 番地の値を読む事実の照合だが、STM32 だけ設計者（JEP106）の照合が無く、別の会社の部品のその番地の値が偶然表に合えば誤る。`source`（何を読んだか）は結果に出る。RP は 0x927 を照合している |
+| Q6 | liveness.py:27, 35 | `FATAL_FUNCTIONS = frozenset({... "vAssertCalled", ... "panic", ... "Error_Handler", ...})` | PC の見本がすべてこの名前の関数の中なら `fatal_halt` / `fault_loop` | 台帳の Ruling（RTOS・ランタイムが定める名前の完全一致で証拠を添える）で残すと判断済み。ただし `Error_Handler`（CubeMX の生成コード）・`vAssertCalled`（FreeRTOS の慣習のフック。コメント自身が「慣習」と書く）・`panic` は中身を利用者が書く関数で、「止まって回る」はその慣習に頼る。Ruling を保つか再確認を求める |
+| Q7 | elfsize.py:31, 33, 35, 37（使うのは 319〜356） | `TOP_SYMBOLS = ("_estack", "__StackTop", ...)` 等 | スタックの上端・下端・大きさ・ベクタ表を、リンカのシンボル名の慣習の表の最初の一致で選ぶ | 名前の慣習の表での選択。結果に出典（`top_source`・`bottom_source`）が出て、上端・下端は明示でも渡せる。台帳の svd.py の Ruling（名前の一致で選ぶ・出典が出る）と同種なら残す |
+| Q8 | bitstreams.py:49（使うのは 93〜97） | `_JTAG_ONLY = re.compile(r"cortex[_-]?a\d*\|arm11\|arm1176\|bcm283\d\|raspberry\|\brpi", re.I)` | `target_connect` のターゲット名がこの正規表現に合えば JTAG を選び、FPGA のデザインを書き替える | 測定の結果ではなく操作の選択だが、名前の部分一致での推定（Cortex-A でも SWD-DP の部品はある。`raspberry` は Pico 等の名前にも合いうる）。`jtag_chain` を渡せば明示できる |
+| Q9 | probe_heap.py:36（使うのは 258〜271） | `WRAPPERS = frozenset({"malloc", "free", "calloc", ..., "strdup", ...})` | ヒープの追跡で、確保の呼び出し元を「この表に無い最初のフレーム」と決める | 標準の確保関数の名前の完全一致で、呼び出し元の定義の選び方とも言える。ただし飛ばしたことが結果に出ず、`strdup` の呼び出し元が `strdup` の中の malloc の代わりに出る等、名前の表で帰属が変わる |
+| Q10 | generated.py:393（gateware/fprobe_gw/caps.py:41 が正。使うのは timesync.py:17） | `SYNC_RX_PHASE_TICKS = 0.5` | 子のボードの同期の組の時刻から、非同期の辺を取り込む位相の平均 0.5 刻みを引く | 位相が一様に分布するという仮定の平均（コメントは「2026-10-22 の実機で、これを入れないと子の出来事が約 0.5 刻み早く出た」）。量子化の不確かさ 1 刻みは結果に出る（merge.py `quantization_ticks`）。物理の性質から言える値とも、仮定に頼る補正とも取れる |
+
+### 4.3 見たが H・? にしなかった主なもの（判断の記録）
+
+- diagnose.py:196, 259 — 接続の速さを frequency/10・100 kHz に下げて試す、JTAG は 1 MHz 以下。試し方の手順（O）で、試した全部を `attempts` に返す。
+- diagnose.py:12, 67, 81 — `verdict` は段の status（fail の有無）から機械的に作る文（F）。台帳 bb73f1c・Ruling のとおり原因の候補は無い。
+- heap.py:364 — 終わり（program break）が分からないとき形の崩れで止める。notes に明示し `end` で渡せる（O）。
+- fpga_obs.py:316〜318, 351, 408 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う（O）。
+- callgraph.py:39 — `_REVISITS = 8` は解析の打ち切りの予算で、理由は「打ち切った」の事実（台帳済、O）。
+- itm.py:180, 193 — `RESYNC_PACKETS = 6` は `resync=True` を明示したときだけ（台帳済、E）。
+- probe_cycles.py:12, 108, 136 — 8 ビットのカウンタの 1 周未満は `counters_exact = false` で明示（台帳の Ruling、F）。108 は測った経過時間 × コアクロックの上限からの事実の注記。
+- jtag_chain.py:220, 239 — Capture-IR の 01 から境目を論理で決め、一つに決まらなければ `ambiguous` と候補を返す（台帳済、F）。
+- correlate.py:516, 517, 529 — 先行率の順・同じ時刻の候補の代表（台帳済・Ruling、D）。
+- flash_bp.py:107 — `persistent` の省略時は全部長く残るとみなして比較器を譲らない（安全側の操作、O）。
+- probe_elf_watch.py:8 — ELF の印が 2 回続けて同じなら書き終えたとして読み直す（読めなければ前のまま、O）。
+- mcp_server.py:1983 — CTS の端子を取らなければ CTS は出ているとして送る（線の既定、O）。
+- memview.py:197 — 番地の名前を 1 MB まで遡って探す（探索の上限、O）。
+
+## 5. F・E・O・D の全行（ファイル:行 — 一言）
+
+規則で付けた一言は同じ文が多い。主なもの:
+「生成物」= `generated.py` の定数（gateware の定義が正）/「ビットの取り出し・組み立て」= レジスタ・形式の定義どおりのシフト・マスク /
+「範囲・長さの検査」= 0・1・長さとの比較 /「待ち・時間切れ」= 通信の待ち（時間切れは時間切れの事実として返し、判定に使わない）/
+「説明文」= docstring・コメント /「名前・形式の照合」= 構文・規格・fprobe 自身の名前との一致。
+
+
+### 5.1 F（事実・仕様の規則） — 1143 行
+
+- __main__.py:85 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:27 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- arm11_debug.py:28 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- arm11_debug.py:29 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm11_debug.py:66 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:73 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:75 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:117 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:132 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm11_debug.py:141 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_a_target.py:41 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_a_target.py:56 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_a_target.py:60 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_a_target.py:169 — 範囲の切り詰め・最大最小（事実の計算）
+- arm_a_target.py:286 — 範囲・長さの検査（0・1・長さとの比較）
+- arm_a_target.py:299 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:33 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:34 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- arm_debug.py:35 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:36 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- arm_debug.py:37 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:38 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:39 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:40 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:41 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:42 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- arm_debug.py:45 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_debug.py:49 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:52 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:53 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:54 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:55 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_debug.py:57 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_debug.py:62 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:66 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:79 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- arm_debug.py:80 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- arm_debug.py:127 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:128 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:138 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:139 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:140 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:302 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:309 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:317 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:319 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:326 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:328 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:399 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:429 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:438 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:459 — 範囲・長さの検査（0・1・長さとの比較）
+- arm_debug.py:469 — 名前・形式の照合（構文・規格・自前の名前）
+- arm_debug.py:471 — 範囲・長さの検査（0・1・長さとの比較）
+- arm_debug.py:473 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- arm_debug.py:475 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- armv7a_debug.py:22 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- armv7a_debug.py:23 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- armv7a_debug.py:24 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- armv7a_debug.py:25 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- armv7a_debug.py:37 — ADIv5 の MEM-AP の型（APB2/3・APB4/5）
+- armv7a_debug.py:46 — ROM テーブルを読めない印（0・0xFFFFFFFF・present ビット）
+- armv7a_debug.py:136 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- aux_flash.py:16 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- aux_mcu.py:15 — ADC の振り切れを知らせる値（補助マイコンの約束）
+- bitstreams.py:38 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:39 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:41 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:42 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:44 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:45 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- bitstreams.py:73 — 範囲・長さの検査（0・1・長さとの比較）
+- bitstreams.py:77 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:28 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:29 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:34 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:36 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:37 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:38 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- callgraph.py:75 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:80 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:112 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:114 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:134 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:136 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:138 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:144 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:145 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:152 — 範囲・長さの検査（0・1・長さとの比較）
+- callgraph.py:176 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:178 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:186 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:203 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:233 — 範囲・長さの検査（0・1・長さとの比較）
+- callgraph.py:250 — 範囲の切り詰め・最大最小（事実の計算）
+- callgraph.py:264 — 名前・形式の照合（構文・規格・自前の名前）
+- callgraph.py:315 — 範囲の切り詰め・最大最小（事実の計算）
+- callgraph.py:433 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- callgraph.py:448 — 名前・形式の照合（構文・規格・自前の名前）
+- calling.py:42 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- calling.py:44 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- calling.py:45 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- calling.py:47 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- calling.py:49 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- calling.py:90 — AAPCS の同質の浮動小数点の集まり（1〜4 要素）・4 バイト超は記憶域で返す
+- calling.py:99 — AAPCS の同質の浮動小数点の集まり（1〜4 要素）・4 バイト超は記憶域で返す
+- calling.py:116 — 範囲・長さの検査（0・1・長さとの比較）
+- calling.py:146 — 範囲・長さの検査（0・1・長さとの比較）
+- calling.py:167 — 幅 8 バイトの値は 8 揃え（AAPCS）
+- calling.py:173 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- calling.py:175 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- calling.py:176 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- calling.py:202 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- calling.py:318 — IPSR が故障の例外番号なら fault（アーキテクチャの定義）
+- calling.py:412 — 名前・形式の照合（構文・規格・自前の名前）
+- calling.py:417 — 名前・形式の照合（構文・規格・自前の名前）
+- calling.py:425 — 名前・形式の照合（構文・規格・自前の名前）
+- calling.py:439 — 範囲の切り詰め・最大最小（事実の計算）
+- caps.py:42 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- caps.py:43 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- caps.py:49 — 旧い構成のロジアナの ch の並び（固定の回路）
+- caps.py:51 — 旧い構成のロジアナの ch の並び（固定の回路）
+- caps.py:114 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- caps.py:115 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- caps.py:132 — TLV の長さの検査（形式）
+- caps.py:161 — TLV の長さの検査（形式）
+- caps.py:162 — TLV の長さの検査（形式）
+- caps.py:164 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- caps.py:172 — TLV の長さの検査（形式）
+- caps.py:177 — 範囲・長さの検査（0・1・長さとの比較）
+- caps.py:182 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- collector.py:25 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- collector.py:26 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- collector.py:29 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- collector.py:47 — 名前・形式の照合（構文・規格・自前の名前）
+- collector.py:48 — 名前・形式の照合（構文・規格・自前の名前）
+- collector.py:65 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- collector.py:66 — 名前・形式の照合（構文・規格・自前の名前）
+- collector.py:87 — 名前・形式の照合（構文・規格・自前の名前）
+- collector.py:184 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- collector.py:276 — 範囲・長さの検査（0・1・長さとの比較）
+- connect_scripts.py:22 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- connect_scripts.py:28 — 名前・形式の照合（構文・規格・自前の名前）
+- connect_scripts.py:36 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- connect_scripts.py:68 — 名前・形式の照合（構文・規格・自前の名前）
+- control.py:17 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- control.py:61 — 範囲・長さの検査（0・1・長さとの比較）
+- control.py:91 — 名前・形式の照合（構文・規格・自前の名前）
+- control.py:109 — 範囲の切り詰め・最大最小（事実の計算）
+- coresight_id.py:21 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:23 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:24 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:25 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:26 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:35 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:39 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:44 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:45 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:46 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:47 — ADIv6 は DPIDR/IDR の版 3 以上（規格）
+- coresight_id.py:52 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:53 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:54 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:59 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:60 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:61 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:64 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:70 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:71 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:75 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:76 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:79 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:86 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:87 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:90 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:96 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- coresight_id.py:97 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- coresight_id.py:98 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- coresight_id.py:99 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:104 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:158 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:159 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:162 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:163 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:170 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:198 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:248 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- coresight_id.py:250 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- coresight_id.py:251 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- coresight_id.py:329 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- coresight_id.py:333 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- correlate.py:25 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- correlate.py:26 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- correlate.py:50 — 条件の構文: 名前の中の " and " は区切り
+- correlate.py:79 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:113 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:119 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:130 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:135 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:137 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:144 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:191 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:205 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:237 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:238 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:239 — 空の範囲の検査
+- correlate.py:259 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:309 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:318 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:321 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:332 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:371 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:391 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:397 — 欠けの件数・長さを warnings に（事実）
+- correlate.py:399 — 欠けの件数・長さを warnings に（事実）
+- correlate.py:401 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:402 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:408 — 欠けの件数・長さを warnings に（事実）
+- correlate.py:409 — 欠けの件数・長さを warnings に（事実）
+- correlate.py:435 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:439 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:447 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:462 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:466 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:475 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:478 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:487 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:495 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:510 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:548 — 空の範囲の検査
+- correlate.py:560 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:569 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:577 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:620 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:628 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:634 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:637 — 範囲の切り詰め・最大最小（事実の計算）
+- correlate.py:652 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:668 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:673 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:690 — 範囲・長さの検査（0・1・長さとの比較）
+- correlate.py:713 — 欠けの件数・長さを warnings に（事実）
+- correlate.py:718 — 名前・形式の照合（構文・規格・自前の名前）
+- correlate.py:724 — 最小・中央値・90 % 点・最大（測った分布）
+- correlate.py:725 — 最小・中央値・90 % 点・最大（測った分布）
+- debug.py:41 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- debug.py:43 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- debug.py:48 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- debug.py:54 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- debug.py:56 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- debug.py:57 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- debug.py:106 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:108 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- debug.py:155 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:171 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:258 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:280 — 範囲・長さの検査（0・1・長さとの比較）
+- debug.py:343 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:366 — 範囲・長さの検査（0・1・長さとの比較）
+- debug.py:370 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:377 — 名前・形式の照合（構文・規格・自前の名前）
+- debug.py:405 — 例外の中で LR が EXC_RETURN（0xFF…）
+- debug.py:468 — ベクタ表の位置: 番地 0 か BKPT の扱い（手順）
+- device.py:13 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- device.py:107 — 範囲・長さの検査（0・1・長さとの比較）
+- device.py:123 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- diagnose.py:12 — verdict は段の status（fail の有無）から機械的に作る文
+- diagnose.py:26 — 入出力の電圧 3.3 V（LVCMOS33。比べた判定はしない）
+- diagnose.py:29 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- diagnose.py:30 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- diagnose.py:67 — verdict は段の status（fail の有無）から機械的に作る文
+- diagnose.py:81 — verdict は段の status（fail の有無）から機械的に作る文
+- diagnose.py:113 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- diagnose.py:159 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- diagnose.py:160 — nRESET・SWDIO が Low という事実の warn（台帳の Ruling）
+- diagnose.py:162 — nRESET・SWDIO が Low という事実の warn（台帳の Ruling）
+- diagnose.py:176 — DPv2 以上だけ TARGETID（ADIv5.2 の規格）
+- diagnose.py:189 — 名前・形式の照合（構文・規格・自前の名前）
+- diagnose.py:202 — 名前・形式の照合（構文・規格・自前の名前）
+- diagnose.py:251 — 要求より遅い速さで応答した事実を warn に
+- diagnose.py:296 — DPv2 の SWD だけ（規格）
+- diagnose.py:366 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- diagnose.py:426 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- diagnose.py:427 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- diagnose.py:436 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- disasm.py:28 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- disasm.py:107 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:108 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:113 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:117 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:121 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:136 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:157 — 範囲・長さの検査（0・1・長さとの比較）
+- disasm.py:175 — 範囲・長さの検査（0・1・長さとの比較）
+- disasm.py:189 — 範囲の切り詰め・最大最小（事実の計算）
+- disasm.py:192 — 確かな境界が無ければ前を推定しない（台帳済）
+- disasm.py:282 — 範囲の切り詰め・最大最小（事実の計算）
+- disasm.py:288 — 範囲の切り詰め・最大最小（事実の計算）
+- disasm.py:298 — 範囲の切り詰め・最大最小（事実の計算）
+- disasm.py:317 — 範囲・長さの検査（0・1・長さとの比較）
+- disasm.py:318 — データの指示の大きさ（.word/.short/.byte）
+- disasm.py:319 — 範囲・長さの検査（0・1・長さとの比較）
+- disasm.py:320 — データの指示の大きさ（.word/.short/.byte）
+- disasm.py:322 — データの指示の大きさ（.word/.short/.byte）
+- disasm.py:333 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:339 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:343 — 範囲の切り詰め・最大最小（事実の計算）
+- disasm.py:350 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:363 — 名前・形式の照合（構文・規格・自前の名前）
+- disasm.py:365 — D レジスタなら 8 バイト（命令の定義）
+- disasm.py:367 — 名前・形式の照合（構文・規格・自前の名前）
+- elfsize.py:39 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- elfsize.py:57 — 範囲の切り詰め・最大最小（事実の計算）
+- elfsize.py:123 — 名前・形式の照合（構文・規格・自前の名前）
+- elfsize.py:133 — 範囲・長さの検査（0・1・長さとの比較）
+- elfsize.py:151 — 範囲の切り詰め・最大最小（事実の計算）
+- elfsize.py:162 — ベクタ表の最初の 2 語が区画の中にあるか
+- elfsize.py:170 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- elfsize.py:171 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- elfsize.py:188 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- elfsize.py:189 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- elfsize.py:226 — 名前・形式の照合（構文・規格・自前の名前）
+- elfsize.py:228 — 範囲・長さの検査（0・1・長さとの比較）
+- elfsize.py:229 — 範囲・長さの検査（0・1・長さとの比較）
+- elfsize.py:270 — 範囲・長さの検査（0・1・長さとの比較）
+- elfsize.py:338 — 大きさのシンボルが 0 より大きく上端未満
+- elfsize.py:343 — 範囲の切り詰め・最大最小（事実の計算）
+- eth_link.py:24 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- eth_link.py:25 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- eth_link.py:26 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- eth_link.py:76 — 範囲・長さの検査（0・1・長さとの比較）
+- events.py:19 — イベント 1 件 = 16 バイト（形式）
+- events.py:20 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:21 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:22 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:23 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:24 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:25 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- events.py:26 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:27 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:28 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:29 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:30 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- events.py:31 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- events.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- events.py:33 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- events.py:34 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- events.py:77 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:79 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:80 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:81 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:83 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:84 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:85 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:86 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:87 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:100 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:108 — 名前・形式の照合（構文・規格・自前の名前）
+- events.py:176 — 範囲の切り詰め・最大最小（事実の計算）
+- events.py:177 — 範囲の切り詰め・最大最小（事実の計算）
+- events.py:182 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- events.py:187 — 範囲の切り詰め・最大最小（事実の計算）
+- events.py:207 — 範囲の切り詰め・最大最小（事実の計算）
+- fault.py:19 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fault.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fault.py:60 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fault.py:67 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fault.py:100 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fault.py:117 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fault.py:124 — 例外番号 16 以上は IRQ（アーキテクチャ）
+- fault.py:132 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fault.py:135 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fault.py:152 — 例外の中で LR が EXC_RETURN（0xFF…）
+- fault.py:163 — 故障のフレームの大きさ（ARMv7-M B1.5.6）
+- flash.py:31 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- flash.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- flash.py:35 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- flash.py:37 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- flash.py:49 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- flash.py:50 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- flash.py:55 — STM32F2/F4/F7 の Flash のキャッシュ（RM0368 3.5.2）
+- flash.py:72 — STM32F2/F4/F7 の Flash のキャッシュ（RM0368 3.5.2）
+- flash.py:90 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- flash.py:150 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:170 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:173 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:175 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:177 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:181 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:184 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:195 — 範囲・長さの検査（0・1・長さとの比較）
+- flash.py:201 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:211 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:212 — 拡張子・先頭のマジック（\x7fELF・':'）でファイル形式（形式の定義）
+- flash.py:224 — 範囲・長さの検査（0・1・長さとの比較）
+- flash.py:291 — 範囲の切り詰め・最大最小（事実の計算）
+- flash.py:292 — 名前・形式の照合（構文・規格・自前の名前）
+- flash.py:399 — 範囲・長さの検査（0・1・長さとの比較）
+- flash.py:430 — 範囲・長さの検査（0・1・長さとの比較）
+- flash.py:451 — 範囲の切り詰め・最大最小（事実の計算）
+- flash.py:549 — 名前・形式の照合（構文・規格・自前の名前）
+- flash.py:561 — 名前・形式の照合（構文・規格・自前の名前）
+- flash.py:597 — 名前・形式の照合（構文・規格・自前の名前）
+- flash.py:604 — 範囲の切り詰め・最大最小（事実の計算）
+- flash.py:668 — Flash の行の保持を避けて別の 16 バイトの行を読ませる（RM0368 の実機の事実）
+- flash.py:697 — 名前・形式の照合（構文・規格・自前の名前）
+- flash.py:700 — 範囲の切り詰め・最大最小（事実の計算）
+- flash.py:704 — 範囲の切り詰め・最大最小（事実の計算）
+- flash.py:735 — 範囲・長さの検査（0・1・長さとの比較）
+- flash.py:775 — 名前・形式の照合（構文・規格・自前の名前）
+- flash_bp.py:47 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- flash_bp.py:448 — 名前・形式の照合（構文・規格・自前の名前）
+- fpga_obs.py:24 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:25 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:26 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:28 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:29 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:30 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- fpga_obs.py:31 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- fpga_obs.py:32 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- fpga_obs.py:33 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- fpga_obs.py:34 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_obs.py:35 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fpga_obs.py:73 — 単位換算・大きさの計算
+- fpga_obs.py:81 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_obs.py:151 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:162 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:168 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_obs.py:184 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:185 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:194 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:196 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:205 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:214 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:242 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_obs.py:306 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:312 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:341 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:359 — 名前・形式の照合（構文・規格・自前の名前）
+- fpga_obs.py:369 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:374 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:412 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:414 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_obs.py:444 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_obs.py:448 — 名前・形式の照合（構文・規格・自前の名前）
+- fpga_obs.py:460 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_obs.py:468 — 名前・形式の照合（構文・規格・自前の名前）
+- fpga_signals.py:14 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- fpga_signals.py:15 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- fpga_signals.py:29 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- fpga_signals.py:51 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_signals.py:107 — 範囲・長さの検査（0・1・長さとの比較）
+- fpga_signals.py:121 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- frame_link.py:27 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- frame_link.py:28 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- frame_link.py:30 — USB HS の Bulk の最大パケット 512 と同じ（形式）
+- frame_link.py:93 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- frame_link.py:178 — 範囲・長さの検査（0・1・長さとの比較）
+- frame_link.py:181 — 範囲の切り詰め・最大最小（事実の計算）
+- generated.py:7 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:8 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:9 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:10 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:11 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:12 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:13 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:14 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:15 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:16 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:22 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:23 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:24 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:25 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:26 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:27 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:28 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:31 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:32 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:33 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:34 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:37 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:38 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:39 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:40 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:41 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:42 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:45 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:46 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:47 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:48 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:49 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:50 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:51 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:52 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:53 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:54 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:55 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:56 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:57 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:58 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:59 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:60 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:63 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:64 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:65 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:66 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:67 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:68 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:69 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:70 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:71 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:72 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:73 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:74 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:75 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:76 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:77 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:78 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:79 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:80 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:81 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:82 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:83 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:84 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:85 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:86 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:87 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:88 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:89 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:92 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:93 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:94 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:95 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:96 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:97 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:98 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:99 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:100 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:101 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:102 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:103 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:104 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:105 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:106 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:107 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:108 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:109 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:110 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:111 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:112 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:113 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:114 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:115 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:116 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:117 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:118 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:121 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:122 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:123 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:124 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:125 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:126 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:127 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:128 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:129 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:130 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:131 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:132 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:133 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:134 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:135 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:136 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:137 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:140 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:141 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:142 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:143 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:144 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:145 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:146 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:147 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:148 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:149 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:150 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:151 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:152 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:153 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:154 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:155 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:156 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:157 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:158 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:159 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:160 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:161 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:162 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:163 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:164 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:166 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:167 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:168 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:169 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:170 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:171 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:172 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:173 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:176 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:177 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:178 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:179 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:180 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:183 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:184 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:185 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:186 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:187 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:188 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:189 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:190 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:191 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:192 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:193 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:194 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:195 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:196 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:197 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:198 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:199 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:200 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:201 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:202 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:218 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:219 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:222 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:223 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:224 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:225 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:226 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:227 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:230 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:231 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:232 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:233 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:234 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:235 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:236 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:237 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:238 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:239 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:240 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:241 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:242 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:243 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:244 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:245 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:246 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:247 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:248 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:249 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:252 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:253 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:254 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:255 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:256 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:257 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:258 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:259 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:260 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:261 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:262 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:263 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:264 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:265 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:266 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:269 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:270 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:271 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:272 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:301 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:302 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:303 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:304 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:305 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:306 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:307 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:308 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:309 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:310 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:311 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:312 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:313 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:314 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:315 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:316 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:317 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:318 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:319 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:320 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:321 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:322 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:323 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:324 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:325 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:326 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:327 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:328 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:329 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:330 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:331 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:332 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:333 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:334 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:335 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:336 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:338 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:339 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:340 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:341 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:342 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:343 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:344 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:345 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:346 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:347 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:350 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:351 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:353 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:354 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:355 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:358 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:359 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:360 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:361 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:362 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:365 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:366 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:367 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:368 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:369 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:370 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:371 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:372 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:373 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:374 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:375 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:376 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:377 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:378 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:379 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:380 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:381 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:382 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:383 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:384 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:385 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:386 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:387 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:388 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:389 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:390 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:391 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:392 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:394 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:395 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:396 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:397 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:398 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:399 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:400 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:401 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:402 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:403 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:404 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:405 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:406 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:407 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:408 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:409 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:410 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:411 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:412 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:413 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:414 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:416 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:417 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:420 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:423 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:424 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:425 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:426 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:429 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:430 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:431 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- generated.py:432 — 生成物（gateware の CSR・プロトコル・ケイパビリティの定義が正）
+- gpio.py:19 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- gpio.py:20 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- halt_risk.py:42 — RTOS のカーネルの大域変数の完全一致
+- halt_risk.py:45 — モニタの関数の名前（fprobe 自身のファーム）
+- heap.py:36 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- heap.py:37 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- heap.py:38 — アロケータの定数（FreeRTOS heap_4/5・newlib の定義）
+- heap.py:39 — アロケータの定数（FreeRTOS heap_4/5・newlib の定義）
+- heap.py:40 — アロケータの定数（FreeRTOS heap_4/5・newlib の定義）
+- heap.py:41 — アロケータの定数（FreeRTOS heap_4/5・newlib の定義）
+- heap.py:42 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- heap.py:43 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- heap.py:107 — 範囲の切り詰め・最大最小（事実の計算）
+- heap.py:115 — 断片化 = 1 − 最大の空き / 空きの合計（定義どおりの割合）
+- heap.py:138 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- heap.py:144 — 名前・形式の照合（構文・規格・自前の名前）
+- heap.py:172 — 名前・形式の照合（構文・規格・自前の名前）
+- heap.py:187 — 名前・形式の照合（構文・規格・自前の名前）
+- heap.py:215 — 名前・形式の照合（構文・規格・自前の名前）
+- heap.py:353 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- heap.py:399 — 名前・形式の照合（構文・規格・自前の名前）
+- heap.py:403 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- heap.py:487 — 範囲の切り詰め・最大最小（事実の計算）
+- heap.py:488 — 範囲の切り詰め・最大最小（事実の計算）
+- heap.py:505 — 範囲の切り詰め・最大最小（事実の計算）
+- heap.py:538 — 範囲の切り詰め・最大最小（事実の計算）
+- hooks.py:20 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:21 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:33 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:34 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:36 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- hooks.py:90 — 名前・形式の照合（構文・規格・自前の名前）
+- hooks.py:165 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:20 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:21 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:23 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:90 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:111 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- inject.py:116 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- inject.py:130 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:139 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:155 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:156 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:157 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:158 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- inject.py:165 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- inject.py:173 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:180 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:185 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:192 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:219 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:230 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:235 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:238 — 範囲・長さの検査（0・1・長さとの比較）
+- inject.py:253 — 名前・形式の照合（構文・規格・自前の名前）
+- inject.py:363 — 名前・形式の照合（構文・規格・自前の名前）
+- itm.py:177 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- itm.py:178 — 同期パケットの 0 のバイト数（ARMv7-M ARM の ITM の規定）
+- itm.py:179 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- itm.py:333 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:334 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:338 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:339 — 範囲・長さの検査（0・1・長さとの比較）
+- itm.py:343 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:344 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:349 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:355 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:361 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:389 — 値の範囲・長さ（規格・形式の定義）
+- itm.py:391 — 値の範囲・長さ（規格・形式の定義）
+- itm.py:403 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:409 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:410 — ITM のハードウェアのパケットの ID の範囲（規定）
+- itm.py:438 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:447 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- itm.py:490 — 範囲・長さの検査（0・1・長さとの比較）
+- jtag_chain.py:1 — Capture-IR の 01 から境目を論理で決め、決まらなければ ambiguous（台帳済）
+- jtag_chain.py:10 — Capture-IR の 01 から境目を論理で決め、決まらなければ ambiguous（台帳済）
+- jtag_chain.py:11 — Capture-IR の 01 から境目を論理で決め、決まらなければ ambiguous（台帳済）
+- jtag_chain.py:37 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:84 — 範囲・長さの検査（0・1・長さとの比較）
+- jtag_chain.py:85 — 範囲の切り詰め・最大最小（事実の計算）
+- jtag_chain.py:86 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:99 — 範囲・長さの検査（0・1・長さとの比較）
+- jtag_chain.py:112 — 範囲・長さの検査（0・1・長さとの比較）
+- jtag_chain.py:120 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:122 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:127 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:129 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:179 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:205 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:212 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- jtag_chain.py:220 — Capture-IR の 01 から境目を論理で決め、決まらなければ ambiguous（台帳済）
+- jtag_chain.py:239 — Capture-IR の 01 から境目を論理で決め、決まらなければ ambiguous（台帳済）
+- jtag_chain.py:252 — 1149.1 の IR 長は 2 以上
+- jtag_chain.py:253 — 1149.1 の IR 長は 2 以上
+- la.py:26 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- la.py:46 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:57 — 名前・形式の照合（構文・規格・自前の名前）
+- la.py:124 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:126 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:165 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:169 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:170 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:176 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:192 — 回路のフィルタの最大の周期数（ゲートウェアの幅）
+- la.py:193 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- la.py:226 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:238 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:241 — フィルタの最小 2 周期（回路の段）
+- la.py:248 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:250 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:252 — 名前・形式の照合（構文・規格・自前の名前）
+- la.py:254 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:259 — 引数の範囲の検査の文言
+- la.py:311 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:322 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:346 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:355 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:373 — 名前・形式の照合（構文・規格・自前の名前）
+- la.py:450 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- la.py:465 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:489 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:496 — 単位換算・大きさの計算
+- la.py:498 — 単位換算・大きさの計算
+- la.py:499 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:534 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:535 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:536 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:541 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:558 — 申告の遅れの半刻みを切り上げて引く（±0.5 刻みを明示）
+- la.py:559 — 申告の遅れの半刻みを切り上げて引く（±0.5 刻みを明示）
+- la.py:586 — 範囲・長さの検査（0・1・長さとの比較）
+- la.py:605 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:632 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:695 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:697 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:700 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:702 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:803 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:817 — 範囲の切り詰め・最大最小（事実の計算）
+- la.py:868 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la.py:894 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la_measure.py:35 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- la_measure.py:53 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:54 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:80 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:116 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:121 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- la_measure.py:146 — 範囲・長さの検査（0・1・長さとの比較）
+- la_measure.py:158 — 範囲・長さの検査（0・1・長さとの比較）
+- la_measure.py:173 — ch の範囲の検査
+- la_measure.py:190 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:231 — 範囲・長さの検査（0・1・長さとの比較）
+- la_measure.py:249 — 範囲・長さの検査（0・1・長さとの比較）
+- la_measure.py:277 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:278 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:291 — 空の範囲の検査
+- la_measure.py:296 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:298 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:299 — 範囲の切り詰め・最大最小（事実の計算）
+- la_measure.py:300 — 空の範囲の検査
+- liveness.py:38 — ティックの変数の名前（RTOS が定める）
+- liveness.py:39 — PCSR の 0 / 0xFFFFFFFF は読めない（ARMv7-M C1.8.?）
+- liveness.py:77 — 範囲の切り詰め・最大最小（事実の計算）
+- mcp_server.py:102 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- mcp_server.py:456 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:492 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:550 — 診断の推奨の速さより上げない
+- mcp_server.py:800 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:811 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:831 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:846 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:864 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:870 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1010 — 範囲の切り詰め・最大最小（事実の計算）
+- mcp_server.py:1025 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1093 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1109 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1202 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1301 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1337 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1339 — 範囲・長さの検査（0・1・長さとの比較）
+- mcp_server.py:1359 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1377 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1395 — 範囲の切り詰め・最大最小（事実の計算）
+- mcp_server.py:1558 — 範囲の外は記録が始め直されたとして最初から（明示のコメント・書いた数と比べる事実）
+- mcp_server.py:1559 — 範囲の切り詰め・最大最小（事実の計算）
+- mcp_server.py:1561 — 範囲の切り詰め・最大最小（事実の計算）
+- mcp_server.py:1562 — 範囲・長さの検査（0・1・長さとの比較）
+- mcp_server.py:1668 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1669 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1690 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1736 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1750 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:1751 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1762 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1783 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- mcp_server.py:1874 — 範囲・長さの検査（0・1・長さとの比較）
+- mcp_server.py:2012 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:2086 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- mcp_server.py:2116 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- mcp_server.py:2181 — 名前・形式の照合（構文・規格・自前の名前）
+- mcp_server.py:2291 — 範囲の切り詰め・最大最小（事実の計算）
+- memory.py:58 — 引数の範囲の検査
+- memory.py:62 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- memview.py:22 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- memview.py:54 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:113 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- memview.py:117 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:135 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:161 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:171 — 名前・形式の照合（構文・規格・自前の名前）
+- memview.py:213 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:243 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- memview.py:251 — 範囲・長さの検査（0・1・長さとの比較）
+- memview.py:275 — 範囲の切り詰め・最大最小（事実の計算）
+- merge.py:23 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- merge.py:24 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- merge.py:52 — 範囲・長さの検査（0・1・長さとの比較）
+- merge.py:55 — 範囲の切り詰め・最大最小（事実の計算）
+- merge.py:103 — 範囲の切り詰め・最大最小（事実の計算）
+- monitor.py:28 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:29 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- monitor.py:30 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:31 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- monitor.py:32 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- monitor.py:33 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- monitor.py:38 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:39 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:40 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:42 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:43 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- monitor.py:58 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:59 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:60 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:61 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:62 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:65 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- monitor.py:83 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:90 — ベクタ 12 = DebugMon（ARMv7-M）
+- monitor.py:120 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:131 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:132 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:420 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:424 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:428 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:432 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:434 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:435 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- monitor.py:436 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:501 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:503 — 名前・形式の照合（構文・規格・自前の名前）
+- monitor.py:507 — 名前・形式の照合（構文・規格・自前の名前）
+- multidrop.py:24 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- multidrop.py:25 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- multidrop.py:26 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- multidrop.py:27 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- multidrop.py:28 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- multidrop.py:29 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- multidrop.py:30 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- multidrop.py:54 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- multidrop.py:121 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_breakpoints.py:98 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_connect.py:28 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_connect.py:30 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_cycles.py:12 — 8 ビットのカウンタは 1 周未満とみなす（counters_exact=false で明示。台帳の Ruling）
+- probe_cycles.py:30 — 定義の定数（規格・形式・プロトコル・自前のファームとの約束）
+- probe_cycles.py:31 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_cycles.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_cycles.py:61 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_cycles.py:76 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_cycles.py:107 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_cycles.py:108 — 経過時間 × コアクロックが 2^32 を超えたら「1 周を超えたかもしれない」（測った上限からの事実）
+- probe_cycles.py:136 — 8 ビットのカウンタは 1 周未満とみなす（counters_exact=false で明示。台帳の Ruling）
+- probe_cycles.py:142 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_cycles.py:153 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_cycles.py:156 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_cycles.py:167 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_decode.py:17 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_decode.py:48 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_design.py:33 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_design.py:218 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_elf_files.py:19 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_elf_files.py:20 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_elf_files.py:36 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_elf_files.py:50 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_elf_watch.py:25 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_elf_watch.py:179 — 引数の範囲の検査
+- probe_elf_watch.py:180 — 引数の範囲の検査
+- probe_etm.py:23 — M-profile の ETM にデータの値が無い説明
+- probe_etm.py:24 — M-profile の ETM にデータの値が無い説明
+- probe_etm.py:90 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_etm.py:99 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_etm.py:101 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_etm.py:135 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_execution.py:31 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_execution.py:75 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_flash.py:27 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_flash.py:28 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_flash.py:151 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_flash.py:200 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_flash.py:213 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_flash_bp.py:141 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_flash_bp.py:148 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_formats.py:51 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_formats.py:55 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_formats.py:57 — 優先度の向き（Zephyr・ThreadX の規約）
+- probe_formats.py:113 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_formats.py:192 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_formats.py:211 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_formats.py:347 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_formats.py:405 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_formats.py:458 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_formats.py:570 — 時刻の分解能 = 1 刻みかターゲットの時計の比の大きい方
+- probe_formats.py:673 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_gdb.py:30 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb.py:31 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb.py:32 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb.py:33 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_gdb.py:36 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_gdb.py:37 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb.py:38 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb.py:45 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:56 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:59 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_gdb.py:104 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:106 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:146 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:149 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_gdb.py:172 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:191 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:204 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb.py:329 — ビットの取り出し・組み立て（レジスタ・形式の定義）
+- probe_gdb_trace.py:28 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_gdb_trace.py:38 — 範囲・長さの検査（0・1・長さとの比較）
+- probe_gdb_trace.py:127 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb_trace.py:170 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gdb_trace.py:194 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_gpio.py:20 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_gpio.py:21 — レジスタのビット・番地（アーキテクチャ・データシートの定義）
+- probe_heap.py:29 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_heap.py:31 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_heap.py:33 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_heap.py:35 — 名前・値の表／形式の定数（規格・データシート・プロトコル・ツールの定義）
+- probe_heap.py:121 — 名前・形式の照合（構文・規格・自前の名前）
+- probe_heap.py:268 — 範囲の切り詰め・最大最小（事実の計算）
+- probe_heap.py:271 — 範囲の切り詰め・最大最小（事実の計算）
+
+### 5.2 E（使う側が明示して渡す引数） — 190 行
+
+- __main__.py:39 — CLI の引数の既定（使う側が渡せる）
+- __main__.py:42 — CLI の引数の既定（使う側が渡せる）
+- __main__.py:43 — CLI の引数の既定（使う側が渡せる）
+- __main__.py:157 — CLI の引数の既定（使う側が渡せる）
+- arm_a_target.py:71 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- arm_a_target.py:90 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- arm_a_target.py:148 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- arm_a_target.py:151 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- arm_debug.py:344 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- arm_debug.py:391 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- armv7a_debug.py:29 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- callgraph.py:56 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- calling.py:108 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:81 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:82 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:83 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:84 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:93 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:101 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- caps.py:102 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- collector.py:131 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- coresight_id.py:173 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- correlate.py:347 — 使う側が渡す窓・欠けの長さ・遅れ（既定は判断に関わらない）
+- correlate.py:644 — 使う側が渡す窓・欠けの長さ・遅れ（既定は判断に関わらない）
+- correlate.py:645 — 使う側が渡す窓・欠けの長さ・遅れ（既定は判断に関わらない）
+- debug.py:384 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- debug.py:424 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- debug.py:437 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- debug.py:441 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- debug.py:448 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- device.py:26 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- device.py:87 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- diagnose.py:38 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- diagnose.py:88 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- diagnose.py:89 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- disasm.py:162 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- disasm.py:275 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- disasm.py:315 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- elfsize.py:242 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- events.py:44 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- events.py:202 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- flash.py:83 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:242 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:281 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:319 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:320 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:321 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:322 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:323 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:324 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:326 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:327 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:328 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:329 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash.py:330 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash_bp.py:50 — dormant_limit（引数で渡せる。状態は結果に出る）
+- flash_bp.py:216 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- flash_bp.py:400 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:50 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:51 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:118 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:119 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:272 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:273 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:298 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- fpga_obs.py:432 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- heap.py:102 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- hooks.py:163 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- inject.py:64 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:30 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:31 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:37 — resync=True を明示したときだけの再同期の数（台帳済）
+- itm.py:38 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:39 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:45 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:54 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:65 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:86 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:93 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:101 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:109 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:119 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:135 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:145 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:152 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:160 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:168 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- itm.py:180 — resync=True を明示したときだけの再同期の数（台帳済）
+- itm.py:193 — resync=True を明示したときだけの再同期の数（台帳済）
+- jtag_chain.py:109 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- jtag_chain.py:175 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- la.py:82 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:205 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:206 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:222 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:304 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:305 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:512 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:579 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:580 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:581 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:594 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:595 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:615 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:616 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la.py:719 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:63 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:64 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:65 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:66 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:71 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:72 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:88 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- la_measure.py:100 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- la_measure.py:252 — 使う側が渡す setup/hold の最小
+- la_measure.py:258 — 使う側が渡す setup/hold の最小
+- la_measure.py:274 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:512 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:532 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:719 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:825 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:890 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:903 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:944 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:945 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1004 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1034 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1040 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1098 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1099 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1101 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1111 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1112 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1146 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1295 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1332 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1428 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1454 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1463 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1527 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1567 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1568 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1646 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:1846 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:1884 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- mcp_server.py:2060 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- mcp_server.py:2062 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- memory.py:51 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- memview.py:217 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- memview.py:246 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- memview.py:268 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- monitor.py:133 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- monitor.py:335 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- monitor.py:398 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- monitor.py:404 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- multidrop.py:44 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- packs.py:62 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_analysis.py:29 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_breakpoints.py:28 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_breakpoints.py:31 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_breakpoints.py:110 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_cycles.py:164 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_cycles.py:169 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_elf_watch.py:176 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_etm.py:50 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_etm.py:51 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_etm.py:52 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_etm.py:53 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_etm.py:118 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_etm.py:163 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_etm.py:169 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_etm.py:181 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_flash.py:184 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:82 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:83 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:86 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:91 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:300 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:386 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_formats.py:410 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_formats.py:443 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_formats.py:532 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_gdb.py:75 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_gdb.py:268 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_gpio.py:81 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_gpio.py:82 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_heap.py:57 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_heap.py:75 — 引数・欄の既定（使う側が渡せる。判断に関わらない）
+- probe_heap.py:203 — 引数の既定（返す件数・範囲。使う側が渡せる）
+- probe_heap.py:294 — 引数の既定（返す件数・範囲。使う側が渡せる）
+
+### 5.3 O（操作の既定） — 271 行
+
+- __main__.py:44 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- __main__.py:84 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- __main__.py:146 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- __main__.py:179 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm11_debug.py:30 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- arm11_debug.py:134 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_a_target.py:27 — 速い読みに切り替える語数（往復の数の問題）
+- arm_debug.py:134 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:136 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:160 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:167 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:214 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:220 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- arm_debug.py:367 — 2 語以上は速い読み（往復の数）
+- armv7a_debug.py:26 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- aux_flash.py:17 — 場所・ログ等の設定
+- aux_mcu.py:42 — ADC の値が落ち着くまでの待ち（引数）
+- aux_mcu.py:45 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- bitstreams.py:43 — 場所・ログ等の設定
+- bitstreams.py:46 — 書き込みの時間切れ 600 秒
+- bitstreams.py:122 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- bitstreams.py:123 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- bitstreams.py:124 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- callgraph.py:39 — 解析の打ち切りの予算（理由は「打ち切った」の事実。台帳済）
+- calling.py:46 — 引数の置き場所の上限 64 KB
+- collector.py:125 — 最近の値を覚える数
+- collector.py:162 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- collector.py:253 — 初期値・既定の小数（操作の値・単位）
+- collector.py:256 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- connect_scripts.py:21 — 場所・ログ等の設定
+- control.py:15 — 1 回の読みの語数の上限
+- coresight_id.py:74 — 初期値
+- correlate.py:293 — numpy の配列の覚えの数
+- correlate.py:431 — 初期値
+- debug.py:33 — 初期値
+- debug.py:207 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:215 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:219 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:222 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:229 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:243 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:263 — 初期値
+- debug.py:273 — 初期値
+- debug.py:334 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- debug.py:355 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- device.py:14 — ドロップ後の回復の時間の上限
+- device.py:35 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- device.py:112 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- device.py:114 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- device.py:116 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- device.py:118 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- diagnose.py:27 — 接続の速さを下げて試す（frequency/10・100 kHz）。試した全部を attempts に出す
+- diagnose.py:196 — 接続の速さを下げて試す（frequency/10・100 kHz）。試した全部を attempts に出す
+- diagnose.py:259 — JTAG の診断は 1 MHz 以下で走査（操作の既定）
+- disasm.py:27 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- disasm.py:93 — 初期値
+- disasm.py:209 — 初期値
+- elfsize.py:177 — 初期値
+- elfsize.py:262 — 初期値・既定の小数（操作の値・単位）
+- eth_link.py:23 — 場所・ログ等の設定
+- eth_link.py:53 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- eth_link.py:70 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- events.py:183 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- events.py:205 — 初期値
+- flash.py:258 — 初期値
+- flash.py:274 — 初期値・既定の小数（操作の値・単位）
+- flash.py:449 — 初期値・既定の小数（操作の値・単位）
+- flash.py:482 — 初期値・既定の小数（操作の値・単位）
+- flash.py:504 — 初期値・既定の小数（操作の値・単位）
+- flash.py:562 — 初期値・既定の小数（操作の値・単位）
+- flash.py:586 — 初期値・既定の小数（操作の値・単位）
+- flash_bp.py:45 — 場所・ログ等の設定
+- flash_bp.py:48 — 記録で確かめる周りの大きさ
+- flash_bp.py:107 — persistent の省略時は全部長く残るとみなし比較器を譲らない（安全側の操作）
+- fpga_obs.py:287 — 初期値・既定の小数（操作の値・単位）
+- fpga_obs.py:288 — 初期値・既定の小数（操作の値・単位）
+- fpga_obs.py:292 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:299 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:316 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:317 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:318 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:325 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:334 — 初期値・既定の小数（操作の値・単位）
+- fpga_obs.py:337 — 初期値・既定の小数（操作の値・単位）
+- fpga_obs.py:347 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:351 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:354 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:365 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:370 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:371 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:379 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:381 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:383 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:385 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:407 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:408 — 1 スキャンの時間の見積もり ×1.5 は待ちの長さだけに使う
+- fpga_obs.py:410 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:418 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:420 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:421 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_obs.py:429 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- fpga_signals.py:16 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- frame_link.py:31 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- frame_link.py:32 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- frame_link.py:53 — 初期値・既定の小数（操作の値・単位）
+- frame_link.py:100 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:104 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:105 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:109 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:113 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:179 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:185 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- frame_link.py:186 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- heap.py:44 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- heap.py:364 — 終わり不明のとき形の崩れで止める（notes に明示・end で指定可）
+- hooks.py:35 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- inject.py:22 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- inject.py:49 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- inject.py:204 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- inject.py:308 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- inject.py:310 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- inject.py:313 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- inject.py:327 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- jtag_chain.py:24 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- la.py:194 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:208 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:256 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:257 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:258 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:260 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:263 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:331 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:333 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:335 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:339 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:340 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:357 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:359 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:577 — 初期値・既定の小数（操作の値・単位）
+- la.py:635 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:640 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:644 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:645 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:664 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:665 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:670 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:671 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:672 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:673 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:701 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:705 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:708 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:762 — 初期値・既定の小数（操作の値・単位）
+- la.py:777 — ロジアナのストリームの読みの大きさ・間隔
+- la.py:778 — ロジアナのストリームの読みの大きさ・間隔
+- la.py:779 — ロジアナのストリームの読みの大きさ・間隔
+- la.py:780 — ロジアナのストリームの読みの大きさ・間隔
+- la.py:798 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:821 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:824 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la.py:826 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- la_measure.py:150 — 初期値・既定の小数（操作の値・単位）
+- liveness.py:52 — 初期値・既定の小数（操作の値・単位）
+- liveness.py:54 — 初期値・既定の小数（操作の値・単位）
+- mcp_server.py:98 — 記録の条件を調べる周期・遅れ・再オープンの周期
+- mcp_server.py:99 — 記録の条件を調べる周期・遅れ・再オープンの周期
+- mcp_server.py:100 — 記録の条件を調べる周期・遅れ・再オープンの周期
+- mcp_server.py:367 — 初期値・既定の小数（操作の値・単位）
+- mcp_server.py:873 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:877 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:929 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:934 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:961 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:967 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1012 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1014 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1100 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1108 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1125 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1132 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1580 — 初期値
+- mcp_server.py:1942 — UART を開く既定のボー 115200（引数で渡せる）
+- mcp_server.py:1964 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1970 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:1983 — CTS を取らなければ出ているとして送る（線の既定の動作）
+- mcp_server.py:2061 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:2067 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:2117 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- mcp_server.py:2177 — 初期値・既定の小数（操作の値・単位）
+- mcp_server.py:2196 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:2242 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- mcp_server.py:2243 — 初期値・既定の小数（操作の値・単位）
+- memory.py:44 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:45 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:48 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:49 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:52 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:63 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:69 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memory.py:70 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- memview.py:197 — シンボルを 1 MB まで遡って探す（探索の上限）
+- monitor.py:44 — ハンドラの頭の印を探す大きさ
+- monitor.py:148 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:149 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:155 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:158 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:169 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:192 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:241 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:244 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:287 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:319 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:325 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:341 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- monitor.py:482 — 書き戻しの順（SP を最後に）
+- multidrop.py:171 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- multidrop.py:172 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- packs.py:21 — 1 回で入れる Pack の上限（誤操作の防止）
+- packs.py:34 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_analysis.py:9 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_analysis.py:18 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_analysis.py:24 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_breakpoints.py:22 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_connect.py:72 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:85 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:107 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:121 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:123 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:125 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:137 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:140 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_connect.py:141 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:29 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_cycles.py:56 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:85 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:89 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:98 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:127 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:143 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:154 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:185 — 初期値・既定の小数（操作の値・単位）
+- probe_cycles.py:195 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_cycles.py:202 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_design.py:31 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_design.py:32 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_design.py:41 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_design.py:205 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_elf_files.py:18 — 場所・ログ等の設定
+- probe_elf_watch.py:8 — ELF の印が 2 回続けて同じなら書き終えたとして読み直す（読めなければ前のまま）
+- probe_elf_watch.py:52 — 初期値・既定の小数（操作の値・単位）
+- probe_elf_watch.py:115 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_execution.py:20 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_execution.py:32 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_execution.py:39 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_execution.py:65 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_execution.py:76 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_flash_bp.py:25 — 場所・ログ等の設定
+- probe_formats.py:52 — 記録の行・出来事を持っておく数（超えたら warnings で明示）
+- probe_formats.py:53 — 記録の行・出来事を持っておく数（超えたら warnings で明示）
+- probe_formats.py:54 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_formats.py:116 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_formats.py:271 — 初期値・既定の小数（操作の値・単位）
+- probe_formats.py:346 — 待ち・時間切れ（通信の操作。時間切れは時間切れの事実として返す）
+- probe_formats.py:378 — 初期値・既定の小数（操作の値・単位）
+- probe_formats.py:484 — 記録の行・出来事を持っておく数（超えたら warnings で明示）
+- probe_formats.py:487 — 初期値・既定の小数（操作の値・単位）
+- probe_formats.py:522 — 初期値・既定の小数（操作の値・単位）
+- probe_formats.py:642 — 初期値・既定の小数（操作の値・単位）
+- probe_formats.py:721 — 初期値・既定の小数（操作の値・単位）
+- probe_heap.py:30 — 上限・大きさ・周期の定数（操作の既定。結果の判断に使わない）
+- probe_heap.py:265 — 包みを出るまで遡るフレームの数
+
+### 5.4 D（見せ方） — 210 行
+
+- __main__.py:7 — 説明文（docstring・コメント）
+- __main__.py:77 — JSON の字下げ
+- __main__.py:93 — 並べる順（番地・名前・事実の値の順）
+- arm11_debug.py:8 — 説明文（docstring・コメント）
+- armv7a_debug.py:64 — 並べる順（番地・名前・事実の値の順）
+- bitstreams.py:20 — 説明文（docstring・コメント）
+- bitstreams.py:84 — 並べる順（番地・名前・事実の値の順）
+- callgraph.py:294 — 並べる順（番地・名前・事実の値の順）
+- callgraph.py:412 — 並べる順（番地・名前・事実の値の順）
+- connect_scripts.py:59 — 並べる順（番地・名前・事実の値の順）
+- coresight_id.py:51 — 説明文（docstring・コメント）
+- correlate.py:27 — 事例の数 5
+- correlate.py:256 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:277 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:308 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:339 — 説明文（docstring・コメント）
+- correlate.py:389 — 事実の印・文言（判定の材料は事実）
+- correlate.py:392 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:394 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:396 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:417 — 事実の印・文言（判定の材料は事実）
+- correlate.py:483 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:502 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:512 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:516 — 先行率の順・同じなら文字の順（事実の順。台帳済）
+- correlate.py:517 — 先行率の順・同じなら文字の順（事実の順。台帳済）
+- correlate.py:529 — 同じ時刻の候補の代表の選び方（台帳の Ruling。ほかは same に残る）
+- correlate.py:674 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:675 — 並べる順（番地・名前・事実の値の順）
+- correlate.py:704 — 並べる順（番地・名前・事実の値の順）
+- debug.py:8 — 説明文（docstring・コメント）
+- debug.py:11 — 説明文（docstring・コメント）
+- debug.py:62 — 説明文（docstring・コメント）
+- debug.py:209 — 説明文（docstring・コメント）
+- debug.py:235 — 説明文（docstring・コメント）
+- diagnose.py:75 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:76 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:77 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:149 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:238 — 並べる順（番地・名前・事実の値の順）
+- diagnose.py:294 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:306 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:334 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:345 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:394 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:423 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:430 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:439 — 事実の印・文言（判定の材料は事実）
+- diagnose.py:450 — 事実の印・文言（判定の材料は事実）
+- disasm.py:9 — 説明文（docstring・コメント）
+- disasm.py:75 — 逆アセンブルの 1 行の整形
+- disasm.py:105 — 説明文（docstring・コメント）
+- disasm.py:129 — 説明文（docstring・コメント）
+- disasm.py:147 — start は呼び手が渡す命令の境界（説明）
+- elfsize.py:9 — 説明文（docstring・コメント）
+- elfsize.py:139 — 並べる順（番地・名前・事実の値の順）
+- elfsize.py:158 — 並べる順（番地・名前・事実の値の順）
+- elfsize.py:164 — 先頭の切り出し（形式のバイト・表示）
+- elfsize.py:281 — 並べる順（番地・名前・事実の値の順）
+- fault.py:9 — 説明文（docstring・コメント）
+- fault.py:31 — hint はアーキテクチャの定義だけの説明（台帳済）
+- flash.py:47 — 説明文（docstring・コメント）
+- flash.py:119 — 並べる順（番地・名前・事実の値の順）
+- flash.py:248 — 違いを 32 件まで（more_differences に残りの数）
+- flash.py:250 — 違いを 32 件まで（more_differences に残りの数）
+- flash.py:251 — 違いを 32 件まで（more_differences に残りの数）
+- flash.py:252 — 違いを 32 件まで（more_differences に残りの数）
+- flash.py:411 — 並べる順（番地・名前・事実の値の順）
+- flash.py:557 — 並べる順（番地・名前・事実の値の順）
+- flash.py:702 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:78 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:85 — JSON の字下げ
+- flash_bp.py:139 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:150 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:152 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:317 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:339 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:348 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:478 — 事実の印・文言（判定の材料は事実）
+- flash_bp.py:488 — 並べる順（番地・名前・事実の値の順）
+- flash_bp.py:504 — 並べる順（番地・名前・事実の値の順）
+- fpga_obs.py:11 — 説明文（docstring・コメント）
+- fpga_obs.py:305 — 並べる順（番地・名前・事実の値の順）
+- fpga_obs.py:436 — 説明文（docstring・コメント）
+- fpga_signals.py:71 — 並べる順（番地・名前・事実の値の順）
+- fpga_signals.py:72 — 並べる順（番地・名前・事実の値の順）
+- frame_link.py:3 — 説明文（docstring・コメント）
+- frame_link.py:6 — 説明文（docstring・コメント）
+- frame_link.py:8 — 説明文（docstring・コメント）
+- frame_link.py:16 — 説明文（docstring・コメント）
+- frame_link.py:101 — 説明文（docstring・コメント）
+- frame_link.py:110 — 説明文（docstring・コメント）
+- halt_risk.py:26 — 種類ごとの手がかりの数 5（count は全部）
+- halt_risk.py:44 — 返す順は決まった順（重さの順ではない）
+- halt_risk.py:70 — 種類ごとの手がかりの数 5（count は全部）
+- heap.py:13 — 説明文（docstring・コメント）
+- heap.py:16 — 説明文（docstring・コメント）
+- heap.py:103 — 説明文（docstring・コメント）
+- heap.py:110 — ブロックの大きさのヒストグラムの桶（2 の冪、最小 16）
+- heap.py:116 — 並べる順（番地・名前・事実の値の順）
+- heap.py:539 — 呼び出し元ごとのポインタの例を 8 個まで
+- hooks.py:85 — 並べる順（番地・名前・事実の値の順）
+- hooks.py:112 — 並べる順（番地・名前・事実の値の順）
+- inject.py:80 — 並べる順（番地・名前・事実の値の順）
+- inject.py:190 — 並べる順（番地・名前・事実の値の順）
+- inject.py:207 — 並べる順（番地・名前・事実の値の順）
+- inject.py:211 — 並べる順（番地・名前・事実の値の順）
+- inject.py:282 — 事実の印・文言（判定の材料は事実）
+- inject.py:318 — 事実の印・文言（判定の材料は事実）
+- inject.py:321 — 事実の印・文言（判定の材料は事実）
+- inject.py:323 — 事実の印・文言（判定の材料は事実）
+- inject.py:330 — 事実の印・文言（判定の材料は事実）
+- inject.py:335 — 事実の印・文言（判定の材料は事実）
+- inject.py:350 — 事実の印・文言（判定の材料は事実）
+- inject.py:362 — 事実の印・文言（判定の材料は事実）
+- inject.py:365 — 事実の印・文言（判定の材料は事実）
+- itm.py:225 — 先頭の切り出し（形式のバイト・表示）
+- itm.py:269 — 事実の印・文言（判定の材料は事実）
+- itm.py:270 — 事実の印・文言（判定の材料は事実）
+- itm.py:274 — 事実の印・文言（判定の材料は事実）
+- la.py:158 — 説明文（docstring）
+- la.py:200 — 説明文（docstring・コメント）
+- la.py:202 — 説明文（docstring・コメント）
+- la.py:408 — 並べる順（番地・名前・事実の値の順）
+- la.py:454 — 説明文（docstring・コメント）
+- la_measure.py:4 — 説明文（docstring・コメント）
+- la_measure.py:9 — 範囲の端で切れたものは数えない（推定しない）の説明
+- la_measure.py:34 — 違反の例を 100 件まで（violation_count は全部）
+- la_measure.py:243 — 並べる順（番地・名前・事実の値の順）
+- liveness.py:4 — 事実だけを返す説明
+- liveness.py:78 — 並べる順（番地・名前・事実の値の順）
+- mcp_server.py:106 — 説明文（docstring・コメント）
+- mcp_server.py:157 — 説明文（docstring・コメント）
+- mcp_server.py:176 — 説明文（docstring・コメント）
+- mcp_server.py:179 — 説明文（docstring・コメント）
+- mcp_server.py:229 — 説明文（docstring・コメント）
+- mcp_server.py:249 — 説明文（docstring・コメント）
+- mcp_server.py:252 — 説明文（docstring・コメント）
+- mcp_server.py:261 — 説明文（docstring・コメント）
+- mcp_server.py:317 — 最初の変化 16 個（first_edges_ns の名前どおり）
+- mcp_server.py:333 — 最初の変化 16 個（first_edges_ns の名前どおり）
+- mcp_server.py:787 — 並べる順（番地・名前・事実の値の順）
+- mcp_server.py:874 — 説明文（docstring・コメント）
+- mcp_server.py:875 — 説明文（docstring・コメント）
+- mcp_server.py:907 — 説明文（docstring・コメント）
+- mcp_server.py:908 — 説明文（docstring・コメント）
+- mcp_server.py:930 — 説明文（docstring・コメント）
+- mcp_server.py:951 — 説明文（docstring・コメント）
+- mcp_server.py:1042 — 説明文（docstring・コメント）
+- mcp_server.py:1103 — 説明文（docstring・コメント）
+- mcp_server.py:1149 — 説明文（docstring・コメント）
+- mcp_server.py:1264 — 並べる順（番地・名前・事実の値の順）
+- mcp_server.py:1318 — 説明文（docstring・コメント）
+- mcp_server.py:1325 — 説明文（docstring・コメント）
+- mcp_server.py:1446 — 1000 件まで（count に全部）
+- mcp_server.py:1451 — 1000 件まで（count に全部）
+- mcp_server.py:1651 — 説明文（docstring・コメント）
+- mcp_server.py:1654 — 説明文（docstring・コメント）
+- mcp_server.py:1745 — 説明文（docstring・コメント）
+- mcp_server.py:1917 — 並べる順（番地・名前・事実の値の順）
+- mcp_server.py:1965 — 説明文（docstring・コメント）
+- mcp_server.py:2167 — 画面用でない（AI には説明文）
+- memview.py:102 — 並べる順（番地・名前・事実の値の順）
+- memview.py:104 — 並べる順（番地・名前・事実の値の順）
+- memview.py:160 — 並べる順（番地・名前・事実の値の順）
+- memview.py:170 — 先頭の切り出し（形式のバイト・表示）
+- memview.py:183 — 並べる順（番地・名前・事実の値の順）
+- merge.py:2 — 説明文（docstring・コメント）
+- merge.py:7 — 説明文（docstring・コメント）
+- merge.py:30 — 並べる順（番地・名前・事実の値の順）
+- monitor.py:11 — 説明文（docstring・コメント）
+- monitor.py:239 — 説明文（docstring・コメント）
+- multidrop.py:11 — 説明文（docstring・コメント）
+- packs.py:60 — 並べる順（番地・名前・事実の値の順）
+- packs.py:95 — 並べる順（番地・名前・事実の値の順）
+- probe_analysis.py:21 — 説明文（docstring・コメント）
+- probe_cycles.py:181 — 事実の印・文言（判定の材料は事実）
+- probe_cycles.py:190 — 事実の印・文言（判定の材料は事実）
+- probe_cycles.py:199 — 先頭の切り出し（形式のバイト・表示）
+- probe_cycles.py:210 — 先頭の切り出し（形式のバイト・表示）
+- probe_cycles.py:212 — 事実の印・文言（判定の材料は事実）
+- probe_design.py:91 — 並べる順（番地・名前・事実の値の順）
+- probe_design.py:213 — 並べる順（番地・名前・事実の値の順）
+- probe_elf_files.py:58 — 事実の印・文言（判定の材料は事実）
+- probe_elf_files.py:59 — 事実の印・文言（判定の材料は事実）
+- probe_elf_files.py:60 — 事実の印・文言（判定の材料は事実）
+- probe_elf_watch.py:31 — 並べる順（番地・名前・事実の値の順）
+- probe_etm.py:147 — 並べる順（番地・名前・事実の値の順）
+- probe_execution.py:26 — 説明文（docstring・コメント）
+- probe_flash.py:273 — 並べる順（番地・名前・事実の値の順）
+- probe_flash_bp.py:86 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:166 — 並べる順（番地・名前・事実の値の順）
+- probe_formats.py:184 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:189 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:203 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:359 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:374 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:511 — 事実の印・文言（判定の材料は事実）
+- probe_formats.py:580 — アイドルは RTOS の名前の完全一致と明示（台帳済）
+- probe_formats.py:581 — アイドルは RTOS の名前の完全一致と明示（台帳済）
+- probe_formats.py:582 — 近似であることを warnings に明示
+- probe_formats.py:643 — 近似であることを warnings に明示
+- probe_formats.py:722 — 近似であることを warnings に明示
+- probe_gdb.py:83 — 並べる順（番地・名前・事実の値の順）
+- probe_gdb_trace.py:94 — 並べる順（番地・名前・事実の値の順）
+- probe_heap.py:183 — 説明文（docstring・コメント）
+- probe_heap.py:200 — 並べる順（番地・名前・事実の値の順）
+- probe_heap.py:291 — 並べる順（番地・名前・事実の値の順）
+- probe_heap.py:298 — 並べる順（番地・名前・事実の値の順）
+- probe_heap.py:299 — 並べる順（番地・名前・事実の値の順）

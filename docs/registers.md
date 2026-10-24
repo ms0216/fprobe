@@ -297,15 +297,17 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000E10` | `words` | 8:0 | `words` | RW | `0x10` | 1 スキャンで受ける記録の語数（1〜256） |
 | `0x00000E14` | `sync_period` | 15:0 | `sync_period` | RW | `0x10` | 印（時刻合わせ。op 3、番号つき）を載せる間隔（スキャンの数。0 = 自動では載せない） |
 | `0x00000E18` | `cmd` | 15:0 | `cmd` | RW | `0x0` | 命令 |
+| `0x00000E1C` | `id_scans` | 7:0 | `id_scans` | RW | `0x0` | ID の応答を待つ上限 |
 | `0x00000E20` | `cmd_push` | 0 | `cmd_push` | PULSE | `0x0` | 命令を積む（待ち行列が一杯なら捨てて status.cmd_dropped） |
 | `0x00000E24` | `status` | 0 | `running` | RO | — | スキャンを繰り返している |
 | `0x00000E24` | `status` | 1 | `id_ok` | RO | — | 開いてから ID が "FOBS" と照合できた（stuck の後も残る: stuck と組で、答えていた後に止まったのか、初めから答えないのかが分かる） |
-| `0x00000E24` | `status` | 2 | `stuck` | RO | — | 観測の回路が答えない（見出しの印が 0xA6 でない・ID が違う・ID の応答が来ない）ので止めた |
+| `0x00000E24` | `status` | 2 | `stuck` | RO | — | 観測の回路が答えない（見出しの印が 0xA6 でない・ID が違う・ID の応答がid_scans スキャンで来ない）ので止めた |
 | `0x00000E24` | `status` | 3 | `cmd_pending` | RO | — | 待ち行列に命令がある |
 | `0x00000E24` | `status` | 4 | `overflow_seen` | RO | — | 最後の見出しの溢れの印 |
 | `0x00000E24` | `status` | 5 | `cmd_dropped` | RO | — | 一杯で捨てた命令がある（enable の 0→1 で消える） |
 | `0x00000E24` | `status` | 6 | `target_running` | RO | — | 最後の見出しの「対象の clk 側が記録中」（対象のリセット等で止まったら 0） |
 | `0x00000E24` | `status` | 7 | `driving` | RO | — | 対象の JTAG の線を駆動している（止めた後は 0 になるまで待つ） |
+| `0x00000E24` | `status` | 8 | `id_timeout` | RO | — | stuck の理由: id_scans スキャン待って ID の応答が来なかった（0 なら答えが違った） |
 | `0x00000E28` | `scans` | 31:0 | `scans` | RO | — | 行ったスキャンの数（イベント 8 の address） |
 | `0x00000E2C` | `read_value` | 31:0 | `read_value` | RO | — | 最後の応答の記録: 番号(31:24。応答のたびに 1 増える) | 番地(19:16) | 値(15:0) |
 | `0x00000E30` | `id` | 31:0 | `id` | RO | — | 始めに読んだ観測の回路の ID |

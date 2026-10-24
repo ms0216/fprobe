@@ -8,7 +8,8 @@
     from fprobe.plugins import ProbeCaller
     from fprobe.plugins import heuristics as h
     ranked = h.rank_causes(client.call("recording.correlate", effect="errors changed", causes=None, window_s=0.01))
-    h.decode_uart_with_estimated_baud(client, channel=5)
+    h.decode_uart_with_estimated_baud(client, channel=5, data_bits=8, parity="none", stop_bits=1, invert=False,
+                                      lsb_first=True)
 
 約束:
 - 結果には必ず "heuristic"（経験則の名前）と "assumption"（仮定の短い説明）を入れる。使う人と AI が、その判断の根拠が
@@ -18,8 +19,10 @@
   本体のライブラリ（データ型・逆アセンブラ等）は import して使うが、本体の API は変えない。
 """
 
+import difflib
 import math
 import re
+import statistics
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -28,12 +31,18 @@ from typing import Any
 from . import ApiCaller
 
 __all__ = [
-    "GUARD_BYTES", "PAYLOAD_CYCLES", "RECORD_CYCLES", "STANDARD_BAUDS", "TYPICAL_CORE_CLOCKS", "WORD_CYCLES",
-    "decode_uart_with_estimated_baud", "diagnose_hints", "disasm_before_pc", "estimate_baud", "fault_hints",
-    "heap_growing", "heap_growing_from_api", "infer_jobs", "infer_jobs_from_api", "outliers", "outliers_of_intervals",
+    "ALLOCATOR_WRAPPERS", "GUARD_BYTES", "PAYLOAD_CYCLES", "RECORD_CYCLES", "STANDARD_BAUDS", "TYPICAL_CORE_CLOCKS", "WORD_CYCLES",
+    "decode_uart_with_estimated_baud", "diagnose_hints", "diagnose_verdict", "disasm_before_pc", "estimate_baud", "fault_hints",
+    "heap_growing", "heap_growing_from_api", "heap_trace_start_skipping_wrappers","infer_jobs", "infer_jobs_from_api", "outliers", "outliers_of_intervals",
     "rank_causes", "stack_warning", "trace_cpu_share", "typical_core_clock",
     "SWO_HEADROOM", "aliasing_suspects", "aliasing_suspects_from_api", "counter_overflow_risk", "heap_overflow_suspects", "jtag_guess_ir",
-    "link_cause_hints", "sampler_falling_behind", "wait_failed_as_timeout",
+    "link_cause_hints", "sampler_falling_behind", "wait_failed_as_timeout", "connect_script_name_hints",
+    "tbb_table_sizes", "literal_pool_ranges",
+    "FATAL_FUNCTIONS", "FAULT_HANDLER_PATTERN", "HALT_RISK_PATTERNS", "RTOS_GLOBALS", "fatal_kind",
+    "halt_risk_conventions", "halt_risk_kinds", "liveness_conventions",
+    "tracex_context_switches",
+    "load_outside_interval", "sampling_intervals", "wilson_interval",
+    "SPI_FLASH_CONVENTIONAL_COMMANDS", "spiflash_conventional_commands", "clock_stderr",
 ]
 
 
@@ -177,8 +186,9 @@ def decode_uart_with_estimated_baud(caller: ApiCaller, channel: int, *, snap: fl
     """最後の捕捉（la.capture 等）の channel からボーを estimate_baud で推定し、その baud で la.decode（uart）を呼ぶ。
 
     最後の捕捉の波形は la.export（format sr）でファイルに書いて fprobe.sigrok.read_sr で読む（デーモンと同じ計算機の
-    ファイルを読む。work_dir を省くと一時ディレクトリ）。settings は la.decode の uart の設定（data_bits・parity・
-    stop_bits・invert）と la.decode の引数（start・end・kinds・errors_only・offset・limit）。
+    ファイルを読む。work_dir を省くと一時ディレクトリ）。settings は la.decode の uart の枠の設定（data_bits・parity・
+    stop_bits・invert・lsb_first。既定を持たないので渡す。推定するのはボーだけ）と la.decode の引数（start・end・
+    kinds・errors_only・offset・limit）。
     経験則・外れる場合は estimate_baud と同じ。推定できなければ la.decode を呼ばず decoding = None。"""
     from ..sigrok import read_sr
     decode_keys = {"start", "end", "kinds", "errors_only", "offset", "limit", "capture_id"}
@@ -410,6 +420,24 @@ def heap_growing_from_api(caller: ApiCaller, min_age_s: float = 1.0, top: int = 
     return out
 
 
+# 標準ライブラリ・FreeRTOS の確保の関数とその包みの名前（総点検 Q3 で本体の probe_heap から外した名前の表）
+ALLOCATOR_WRAPPERS = ("malloc", "free", "calloc", "realloc", "_calloc_r", "_realloc_r", "_malloc_r", "_free_r",
+                      "reallocf", "_reallocf_r", "memalign", "_memalign_r", "strdup", "_strdup_r", "strndup",
+                      "_strndup_r", "pvPortMalloc", "vPortFree", "pvPortCalloc", "__wrap_malloc", "__wrap_free")
+
+
+def heap_trace_start_skipping_wrappers(caller: ApiCaller, allocators: list[str] | None = None,
+                                       wrappers: Sequence[str] = ALLOCATOR_WRAPPERS) -> dict:
+    """heap.trace.start を、確保の関数の包み（calloc・strdup 等）を呼び出し元から飛ばす形で呼ぶ（skip_functions）。
+
+    経験則: 関数の名前が ALLOCATOR_WRAPPERS にあれば、それは確保の包みで、本当の呼び出し元はその外とみなす。外れる場合:
+    利用者が同じ名前の関数を別の役目で持つ・包みを別の名前で作った（__wrap_ 以外の --wrap 等）・名前がリンクで変わった。
+    飛ばしたフレームは本体の出来事の skipped に出る。"""
+    out = dict(caller.call("heap.trace.start", allocators=allocators, skip_functions=list(wrappers)))
+    out.update(_tag("allocator_wrapper_names", "名前が標準の確保の関数・包みなら、呼び出し元はその外"))
+    return out
+
+
 GUARD_BYTES = 16                       # 底のこのバイト数が塗りのままかを見る（FreeRTOS の方法 2 と同じ幅）
 
 
@@ -535,8 +563,81 @@ def diagnose_hints(result: Mapping, min_volts: float = 1.0, low_volts: float = 1
     return _tag("diagnose_typical_causes",
                 f"電圧 {min_volts} V 未満は電源なし・{low_volts} V 未満は低い・{high_volts} V 超は高い。"
                 "各段の失敗によくある原因の見込み",
-                min_volts=min_volts, low_volts=low_volts, high_volts=high_volts, verdict=result.get("verdict"),
-                ok=result.get("ok"), steps=steps)
+                min_volts=min_volts, low_volts=low_volts, high_volts=high_volts, reached=result.get("reached"),
+                steps=steps)
+
+
+_SOFT_FAILS = ("part", "ap_idr", "core", "protection")    # 読めなくても接続はできうる段（以前の本体の warn）
+
+
+def _diagnose_severity(s: Mapping, first_hz: int | None) -> str:
+    status, name, data = s.get("status"), s.get("name"), s.get("data", {})
+    if status == "skip":
+        return "skip"
+    if status == "fail":
+        return "warn" if name in _SOFT_FAILS else "fail"
+    if name == "pins":
+        return "warn" if data.get("nreset") == 0 or data.get("swdio") == 0 else "ok"
+    if name == "voltage":
+        return "warn" if data.get("over_range") else "ok"
+    if name in ("swd", "jtag"):
+        hz = data.get("frequency_hz")
+        return "warn" if hz is not None and first_hz is not None and hz != first_hz else "ok"
+    if name in ("dp_errors", "ap_disabled"):
+        return "warn"
+    if name == "power":
+        return "ok" if data.get("system_power", True) else "warn"
+    if name == "core":
+        return "warn" if data.get("lockup") else "ok"
+    if name == "protection":
+        level = data.get("rdp_level")
+        return "fail" if level == 2 else "warn" if level == 1 or data.get("approtect") else "ok"
+    return "ok"
+
+
+def diagnose_verdict(result: Mapping) -> dict:
+    """target.diagnose の事実（段ごとの status = ok / fail / skip と data）に、以前の本体がしていた良し悪しの判定
+    （各段の severity = ok / warn / fail）・結論の文（verdict）・接続できるか（ok）・target_connect の引数のおすすめ
+    （suggested_connect）を足す。
+
+    経験則（以前の本体の判定）:
+    - warn: ピンの nRESET・SWDIO が Low、電圧が測れる上限を超えた、最初に試した速さで応答せず後の速さで応答した、
+      DP に誤りの印が残っていた、システム電源の応答が無い、MEM-AP が無効、コアがロックアップ、STM32 の RDP Level 1・
+      nRF の APPROTECT、部品・コア・AP の IDR・保護を読めなかった（接続はできうる）。fail: RDP Level 2、ほかの読めない段。
+    - ok（接続できる）= DP に届き（reached）、fail の段が無い。
+    - おすすめの接続: 部品の候補がちょうど 1 つならその名前、無ければ汎用の cortex_m。応答した速さ。JTAG ならチェーン。
+      ロックアップなら connect_mode = under-reset（眠っている（WFI）は勧めない: 止めると壊れるターゲットがある）。
+    外れる場合: Low のピン・遅い速さが正常な配線もある。候補が 1 つでも別の品種のことがある（DBGMCU の値の表）。
+    ロックアップでもリセットしないほうがよい（状態を調べたい）こともある。"""
+    first = (result.get("frequencies_hz") or [None])[0]
+    steps = [{**s, "severity": _diagnose_severity(s, first)} for s in result.get("steps", [])]
+    reached = bool(result.get("reached"))
+    fails = [s for s in steps if s["severity"] == "fail"]
+    ok = reached and not fails
+    part, core = result.get("part"), result.get("core")
+    if not ok:
+        head = fails[0]["message"] if fails else "ターゲットのデバッグポートに届かなかった"
+        volts = next((s.get("data", {}).get("volts") for s in steps if s["name"] == "voltage" and s["status"] == "ok"),
+                     None)
+        verdict = f"接続できない: {head}" + ("" if volts is None else f"（Vtarget = {volts:.2f} V）")
+    else:
+        what = part["name"] if part else core["core"] if core else "ターゲット"
+        verdict = f"接続できる（{what}、{str(result.get('protocol')).upper()} {result.get('frequency_hz'):,} Hz）"
+        warns = [s for s in steps if s["severity"] == "warn"]
+        if warns:
+            verdict += "。ただし: " + " / ".join(s["message"] for s in warns)
+    connect = None
+    if reached:
+        connect = {"target": (part or {}).get("suggested_target") or "cortex_m", "frequency_hz": result.get("frequency_hz")}
+        chain = (result.get("jtag") or {}).get("jtag_chain")
+        if result.get("protocol") == "jtag" and chain:
+            connect["jtag_chain"] = chain
+        if core and core.get("lockup"):
+            connect["connect_mode"] = "under-reset"
+    return _tag("diagnose_verdict",
+                "以前の本体の判定: Low のピン・遅い速さ・ロックアップ・保護等を warn、DP に届いて fail が無ければ接続できる。"
+                "おすすめの接続は部品の候補が 1 つならその名前、ロックアップなら under-reset",
+                ok=ok, verdict=verdict, suggested_connect=connect, steps=steps)
 
 
 # --- 9. disasm の境界の推定 -------------------------------------------------------------------
@@ -580,23 +681,24 @@ def disasm_before_pc(caller: ApiCaller, pc: int, before: int = 8, after: int = 8
 
 # --- 2 回目に外した判断（2026-10-22 以降。台帳 .superpowers/sdd/heuristics-ledger.md） ----------------------
 
-def aliasing_suspects(result: Mapping, min_expected: float = 4.6, top: int | None = None) -> dict:
+def aliasing_suspects(result: Mapping, min_expected: float = 4.6, top: int | None = None,
+                      confidence: float = 0.95) -> dict:
     """profile.result（method=itm・by="exception"）の結果から、PC サンプルと例外トレースの負荷が「噛み合い（エイリアシング）で
-    ずれている」と見る例外を挙げる（4e2138e より前の本体の判定）。本体は信頼区間の外という事実だけを notes に書く。
+    ずれている」と見る例外を挙げる（4e2138e より前の本体の判定）。本体はサンプルの回数と例外トレースの負荷だけを返す
+    （区間の外かの比べ方は load_outside_interval）。
 
     経験則:
     - サンプル 0 回でも、期待回数 load × total が min_expected（4.6 = 0 回になる確率が約 1 %）以上なら噛み合いと見る。
     - 1 回以上なら信頼区間に余裕 2/√total × √load を足し、その外なら噛み合いと見る。余裕の幅は経験則。
     外れる場合: 例外の負荷が測る間に本当に変わった（記録の窓とサンプルの窓が違う）とき、ずれは噛み合いではない。
     rows は上位 top 件で切られる。top（求めた件数）を渡し、rows がその件数に達していれば、rows に無い例外は 0 回と
-    みなさず unknown に入れる（aliasing_suspects_from_api は全件を取る）。"""
-    from fprobe.profile.stats import wilson_interval
+    みなさず unknown に入れる（aliasing_suspects_from_api は全件を取る）。区間は wilson_interval（信頼度 confidence。
+    各サンプルが独立な二項の試行という仮定の上の推定）。"""
     if result.get("by") != "exception":
         raise ValueError('profile.result を by="exception" で取った結果を渡す（ほかの表では例外ごとの回数が無い）')
-    total, confidence = result["total"], result.get("confidence", 0.95)
+    total = result["total"]
     rows = result.get("rows", [])
     hits = {r["exception"]: r["samples"] for r in rows}
-    ci = {r["exception"]: r["ci"] for r in rows if r.get("ci")}
     cut = top is not None and len(rows) >= top
     suspects, unknown = [], []
     for e in result.get("exceptions", []):
@@ -609,14 +711,14 @@ def aliasing_suspects(result: Mapping, min_expected: float = 4.6, top: int | Non
                 suspects.append({"exception": e["exception"], "name": e.get("name"), "load": load, "samples": 0,
                                  "reason": "zero_samples"})
             continue
-        low, high = ci.get(e["exception"]) or wilson_interval(n, total, confidence)
+        low, high = wilson_interval(n, total, confidence)
         slack = 2 / math.sqrt(total) * math.sqrt(max(load, 1e-9))
         if load < low - slack or load > high + slack:
             suspects.append({"exception": e["exception"], "name": e.get("name"), "load": load, "samples": n,
                              "reason": "outside_interval"})
     return _tag("aliasing", "サンプルの割合と例外トレースの負荷のずれは、サンプルの間隔と割り込みの周期の噛み合いによる。"
                 "負荷は例外トレースの値を使い、rate_hz を少し変えると偏りが変わる",
-                suspects=suspects, unknown=unknown, min_expected=min_expected)
+                suspects=suspects, unknown=unknown, min_expected=min_expected, confidence=confidence)
 
 
 def aliasing_suspects_from_api(caller: ApiCaller, min_expected: float = 4.6, top: int = 1000) -> dict:
@@ -708,3 +810,337 @@ def wait_failed_as_timeout(stats: Mapping) -> dict:
     """rtos の待ちの統計（failed = 起きた後の操作が失敗）を「時間切れ」と読む（715c29a より前の本体の outcome="timeout"）。
     外れる場合: 待ちの中断（xTaskAbortDelay）・削除されたオブジェクト。"""
     return _tag("failed_is_timeout", "待ちの後の操作の失敗は、時間切れによる", timeouts=stats.get("failed", 0))
+
+
+# --- 接続スクリプトの名前の候補（connect_scripts.check_script から外した） ----------------------------------
+
+def connect_script_name_hints(check: Mapping, cutoff: float = 0.8,
+                              prefixes: Sequence[str] = ("will_", "did_")) -> dict:
+    """target.script.check の結果の functions（pyOCD の手順の名前でない関数 = pyOCD は呼ばない）から、手順の名前の
+    書き誤りかもしれないものを挙げる（以前は本体の check_script が problems に入れていたもの）。
+
+    経験則:
+    - 名前の似ている度合い（difflib の比）が cutoff（既定 0.8）以上の手順の名前があれば、そのつもりだったとみなし
+      close に入れる。
+    - prefixes（既定 will_ / did_。pyOCD の手順の名前の付け方）で始まる関数は、似た名前が無くても手順のつもりとみなす。
+    外れる場合: 手順と似た名前の補助の関数（will_connect_helper 等）を誤りに挙げる。似ていない書き誤り（短い名前の
+    大きな誤り）は挙がらない。"""
+    from ..connect_scripts import HOOKS
+    hints = []
+    for f in check.get("functions", []):
+        close = difflib.get_close_matches(f["name"], HOOKS, n=1, cutoff=cutoff)
+        if close or f["name"].startswith(tuple(prefixes)):
+            hints.append({"name": f["name"], "line": f.get("line"), "close": close[0] if close else None})
+    return _tag("hook_name_similarity",
+                f"名前の似ている度合い {cutoff} 以上か、接頭辞 {', '.join(prefixes) or '（なし）'} の関数は手順のつもり",
+                cutoff=cutoff, prefixes=list(prefixes), hints=hints)
+
+
+# --- tbb / tbh の表の大きさ（disasm から外した） ------------------------------------------------------
+
+def tbb_table_sizes(instructions: Sequence, window: int = 4) -> dict:
+    """逆アセンブルの命令の列（fprobe.disasm.Instruction）の tbb / tbh ごとに、表の項目の数を直前 window 命令の中の
+    "cmp 添字, #n" から n + 1 と推す（以前は本体の Disassembler がしていた）。結果の tables は
+    Disassembler(branch_tables=...) にそのまま渡せる（表の直後のバイトをデータとして区切る）。branch_tables は同じ内容を
+    API（debug.disasm.* の branch_tables）に渡す形にしたもの。
+
+    経験則: コンパイラは switch の表引きの前に添字の範囲を "cmp 添字, #最大" と "bhi 既定へ" で確かめる（慣用句）。
+    外れる場合: 範囲の確かめが window より前にある・別の形（subs・and での丸め等）・添字の値を cmp の後で変える・
+    手書きのアセンブリ。表を大きく見積もると後ろの命令をデータにし、小さく見積もると表をコードとして読む。"""
+    tables = {}
+    for n, insn in enumerate(instructions):
+        if insn.kind != "code" or insn.mnemonic.split(".")[0] not in ("tbb", "tbh"):
+            continue
+        parts = [p.strip() for p in insn.operands.strip("[]").split(",")]
+        if len(parts) < 2:
+            continue
+        index = parts[1]
+        for previous in reversed(instructions[max(0, n - window):n]):
+            if previous.kind == "code" and previous.mnemonic.startswith("cmp"):
+                reg, _, imm = previous.operands.partition(", #")
+                if reg.strip() == index and imm:
+                    tables[insn.address] = int(imm, 0) + 1
+                    break
+    return _tag("tbb_cmp_bound", f"tbb / tbh の直前 {window} 命令の cmp 添字, #n が表の範囲の確かめ（項目 n + 1）",
+                window=window, tables=tables,
+                branch_tables=[{"address": a, "entries": n} for a, n in tables.items()])   # debug.disasm.* の引数の形
+
+
+def literal_pool_ranges(instructions: Sequence) -> dict:
+    """逆アセンブルの命令の列（fprobe.disasm.Instruction か API の instructions の辞書）の ldr / vldr [pc, #n] が読む先を
+    データの区間とみなす（以前は本体の Disassembler が $t・$d の無い所でしていた）。結果の data_ranges は API
+    （debug.disasm.* の data_ranges）・Disassembler(data_ranges=[(address, size)]) に渡せる。
+
+    経験則: PC 相対で読まれる番地はリテラルプール（コンパイラが関数の後ろに置く定数）で、命令ではない。
+    外れる場合: 手書きのアセンブリ・自己書き換え・コードのバイトを定数として読む所（チェックサム等）。読む先がコードの
+    途中なら、後ろの命令の境界がずれる。"""
+    ranges: dict[int, int] = {}
+    for insn in instructions:
+        get = insn.get if isinstance(insn, Mapping) else lambda k, i=insn: getattr(i, k)
+        mnemonic = get("mnemonic") or ""
+        if get("kind") != "code" or get("literal") is None or not mnemonic.startswith(("ldr", "vldr")) \
+                or "pc" not in (get("operands") or ""):
+            continue
+        operands = get("operands") or ""
+        size = 8 if mnemonic.startswith("vldr") and operands.lstrip().startswith("d") else 4
+        ranges[int(get("literal"))] = max(size, ranges.get(int(get("literal")), 0))
+    return _tag("pc_load_literal_pool", "ldr / vldr [pc, #n] の読む先はリテラルプール（データ）",
+                data_ranges=[{"address": a, "size": n} for a, n in sorted(ranges.items())])
+
+
+# --- 3 回目に外した判断（2026-10-23。台帳 docs/reports/2026-10-23-heuristics-audit/ledger.md の A2・A3・Q6） ------------
+
+_IRQ = r"_IRQHandler$"
+# 種類 → 関数の名前の形（本体の halt_risk.py の KINDS だったもの。関数だけに当てる）
+HALT_RISK_PATTERNS: dict[str, list[str]] = {
+    # 無線: 無線の割り込み、BLE / 802.15.4 / Wi-Fi のスタックの関数
+    "radio": [rf"(?i)^(RADIO|RF\w*|BLE\w*|BT\w*|WIFI\w*|WLAN\w*|IEEE802154\w*|LORA\w*|SUBGHZ\w*){_IRQ}",
+              r"^(ll|lll|ull|radio|bt_ctlr|hci_driver|sdc|mpsl|btdm|nimble_port|ble_ll|ble_hs|sd_ble|"
+              r"nrf_802154|esp_wifi|wlan|lora)_\w"],
+    # USB の機器（ホストが応答の無い機器を切る）
+    "usb": [rf"(?i)^(USB\w*|OTG\w*){_IRQ}", r"^(tud|usbd|USBD|usb_dc|udc)_\w"],
+    # ウォッチドッグ（止まっている間に満了しうる）
+    "watchdog": [rf"(?i)^(WDT|IWDG|WWDG|WDOG)\w*{_IRQ}", r"(?i)(^|_)(wdt|iwdg|wwdg|wdog|watchdog)(_|$)"],
+}
+# RTOS のカーネルの大域変数（変数だけに当てる）
+RTOS_GLOBALS = {"pxCurrentTCB": "FreeRTOS", "_kernel": "Zephyr", "_tx_thread_current_ptr": "ThreadX",
+                "osRtxInfo": "RTX5", "OSTCBCurPtr": "uC/OS", "OS_Global": "embOS", "g_readytorun": "NuttX"}
+_HALT_ORDER = ("radio", "usb", "watchdog", "rtos")
+
+
+def halt_risk_kinds(result: Mapping) -> dict:
+    """debug.halt_risk の結果（HALT_RISK_PATTERNS・RTOS_GLOBALS を条件にしたもの）を、種類（radio / usb / watchdog /
+    rtos）ごとに分ける（2026-10-23 より前の本体の halt_risk.assess）。関数の形は関数のシンボルだけ、RTOS の名前は
+    変数だけに当て、1 つのシンボルは先の種類（radio → usb → watchdog）に入れる。
+
+    経験則: 関数名の接頭辞・部分一致（ll_ = BLE のコントローラ、名前に wdt を含む = ウォッチドッグ 等）は RTOS・スタックの
+    名付けの慣習で、その名前の関数がそれをする保証は無い。外れる場合: 利用者の関数が同じ接頭辞を使う（ll_ = linked
+    list 等）、名前を変えたスタック、慣習に無いスタック。止めて壊れるかは、そのシンボルの中身（割り込みを有効にして
+    いるか・相手がいるか）で確かめる。"""
+    found: dict[str, set[str]] = {k: set() for k in _HALT_ORDER}
+    rtos: str | None = None
+    kind_of_pattern = {p: k for k, ps in HALT_RISK_PATTERNS.items() for p in ps}
+    claimed: dict[str, str] = {}
+    for m in result.get("matches", []):
+        for s in m["symbols"]:
+            if m["by"] == "name" and m["query"] in RTOS_GLOBALS and s["kind"] == "object":
+                found["rtos"].add(s["name"])
+                rtos = rtos or RTOS_GLOBALS[m["query"]]
+            elif m["by"] == "pattern" and m["query"] in kind_of_pattern and s["kind"] == "function":
+                kind = kind_of_pattern[m["query"]]
+                if _HALT_ORDER.index(kind) < _HALT_ORDER.index(claimed.get(s["name"], "rtos")):
+                    claimed[s["name"]] = kind
+    for name, kind in claimed.items():
+        found[kind].add(name)
+    reasons = []
+    for kind in _HALT_ORDER:
+        names = sorted(found[kind], key=lambda n: (not n.endswith("IRQHandler"), n))
+        if names:
+            reason = {"kind": kind, "count": len(names), "symbols": names}
+            if kind == "rtos":
+                reason["rtos"] = rtos
+            reasons.append(reason)
+    return _tag("halt_risk_name_conventions", "関数名の接頭辞・部分一致と RTOS の大域変数の名前で、止めている間も"
+                "待たない相手（無線・USB のホスト・ウォッチドッグ・RTOS）の処理が ELF にあると見る",
+                risky=bool(reasons), reasons=reasons, monitor_in_elf=result.get("monitor_in_elf"))
+
+
+def halt_risk_conventions(caller: ApiCaller) -> dict:
+    """debug.halt_risk.set に HALT_RISK_PATTERNS と RTOS_GLOBALS を渡し（デーモンの条件を置き換える。画面の警告も
+    この条件で出る）、debug.halt_risk の結果を halt_risk_kinds で分ける。"""
+    caller.call("debug.halt_risk.set", names=list(RTOS_GLOBALS),
+                patterns=[p for ps in HALT_RISK_PATTERNS.values() for p in ps])
+    return halt_risk_kinds(caller.call("debug.halt_risk"))
+
+
+# 止まって回り続ける関数（本体の liveness.py の FATAL_FUNCTIONS だったもの）
+FATAL_FUNCTIONS = frozenset({
+    "arch_system_halt", "k_fatal_halt", "z_fatal_halt",                                   # Zephyr
+    "vAssertCalled", "vApplicationStackOverflowHook", "vApplicationMallocFailedHook",     # FreeRTOS の慣習のフック
+    "abort", "_exit", "__assert_func", "__assert_fail", "__stack_chk_fail",              # C のランタイム
+    "rust_begin_unwind", "panic", "__rust_start_panic",                                   # Rust
+    "Error_Handler", "osRtxErrorNotify", "_tx_thread_system_error",                       # CMSIS の生成コード・RTX・ThreadX
+})
+# 故障の処理（CMSIS の名前・cortex-m-rt・既定の処理。本体の liveness.py の FAULT_HANDLERS だったもの）
+FAULT_HANDLER_PATTERN = r"(?i)^(HardFault|MemManage|BusFault|UsageFault|SecureFault)(_Handler)?$|^Default_?Handler_?$"
+_ASSUME_FATAL = ("Error_Handler・vAssertCalled・panic・HardFault_Handler 等の名前の関数は、致命的エラーの後に止まって"
+                 "回り続ける処理（RTOS・ランタイム・CubeMX の生成コードの慣習）")
+
+
+def liveness_conventions(caller: ApiCaller, pc_samples: int = 4) -> dict:
+    """target.liveness.set に FATAL_FUNCTIONS と FAULT_HANDLER_PATTERN を渡す（デーモンの見張りの条件を置き換える。
+    以後 PC の見本がその中にあれば target.status の fatal が kind = pc_in になる。fatal_kind で種類に分ける）。
+    pc_samples の 4 は 2026-10-23 より前の本体の固定値。
+
+    経験則: 中身を利用者が書く関数（Error_Handler・vAssertCalled・panic 等）も含む。外れる場合: その関数が戻る・
+    ログを出して続ける実装、名前を変えた処理（その名前の関数の中にいても致命的とは限らず、別の名前で止まって
+    回っていれば見つけない）。"""
+    settings = caller.call("target.liveness.set", functions=sorted(FATAL_FUNCTIONS), patterns=[FAULT_HANDLER_PATTERN],
+                           pc_samples=pc_samples)
+    return _tag("fatal_function_names", _ASSUME_FATAL, settings=settings)
+
+
+def fatal_kind(fatal: Mapping) -> dict:
+    """target.status の fatal（liveness_conventions の条件で見たもの）の kind = pc_in を、関数の名前で fault_loop
+    （故障の処理）か fatal_halt（致命的エラーの処理）に分ける（2026-10-23 より前の本体の kind）。ほかの kind はそのまま。"""
+    kind = fatal.get("kind")
+    if kind == "pc_in":
+        names = [n.strip() for n in str(fatal.get("function", "")).split(",")]
+        kind = "fault_loop" if any(re.search(FAULT_HANDLER_PATTERN, n) for n in names) else "fatal_halt"
+    return _tag("fatal_function_names", _ASSUME_FATAL, kind=kind, fatal=dict(fatal))
+
+
+# --- 4 回目に外した判断（2026-10-24。点検 docs/reports/2026-10-24-heuristics-audit-2/fprobe-sub.md） --------------
+
+_TRACEX_ISR, _TRACEX_INIT = 0xFFFFFFFF, 0xF0F0F0F0             # tracefmt.tracex の ISR_CONTEXT・INIT_CONTEXT
+
+
+def tracex_context_switches(events: Iterable[Mapping]) -> dict:
+    """TraceX の出来事（トレースの events。各出来事の args.context = その時の thread_pointer）から、文脈が別の
+    スレッドに変わった所を切り替え（task_in）とみなす（2026-10-24 より前の本体の tracefmt.tracex の推定）。
+    割り込みの中（isr_enter と isr_exit の間）・初期化の文脈では数えない。
+
+    経験則: 切り替えの時刻 = 文脈の変わった最初の出来事の時刻とする（TraceX の表示と同じ考え）。外れる場合: 切り替えの
+    後しばらく出来事の無いスレッドは、その出来事まで前のスレッドが動いていたように見える（時刻は遅れる）。出来事を
+    1 つも出さずに動いて戻ったスレッドは見えない。"""
+    out: list[dict] = []
+    running, depth = None, 0
+    for e in events:
+        ctx, kind = (e.get("args") or {}).get("context"), e.get("kind")
+        if ctx is not None and ctx not in (_TRACEX_ISR, _TRACEX_INIT) and ctx != running and depth == 0:
+            out.append({"ts": e["ts"], "kind": "task_in", "task": ctx})
+            running = ctx
+        if kind == "isr_enter":
+            depth += 1
+        elif kind == "isr_exit":
+            depth = max(0, depth - 1)
+    return _tag("tracex_context_change",
+                "スレッドは文脈の変わった最初の出来事の時刻に切り替わった（間に出来事が無ければ時刻は遅れる）",
+                task_in=out)
+
+
+# --- 5 回目に外した判断（2026-10-24。点検 docs/reports/2026-10-24-heuristics-audit-3/fprobe-sub.md の H1・H2） ----------
+
+_ASSUME_BINOMIAL = ("各サンプルが独立な二項の試行（ランダムな時刻の抽出）。PC サンプリングは周期の抽出なので、周期と"
+                    "同期した処理（割り込み等）ではこの仮定が外れ、区間は偏りを含まない")
+
+
+def _z(confidence: float) -> float:
+    if not 0 < confidence < 1:
+        raise ValueError(f"信頼度は 0 と 1 の間: {confidence}")
+    return statistics.NormalDist().inv_cdf(0.5 + confidence / 2)
+
+
+def wilson_interval(hits: int, total: int, confidence: float = 0.95) -> tuple[float, float]:
+    """二項の割合 hits / total の Wilson の区間（2026-10-24 より前の本体の profile.stats.wilson_interval）。
+    サンプルが少なくても、割合が 0 や 1 でも [0, 1] の外へ出ない。total が 0 なら何も分からない: (0, 1)。
+    仮定: 各サンプルが独立な二項の試行（_ASSUME_BINOMIAL）。信頼度 0.95 は元の本体の既定。"""
+    if not 0 <= hits <= total:
+        raise ValueError(f"数が合わない: {hits} / {total}")
+    if total == 0:
+        return 0.0, 1.0
+    z = _z(confidence)
+    p = hits / total
+    z2n = z * z / total
+    center = (p + z2n / 2) / (1 + z2n)
+    half = z / (1 + z2n) * math.sqrt(p * (1 - p) / total + z2n / (4 * total))
+    low = 0.0 if hits == 0 else max(0.0, center - half)                # 端は丸めの誤差を残さない
+    high = 1.0 if hits == total else min(1.0, center + half)
+    return low, high
+
+
+def _with_ci(row: Mapping, total: int, confidence: float) -> dict:
+    n, fraction = row["samples"], row.get("fraction")
+    denominator = round(n / fraction) if n and fraction else total    # 例外の表の分母は例外の分かったサンプル
+    return {**row, "ci": list(wilson_interval(n, denominator, confidence))}
+
+
+def sampling_intervals(result: Mapping, confidence: float = 0.95) -> dict:
+    """profile.result（または profile.group）の各行と categories に、割合の Wilson の信頼区間 ci = [下, 上] を付ける
+    （2026-10-24 より前の本体が付けていた ci。本体は回数 samples と割合 fraction だけを返す）。
+
+    仮定: 各サンプルが独立な二項の試行。外れる場合: PC サンプリングは周期の抽出で、サンプルの周期と同期した処理
+    （SysTick 等）の割合は区間の外に大きく偏りうる（2026-10-18 の実機で SysTick の負荷 0.1 % が 0 % や 0.8 % に）。
+    区間はサンプル数による誤差の目安でしかない。元の result は変えない。"""
+    total = result["total"]
+    out = {k: v for k, v in result.items() if k not in ("rows", "categories")}
+    out["rows"] = [_with_ci(r, total, confidence) for r in result.get("rows", [])]
+    if "categories" in result:
+        out["categories"] = {k: _with_ci(v, total, confidence) for k, v in result["categories"].items()}
+    return _tag("wilson_binomial", _ASSUME_BINOMIAL, confidence=confidence, **out)
+
+
+def load_outside_interval(result: Mapping, confidence: float = 0.95) -> dict:
+    """profile.result（method=itm・by="exception"）の結果で、例外トレースで測った負荷 load が、PC サンプルの割合
+    （その例外のサンプル数 / サンプルの総数 total）の Wilson の区間の外にある例外を挙げる（2026-10-24 より前の本体の
+    profile.aliasing.aliasing_notes の判定）。0 回のときも同じ区間で比べる。
+
+    仮定: 区間は各サンプルが独立な二項の試行とした推定（wilson_interval）。外れる場合: 周期の抽出の偏り（噛み合い）・
+    記録の窓とサンプルの窓の違いで外に出る。区間の外にある原因はここでも断定しない（aliasing_suspects を参照）。
+    rows が top で切られていると、rows に無い例外を 0 回として比べてしまう（全件を取って渡す）。"""
+    if result.get("by") != "exception":
+        raise ValueError('profile.result を by="exception" で取った結果を渡す（ほかの表では例外ごとの回数が無い）')
+    total = result["total"]
+    hits = {r["exception"]: r["samples"] for r in result.get("rows", [])}
+    outside = []
+    for e in result.get("exceptions", []):
+        n = hits.get(e["exception"], 0)
+        low, high = wilson_interval(n, total, confidence)
+        if not low <= e["load"] <= high:
+            outside.append({"exception": e["exception"], "name": e.get("name"), "load": e["load"], "samples": n,
+                            "total": total, "ci": [low, high]})
+    return _tag("wilson_binomial", _ASSUME_BINOMIAL, confidence=confidence, outside=outside)
+
+
+def clock_stderr(samples: Sequence[tuple[int, int]], timebase_hz: float) -> dict:
+    """(タイムベースの時刻, CYCCNT) の列の最小二乗の傾き（CPU クロック）と、その標準誤差・ppm（2026-10-24 より前の
+    本体の profile.cycles.estimate_clock が返した stderr_hz・ppm）。本体の cycles.clock は傾きと残差の事実だけを返す。
+
+    仮定: 直線からの残差が独立・等分散（読みの時刻の揺れが互いに無関係）。外れる場合: サンプラの読みが USB・DAP の
+    周期と同期して揺れる、温度で水晶がゆっくり動く（残差が相関する）と、標準誤差は実際の誤差より小さく出る。"""
+    from fprobe.profile.cycles import estimate_clock, unwrap
+    est = estimate_clock(list(samples), timebase_hz)
+    ordered = sorted(samples)
+    xs = [(t - ordered[0][0]) / timebase_hz for t, _ in ordered]
+    ys = unwrap([c for _, c in ordered])
+    mx = statistics.fmean(xs)
+    sxx = sum((x - mx) ** 2 for x in xs)
+    intercept = statistics.fmean(ys) - est.clock_hz * mx
+    sse = sum((y - intercept - est.clock_hz * x) ** 2 for x, y in zip(xs, ys))
+    n = len(xs)
+    stderr = (sse / (n - 2) / sxx) ** 0.5
+    return _tag("least_squares_iid", "直線からの残差が独立・等分散（読みの時刻の揺れが互いに無関係）",
+                clock_hz=est.clock_hz, stderr_hz=stderr, ppm=stderr / est.clock_hz * 1e6 if est.clock_hz else None,
+                samples=n)
+
+
+def _flash_command(name: str, address_bytes: int | None, dummy: int, direction: str | None, write: bool = False) -> dict:
+    return {"name": name, "address_bytes": address_bytes, "dummy": dummy, "direction": direction, "write": write}
+
+
+# 2026-10-24 より前の本体の decode/spiflash.py の表のうち、JEDEC で値の決まっていない命令（Winbond W25Q 系等でよく見る値）
+SPI_FLASH_CONVENTIONAL_COMMANDS = {
+    "0x35": _flash_command("READ_STATUS2", 0, 0, "r"), "0x15": _flash_command("READ_STATUS3", 0, 0, "r"),
+    "0x31": _flash_command("WRITE_STATUS2", 0, 0, "w", True), "0x11": _flash_command("WRITE_STATUS3", 0, 0, "w", True),
+    "0x90": _flash_command("READ_MANUFACTURER_ID", 3, 0, "r"), "0xAB": _flash_command("RELEASE_POWER_DOWN", 0, 3, "r"),
+    "0x4B": _flash_command("READ_UNIQUE_ID", 0, 4, "r"), "0xB9": _flash_command("POWER_DOWN", 0, 0, None),
+    "0x20": _flash_command("SECTOR_ERASE_4K", None, 0, None, True), "0x21": _flash_command("SECTOR_ERASE_4K_4B", 4, 0, None, True),
+    "0x52": _flash_command("BLOCK_ERASE_32K", None, 0, None, True), "0xD8": _flash_command("BLOCK_ERASE_64K", None, 0, None, True),
+    "0xDC": _flash_command("BLOCK_ERASE_64K_4B", 4, 0, None, True), "0xC7": _flash_command("CHIP_ERASE", 0, 0, None, True),
+    "0x60": _flash_command("CHIP_ERASE", 0, 0, None, True),
+    "0x75": _flash_command("SUSPEND", 0, 0, None), "0x7A": _flash_command("RESUME", 0, 0, None),
+    "0x3B": _flash_command("DUAL_OUTPUT_READ", None, 1, "multi"), "0x6B": _flash_command("QUAD_OUTPUT_READ", None, 1, "multi"),
+    "0xBB": _flash_command("DUAL_IO_READ", None, 0, "multi"), "0xEB": _flash_command("QUAD_IO_READ", None, 0, "multi"),
+    "0x32": _flash_command("QUAD_PAGE_PROGRAM", None, 0, "multi", True),
+}
+
+
+def spiflash_conventional_commands() -> dict:
+    """SPI Flash の解読（la の spiflash）の extra_commands に渡す、よく見る命令の表（2026-10-24 より前の本体の既定の表から
+    JEDEC で決まった命令を除いたもの）。
+
+    仮定: 機器がこの値をこの意味で使う。外れる場合: 製造元で意味が違う（35h・15h・31h・11h は第 2 / 第 3 の状態の
+    レジスタとは限らない、一時停止は B0h / 30h の機器もある、消去の命令と大きさは SFDP で機器が申告する）と、名前・
+    アドレスとデータの切り分け・write_disabled の誤りが誤って付く。使う機器のデータシートか SFDP で確かめる。"""
+    return _tag("spiflash_conventional_opcodes", "SPI Flash の機器がこれらの命令の値をこの意味で使う（W25Q 系等でよく見る値）",
+                commands={k: dict(v) for k, v in SPI_FLASH_CONVENTIONAL_COMMANDS.items()})

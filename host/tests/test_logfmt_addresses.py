@@ -1,4 +1,5 @@
-"""ログの文字の中のコードの番地を関数・ファイル:行にする（fprobe.logfmt.addresses）。rtt_demo の ELF を使う。"""
+"""ログの文字の中の 0x の数のうち ELF の実行区画に入る値を、その番地の関数・ファイル:行にする
+（fprobe.logfmt.addresses）。rtt_demo の ELF を使う。"""
 
 from pathlib import Path
 
@@ -26,9 +27,19 @@ def test_a_code_address_becomes_function_and_line(annotator):
 
 
 def test_the_thumb_bit_is_dropped(annotator):
+    # ARM の ELF（e_machine = EM_ARM）では bit 0 は Thumb の印（AAELF）なので落として引く。書かれた値（value）と
+    # 引いた番地（address）を両方返す
     f = Symbols(ELF).symbol("systick_handler")
     hits = annotator.find(f"LR 0x{f.address + 3:08X}")
-    assert hits[0].function == "systick_handler" and hits[0].offset == 2 and hits[0].address == f.address + 3
+    assert hits[0].function == "systick_handler" and hits[0].offset == 2
+    assert hits[0].value == f.address + 3 and hits[0].address == f.address + 2 and annotator.thumb_bit
+
+
+def test_hex_numbers_of_any_length_are_looked_at(annotator):
+    # 4〜8 桁という暗黙の境界で数を捨てない（0x の 16 進は桁数によらず、値が実行区画に入るかを見る）
+    f = Symbols(ELF).symbol("rtt_read")
+    hits = annotator.find(f"pc 0x{f.address:016x}")
+    assert [h.function for h in hits] == ["rtt_read"]
 
 
 def test_data_and_out_of_range_numbers_are_left_alone(annotator):
@@ -47,5 +58,5 @@ def test_backtrace_pairs_decode_only_the_code_side(annotator):
 def test_hits_are_jsonable(annotator):
     f = Symbols(ELF).symbol("rtt_read")
     d = annotator.find(f"0x{f.address:08x}")[0].to_dict()
-    assert d == {"address": f.address, "where": "rtt_read+0 (rtt_demo.c:131)", "function": "rtt_read", "offset": 0,
-                 "file": "rtt_demo.c", "line": 131}
+    assert d == {"value": f.address, "address": f.address, "where": "rtt_read+0 (rtt_demo.c:131)",
+                 "function": "rtt_read", "offset": 0, "file": "rtt_demo.c", "line": 131}
