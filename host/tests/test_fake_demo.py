@@ -164,3 +164,10 @@ def test_swo_trace_has_data_accesses_and_exceptions_on_the_recording_timebase():
     assert a["name"] == "counter" and a["write"] and a["file"] == "sram_demo.c" and a["line"] == 17
     assert r["exceptions"]["counts"]["SysTick"] > 100
     assert demo.swo_unconfigure()["running"] is False
+
+
+def test_demo_system_status_has_the_real_shape(demo):
+    """画面のシステム解析が読む system_status を、デモも本物と同じ形で返す（FPGA の観測は無い）"""
+    out = demo.system_status(addresses=[0x20000000])
+    assert set(out) == {"time_us", "mcu", "fpga"} and out["fpga"] == {"available": False}
+    assert out["mcu"]["connected"] is True and "0x20000000" in out["mcu"]["memory"]
