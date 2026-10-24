@@ -161,6 +161,14 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
                 out["fatal"] = fatal
         return out
 
+    def system_status(self, addresses=None, fpga_last=2000):
+        """本物の system_status の形（デモの機器に FPGA の観測は無い: fpga.available = false）。"""
+        mcu = {"connected": self.connected, **(self.target_status() if self.connected else {})}
+        if self.connected:
+            mcu["memory"] = {f"0x{a:08X}": int.from_bytes(self._mem.read(a, 4), "little") for a in addresses or []}
+        mcu["connect"] = self.link if self.connected else None
+        return {"time_us": (time.monotonic() - self.started) * 1e6, "mcu": mcu, "fpga": {"available": False}}
+
     # --- 止まったときの値 --------------------------------------------------------------------------
 
     def read_registers(self, names=None):
