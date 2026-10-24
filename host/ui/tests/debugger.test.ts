@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { confirmer } from "../src/lib/confirm";
 import { Debugger, frameLine, markedAddresses, type DebugSnapshot } from "../src/lib/debugger";
 import { AppState } from "../src/lib/state";
 import { FakeConn } from "./fake-conn";
@@ -24,7 +25,7 @@ function setup(responders: Record<string, any> = {}) {
       return { breakpoints: bps, watchpoints: [] };
     },
     "target.registers.read": { r0: 1, pc: 0x104 },
-    "debug.backtrace": [{ pc: 0x104, where: "f+0 (main.c:4)", note: "" }],
+    "debug.backtrace": [{ pc: 0x104, where: "f+0 (main.c:4)", note: "", function: "f", file: "main.c", line: 4 }],
     "debug.evaluate": ({ expression }: any) => {
       if (expression === "nope") throw new Error("シンボル 'nope' が無い");
       return { expression, type: "uint32_t", value: 256 };
@@ -339,10 +340,27 @@ describe("Debugger の呼び出し履歴", () => {
     expect(get().locals?.locals[0].name).toBe("v0");
   });
 
-  it("フレームの場所は file・line が無ければ where から", () => {
-    expect(frameLine({ pc: 1, where: "f+2 (dir/a.c:7)", note: "" })).toEqual({ file: "a.c", line: 7 });
+  it("フレームの場所はデーモンの欄 file・line だけ（where の文の形から拾わない）", () => {
+    expect(frameLine({ pc: 1, where: "f+2 (dir/a.c:7)", note: "" })).toBeNull();
     expect(frameLine({ pc: 1, where: "x", note: "", file: "C:\\src\\b.c", line: 3 })).toEqual({ file: "b.c", line: 3 });
-    expect(frameLine({ pc: 1, where: "0x100", note: "" })).toBeNull();
+    expect(frameLine({ pc: 1, where: "0x100", note: "", file: null as any, line: null as any })).toBeNull();
+  });
+
+  it("番地の場所（showAddress）は debug.symbol.info の欄 file・line で（空白を含むパスも）", async () => {
+    const { dbg } = setup({
+      "debug.symbol.info": { address: 0x104, where: "f+4 (C:\\My Src\\main.c:12)", function: "f", offset: 4,
+                             file: "C:\\My Src\\main.c", line: 12 },
+      "debug.disasm.around": { instructions: [] },
+    });
+    expect(await dbg.showAddress(0x104)).toEqual({ file: "main.c", line: 12 });
+  });
+
+  it("番地の場所が分からなければ null（where の文字を解釈しない）", async () => {
+    const { dbg } = setup({
+      "debug.symbol.info": { address: 0x104, where: "f+4 (a.c:12)", function: "f", offset: 4, file: null, line: null },
+      "debug.disasm.around": { instructions: [] },
+    });
+    expect(await dbg.showAddress(0x104)).toBeNull();
   });
 });
 
@@ -412,5 +430,52 @@ describe("ライブ ウォッチ（走らせたまま読む・ELF だけで式�
     conn.emit("target.state", { state: "RUNNING" });
     await settle();
     expect((await dbg.evaluate("*p")).value).toBe(7);
+  });
+
+  it("走っている間の書き込みは watch.write（フレームを付けない）で、書いたらウォッチを読み直す", async () => {
+    const { conn, dbg } = live();
+    conn.responders["watch.write"] = ({ expression, value }: any) => ({ expression, value });
+    conn.link!("open", {});
+    await dbg.addWatch("counter");
+    conn.emit("target.state", { state: "RUNNING" });
+    const stop = dbg.startLive(1000);
+    await settle();
+    const before = conn.calls.filter(([m]) => m === "debug.evaluate").length;
+    expect(await dbg.writeExpression("counter", 3)).toBe(true);
+    expect(conn.calls.find(([m]) => m === "watch.write")?.[1]).toEqual({ expression: "counter", value: 3 });
+    expect(conn.calls.some(([m]) => m === "debug.write_expression")).toBe(false);
+    expect(conn.calls.filter(([m]) => m === "debug.evaluate").length).toBeGreaterThan(before);
+    stop();
+  });
+
+  it("つないでいなければ書かない", async () => {
+    const { conn, dbg } = live();
+    conn.link!("open", {});
+    conn.emit("target.state", { state: "DISCONNECTED" });
+    await settle();
+    expect(await dbg.writeExpression("counter", 3)).toBe(false);
+    expect(conn.calls.some(([m]) => m === "watch.write" || m === "debug.write_expression")).toBe(false);
+  });
+
+  it("AI の作業中は確かめ、断ったら書かない（Watch・Locals の書き込みも確認を通す）", async () => {
+    const { conn, dbg } = live();
+    conn.link!("open", {});
+    conn.emit("target.state", { state: "RUNNING" });
+    await settle();
+    conn.emit("clients", { clients: [{ id: 1, name: "claude", role: "ai" }] });
+    const answer = new Promise<void>((done) => {
+      const off = confirmer.subscribe((r) => {
+        if (!r) return;
+        queueMicrotask(() => {
+          off();
+          confirmer.answer(false);
+          done();
+        });
+      });
+    });
+    const wrote = dbg.writeExpression("counter", 3);
+    await answer;
+    expect(await wrote).toBe(false);
+    expect(conn.calls.some(([m]) => m === "watch.write")).toBe(false);
   });
 });

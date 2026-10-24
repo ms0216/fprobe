@@ -97,7 +97,7 @@ class SerialDecoder:
     開始・終了は、その後 guard サンプル CLK が 1 のままのときだけ認める（CLK の立ち下がりと同じ書き込みの DAT の
     変化が、ピンのずれで先に見えても誤らない）。記録の時刻は開始のサンプル。"""
 
-    def __init__(self, clock_channel: int, data_channel: int, guard: int = 1):
+    def __init__(self, clock_channel: int, data_channel: int, guard: int):          # guard は使う側が決める（既定なし）
         self.clock, self.data, self.guard = clock_channel, data_channel, guard
         self._clk: int | None = None
         self._dat: int | None = None
@@ -212,13 +212,15 @@ class ItmDecoder:
 
 class RttDecoder:
     """RTT: u32 CYCCNT, u16 ID, u16 flags（上位 8 ビット = 0xA5 の印、bit0 = 値付き）[, u32 値]。CYCCNT の回り込みを
-    戻す（記録の間が 2^32 クロックより短い前提）。印が合わなければ 1 バイトずつずらして同期を取り直す（Loss は 1 回）。"""
+    戻す（記録の間が 2^32 クロックより短い前提）。前提で戻した回数は wraps（前提が外れると、その回数のどこかで時刻が
+    2^32 の倍数ずれる）。印が合わなければ 1 バイトずつずらして同期を取り直す（Loss は 1 回）。"""
 
     def __init__(self):
         self._buf = bytearray()
         self._high = 0
         self._last: int | None = None
         self._lost = False
+        self.wraps = 0                               # CYCCNT が減ったのを 1 周の回り込みとみなした回数
 
     def feed(self, data: bytes) -> list[Item]:
         out: list[Item] = []
@@ -246,6 +248,7 @@ class RttDecoder:
         if self._last is not None and cyc < self._last:
             high += 1 << 32
         if advance:
+            self.wraps += high != self._high
             self._high, self._last = high, cyc
         return high + cyc
 
@@ -265,7 +268,7 @@ def decode_gpio_parallel(tr: Transitions, data_channels: Sequence[int], strobe_c
     return Decoded(dec.feed(tr) + dec.flush(), 1 / tr.sample_period_s)
 
 
-def decode_gpio_serial(tr: Transitions, clock_channel: int, data_channel: int, guard: int = 1) -> Decoded:
+def decode_gpio_serial(tr: Transitions, clock_channel: int, data_channel: int, guard: int) -> Decoded:
     dec = SerialDecoder(clock_channel, data_channel, guard)
     return Decoded(dec.feed(tr) + dec.flush(), 1 / tr.sample_period_s)
 
@@ -277,6 +280,7 @@ def decode_itm(items: Iterable[Packet | TimedPacket | tuple[int, Packet]], hz: f
 
 
 def decode_rtt(data: bytes, hz: float) -> Decoded:
-    """hz: コアのクロック（CYCCNT の速さ）。"""
+    """hz: コアのクロック（CYCCNT の速さ）。wraps = CYCCNT の回り込みを仮定した回数（RttDecoder.wraps）。"""
     dec = RttDecoder()
-    return Decoded(dec.feed(data) + dec.flush(), hz)
+    items = dec.feed(data) + dec.flush()
+    return Decoded(items, hz, wraps=dec.wraps)

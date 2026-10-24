@@ -1,20 +1,15 @@
-// Interrupts のビューの計算（SystemView・IAR Interrupt Log・MCUXpresso SWO Interrupt Trace の型）。Svelte・DOM に依らない。
-// 材料は 2 つ: 記録の stream "rtos" の割り込みの区間（isr。時刻がタイムベース = 時間軸へ飛べる。SQL で読む）と、
-// Code Profile の SWO 例外トレース（profile.exceptions。時刻はコアのクロック数なので時間軸へは飛べない）。
+// Interrupts のビュー（SystemView・IAR Interrupt Log・MCUXpresso SWO Interrupt Trace の型）の、API の応答を描く形への写し。
+// Svelte・DOM に依らない。材料は 2 つ: 記録の割り込みの区間（recording.interrupts。時刻がタイムベース = 時間軸へ飛べる）
+// と、Code Profile の SWO 例外トレース（profile.exceptions。時刻はコアのクロック数なので時間軸へは飛べない）。どちらも
+// デーモンが同じ形で数える（回数・時間・自分の時間・負荷・分布）。画面では数えない。
 import type { Bar } from "./chart";
 import type { DaemonConnection } from "./api";
 
 type Conn = Pick<DaemonConnection, "call">;
+const quiet = { quiet: true };
 
-/** 1 回の割り込み（記録の時刻） */
-export interface Activation {
-  t: number;
-  tEnd: number;
-  inclusive: number;
-  self: number;
-}
-
-/** 割り込みごとの統計。時間は秒（unit の 1 秒あたりの数 hz で割った値） */
+/** 割り込みごとの統計。時間は秒（unit の 1 秒あたりの数 hz で割った値）。hz が分からなければ unit の数のまま
+ *  （タイムベース・コアのクロックの数。秒として出さない） */
 export interface IsrStat {
   number: number;
   name: string;
@@ -29,100 +24,62 @@ export interface IsrStat {
   maxEnd: number | null;
 }
 
-export const ISR_SQL = "SELECT t, t_end, a, json_extract(body, '$.name') FROM events WHERE stream = 'rtos' "
-  + "AND kind = 'isr' AND t_end IS NOT NULL ORDER BY t";
-export const SPAN_SQL = "SELECT MIN(t), MAX(COALESCE(t_end, t)), timebase_hz() FROM events WHERE stream = 'rtos'";
-
-/** 入れ子の区間から、回ごとの自分の時間（中に入れ子になった回の時間を引く） */
-export function activations(rows: [number, number, number, string | null][]): Map<number, { name: string; acts: Activation[] }> {
-  const ordered = rows.map((r, i) => ({ r, i })).sort((x, y) => x.r[0] - y.r[0] || y.r[1] - x.r[1]);
-  const nested = new Map<number, number>();
-  const stack: { r: [number, number, number, string | null]; i: number }[] = [];
-  for (const cur of ordered) {
-    while (stack.length && stack[stack.length - 1].r[1] <= cur.r[0]) stack.pop();
-    const parent = stack[stack.length - 1];
-    if (parent && cur.r[1] <= parent.r[1]) nested.set(parent.i, (nested.get(parent.i) ?? 0) + cur.r[1] - cur.r[0]);
-    stack.push(cur);
-  }
-  const out = new Map<number, { name: string; acts: Activation[] }>();
-  rows.forEach(([t, tEnd, n, name], i) => {
-    const e = out.get(n) ?? { name: name ?? `#${n}`, acts: [] };
-    e.acts.push({ t, tEnd, inclusive: tEnd - t, self: tEnd - t - (nested.get(i) ?? 0) });
-    out.set(n, e);
-  });
-  return out;
+/** 1 回の割り込み（記録の時刻。inclusive はタイムベースの数） */
+export interface Activation {
+  t: number;
+  tEnd: number;
+  inclusive: number;
 }
 
-/** 回の並び → 統計（時間は秒） */
-export function statsOf(groups: Map<number, { name: string; acts: Activation[] }>, hz: number,
-                        span: number | null): IsrStat[] {
-  const rows: IsrStat[] = [];
-  for (const [number, { name, acts }] of groups) {
-    if (!acts.length) continue;
-    let total = 0, self = 0, min = Infinity, longest = acts[0];
-    for (const a of acts) {
-      total += a.inclusive;
-      self += a.self;
-      min = Math.min(min, a.inclusive);
-      if (a.inclusive > longest.inclusive) longest = a;
-    }
-    rows.push({ number, name, count: acts.length, total: total / hz, self: self / hz, min: min / hz,
-                max: longest.inclusive / hz, mean: total / acts.length / hz, load: span ? self / span : null,
-                maxAt: longest.t, maxEnd: longest.tEnd });
-  }
-  return rows.sort((a, b) => b.self - a.self);
+/** profile.exceptions・recording.interrupts の時間の単位（Hz。分からなければ null） */
+export function profileHz(r: any): number | null {
+  const hz = r?.clock_hz ?? r?.timebase_hz;
+  return Number(hz) > 0 ? Number(hz) : null;
 }
 
-/** 記録の割り込み（統計と回の並び） */
-export async function recordedIsrs(conn: Conn): Promise<{ stats: IsrStat[]; groups: Map<number, { name: string; acts: Activation[] }>;
-                                                         hz: number; truncated: boolean }> {
-  const [r, s] = await Promise.all([conn.call("recording.query", { sql: ISR_SQL, limit: 100000 }, { quiet: true }),
-                                    conn.call("recording.query", { sql: SPAN_SQL }, { quiet: true })]);
-  const [t0, t1, hz] = s.rows?.[0] ?? [0, 0, 1];
-  const groups = activations(r.rows ?? []);
-  return { stats: statsOf(groups, hz || 1, t1 > t0 ? t1 - t0 : null), groups, hz: hz || 1, truncated: !!r.truncated };
-}
-
-/** profile.exceptions の結果 → 統計（秒。clock_hz が無ければクロック数のまま） */
+/** profile.exceptions・recording.interrupts の exceptions → 統計（秒。単位が分からなければ数のまま）。並びは API のまま */
 export function statsFromProfile(r: any): IsrStat[] {
-  const hz = r.clock_hz || 1;
-  return (r.exceptions ?? []).map((e: any): IsrStat => ({
+  const hz = profileHz(r) ?? 1;
+  return (r?.exceptions ?? []).map((e: any): IsrStat => ({
     number: e.exception, name: e.name, count: e.count, total: e.total_inclusive / hz, self: e.total_self / hz,
     min: e.inclusive.min / hz, max: e.inclusive.max / hz, mean: e.inclusive.mean / hz, load: e.load ?? null,
     maxAt: e.max_at ?? null, maxEnd: e.max_end ?? null,
   }));
 }
 
-/** 分布図: 時間（含む）を bins 本の棒に。長い順の上位 LONGEST 回を含む棒に印（外れ値の経験則は使わない） */
+/** 分布図（recording.interrupts の distribution）: 棒・長い順の上位・棒ごとのいちばん長い回（ダブルクリックの飛ぶ先） */
 export interface Histogram {
   bars: Bar[];
-  longest: Activation[];           // 長い順の上位 LONGEST 回
-  bins: Activation[][];            // 棒ごとの回
+  longest: Activation[];
+  binLongest: (Activation | null)[];
 }
 
-const LONGEST = 10;
+const act = (a: any): Activation => ({ t: a.t, tEnd: a.t_end, inclusive: a.inclusive });
 
-export function histogram(acts: Activation[], bins = 24): Histogram {
-  if (!acts.length) return { bars: [], longest: [], bins: [] };
-  const sorted = acts.map((a) => a.inclusive).sort((a, b) => a - b);
-  const integral = sorted.every(Number.isInteger);
-  // 整数（タイムベースの数）で種類が棒の数より少なければ 1 つの値に 1 本（空の棒を挟まない）
-  const narrow = integral && sorted[sorted.length - 1] - sorted[0] + 1 <= bins;
-  const lo = narrow ? sorted[0] - 0.5 : sorted[0], hi = narrow ? sorted[sorted.length - 1] + 0.5 : sorted[sorted.length - 1];
-  const n = narrow ? hi - lo : hi > lo ? bins : 1;
-  const width = narrow ? 1 : hi > lo ? (hi - lo) / n : 1;
-  const groups: Activation[][] = Array.from({ length: n }, () => []);
-  for (const a of acts) groups[Math.min(n - 1, Math.floor((a.inclusive - lo) / width))].push(a);
-  const longest = [...acts].sort((a, b) => b.inclusive - a.inclusive || a.t - b.t).slice(0, LONGEST);
-  const top = new Set(longest);
-  const bars = groups.map((g, i): Bar => ({ x0: lo + i * width, x1: lo + (i + 1) * width, y: g.length,
-                                          mark: g.some((a) => top.has(a)) }));
-  return { bars, longest, bins: groups };
+/** distribution → 分布図。長い順の上位の入った棒に印（外れ値の経験則は使わない。API の bin のまま） */
+export function histogramOf(d: any): Histogram | null {
+  if (!d) return null;
+  const marked = new Set<number>((d.longest ?? []).map((a: any) => a.bin));
+  const boxes: any[] = d.histogram ?? [];
+  return { bars: boxes.map((b, i): Bar => ({ x0: b.lo, x1: b.hi, y: b.count, mark: marked.has(i) })),
+           longest: (d.longest ?? []).map(act), binLongest: boxes.map((b) => (b.longest ? act(b.longest) : null)) };
 }
 
-/** 棒の中でいちばん長い回（時間軸へ飛ぶ先） */
+/** 棒の中でいちばん長い回（時間軸へ飛ぶ先。API の箱ごとの longest） */
 export function longestIn(h: Histogram, bar: number | null): Activation | null {
-  const g = bar === null ? null : h.bins[bar];
-  if (!g?.length) return null;
-  return g.reduce((a, b) => (b.inclusive > a.inclusive ? b : a));
+  return bar === null ? null : h.binLongest[bar] ?? null;
+}
+
+/** 記録の割り込み（recording.interrupts）。number・bins・longest があればその割り込みの分布も */
+export async function recordedIsrs(conn: Conn, dist: { number: number; bins: number; longest: number } | null):
+  Promise<{ stats: IsrStat[]; hz: number | null; histogram: Histogram | null }> {
+  const r: any = await conn.call("recording.interrupts", dist ?? {}, quiet);
+  return { stats: statsFromProfile(r), hz: profileHz(r), histogram: histogramOf(r.distribution) };
+}
+
+/** 記録の時刻 t に実行していた割り込み（recording.interrupts の at_numbers の最後 = いちばん内側。無ければ null） */
+export async function isrAt(conn: Conn, t: number): Promise<number | null> {
+  const r: any = await conn.call("recording.interrupts", { at: t }, quiet);
+  const at: number[] = r?.at_numbers ?? [];
+  return at.length ? at[at.length - 1] : null;
 }

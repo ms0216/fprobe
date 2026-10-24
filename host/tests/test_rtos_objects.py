@@ -67,9 +67,28 @@ def by_name(objects):
 
 def test_variables_holding_handles_are_found_through_types(kernel):
     info, _ = shared()
-    found = {f.expression: f for f in typed_variables(info, rtos_of(kernel).mem, {"QueueDefinition": "queue"})}
+    found = {f.expression: f for f in typed_variables(info, rtos_of(kernel).mem, {"QueueDefinition": "queue"}).found}
     assert found["cmd_queue"].address == kernel.queues["cmd_queue"] and found["cmd_queue"].pointer
     assert "done_sem" not in found                                    # ハンドルの変数が 0（作る前）は出さない
+
+
+def test_the_type_search_reports_what_its_limits_left_unread(kernel):
+    # 黙って数え止めない（総点検）: 配列の要素・入れ子の深さ・読むハンドルの上限で見ていない所を事実として返す
+    info, _ = shared()
+    mem = rtos_of(kernel).mem
+    search = typed_variables(info, mem, {"xMINI_LIST_ITEM": "mini"})
+    assert len([f for f in search.found if f.expression.startswith("pxReadyTasksLists")]) == 5
+    assert search.elements_cut == [] and search.depth_cut == [] and search.notes() == []
+    cut = typed_variables(info, mem, {"xMINI_LIST_ITEM": "mini"}, max_elements=2)
+    assert [f.expression for f in cut.found if f.expression.startswith("pxReadyTasksLists")] == [
+        "pxReadyTasksLists[0].xListEnd", "pxReadyTasksLists[1].xListEnd"]
+    assert cut.elements_cut == [("pxReadyTasksLists", 5)] and cut.limits["max_elements"] == 2
+    assert any("pxReadyTasksLists（5 要素）" in n and "2" in n for n in cut.notes())
+    shallow = typed_variables(info, mem, {"xMINI_LIST_ITEM": "mini"}, max_depth=1)
+    assert shallow.depth_cut == [f"pxReadyTasksLists[{i}]" for i in range(5)]
+    assert "xDelayedTaskList1.xListEnd" in [f.expression for f in shallow.found]
+    handles = typed_variables(info, mem, {"xLIST": "list"}, max_pointers=1)
+    assert handles.pointers_unread >= 1 and any("上限 1" in n for n in handles.notes())
 
 
 def test_queues_semaphores_and_mutexes(kernel):
@@ -93,10 +112,13 @@ def test_objects_found_only_through_a_waiting_task_are_named_by_address(kernel):
     producer = k.task("producer", 1)                                    # 名前の無いキューに送ろうとして待っている
     k.put_state(producer, k.var("xSuspendedTaskList"))
     k.put_event(producer, k.senders(k.queues["hidden"]))
+    # 総点検 T9: 登録簿にも変数にも無い待ちリストの持ち主を、「キューらしさ」の閾値で推定しない。待ちリストの番地と
+    # 待っているタスクの事実だけを返す（持ち主の種類は unknown）
     objects = by_name(rtos_of(k).objects())
-    hidden = objects[f"0x{k.queues['hidden']:08X}"]
-    assert hidden.source == "waiter" and hidden.kind == "queue" and hidden.fields["item_size"] == 8
-    assert [(w.task, w.reason) for w in hidden.waiters] == [("producer", "send")]
+    lst = k.senders(k.queues["hidden"])
+    hidden = objects[f"0x{lst:08X}"]
+    assert hidden.source == "waiter" and hidden.kind == "unknown" and hidden.wait_lists == (lst,)
+    assert [(w.task, w.reason) for w in hidden.waiters] == [("producer", "event")]          # 待ちの理由も持ち主から推さない
 
 
 def test_timers(kernel):
@@ -129,6 +151,29 @@ def test_stream_and_message_buffers(kernel):
     message = objects["msg_buffer"]
     assert message.kind == "message_buffer" and message.fields["used"] == 14
     assert message.fields["messages"] == 2 and message.fields["next_message"] == 4
+    # 長さの語の大きさは 4 バイトと仮定せず、FreeRTOS の stream_buffer.c の configMESSAGE_BUFFER_LENGTH_TYPE の変数の
+    # DWARF の型から決める（事実）
+    assert message.fields["message_length_bytes"] == 4
+    assert "configMESSAGE_BUFFER_LENGTH_TYPE" in message.fields["message_length_from"]
+
+
+def test_messages_are_not_counted_when_the_length_type_is_unknown(kernel, monkeypatch):
+    import fprobe.rtos.freertos_objects as fo
+    monkeypatch.setattr(fo, "MESSAGE_LENGTH_VARIABLES", {"no_such_function": "x"})
+    message = by_name(rtos_of(kernel).objects())["msg_buffer"]
+    assert message.fields["messages"] is None and message.fields["message_length_bytes"] is None
+    assert any("configMESSAGE_BUFFER_LENGTH_TYPE" in n for n in message.notes)
+
+
+def test_messages_counted_up_to_the_limit_say_so(kernel, monkeypatch):
+    # 黙って数え止めない（総点検）: メッセージを数える上限で止めたら、止めた印と上限を返す
+    import fprobe.rtos.freertos_objects as fo
+    monkeypatch.setattr(fo, "MAX_MESSAGES", 1)
+    message = by_name(rtos_of(kernel).objects())["msg_buffer"]
+    assert message.fields["messages"] == 1 and message.fields["messages_truncated"] is True
+    assert any("上限 1" in n for n in message.notes)
+    monkeypatch.setattr(fo, "MAX_MESSAGES", 1024)
+    assert "messages_truncated" not in by_name(rtos_of(kernel).objects())["msg_buffer"].fields
 
 
 def test_kinds_filter_and_sorting(kernel):
@@ -137,11 +182,13 @@ def test_kinds_filter_and_sorting(kernel):
 
 
 def test_heap_4(kernel):
+    """方式は変数の有無からの推定でなく、ヒープの変数を定めた源のファイル（DWARF の decl_file）。総量は ucHeap の
+    大きさ（configTOTAL_HEAP_SIZE）そのもの（port で違う portBYTE_ALIGNMENT を決め打ちで引かない）。"""
     heap = rtos_of(kernel).heap()
     d = heap.to_dict()
-    assert d["scheme"] == "heap_4" and d["total"] == 20 * 1024 - 8
+    assert d["scheme"] == "heap_4" and d["source"] == "heap_4.c" and d["total"] == 20 * 1024
     assert (d["free"], d["min_free"], d["allocations"], d["frees"]) == (9000, 8000, 20, 2)
-    assert d["used"] == 20 * 1024 - 8 - 9000 and d["peak_used"] == 20 * 1024 - 8 - 8000
+    assert d["used"] == 20 * 1024 - 9000 and d["peak_used"] == 20 * 1024 - 8000
     assert d["free_blocks"] == 2 and d["largest_free_block"] == 1024
 
 
@@ -199,4 +246,4 @@ def test_words_for_the_sampler(kernel):
     k.u32(k.var("xIdleTaskHandles"), k.handles["IDLE"])
     assert rtos.idle_handles() == {k.handles["IDLE"]}
     assert rtos.handle_priority(k.handles["worker"]) == 1                    # 継承の前（uxBasePriority）
-    assert rtos.heap_free_word() == (k.var("xFreeBytesRemaining"), 20 * 1024 - 8)
+    assert rtos.heap_free_word() == (k.var("xFreeBytesRemaining"), 20 * 1024)

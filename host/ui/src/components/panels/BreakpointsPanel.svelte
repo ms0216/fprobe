@@ -3,17 +3,21 @@
   // ブレークポイントごとの条件・ヒット カウント・ログ メッセージの編集（VS Code の Edit Condition / Hit Count /
   // Log Message、Ozone の Breakpoint Properties）、ログ・ブレークポイントの記録（時刻があれば時間軸へ）、
   // ベクタ キャッチ（IAR・J-Link の Vector Catch）、Flash ブレークポイントの様子、デバッグの方式（停止 / モニタ。
-  // J-Link の Monitor Mode）（詳細に畳む）
+  // J-Link の Monitor Mode）、止める前の警告・走らせたままの見張りの条件（SafetyConditions）（詳細に畳む）
   import { onDestroy } from "svelte";
   import {
     BreakpointLog, VECTOR_CATCH, catchState, changesBreakpoints, changesCatch, editOf, formatLog, logMarks, setParams, toggled,
     type ActionEdit, type LogEntry, type VectorCatchState,
   } from "../../lib/breakpoints";
+  import { BREAKPOINT_LOG_KEEP } from "../../lib/breakpoints";
+  import { breakpointMenu, openMenu } from "../../lib/contextmenu";
+  import type { Breakpoint } from "../../lib/debugger";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n, t, type Key } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import { nearestAtOrBefore, onTimeline } from "../../lib/timeline/events";
+  import SafetyConditions from "./SafetyConditions.svelte";
   import TimeLink from "./TimeLink.svelte";
   import { hex32 } from "./format";
 
@@ -26,6 +30,7 @@
   let editError = $state<string | null>(null);
   let vc = $state<VectorCatchState | null>(null);
   let entries = $state<LogEntry[]>([]);
+  let discarded = $state(0);                       // 画面に持つ上限を超えて捨てたログの行
   let selected = $state<number | null>(null);           // 選んだログの seq
   let flashBp = $state<any>(null);
   let mode = $state<any>(null);                         // target.debug_mode.get
@@ -46,6 +51,17 @@
     if (!file || line === undefined) return;
     await dbg.openFile(file);
     ui.select(file, line);
+  }
+
+  /** 表の行の右クリック（lib/contextmenu.ts の breakpointMenu） */
+  function rowContext(e: MouseEvent, b: Breakpoint) {
+    openMenu(e, breakpointMenu(b, online ? null : "tip.offline", {
+      enable: async (enabled) => (await allowed(app)) && dbg.enableBreakpoint(b.location, enabled),
+      edit: () => startEdit(b.location, b.action),
+      remove: async () => (await allowed(app)) && dbg.removeBreakpoint(b.location),
+      source: b.file && b.line !== undefined ? () => go(b.file, b.line) : null,
+      removeAll: async () => (await allowed(app)) && dbg.removeAllBreakpoints(),
+    }));
   }
 
   function startEdit(location: string, action: any) {
@@ -74,7 +90,10 @@
 
   // --- ログ・ブレークポイントの記録（1 秒ごとに続きを読む）・時間軸の印 ---
   const feed = new BreakpointLog((m, p, o) => conn.call(m, p, o));
-  const stopFeed = feed.subscribe((e) => (entries = e));
+  const stopFeed = feed.subscribe((e) => {
+    entries = e;
+    discarded = feed.discarded;
+  });
   const timer = setInterval(() => {
     if (online && connected) void feed.poll();
   }, 1000);
@@ -191,7 +210,10 @@
   {#if $dbg.breakpoints.length || $dbg.watchpoints.length}
     <ul class="list mono">
       {#each $dbg.breakpoints as b (b.address)}
-        <li>
+        <li oncontextmenu={(e) => rowContext(e, b)} class:off={b.enabled === false}>
+          <input type="checkbox" checked={b.enabled !== false} disabled={!online} title={$i18n("bp.enabledTip")}
+                 aria-label={$i18n("bp.enabledTip")}
+                 onclick={async (e) => { e.preventDefault(); if (await allowed(app)) await dbg.enableBreakpoint(b.location, b.enabled === false); }} />
           <span class="dot" class:log={b.action && b.action.log !== null} class:cond={b.action && b.action.log === null}></span>
           <button class="link" onclick={() => go(b.file, b.line)}>{b.location}</button>
           <span class="info">
@@ -250,6 +272,7 @@
     <summary>{$i18n("bp.log")} {#if entries.length}<span class="count">{entries.length}</span>{/if}</summary>
     {#if entries.length}
       <div class="row pad">
+        {#if discarded}<span class="muted">{$i18n("common.discarded", { n: discarded, limit: BREAKPOINT_LOG_KEEP })}</span>{/if}
         <span class="spacer"></span>
         <button class="small" title={$i18n("bp.clearLogTip")} onclick={() => feed.clear()}>{$i18n("bp.clearLog")}</button>
       </div>
@@ -320,6 +343,8 @@
     {/if}
   </details>
 
+  <SafetyConditions />
+
   <details open={open.flash} ontoggle={(e) => toggleSection("flash", e)}>
     <summary title={$i18n("bp.flashTip")}>{$i18n("bp.flash")}</summary>
     {#if flashBp?.available}
@@ -357,6 +382,8 @@
   .info { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
   .buttons { display: flex; gap: 4px; }
   .dot, .watch { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  li.off .dot { background: none; box-shadow: inset 0 0 0 2px var(--bad); }       /* 無効（中抜き） */
+  li.off > .link { color: var(--muted); }
   .dot.log { border-radius: 1px; transform: rotate(45deg); }               /* ログ（VS Code の Logpoint の菱形） */
   .dot.cond { box-shadow: inset 0 0 0 2px var(--panel); outline: 1px solid var(--bad); }
   .watch { border-radius: 2px; background: var(--warn); }

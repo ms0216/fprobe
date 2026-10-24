@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import re
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -20,17 +19,9 @@ from ..profile.exceptions import Activation
 from ..rtos.timeline import TaskEvent
 
 __all__ = ["KINDS", "STREAM", "TargetClock", "TaskInfo", "Trace", "TraceEvent", "activations", "task_events",
-           "is_rtos_idle_name", "unwrap32", "write_trace"]
+           "unwrap32", "write_trace"]
 
 STREAM = "trace"
-# RTOS のソースが定めるアイドルのタスクの名前: FreeRTOS の configIDLE_TASK_NAME の既定 "IDLE"（SMP はコアの番号が付く）・
-# Zephyr の "idle"（SMP は "idle %02d"）・RTX5 の "osRtxIdleThread"。部分一致はしない（利用者のタスクを idle にしない）
-_IDLE_NAME = re.compile(r"IDLE\d*|idle( \d+)?|osRtxIdleThread")
-
-
-def is_rtos_idle_name(name: str) -> bool:
-    """RTOS が定めるアイドルのタスクの名前と完全に一致するか（取り込んだトレースでカーネルの情報が無いとき）。"""
-    return bool(_IDLE_NAME.fullmatch(name))
 KINDS = (
     "task_in",        # タスクが CPU を使い始めた（task = そのタスク）
     "task_out",       # タスクが CPU を手放した
@@ -95,7 +86,17 @@ class Trace:
     lost: int = 0                   # あふれ・解読の誤りで失った出来事の数（分かる範囲）
     errors: int = 0                 # 解読できなかったかたまりの数
     notes: list[str] = field(default_factory=list)
-    idle: set[int] = field(default_factory=set)   # アイドルのタスク（分かれば）
+    ts_wraps: int = 0               # 時刻の桁あふれを「前の出来事から 1 周未満」の前提で戻した回数（unwrap）
+
+    def unwrap(self, previous: int | None, value: int, mask: int = 0xFFFFFFFF) -> int:
+        """mask の幅で送られた時刻を、前の値（単調）から続く値にする（unwrap32 と同じ）。前の値より小さく戻った
+        （桁あふれとみなした）回数を ts_wraps に数える。前提: 出来事の間は 1 周（mask + 1）未満。外れると、その
+        回数のどこかで時刻が 1 周の倍数ずれる（形式に上位の桁が無いので、解読からは分からない）。"""
+        if previous is None:
+            return value
+        if value < previous & mask:
+            self.ts_wraps += 1
+        return previous + ((value - previous) & mask)
 
     def task(self, task_id: int) -> TaskInfo:
         return self.tasks.setdefault(task_id, TaskInfo(task_id))
@@ -109,7 +110,7 @@ class Trace:
             counts[e.kind] = counts.get(e.kind, 0) + 1
         out = {"format": self.format, "events": len(self.events), "kinds": counts,
                "tasks": [t.to_dict() for t in sorted(self.tasks.values(), key=lambda t: t.id)],
-               "lost": self.lost, "errors": self.errors, "notes": list(self.notes)}
+               "lost": self.lost, "errors": self.errors, "notes": list(self.notes), "ts_wraps": self.ts_wraps}
         if self.events:
             out.update(ts_first=self.events[0].ts, ts_last=self.events[-1].ts)
             if self.ts_hz:

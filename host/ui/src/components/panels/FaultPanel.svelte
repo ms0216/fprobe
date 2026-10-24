@@ -2,14 +2,18 @@
   // Fault Analyzer（STM32CubeIDE）・Fault exception viewer（IAR）: 故障で止まったときの原因（CFSR・HFSR の立っている
   // ビットの意味と手がかり）、故障のアドレス（MMFAR・BFAR → Memory）、故障した命令（積まれた PC → Source・Disassembly）、
   // スタックされたレジスタ、呼び出し履歴（各フレーム → Source）。故障で止まると App が自動で開く（lib/fault.ts の
-  // watchFaults）。故障していなければその旨と「故障で中断する」（ベクタ キャッチ）
+  // watchFaults）。故障していなければその旨と「故障で中断する」（ベクタ キャッチ）。
+  // 故障のレジスタと積まれたレジスタは、値のダブルクリックで target.memory.write で書ける（番地と大きさは target.fault の
+  // locations の事実。1 を書いて消すレジスタは write_one_to_clear）
   import { errorText } from "../../lib/api";
   import { FAULT_CATCH, VECTOR_CATCH, catchState, changesCatch, type VectorCatchState } from "../../lib/breakpoints";
   import { shared } from "../../lib/context";
-  import { STACKED, VALID_BITS, causeRegister, headline, isFault, reportText, type FaultReport } from "../../lib/fault";
+  import { STACKED, headline, isFault, reportText, type FaultReport } from "../../lib/fault";
   import { allowed } from "../../lib/guard";
-  import { decodeParams, markersAt, parseCount, readHistory, trailingMarkers, type EtmHistory, type EtmSourceForm } from "../../lib/etm";
+  import { configParam, decodeParams, markersAt, parseCount, readHistory, trailingMarkers, type Cut, type EtmConfigForm, type EtmHistory, type EtmSourceForm } from "../../lib/etm";
   import { load, save } from "../../lib/prefs";
+  import { locationOf, memoryWriteCall, writeBuilt, writeOneToClear, type Location } from "../../lib/valuewrite";
+  import EditValue from "./EditValue.svelte";
   import { i18n } from "../../lib/i18n";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
@@ -22,10 +26,11 @@
   let savedTo = $state<string | null>(null);             // 「状態を保存」の保存先（Recordings に一覧）
   // 直前の命令（ETM）: トレースのバイトの置き場所はその人のブラウザに覚える（ボード・ファームウェアで決まる）
   let etmForm = $state<EtmSourceForm>(restoreEtm());
-  let etmCount = $state(load("fault.etmCount", "32"));
+  let etmConfig = $state<EtmConfigForm>({ commitOpt1: "", vmidBytes: "", cidBytes: "" });   // 空 = trace.etm.start の ID レジスタ
+  let etmCount = $state(load("fault.etmCount", ""));                // 読む命令の数は使う人が入れる（画面の既定を持たない）
   let etmHistory = $state<EtmHistory | null>(null);
   let etmError = $state<string | null>(null);
-  let etmDecode = $state<{ errors: string[]; note?: string } | null>(null);   // 解読の誤り・注記（decode の結果）
+  let etmDecode = $state<{ errors: string[]; cut: Cut | null; note?: string } | null>(null);   // 解読の誤り・注記（decode の結果）
   let etmBusy = $state(false);
 
   const online = $derived($app.link === "open");
@@ -67,6 +72,13 @@
     }
   }
 
+  /** 番地に書いて、止まっていれば読み直す */
+  async function writeAt(at: Location, input: string): Promise<string | null> {
+    const error = await writeBuilt(app, memoryWriteCall(at, input), $i18n);
+    if (!error && halted) await read();
+    return error;
+  }
+
   async function haltOnFaults() {
     if (!(await allowed(app))) return;
     const r = await app.act("target.vector_catch", { catch: [...new Set([...(vc?.enabled ?? []), ...FAULT_CATCH])] as any });
@@ -101,6 +113,11 @@
       etmError = $i18n("fault.etmBadField", { field: built.error });
       return;
     }
+    const config = configParam(etmConfig);
+    if ("error" in config) {
+      etmError = $i18n("fault.etmBadField", { field: config.error });
+      return;
+    }
     const count = parseCount(etmCount);
     if (count === null) {
       etmError = $i18n("fault.etmBadField", { field: "count" });
@@ -110,11 +127,11 @@
     save("fault.etmSource", JSON.stringify(etmForm));
     save("fault.etmCount", etmCount);
     etmBusy = true;
-    const r = await readHistory(conn, built.params, count);
+    const r = await readHistory(conn, { ...built.params, ...config.params }, count);
     etmBusy = false;
     etmHistory = r.history;
     etmError = r.error;
-    etmDecode = r.history ? { errors: r.decodeErrors ?? [], note: r.decodeNote } : null;
+    etmDecode = r.history ? { errors: r.decodeErrors ?? [], cut: r.decodeErrorsCut ?? null, note: r.decodeNote } : null;
   }
 </script>
 
@@ -135,8 +152,8 @@
           <thead><tr><th>{$i18n("fault.register")}</th><th>{$i18n("fault.bit")}</th><th>{$i18n("fault.description")}</th></tr></thead>
           <tbody>
             {#each report.causes as c (c.bit)}
-              <tr class:minor={VALID_BITS.has(c.bit)}>
-                <td class="mono muted">{causeRegister(c.bit)}</td>
+              <tr>
+                <td class="mono muted">{c.register ?? ""}</td>
                 <td class="mono bit">{c.bit}</td>
                 <td>{c.meaning}{#if c.hint}<div class="muted hint">{c.hint}</div>{/if}</td>
               </tr>
@@ -164,8 +181,7 @@
             <dt title={$i18n("fault.addressTip")}>{$i18n("fault.address")}</dt>
             <dd class="mono"><button class="link" onclick={() => showMemory(report!.fault_address!.address)}>
               {hex32(report.fault_address.address)}</button>
-              {#if report.fault_address.where && !report.fault_address.where.startsWith("0x")}
-                <span class="muted">{report.fault_address.where}</span>{/if}</dd>
+              {#if report.fault_address.where}<span class="muted">{report.fault_address.where}</span>{/if}</dd>
           {/if}
         </dl>
       </section>
@@ -178,7 +194,11 @@
           </div>
           <div class="regs mono">
             {#each STACKED as r (r)}
-              <span class="muted">{r}</span><span>{hex32(report.frame.registers[r])}</span>
+              {@const at = locationOf(report.frame, r)}
+              <span class="muted">{r}</span><span><EditValue text={hex32(report.frame.registers[r])}
+                via={at && connected ? "target.memory.write" : null}
+                note={at ? $i18n("write.at", { address: hex32(at.address), size: at.size }) : ""}
+                reason={at ? "" : $i18n("write.noLocation")} onwrite={(input) => writeAt(at!, input)} /></span>
             {/each}
           </div>
         {:else}
@@ -222,13 +242,25 @@
           <option value="file">{$i18n("fault.etmFile")}</option>
         </select>
         {#if etmForm.kind === "memory"}
-          <input class="mono" bind:value={etmForm.address} placeholder={$i18n("fault.etmAddress")} aria-label={$i18n("fault.etmAddress")} />
-          <input class="mono num" bind:value={etmForm.length} placeholder={$i18n("fault.etmLength")} aria-label={$i18n("fault.etmLength")} />
-          <input class="mono num" bind:value={etmForm.oldest} placeholder={$i18n("fault.etmOldest")} aria-label={$i18n("fault.etmOldest")} />
+          <input class="mono" bind:value={etmForm.address} placeholder={$i18n("fault.etmAddress")} aria-label={$i18n("fault.etmAddress")}
+                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={etmForm.length} placeholder={$i18n("fault.etmLength")} aria-label={$i18n("fault.etmLength")}
+                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={etmForm.oldest} placeholder={$i18n("fault.etmOldest")} aria-label={$i18n("fault.etmOldest")}
+                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
         {:else}
-          <input class="mono" bind:value={etmForm.path} placeholder={$i18n("fault.etmPath")} aria-label={$i18n("fault.etmPath")} />
+          <input class="mono" bind:value={etmForm.path} placeholder={$i18n("fault.etmPath")} aria-label={$i18n("fault.etmPath")}
+                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
         {/if}
-        <input class="mono num" bind:value={etmCount} aria-label={$i18n("fault.etmCount")} title={$i18n("fault.etmCount")} />
+        <select bind:value={etmConfig.commitOpt1} aria-label="commit_opt1" title={$i18n("fault.etmConfigTip")}>
+          <option value="">{$i18n("fault.etmConfigFromStart")}</option>
+          <option value="1">COMMOPT = 1</option>
+          <option value="0">COMMOPT = 0</option>
+        </select>
+        <input class="mono num" bind:value={etmConfig.vmidBytes} placeholder="vmid_bytes" aria-label="vmid_bytes" title={$i18n("fault.etmConfigTip")} />
+        <input class="mono num" bind:value={etmConfig.cidBytes} placeholder="cid_bytes" aria-label="cid_bytes" title={$i18n("fault.etmConfigTip")} />
+        <label class="muted">{$i18n("fault.etmCount")}<span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={etmCount} inputmode="numeric" aria-required="true" /></label>
         <button class="small" disabled={etmBusy}>{$i18n("fault.etmDecode")}</button>
       </form>
       {#if etmError}<div class="bad small-text">{etmError}</div>{/if}
@@ -256,6 +288,7 @@
         </table>
         {#each etmHistory.errors as err, k (k)}<div class="bad small-text">{err}</div>{/each}
         {#each etmDecode?.errors ?? [] as err, k (k)}<div class="bad small-text">{err}</div>{/each}
+        {#if etmDecode?.cut}<div class="muted small-text">{$i18n("common.truncated", { ...etmDecode.cut })}</div>{/if}
         {#if etmDecode?.note}<div class="muted small-text">{etmDecode.note}</div>{/if}
       {/if}
     </details>
@@ -265,7 +298,14 @@
         {#if report.registers}
           <div class="regs mono">
             {#each Object.entries(report.registers) as [name, value] (name)}
-              <span class="muted">{name}</span><span>{value == null ? "-" : hex32(value)}</span>
+              {@const at = locationOf(report, name)}
+              {@const w1c = writeOneToClear(report, name)}
+              <span class="muted" title={w1c ? $i18n("fault.w1cTip") : undefined}>{name}{#if w1c}<sup class="w1c">w1c</sup>{/if}</span>
+              <span><EditValue text={value == null ? "-" : hex32(value)} initial={value == null ? "" : hex32(value)}
+                via={at && connected ? "target.memory.write" : null}
+                note={[at ? $i18n("write.at", { address: hex32(at.address), size: at.size }) : "", w1c ? $i18n("fault.w1cTip") : ""]
+                  .filter(Boolean).join("\n")}
+                reason={at ? "" : $i18n("write.noLocation")} onwrite={(input) => writeAt(at!, input)} /></span>
             {/each}
           </div>
         {/if}
@@ -298,7 +338,6 @@
   h3 { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 4px; }
   .bad { color: var(--bad); }
   .bit { font-weight: 600; white-space: nowrap; }
-  tr.minor td { opacity: 0.7; }
   .hint { font-size: 12px; }
   .small-text { font-size: 12px; margin-bottom: 4px; }
   .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; align-items: baseline; }
@@ -307,5 +346,6 @@
   .regs { display: grid; grid-template-columns: repeat(auto-fill, 48px 96px); gap: 2px 6px; }
   .frames { list-style: none; margin: 0; padding: 0; }
   .frames li { display: flex; gap: 8px; align-items: center; padding: 1px 0; }
+  .w1c { font-size: 9px; color: var(--muted); margin-left: 2px; }
   .note { font-size: 11px; color: var(--warn); border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; }
 </style>

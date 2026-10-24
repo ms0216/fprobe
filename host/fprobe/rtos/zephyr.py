@@ -11,9 +11,9 @@ from __future__ import annotations
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.typesys import BaseType, strip, type_name
-from .base import KernelAwareness
+from .base import NAME_LIMIT, KernelAwareness, stopped_note
 from .cortexm import THREAD_PSP_EXC_RETURN, SavedContext, unstack_exception_frame
-from .model import HeapInfo, KernelObject, StackInfo, Task, TaskState, WaitInfo
+from .model import HeapInfo, KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .stackcheck import check_stack
 from .structs import StructLayout
 from .zephyr_objects import ZephyrObjects
@@ -30,8 +30,8 @@ class Zephyr(KernelAwareness):
     name = "Zephyr"
     priority_order = -1           # 小さい方が高い（負は協調的なスレッド）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, name_limit: int = NAME_LIMIT):
+        super().__init__(info, access, symbols, name_limit)
         self.thread = StructLayout.of(info, "struct k_thread")
         self.kernel = StructLayout.of(info, "struct z_kernel")
         self.kernel_address = self.address("_kernel")
@@ -60,7 +60,7 @@ class Zephyr(KernelAwareness):
         handle = self.mem.u32(self.kernel_address + self.kernel.offset("threads"))
         while handle:
             if handle in out or len(out) >= MAX_THREADS:
-                self.warnings.append(f"スレッドのリストが壊れている（{len(out)} 個で止めた）")
+                self.warnings.append(stopped_note("スレッドのリスト", len(out), "cycle" if handle in out else "limit", MAX_THREADS))
                 break
             out.append(handle)
             handle = self._field(handle, "next_thread")
@@ -75,7 +75,7 @@ class Zephyr(KernelAwareness):
 
     def thread_name(self, handle: int) -> str:
         if self.thread.has("name"):
-            name = self.mem.cstring(handle + self.thread.offset("name"), self.thread.member_size("name"))
+            name = self.mem.cstring(handle + self.thread.offset("name"), self.thread.member_size("name"), whole=True)
             if name:
                 return name
         return f"0x{handle:08X}"
@@ -100,9 +100,15 @@ class Zephyr(KernelAwareness):
         elif state_bits & QUEUED:
             state = TaskState.READY
         else:
-            state = TaskState.BLOCKED                   # 寝ている（_THREAD_SLEEPING、または時間切れの待ち）・起動前
-            wait = WaitInfo("sleep")
-        return Task(handle, self.thread_name(handle), priority, state, self._stack(handle, running), wait)
+            state = TaskState.BLOCKED                   # 実行可能でない（QUEUED でも PENDING でもない）
+        task = Task(handle, self.thread_name(handle), priority, state, self._stack(handle, running), wait)
+        if state is TaskState.BLOCKED and wait is None:
+            # 寝ている・時間切れを待つ・起動前のどれかは決めない（ビット 2 は Zephyr の版で _THREAD_SLEEPING か
+            # _THREAD_PRESTART。古い版の k_sleep はビットを立てない）
+            task.notes.append(f"thread_state 0x{state_bits:02X}: QUEUED でも PENDING でもない（寝ている・起動前等。"
+                              "どれかは決めない）")
+        task.locations["priority"] = field_location(self.thread, handle, "base.prio")
+        return task
 
     def _pended_on(self, wait_queue: int) -> WaitInfo:
         """待ちキューの番地 → それを持つもの（シンボルの名前と、DWARF の変数の型）。"""

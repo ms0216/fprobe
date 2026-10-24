@@ -89,7 +89,8 @@ class Etmv4Info:
         return f"{self.arch_major}.{self.arch_minor}"
 
     def decoder_config(self) -> Etmv4Config:
-        return Etmv4Config(commit_opt1=self.commit_opt1, vmid_bytes=self.vmid_bytes or 1, cid_bytes=self.cid_bytes or 4)
+        # ID レジスタの言う大きさのまま（0 = 無い。別の値で置き換えない）
+        return Etmv4Config(commit_opt1=self.commit_opt1, vmid_bytes=self.vmid_bytes, cid_bytes=self.cid_bytes)
 
     def as_dict(self) -> dict:
         return {"version": self.version, **asdict(self)}
@@ -169,7 +170,7 @@ class Funnel:
         if not 0 <= ports <= 0xFF:
             raise ValueError(f"ファンネルの入口は 8 ビットのマスク: 0x{ports:X}")
         unlock(self.regs, self.base)
-        hold = self.regs.read(self.base, 32) & 0xF00 or 0x300
+        hold = self.regs.read(self.base, 32) & 0xF00          # 最小の保持時間はいまの値のまま（0 も有効な値）
         value = hold | ports
         self.regs.write(self.base, 32, value)
         return value

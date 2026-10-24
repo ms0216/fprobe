@@ -44,6 +44,9 @@ def probe():
     program("fprobe")
     p = Probe(SERIAL)
     p.target_connect("stm32f401xe", frequency_hz=4_000_000)
+    # STM32F4 のクロックの守り（PLL のまま書き込みアルゴリズムを動かさない）は本体に無い: プラグインで渡す
+    from fprobe.plugins import ProbeCaller, stm32_flash_clock
+    stm32_flash_clock.install(ProbeCaller(p), "f4")
     yield p
     p.target_reset()
     p.close()

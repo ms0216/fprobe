@@ -179,7 +179,7 @@ def _when(t: int, report: Report, time_map: TimeMap | None) -> dict:
 
 def _tree(node: CallTreeNode, hz: float, depth: int) -> dict:
     out = {"function": node.function, "count": node.count, "inclusive_s": node.inclusive / hz,
-           "exclusive_s": node.exclusive / hz, "children": []}
+           "exclusive_s": node.exclusive / hz, "cut": node.cut, "children": []}
     children = sorted(node.children.values(), key=lambda n: -n.inclusive)
     if depth > 0:
         out["children"] = [_tree(c, hz, depth - 1) for c in children]
@@ -191,7 +191,9 @@ def _tree(node: CallTreeNode, hz: float, depth: int) -> dict:
 def report_dict(report: Report, time_map: TimeMap | None, *, top: int = 20, anomalies: int = 100,
                 buckets: int = 120, tree_depth: int = 8) -> dict:
     """解析の要約: 関数（子を含む時間の合計の多い順に top 個）・カバレッジの割合・異常（種類ごとの数と先頭 anomalies 件）・
-    時間の区切り（最後の buckets 個）・変数・開いたままの呼び出し・呼び出しの木（深さ tree_depth まで）。"""
+    時間の区切り（最後の buckets 個）・変数・開いたままの呼び出し・呼び出しの木（深さ tree_depth まで。それより下は
+    節の children_omitted）。切る前の数は *_total、使った件数は limits。解析の木の深さの上限 tree_max_depth より深くて
+    木に入れなかった呼び出しの数は tree_cut（節ごとは cut）。"""
     hz = report.hz
     funcs = sorted(report.functions.values(), key=lambda f: -f.total_inclusive)
     cov = report.coverage
@@ -213,6 +215,8 @@ def report_dict(report: Report, time_map: TimeMap | None, *, top: int = 20, anom
                        "last": v.last, "min": v.min, "max": v.max} for v in report.variables.values()],
         "open": [{"function": f, **_when(t, report, time_map)} for f, t in report.open_frames],
         "tree": _tree(report.tree, hz, tree_depth),
+        "tree_max_depth": report.tree_max_depth, "tree_cut": report.tree_cut,
+        "limits": {"top": top, "anomalies": anomalies, "buckets": buckets, "tree_depth": tree_depth},
     }
     if time_map is not None:
         out["time_map"] = time_map.to_dict()
@@ -230,7 +234,7 @@ def calls_dict(calls: list[Call], dropped: int, report: Report, time_map: TimeMa
     chosen = sorted((c for c in calls if (lo is None or c.t0 >= lo) and (hi is None or c.t0 < hi)
                      and (function is None or c.function == function)), key=lambda c: (c.t0, c.depth))
     shown = chosen[:limit]
-    return {"total": len(chosen), "truncated": len(chosen) > limit, "dropped": dropped,
+    return {"total": len(chosen), "truncated": len(chosen) > limit, "limit": limit, "dropped": dropped,
             "calls": [{"function": c.function, **_when(c.t0, report, time_map), "duration_us": c.ticks / hz * 1e6,
                        "self_us": c.self_ticks / hz * 1e6, "depth": c.depth, "complete": c.complete,
                        "entry_id": c.entry_id, "exit_id": c.exit_id} for c in shown],
@@ -247,5 +251,5 @@ def coverage_dict(coverage: Coverage, *, file: str | None = None, function: str 
     uncovered = [u for u in d["uncovered"] if chosen(u["where"], u["function"])]
     decisions = [x for x in d["decisions"] if chosen(x["where"], x["function"])]
     return {"functions": d["functions"], "c0": d["c0"], "c1": d["c1"], "function_ratio": d["function_ratio"],
-            "c0_ratio": d["c0_ratio"], "c1_ratio": d["c1_ratio"], "uncovered_total": len(uncovered),
+            "c0_ratio": d["c0_ratio"], "c1_ratio": d["c1_ratio"], "limit": limit, "uncovered_total": len(uncovered),
             "uncovered": uncovered[:limit], "decisions_total": len(decisions), "decisions": decisions[:limit]}

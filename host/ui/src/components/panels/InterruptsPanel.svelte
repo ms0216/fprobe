@@ -7,8 +7,9 @@
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
   import {
-    histogram, longestIn, recordedIsrs, statsFromProfile, type Activation, type IsrStat,
+    isrAt, longestIn, profileHz, recordedIsrs, statsFromProfile, type Histogram, type IsrStat,
   } from "../../lib/interrupts";
+  import { parseCount } from "../../lib/system";
   import { load, save } from "../../lib/prefs";
   import { percent } from "../../lib/rtos";
   import { onCalls, onRecording } from "../../lib/notify";
@@ -24,17 +25,41 @@
   $effect(() => save("interrupts.source", source));
   let recorded = $state<Awaited<ReturnType<typeof recordedIsrs>> | null>(null);
   let profiled = $state<IsrStat[] | null>(null);
+  let profiledHz = $state<number | null>(null);        // SWO の例外トレースのコア クロック（分からなければ null）
+  // 分布図の棒の数・印を付ける長い順の上位の数は使う人が入れる（空から。暗黙の数を持たない）
+  let binsText = $state(load("interrupts.bins", ""));
+  let longestText = $state(load("interrupts.longest", ""));
+  $effect(() => save("interrupts.bins", binsText));
+  $effect(() => save("interrupts.longest", longestText));
+  const bins = $derived(parseCount(binsText));
+  const longestCount = $derived(parseCount(longestText));
   let selected = $state<number | null>(null);
   let recKey = "";
+  let recKeyGen = $state(0);
 
   const online = $derived($app.link === "open");
   const available = $derived({ recording: !!recorded?.stats.length, profile: !!profiled?.length });
   const active = $derived(available[source] ? source : available.recording ? "recording" : available.profile ? "profile" : null);
   const stats = $derived<IsrStat[]>(active === "recording" ? recorded!.stats : active === "profile" ? profiled! : []);
   const chosen = $derived(stats.find((s) => s.number === selected) ?? stats[0] ?? null);
-  const acts = $derived<Activation[]>(active === "recording" && chosen ? recorded!.groups.get(chosen.number)?.acts ?? [] : []);
-  const hist = $derived(histogram(acts));
-  const hz = $derived(recorded?.hz ?? 1);
+  // 選んだ割り込みの分布（デーモンが数える recording.interrupts の distribution。棒の数・上位の数は使う人の値のまま）
+  let hist = $state<Histogram | null>(null);
+  $effect(() => {
+    const n = active === "recording" ? chosen?.number ?? null : null, b = bins, k = longestCount;
+    void recKeyGen;
+    if (n === null || b === null || k === null) {
+      hist = null;
+      return;
+    }
+    void recordedIsrs(conn, { number: n, bins: b, longest: k }).then((r) => (hist = r.histogram)).catch(() => (hist = null));
+  });
+  // 時間の単位（1 秒あたりの数）。分からなければ null: 秒にせず元の単位の数のまま出す
+  const hz = $derived(active === "recording" ? recorded?.hz ?? null : active === "profile" ? profiledHz : null);
+  // 統計（statsOf・statsFromProfile が hz で割った値）を出す
+  const sec = (s: number) => (hz !== null ? formatDuration(s)
+    : $i18n(active === "profile" ? "interrupts.rawCycles" : "interrupts.rawTicks", { n: s }));
+  // 回の時間（元の単位の数）を出す
+  const raw = (n: number) => (hz !== null ? formatDuration(n / hz) : $i18n("interrupts.rawTicks", { n }));
 
   $effect(() => {
     if (online) void refresh();
@@ -44,20 +69,18 @@
   $effect(() => onRecording(conn, () => void refresh()));
   // 選んだ割り込みの長い順の上位を時間軸に印として置く（普通の色: 異常とは言わない）
   $effect(() => {
-    tl.setMarks("interrupts", "recording", hist.longest.map((a) => ({
-      t: a.t, tEnd: a.tEnd, tone: 0 as const, label: `${chosen?.name ?? ""} ${formatDuration(a.inclusive / hz)}` })));
+    tl.setMarks("interrupts", "recording", (hist?.longest ?? []).map((a) => ({
+      t: a.t, tEnd: a.tEnd, tone: 0 as const, label: `${chosen?.name ?? ""} ${raw(a.inclusive)}` })));
   });
   onDestroy(() => tl.setMarks("interrupts", "recording", []));
   // 時間軸の 1 回クリック（記録）: その時刻に処理していた割り込みの行を選ぶ
+  // （その時刻に実行していた = デーモンが返す at_numbers のいちばん内側）
   $effect(() => onTimeline({
     select: (d) => {
       if (d.source !== "recording" || active !== "recording" || !recorded) return;
-      for (const [n, g] of recorded.groups) {
-        if (g.acts.some((a) => a.t <= d.t && d.t < a.tEnd)) {
-          selected = n;
-          return;
-        }
-      }
+      void isrAt(conn, d.t).then((n) => {
+        if (n !== null) selected = n;
+      }).catch(() => {});
     },
   }));
 
@@ -67,15 +90,19 @@
       const key = st.name ? `${st.name}/${st.events}` : "";
       if (key !== recKey) {
         recKey = key;
-        recorded = key ? await recordedIsrs(conn) : null;
+        recorded = key ? await recordedIsrs(conn, null) : null;
+        recKeyGen++;                                       // 分布も読み直す
       }
     } catch {
       recorded = null;
     }
     try {
-      profiled = statsFromProfile(await conn.call("profile.exceptions", {}, quiet));
+      const r = await conn.call("profile.exceptions", {}, quiet);
+      profiled = statsFromProfile(r);
+      profiledHz = profileHz(r);
     } catch {
       profiled = null;
+      profiledHz = null;
     }
   }
 
@@ -84,11 +111,9 @@
   }
 
   function openBar(_x: number, bar: number | null) {
-    const a = longestIn(hist, bar);
+    const a = hist ? longestIn(hist, bar) : null;
     if (a) reveal({ source: "recording", t: a.t, tEnd: a.tEnd });
   }
-
-  const sec = (s: number) => formatDuration(s);
 </script>
 
 <div class="pane irq">
@@ -134,12 +159,21 @@
       <div class="dist">
         <div class="head">
           <span>{$i18n("interrupts.distribution", { name: chosen.name })}</span>
+          {#if active === "recording"}
+            <label>{$i18n("interrupts.bins")}<input class="num" bind:value={binsText} inputmode="numeric" size="4"
+              aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
+            <label title={$i18n("interrupts.longestTip")}>{$i18n("interrupts.longest")}<input class="num"
+              bind:value={longestText} inputmode="numeric" size="4" aria-required="true" /><span class="req"
+              aria-hidden="true">*</span></label>
+          {/if}
         </div>
-        {#if active === "recording"}
-          <div title={$i18n("interrupts.histTip")}>
-            <Chart bars={hist.bars} height={120} xFormat={(x) => formatDuration(x / hz)} onopen={openBar}
+        {#if active === "recording" && hist}
+          <div title={$i18n("interrupts.histTip", { n: longestCount ?? 0 })}>
+            <Chart bars={hist.bars} height={120} xFormat={raw} onopen={openBar}
                    label={$i18n("interrupts.distribution", { name: chosen.name })} />
           </div>
+        {:else if active === "recording"}
+          <span class="muted">{$i18n("interrupts.needBins")}</span>
         {:else}
           <span class="muted">{$i18n("interrupts.noInstances")}</span>
         {/if}
@@ -156,5 +190,5 @@
   .row { cursor: pointer; }
   .row:hover td, .row.sel td { background: var(--select); }
   .dist { padding: 6px 8px; }
-  .head { display: flex; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .head { display: flex; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 4px; align-items: center; }
 </style>

@@ -5,6 +5,7 @@
 // 時刻はすべてタイムベースの µs（watch.series の time_us。記録の 1 単位の秒で時間軸の時刻と行き来できる）。
 import type { DaemonConnection } from "./api";
 import type { Series } from "./chart";
+import { display, kindOf, scalarOf } from "./vartree";
 
 export interface SampledExpr {
   expr: string;
@@ -37,7 +38,7 @@ export class SharedSampling {
   }
 
   /** つながったとき: デーモンに一覧があればそれ（onChange）、無ければ手元の一覧を上げる */
-  async load(local: SampledExpr[], rate: number): Promise<void> {
+  async load(local: SampledExpr[], rate: number | null): Promise<void> {
     let state: any;
     try {
       state = await this.conn.call("ui.state.get", {}, { quiet: true });
@@ -52,7 +53,7 @@ export class SharedSampling {
   }
 
   /** 手元の変更を上げる（記録に残さない） */
-  async save(list: SampledExpr[], rate: number): Promise<void> {
+  async save(list: SampledExpr[], rate: number | null): Promise<void> {
     if (!this.available) return;
     const sampling = { expressions: list.map((e) => ({ expr: e.expr, plot: e.plot, axis: e.axis })), rate_hz: rate };
     try {
@@ -101,49 +102,39 @@ export function removeExpr(list: SampledExpr[], expr: string): SampledExpr[] {
   return list.filter((x) => x.expr !== expr);
 }
 
-/** 観測の値を数に（整数・浮動小数・真偽、列挙・ビットフィールドの {value}）。数でなければ NaN */
+/** 観測の値（fprobe.dwarf.values の形）を数に（int・float・enum の value、bool は 1 / 0）。数でなければ NaN
+ *  （float の NaN・無限大の "nan" 等、ほかの種類、kind の無い古い形） */
 export function numberOf(v: unknown): number {
-  if (typeof v === "number") return v;
-  if (typeof v === "boolean") return v ? 1 : 0;
-  if (v && typeof v === "object" && typeof (v as any).value === "number") return (v as any).value;
-  return NaN;
+  const n = scalarOf(v);
+  if (typeof n === "boolean") return n ? 1 : 0;
+  return typeof n === "number" ? n : NaN;
 }
 
-/** 値の短い表し方（列挙は名前、真偽、数は桁を抑える。構造体・配列は JSON の短縮） */
+/** 値の短い表し方（列挙は名前、真偽、数は桁を抑える。ほかの種類は変数の木と同じ短い文字、kind の無いものは JSON の短縮） */
 export function displayValue(v: unknown, digits?: number): string {
   if (v === null || v === undefined) return "—";
-  if (typeof v === "number") {
-    if (digits !== undefined) return v.toFixed(digits);
-    return Number.isInteger(v) ? String(v) : String(parseFloat(v.toPrecision(6)));
-  }
-  if (typeof v === "boolean") return v ? "true" : "false";
-  if (typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if (typeof o.enum === "string") return String(o.enum);
-    if (typeof o.unavailable === "string") return `<${o.unavailable}>`;
-    if (typeof o.string === "string") return JSON.stringify(o.string);
-  }
-  const text = JSON.stringify(v);
-  return text.length > 60 ? `${text.slice(0, 57)}…` : text;
-}
-
-/** 走りながら足す統計（最小・最大・平均・件数。数でない値は数えない） */
-export class Stats {
-  count = 0;
-  min = Infinity;
-  max = -Infinity;
-  private sum = 0;
-
-  add(v: number): void {
-    if (!Number.isFinite(v)) return;
-    this.count++;
-    this.sum += v;
-    if (v < this.min) this.min = v;
-    if (v > this.max) this.max = v;
-  }
-
-  get mean(): number {
-    return this.count ? this.sum / this.count : NaN;
+  const o = v as Record<string, any>;
+  switch (kindOf(v)) {
+    case "int":
+    case "float":
+      if (typeof o.value !== "number") return String(o.value);           // "nan" "inf" "-inf"
+      if (digits !== undefined) return o.value.toFixed(digits);
+      return Number.isInteger(o.value) ? String(o.value) : String(parseFloat(o.value.toPrecision(6)));
+    case "bool":
+      return o.value ? "true" : "false";
+    case "enum":
+      return o.name ?? String(o.value);
+    case "unavailable":
+      return `<${o.reason}>`;
+    case "array":
+      if (typeof o.string === "string") return JSON.stringify(o.string);
+      return display(v, 60);
+    case "none": {
+      const text = JSON.stringify(v);
+      return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+    }
+    default:
+      return display(v, 60);
   }
 }
 
@@ -155,7 +146,8 @@ export interface Sample {
 interface Track {
   x: number[];
   y: number[];
-  stats: Stats;
+  discarded: number;                // 上限を超えて捨てた点の数（グラフから）
+  gaps: [number, number][];         // 読まなかった区間（前回の最後の時刻, API が返した読んだ範囲の始め）。µs
   last: Sample | null;              // 最新の値（数でなくても）
 }
 
@@ -163,27 +155,28 @@ interface Track {
 export class SampleStore {
   private tracks = new Map<string, Track>();
 
-  constructor(private limit = STORE_LIMIT) {}
+  constructor(readonly limit = STORE_LIMIT) {}
 
   private track(name: string): Track {
     let t = this.tracks.get(name);
     if (!t) {
-      t = { x: [], y: [], stats: new Stats(), last: null };
+      t = { x: [], y: [], discarded: 0, gaps: [], last: null };
       this.tracks.set(name, t);
     }
     return t;
   }
 
-  /** 新しい値を足す（古い順）。足した数を返す */
-  merge(name: string, samples: Sample[]): number {
+  /** 新しい値を足す（古い順）。足した数を返す。fromUs = API（watch.series の from_us）が返した読んだ範囲の始め
+   *  （それより古い値を読まなかった）: 前回の最後がそれより前なら、その間を読まなかった区間（gaps）に数える */
+  merge(name: string, samples: Sample[], fromUs: number | null = null): number {
     const t = this.track(name);
+    if (fromUs !== null && t.last && t.last.time_us < fromUs) t.gaps.push([t.last.time_us, fromUs]);
     let added = 0;
     for (const s of samples) {
       if (typeof s.time_us !== "number" || (t.last && !(s.time_us > t.last.time_us))) continue;
       const y = numberOf(s.value);
       t.x.push(s.time_us);
       t.y.push(y);
-      t.stats.add(y);
       t.last = s;
       added++;
     }
@@ -191,6 +184,7 @@ export class SampleStore {
       const cut = t.x.length - this.limit;
       t.x.splice(0, cut);
       t.y.splice(0, cut);
+      t.discarded += cut;
     }
     return added;
   }
@@ -200,12 +194,18 @@ export class SampleStore {
     if (sample) this.merge(name, [sample]);
   }
 
-  latest(name: string): Sample | null {
-    return this.tracks.get(name)?.last ?? null;
+  /** 画面の読みが追いつかず読まなかった区間（µs。グラフに無い） */
+  gaps(name: string): [number, number][] {
+    return this.tracks.get(name)?.gaps ?? [];
   }
 
-  stats(name: string): Stats {
-    return this.tracks.get(name)?.stats ?? new Stats();
+  /** 上限（limit）を超えてグラフの点から捨てた数（統計は全部の分） */
+  discarded(name: string): number {
+    return this.tracks.get(name)?.discarded ?? 0;
+  }
+
+  latest(name: string): Sample | null {
+    return this.tracks.get(name)?.last ?? null;
   }
 
   points(name: string): { x: number[]; y: number[] } {
@@ -243,15 +243,11 @@ export function windowDomain(end: number | null, windowS: number): [number, numb
   return [end - windowS * 1e6, end];
 }
 
-/** XY: a の各時刻に、その時刻までの b の最新の値を組む（サンプル・アンド・ホールド）。数でない組は除く */
-export function pairXY(a: { x: ArrayLike<number>; y: ArrayLike<number> },
-                       b: { x: ArrayLike<number>; y: ArrayLike<number> }): { x: number[]; y: number[] } {
+/** XY: watch.xy の組（組み方・時刻の差はデーモンが決めて返す）を描く点に。数でない値の組は描けないので除く */
+export function xyPoints(result: any): { x: number[]; y: number[] } {
   const xs: number[] = [], ys: number[] = [];
-  let j = -1;
-  for (let i = 0; i < a.x.length; i++) {
-    while (j + 1 < b.x.length && b.x[j + 1] <= a.x[i]) j++;
-    if (j < 0) continue;
-    const x = a.y[i], y = b.y[j];
+  for (const p of Array.isArray(result?.points) ? result.points : []) {
+    const x = numberOf(p.x), y = numberOf(p.y);
     if (Number.isFinite(x) && Number.isFinite(y)) {
       xs.push(x);
       ys.push(y);
@@ -260,28 +256,13 @@ export function pairXY(a: { x: ArrayLike<number>; y: ArrayLike<number> },
   return { x: xs, y: ys };
 }
 
-/** 配列の値（debug.evaluate）を添字 → 数の列に。数の配列・文字の配列・多い配列の先頭（{length, head}）・
- *  構造体の配列は member の欄。数にならなければ null */
+/** 配列の値（debug.evaluate）を添字 → 数の列に。数の配列・文字の配列・構造体の配列は member の欄。length は配列の
+ *  要素数（max_elements で切ったときは values より多い）。配列でない・数にならなければ null */
 export function arrayWave(value: unknown, member = ""): { values: number[]; length: number } | null {
-  let items: unknown[] | null = null;
-  let length = 0;
-  if (Array.isArray(value)) {
-    items = value;
-    length = value.length;
-  } else if (value && typeof value === "object") {
-    const o = value as Record<string, any>;
-    const inner = Array.isArray(o.values) ? o.values : o.values && Array.isArray(o.values.head) ? o.values.head : null;
-    if (Array.isArray(o.head)) {
-      items = o.head;
-      length = Number(o.length) || o.head.length;
-    } else if (inner) {
-      items = inner;
-      length = Number(o.values?.length) || inner.length;
-    }
-  }
-  if (!items) return null;
-  const values = items.map((v) => numberOf(member && v && typeof v === "object" ? (v as any)[member] : v));
-  return values.some(Number.isFinite) ? { values, length } : null;
+  if (kindOf(value) !== "array") return null;
+  const a = value as { length: number; items: unknown[] };
+  const values = a.items.map((v) => numberOf(!member ? v : kindOf(v) === "struct" ? (v as any).members[member] : undefined));
+  return values.some(Number.isFinite) ? { values, length: a.length } : null;
 }
 
 export interface Health {
@@ -291,31 +272,30 @@ export interface Health {
   rounds: number | null;
   overruns: number | null;            // 飛ばした周期（取りこぼし）
   errors: number | null;              // 読みの誤り（ACK が OK でない）
-  lossRatio: number;                  // 飛ばした周期の割合（0〜1）
+  lossRatio: number | null;           // 飛ばした周期の割合（0〜1。watch.status の loss_ratio）
   chaseErrors: Record<string, string>;
   rejected: Record<string, string>;   // watch.set が外した誤った式 → 誤り
   sinceStartS: number | null;         // 始めてからの秒（巡回・取りこぼしの数はここから）
-  measuredHz: number | null;          // 実際の周期（巡回の数 ÷ 秒）
+  measuredHz: number | null;          // 実際の周期（巡回の数 ÷ 秒。watch.status の measured_hz）
   running: boolean;
 }
 
-/** watch.status から取得の状態（取りこぼしの割合） */
+/** watch.status から取得の状態（割合・周期はデーモンが数から出したもの） */
 export function health(status: any): Health {
   const watches: any[] = Array.isArray(status?.watches) ? status.watches : [];
   const num = (v: unknown) => (typeof v === "number" ? v : null);
   const rounds = num(status?.rounds), overruns = num(status?.overruns);
-  const total = (rounds ?? 0) + (overruns ?? 0);
   return {
     rate: Number(status?.rate_hz) || 0,
     sampled: watches.filter((w) => w.method !== "host").map((w) => w.name),
     host: watches.filter((w) => w.method === "host").map((w) => w.name),
     rounds, overruns, errors: num(status?.errors),
-    lossRatio: total > 0 ? (overruns ?? 0) / total : 0,
+    lossRatio: num(status?.loss_ratio),
     chaseErrors: status?.chase_errors ?? {},
     rejected: Object.fromEntries((Array.isArray(status?.rejected) ? status.rejected : [])
       .map((r: any) => [String(r.expression), String(r.error)])),
     sinceStartS: num(status?.since_start_s),
-    measuredHz: rounds !== null && num(status?.since_start_s) ? rounds / status.since_start_s : null,
+    measuredHz: num(status?.measured_hz),
     running: watches.length > 0,
   };
 }
@@ -327,8 +307,8 @@ export interface TriggerForm {
   op: (typeof OPS)[number];
   value: string;
   edge: boolean;
-  preMs: number;
-  postMs: number;                     // 0 = 止まりの条件か件数の上限まで
+  preMs: string;                      // 使う人が入れる（空は誤り。画面の既定を持たない）
+  postMs: string;                     // 0 = 止まりの条件か件数の上限まで
 }
 
 /** 条件での取得の引数（watch.trigger）。誤りは文字列 */
@@ -336,11 +316,13 @@ export function triggerParams(f: TriggerForm): { start: Record<string, unknown> 
   | string {
   const value = Number(f.value);
   if (f.variable && (f.value.trim() === "" || !Number.isFinite(value))) return "value";
-  if (!(f.preMs >= 0) || !(f.postMs >= 0)) return "time";
+  const ms = (s: string) => (s.trim() === "" ? NaN : Number(s));
+  const pre = ms(f.preMs), post = ms(f.postMs);
+  if (!(pre >= 0) || !(post >= 0)) return "time";
   return {
     start: f.variable ? { variable: f.variable, op: f.op, value, edge: f.edge } : null,
-    pre_s: f.preMs / 1000,
-    post_s: f.postMs > 0 ? f.postMs / 1000 : null,
+    pre_s: pre / 1000,
+    post_s: post > 0 ? post / 1000 : null,
   };
 }
 
@@ -365,45 +347,4 @@ export function toggleCursor(c: ChartCursors, x: number, shift: boolean): ChartC
   return shift && c.a !== null ? { a: c.a, b: x } : { a: x, b: c.b };
 }
 
-export interface MeasureRow {
-  name: string;
-  a: number;                          // A の時刻に保たれている値（無ければ NaN）
-  b: number;
-  delta: number;                      // b − a
-  min: number;                        // A〜B の間（両端を含む）の点の最小・最大・平均・件数（値の無い点は数えない）
-  max: number;
-  mean: number;
-  count: number;
-}
 
-export interface Measurement {
-  dx: number;                         // B − A（横軸の単位）
-  rows: MeasureRow[];
-}
-
-/** 昇順の x の系列で、x 以下のいちばん後の点の値（サンプル・アンド・ホールド。無ければ NaN） */
-function heldAt(s: Series, x: number): number {
-  let lo = 0, hi = s.x.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (s.x[mid] <= x) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo > 0 ? s.y[lo - 1] : NaN;
-}
-
-/** A・B の 2 つのカーソルの測定: 系列ごとの A・B の値と差、A〜B の間の点の統計。どちらかが無ければ null */
-export function measureBetween(series: Series[], a: number | null, b: number | null): Measurement | null {
-  if (a === null || b === null) return null;
-  const lo = Math.min(a, b), hi = Math.max(a, b);
-  return {
-    dx: b - a,
-    rows: series.map((s) => {
-      const stats = new Stats();
-      for (let i = 0; i < s.x.length; i++) if (s.x[i] >= lo && s.x[i] <= hi) stats.add(s.y[i]);
-      const va = heldAt(s, a), vb = heldAt(s, b);
-      return { name: s.name, a: va, b: vb, delta: vb - va, min: stats.count ? stats.min : NaN,
-               max: stats.count ? stats.max : NaN, mean: stats.mean, count: stats.count };
-    }),
-  };
-}

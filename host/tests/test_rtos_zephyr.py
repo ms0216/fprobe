@@ -51,7 +51,11 @@ def test_waits(image):
     _, symbols = image
     w = t["sensor"].wait
     assert (w.reason, w.name, w.kind, w.object) == ("pend", "sem_data", "k_sem", symbols.variable("sem_data").address)
-    assert t["sleeper"].wait.reason == "sleep"
+    # QUEUED でも PENDING でもない: 寝ている・起動前のどれかは決めない（ビット 2 は版で _THREAD_SLEEPING か
+    # _THREAD_PRESTART）。待ちの理由を付けず、thread_state の値を notes に
+    sleeper = t["sleeper"]
+    assert sleeper.state is TaskState.BLOCKED and sleeper.wait is None
+    assert any("thread_state 0x04" in n for n in sleeper.notes)
     assert t["main"].wait is None and t["idle"].wait is None and t["parked"].wait is None
 
 
@@ -96,7 +100,7 @@ def test_backtrace_of_pended_thread(image):
     assert ctx.registers["pc"] == pc and ctx.sp == b.regs["sp"] and not ctx.fp
     frames = rtos.backtrace("sensor", variables=True)
     assert [f["function"] for f in frames] == ["k_sem_take", "sensor_entry"]
-    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["sem"]["pointer"] == sem
+    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["sem"]["address"] == sem
     assert rtos.saved_context("main") is None
 
 

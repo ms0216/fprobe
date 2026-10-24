@@ -153,11 +153,17 @@ class XtrigOutputTools:
             else:
                 cfg = st.config
                 item.update({"configured": True, "enabled": st.enabled, "active": st.active, "claim": cfg.claim,
-                             "mode": mode_names[cfg.mode], "level": "high" if cfg.high else "low",
+                             "mode": mode_names[cfg.mode] if st.mode_raw in (None, *MODES.values()) else None,
+                             "level": "high" if cfg.high else "low",
                              "pattern": {"mask": cfg.mask, "value": cfg.value, "any": cfg.any},
                              "sources": [s.name.lower() for s in Source if s & cfg.sources]})
-                if cfg.mode is OutputMode.PULSE:
-                    low, high = pulse_range_s(cfg.length, cfg.unit, clock_hz)
-                    item["pulse_us"] = {"min": low * 1e6, "max": high * 1e6}
+                if item["mode"] is None:
+                    item["mode_raw"] = st.mode_raw                # 定義の外の値（丸めずに読んだまま）
+                if cfg.mode is OutputMode.PULSE and item["mode"] is not None:
+                    if st.length_raw == 0:
+                        item["length_raw"] = 0                    # 長さ 0（定義の外）: 脈の長さは出さない
+                    else:
+                        low, high = pulse_range_s(cfg.length, cfg.unit, clock_hz)
+                        item["pulse_us"] = {"min": low * 1e6, "max": high * 1e6}
             result.append(item)
         return {"outputs": result, "actions": outputs.actions, "free": sum(not st.in_use for st in states)}

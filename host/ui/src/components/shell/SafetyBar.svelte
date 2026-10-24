@@ -1,6 +1,7 @@
 <script lang="ts">
-  // 安全の帯（ツールバーの下）: 走らせたままの致命的エラー（target.state の fatal。止めずに見張って見つけたもの）と、
-  // 止めると壊れうるターゲット（debug.halt_risk）の知らせ。止めずに調べる道具・モニタ方式（Breakpoints のデバッグ方式）へ
+  // 安全の帯（ツールバーの下）: 走らせたままの見張りの事実（target.state の fatal。止めずに見張って見つけたもの）と、
+  // 止める前の手がかり（debug.halt_risk = 使う側が渡した名前に合う ELF のシンボル）の知らせ。止めずに調べる道具・
+  // モニタ方式（Breakpoints のデバッグ方式）へ。判定はしない（デーモンが返した事実を描くだけ）
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";

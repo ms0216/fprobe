@@ -59,6 +59,13 @@ def test_interval_limits_find_late_responses_and_missing_ends(tmp_path):
     assert rule["violations"][0]["t_end"] == 260 and rule["expected"] == {"max_us": 50}
 
 
+def test_violations_are_cut_with_the_total_and_the_limit_used(tmp_path):
+    r = _record(tmp_path, [tp("isr", t) for t in (0, 10, 20, 30)])
+    rules = RuleSet.parse({"rules": [{"id": "n", "kind": "never", "event": ISR}]})
+    rule = check(r, rules, limit=2)["rules"][0]
+    assert len(rule["violations"]) == 2 and rule["violations_total"] == 4 and rule["violations_limit"] == 2
+
+
 def test_period_with_tolerance(tmp_path):
     r = _record(tmp_path, [tp("isr", t) for t in (0, 1000, 2000, 3100, 4100)])
     rules = RuleSet.parse({"rules": [{"id": "p", "kind": "period", "event": ISR, "period_us": 1000,

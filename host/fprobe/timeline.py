@@ -171,14 +171,15 @@ def name_rows(result: dict, stream: str, namer) -> None:
 
 def _raw_lane(rec: Recording, stream: str, t0: int, t1: int, n: int, i: int, sections: dict) -> dict:
     """生の段: 出来事（t0 より前に始まって t0 以降に終わるものも。状態・値の段は t0 の前の最後の出来事も）と、段の規則で
-    分けた段・ラベル・値・深さ・色の意味・飛び先の番地（fprobe.timeline_rows）。"""
+    分けた段・ラベル・値・深さ・色の意味・飛び先の番地（fprobe.timeline_rows）。t0 の前を探した始め carry_from と、
+    記録の始めまで探したか carry_complete（False なら carry_from より前に変わったきりの段の始めの値は探していない）。"""
     if stream == timeline_fpga.STREAM:                    # 組の値を記録の信号の定義で信号ごとに（後から付けた名前も効く）
-        items = timeline_fpga.raw_items(rec, t0, t1)
+        items, carried = timeline_fpga.raw_items(rec, t0, t1)
     else:
         items = list(rec.iter_events(t0, t1, [stream], overlapping=True))
         carried = carry_in(rec, stream, t0, t1)
-        if carried:
-            items = sorted(carried + items, key=lambda e: e.t)
+        if carried.events:
+            items = sorted(carried.events + items, key=lambda e: e.t)
     kinds = sorted({e.kind for e in items})
     code = {k: j for j, k in enumerate(kinds)}
     c = classify(stream, items)
@@ -191,8 +192,16 @@ def _raw_lane(rec: Recording, stream: str, t0: int, t1: int, n: int, i: int, sec
     sections[f"lane.{i}.depth"] = bytes(c.depth)
     sections[f"lane.{i}.tone"] = bytes(c.tone)
     sections[f"lane.{i}.address"] = array("d", c.address)
-    return {"stream": stream, "mode": "raw", "count": n, "items": len(items), "kinds": kinds,
-            "rows": [r.to_dict() for r in c.table.rows], "labels": c.labels}
+    out = {"stream": stream, "mode": "raw", "count": n, "items": len(items), "kinds": kinds,
+           "rows": [r.to_dict() for r in c.table.rows], "labels": c.labels, **carried.facts()}
+    return _with_signals_error(rec, stream, out)
+
+
+def _with_signals_error(rec: Recording, stream: str, lane: dict) -> dict:
+    """FPGA の段: 記録の信号の定義が壊れていれば signals_error（組の値の段 1 本で見せている理由）。"""
+    if stream == timeline_fpga.STREAM and (error := timeline_fpga.signals_error(rec)) is not None:
+        lane["signals_error"] = error
+    return lane
 
 
 def _summary_lane(rec: Recording, stream: str, n: int, bins: tuple[int, int, int], i: int, sections: dict) -> dict:
@@ -210,8 +219,8 @@ def _summary_lane(rec: Recording, stream: str, n: int, bins: tuple[int, int, int
     if s.low is not None:
         sections[f"lane.{i}.row_min"] = array("d", s.low)
         sections[f"lane.{i}.row_max"] = array("d", s.high)
-    return {"stream": stream, "mode": "summary", "count": n, "start": start, "bin": width, "bins": count,
-            "rows": [r.to_dict() for r in s.table.rows]}
+    return _with_signals_error(rec, stream, {"stream": stream, "mode": "summary", "count": n, "start": start,
+                                             "bin": width, "bins": count, "rows": [r.to_dict() for r in s.table.rows]})
 
 
 def _wave_sources(rec: Recording) -> list[tuple[str, Recording, int]]:

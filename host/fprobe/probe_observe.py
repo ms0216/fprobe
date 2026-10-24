@@ -23,6 +23,7 @@ import time
 
 from pyocd.core.target import Target
 
+from .api import NoData
 from .debug import PyocdAccess, Stop
 from .decode import Decoding, decode_on, get_decoder
 from .decode.registry import split_settings
@@ -386,13 +387,14 @@ class ObserveTools:
 
     def rtt_start(self, address: int | None = None, ranges: list[list[int]] | None = None,
                   text_channels: list[int] | None = None, wake: str = "poll", interval_s: float | None = None,
-                  sampler_rate_hz: float = 1000.0) -> dict:
+                  sampler_rate_hz: float = 1000.0, caller: dict | None = None) -> dict:
         """RTT の受信を始める（ターゲットを止めずに、背景で周期的に読む）。制御ブロックの番地は address、無ければ ELF の
         _SEGGER_RTT、それも無ければ RAM（ranges = [[番地, 長さ], …]、省略時はターゲットのメモリマップの RAM）を走査。
         text_channels（既定 [0]）は記録で行に区切るチャンネル（ほかはバイト列）。
         wake: poll（ホストが interval_s ごとに記述子を読む）/ sampler（FPGA の DAP サンプラが sampler_rate_hz で WrOff を
         読み、変わったチャンネルだけをホストが読む。何も来ない間はターゲットの線を使わない。サンプラは 1 つなので
-        watch_set 等とは同時に使えない）。interval_s: 背景の読みの周期（既定 0.01 秒）。"""
+        watch_set 等とは同時に使えない）。interval_s: 背景の読みの周期（既定 0.01 秒）。
+        caller: デーモンが渡す呼び出し元 {id, name, role}（引数の仕様には出ない。sampler_status の client に残す）。"""
         if wake not in RTT_WAKES:
             raise ValueError(f"wake は {' / '.join(RTT_WAKES)}（{wake!r}）")
         if interval_s is not None and not 0.0005 <= interval_s <= 1.0:
@@ -402,13 +404,16 @@ class ObserveTools:
             memory = PyocdAccess(target)
             if address is None:
                 address = self._rtt_address(memory, target, ranges)
-            rtt = Rtt(memory, address)
+            # 制御ブロックが置かれた領域の終わり（メモリマップの事実。分からなければ 32 ビットの番地の終わり）
+            region = next((r for r in getattr(target, "memory_map", None) or []
+                           if r.start <= address < r.start + r.length), None)
+            rtt = Rtt(memory, address, end=region.start + region.length if region is not None else 1 << 32)
             cb = rtt.open()
             if wake == "sampler":
-                self._claim_sampler("rtt")                         # ほかの道具が使っていれば、ここで誤り
+                self._claim_sampler("rtt", caller)                 # ほかの道具が使っていれば、ここで誤り
             self._rtt_release_wake()                               # 前の rtt_start のサンプラ
             if wake == "sampler":
-                self._claim_sampler("rtt")
+                self._claim_sampler("rtt", caller)
                 self._rtt_wake = self._rtt_sampler_wake(rtt, sampler_rate_hz)
             if interval_s is not None:
                 self.poll_s = interval_s
@@ -838,7 +843,7 @@ class ObserveTools:
         with self._lock:
             tr, info = self._capture, self._capture_info
         if tr is None:
-            raise RuntimeError("捕捉が無い（la_capture / la_deep_capture を先に）")
+            raise NoData("捕捉が無い（la_capture / la_deep_capture を先に）")
         if capture_id is not None and capture_id != info["id"]:
             raise KeyError(f"捕捉 {capture_id} は残っていない（最後の捕捉は {info['id']}）")
         decoding = self._decoding(tr, info["id"], protocol, settings or {})
@@ -864,10 +869,12 @@ class ObserveTools:
         try:
             if info.stacked:
                 name, lower_settings, own = split_settings(info, settings)
+                info.check(own)                                    # 足りない設定を名前で（下の解読の前に）
                 decoding = decode_on(protocol, self._decoding(tr, capture_id, name, lower_settings), **own)
             else:
+                info.check(settings)
                 decoding = info.function(tr, **settings)
-        except TypeError as e:                                     # 知らない・足りない設定
+        except TypeError as e:                                     # 知らない設定
             raise ValueError(f"{protocol} の設定が合わない: {e}") from None
         if not isinstance(decoding, Decoding):
             raise TypeError(f"解読器 {protocol} が Decoding を返さない")

@@ -221,6 +221,21 @@ def test_a_trigger_marks_the_recording_each_time_the_condition_holds(tmp_path, m
         p.recording_stop()
 
 
+def test_a_trigger_counts_events_that_arrived_after_their_time_was_checked(tmp_path, monkeypatch):
+    # 調べる遅れ lag_s は引数（使った値は状態に出す）。調べ終えた時刻より前に後から届いた出来事は数えて返す（?29）
+    p = _recording_probe(tmp_path, monkeypatch)
+    try:
+        p._recorder.add_many([("sample", "word", t, ERRORS, v) for t, v in [(1000, 0), (2000, 1)]])
+        assert p.recording_trigger_set("0x20040808 changed", lag_s=0.5)["lag_s"] == 0.5
+        p._trigger_poll(now=3000)
+        p._recorder.add_many([("sample", "word", 2500, ERRORS, 2)])          # 調べ終えた所（3000）より前に後から届いた
+        p._trigger_poll(now=4000)
+        st = p.recording_trigger_status()
+        assert st["late"] == 1 and st["hits"] == 1
+    finally:
+        p.recording_stop()
+
+
 def test_a_stop_trigger_stops_the_recording_after_post_s(tmp_path, monkeypatch):
     import time as _time
     p = _recording_probe(tmp_path, monkeypatch)
@@ -272,14 +287,15 @@ def test_auto_candidates_quote_enum_names_with_spaces(tmp_path):
 
 def test_auto_candidates_that_fire_at_the_same_times_are_listed_once():
     # 自動の候補で、成立する時刻がすべて同じもの（"restart changed and state=BUSY" と "… and addr=CTRL" 等）は 1 つに
-    # まとめ、短い方を残して残りを same に（AI の試験で、数値が完全に同じ候補が並んで読み取りの手間になった）
+    # まとめ、並びの最初のもの（事実の順: 先行率・条件の文字の順）を残して残りを same に（AI の試験で、数値が完全に
+    # 同じ候補が並んで読み取りの手間になった）。「項が多い・短い」等の決めごとで代表を選ばない（?11）
     from fprobe.correlate import _merge_same
     a = {"condition": "restart changed and state=BUSY", "_times": (1, 5, 9), "lift": 4.0}
     b = {"condition": "restart changed and addr=CTRL", "_times": (1, 5, 9), "lift": 4.0}
     c = {"condition": "in0 rose", "_times": (2, 6), "lift": 1.0}
     out = _merge_same([a, b, c])
-    assert [x["condition"] for x in out] == ["restart changed and addr=CTRL", "in0 rose"]
-    assert out[0]["same"] == ["restart changed and state=BUSY"] and "_times" not in out[0]
+    assert [x["condition"] for x in out] == ["restart changed and state=BUSY", "in0 rose"]
+    assert out[0]["same"] == ["restart changed and addr=CTRL"] and "_times" not in out[0]
     assert "same" not in out[1]
 
 
@@ -628,3 +644,40 @@ def test_coverage_is_the_same_with_and_without_numpy(monkeypatch, use_numpy):
     for c in cs:
         covered.update(t for t in range(c, min(10_000, c + 37)) if not 3000 <= t < 3500)
     assert C._coverage(cs, 37, 0, 10_000, [(3000, 3500)]) == pytest.approx(len(covered) / 9500, abs=1e-9)
+
+
+def test_auto_candidates_cut_to_the_limit_report_the_total_and_the_cut(tmp_path):
+    # 黙って切らない（総点検 Q1）: 自動の候補を limit 個に切ったら、候補の総数・切った印・使った limit を返す
+    rec = make(tmp_path)
+    full = correlate(rec, "errors changed", None, window_s=0.005, limit=200)
+    total = len(full["causes"])
+    assert total > 2 and full["causes_total"] == total and full["truncated"] is False and full["limit"] == 200
+    cut = correlate(rec, "errors changed", None, window_s=0.005, limit=2)
+    assert len(cut["causes"]) == 2 and cut["causes_total"] == total and cut["truncated"] is True and cut["limit"] == 2
+    given = correlate(rec, "errors changed", ["mark rose"], window_s=0.005, limit=1)
+    assert given["causes_total"] == 1 and given["truncated"] is False and given["limit"] is None   # 明示の候補は切らない
+
+
+def test_durations_cut_to_the_limit_report_the_total_and_the_cut(tmp_path):
+    # 黙って切らない（総点検 Q2）: 値を limit 個に切ったら、値の総数・切った印・使った limit を返す
+    from fprobe.correlate import durations
+    rec = make(tmp_path)
+    full = durations(rec, "state")
+    assert full["values_total"] == 3 and full["truncated"] is False and full["limit"] == 20
+    cut = durations(rec, "state", limit=1)
+    assert list(cut["values"]) == ["DONE"] and cut["values_total"] == 3 and cut["truncated"] is True
+    assert cut["limit"] == 1
+
+
+def test_transactions_say_when_the_rows_are_cut_and_the_limit_used(tmp_path):
+    # rows は表示のための件数。切ったこと（rows_truncated）・切る前の数（rows_total）・使った上限（rows_limit）を必ず返す
+    from fprobe.correlate import transactions
+    rec = make(tmp_path)
+    try:
+        cut = transactions(rec, "mark rose", by="restart", rows=3)
+        whole = transactions(rec, "mark rose", by="restart", rows=1000)
+    finally:
+        rec.close()
+    assert len(cut["rows"]) == 3
+    assert cut["rows_total"] == 10 - cut["excluded"] and cut["rows_truncated"] is True and cut["rows_limit"] == 3
+    assert len(whole["rows"]) == whole["rows_total"] and whole["rows_truncated"] is False and whole["rows_limit"] == 1000

@@ -27,11 +27,14 @@ from typing import Any
 
 from .recording import Event
 
-__all__ = ["ROW_TYPES", "TONES", "Rule", "Row", "RowTable", "carry_in", "classify", "rule_for", "rules_of", "summarize",
+__all__ = ["ROW_TYPES", "TONES", "CarryIn", "Rule", "Row", "RowTable", "carry_in", "lookback_ranges","classify", "rule_for", "rules_of", "summarize",
            "summary_sql"]
 
 ROW_TYPES = ("intervals", "bus", "state", "points", "values")
-TONES = {"normal": 0, "bad": 1, "good": 2, "warn": 3}          # 色の意味（画面は意味の色で塗る）
+# 色の意味 = 出来事の事実の種類（良し悪しの判定ではない。画面が種類ごとの色で塗る）: plain = ほか / failure = 失敗・
+# 欠け・異常の事実（ACK が OK でない・誤り・取りこぼし・欠け・優先度の逆転・ロックアップ・切断）/ running = ターゲットが
+# 走っている / stop = 止める・止まった（HALTED・DHCSR の停止の書き込み）/ mark = 印 / other = 解読の残りの種類
+TONES = {"plain": 0, "failure": 1, "running": 2, "stop": 3, "mark": 4, "other": 5}
 NO_LABEL = 0xFFFF_FFFF
 
 
@@ -62,7 +65,7 @@ class Rule:
 
     key / key_sql: 段を分ける値（None なら 1 段）。title / title_sql: 段の名前（データから。無ければ画面が規則の名前で）。
     value / value_sql: values の段の値。label: 出来事の文字。depth: 入れ子の深さ（無ければ nest = True のとき重なりで数える）。
-    tone: 色の意味。address: ダブルクリックの飛び先（jump = memory / source）。
+    tone: 色の意味（TONES の事実の種類）。address: ダブルクリックの飛び先（jump = memory / source）。
     """
     stream: str
     name: str
@@ -145,8 +148,8 @@ def _rules() -> dict[str, list[Rule]]:
              title_sql=_j("name"), label=lambda e: _body(e, "name"), nest=True),
         Rule("rtos", "blocked", "intervals", ("blocked",), nest=True,
              label=lambda e: f"{_body(e, 'task', '?')} → {_body(e, 'on', '?')}"),
-        Rule("rtos", "inversion", "intervals", ("inversion",), label=lambda e: "inversion", tone=lambda e: "bad"),
-        Rule("rtos", "gap", "intervals", ("gap",), label=lambda e: _body(e, "reason"), tone=lambda e: "warn"),
+        Rule("rtos", "inversion", "intervals", ("inversion",), label=lambda e: "inversion", tone=lambda e: "failure"),
+        Rule("rtos", "gap", "intervals", ("gap",), label=lambda e: _body(e, "reason"), tone=lambda e: "failure"),
         Rule("rtos", "switch", "points", ("switch",), hidden=True,
              label=lambda e: f"{_body(e, 'from') or '?'} → {_body(e, 'to') or '?'}"),
         Rule("rtos", "kernel", "points", label=lambda e: e.kind),
@@ -161,16 +164,20 @@ def _rules() -> dict[str, list[Rule]]:
         Rule("swo", "itm", "bus", ("byte",), label=byte),
         Rule("swo", "data", "values", ("data_access",), key=lambda e: e.a, key_sql="a",
              value=lambda e: float(e.b), value_sql="b", address=lambda e: e.a, jump="memory"),
-        Rule("swo", "other", "points", label=lambda e: e.kind, tone=lambda e: "warn"),
+        Rule("swo", "other", "points", label=lambda e: e.kind, tone=lambda e: "other"),
     ]
     dap_label = lambda e: (f"{'R' if 'read' in e.kind else 'W'} {_hex(e.a)}" +           # noqa: E731
                            (f" = {_hex(e.b)}" if e.kind != "fail" else ""))
     dap = [
         Rule("dap", "ap", "points", ("ap_read", "ap_write", "inject"), label=_ap_label, address=lambda e: e.a, jump="memory",
-             tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "warn" if _dhcsr_action(e) == "halt" else "normal"),
+             tone=lambda e: "failure" if _body(e, "ack", 1) != 1 else "stop" if _dhcsr_action(e) == "halt" else "plain"),
         Rule("dap", "dp", "points", ("dp_read", "dp_write"), label=dap_label,
-             tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "normal"),
-        Rule("dap", "fail", "points", label=lambda e: f"{e.kind} {_hex(e.a)}", tone=lambda e: "bad"),
+             tone=lambda e: "failure" if _body(e, "ack", 1) != 1 else "plain"),
+        # メモリの番地を追えなかった DRW（番地の段 ap には置かない。番地へ飛ばない）
+        Rule("dap", "drw", "points", ("drw_read", "drw_write"),
+             label=lambda e: f"{'R' if 'read' in e.kind else 'W'} DRW (address not tracked) = {_hex(e.b)}",
+             tone=lambda e: "failure" if _body(e, "ack", 1) != 1 else "plain"),
+        Rule("dap", "fail", "points", label=lambda e: f"{e.kind} {_hex(e.a)}", tone=lambda e: "failure"),
     ]
     aux = [Rule("aux", "voltage", "values", ("mv",), value=lambda e: e.b / 1000,
                 value_sql="b / 1000.0", unit="V"),
@@ -180,7 +187,7 @@ def _rules() -> dict[str, list[Rule]]:
                    value=lambda e: float(e.b) if _body(e, "ack", 1) == 1 else None,          # 読めなかった語は値なし
                    value_sql=f"CASE WHEN COALESCE({_j('ack')}, 1) = 1 THEN b END",
                    address=lambda e: e.a, jump="memory",
-                   tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "normal")]
+                   tone=lambda e: "failure" if _body(e, "ack", 1) != 1 else "plain")]
     name = lambda e: _body(e, "name")                                      # noqa: E731
     user = [
         Rule("user", "value", "values", ("value",), key=lambda e: e.a, key_sql="a", title=name, title_sql=_j("name"),
@@ -191,37 +198,37 @@ def _rules() -> dict[str, list[Rule]]:
         Rule("user", "event", "points", title=None, label=lambda e: _body(e, "name") or e.kind),
     ]
     annotation = [
-        Rule("annotation", "mark", "points", ("mark",), label=lambda e: _body(e, "text"), tone=lambda e: "warn"),
+        Rule("annotation", "mark", "points", ("mark",), label=lambda e: _body(e, "text"), tone=lambda e: "mark"),
         Rule("annotation", "decode", "bus", dotted=True, key=lambda e: e.kind.split(".", 1)[0],
              key_sql="substr(kind, 1, instr(kind, '.') - 1)", title=lambda e: e.kind.split(".", 1)[0].upper(),
              title_sql="upper(substr(kind, 1, instr(kind, '.') - 1))",
              label=lambda e: _body(e, "text") or e.kind.split(".", 1)[1],
              value=lambda e: _number(_body(e, "value")),
-             tone=lambda e: "bad" if _body(e, "error") else "normal"),
-        Rule("annotation", "loss", "points", label=lambda e: e.kind, tone=lambda e: "bad"),
+             tone=lambda e: "failure" if _body(e, "error") else "plain"),
+        Rule("annotation", "loss", "points", label=lambda e: e.kind, tone=lambda e: "failure"),
     ]
     role = lambda e: _body(e, "role") or "other"                           # noqa: E731
     host = [Rule("host", "call", "points", ("call",), key=role, key_sql=f"COALESCE({_j('role')}, 'other')",
-                 label=lambda e: _body(e, "method"), tone=lambda e: "bad" if _body(e, "error") else "normal"),
+                 label=lambda e: _body(e, "method"), tone=lambda e: "failure" if _body(e, "error") else "plain"),
             Rule("host", "other", "points", label=lambda e: e.kind)]
 
     def state_tone(e: Event) -> str:
         s = _body(e, "state")
-        return {"RUNNING": "good", "HALTED": "warn", "DISCONNECTED": "bad", "LOCKUP": "bad"}.get(s, "normal")
+        return {"RUNNING": "running", "HALTED": "stop", "DISCONNECTED": "failure", "LOCKUP": "failure"}.get(s, "plain")
 
     def pc_of(e: Event) -> int | None:
         pc = _body(e, "pc")
         return pc if isinstance(pc, int) else None
 
     target = [Rule("target", "state", "state", ("state",),
-                   label=lambda e: " ".join(str(x) for x in (_body(e, "state"), _body(e, "reason")) if x),
+                   label=lambda e: " ".join(str(x) for x in (_body(e, "state"), _body(e, "halt_reason")) if x),
                    tone=state_tone, address=pc_of, jump="source"),
               Rule("target", "other", "points", label=lambda e: e.kind)]
     testpoint = [
         Rule("testpoint", "call", "intervals", ("call",), label=lambda e: _body(e, "name") or f"#{e.a}",
              depth=lambda e: int(e.b)),
         Rule("testpoint", "anomaly", "points", ("anomaly",), label=lambda e: _body(e, "message") or e.kind,
-             tone=lambda e: "bad"),
+             tone=lambda e: "failure"),
         Rule("testpoint", "hit", "points", label=lambda e: _body(e, "name") or f"#{e.a}"),
     ]
     snapshot = [Rule("snapshot", "save", "points", label=lambda e: e.kind, address=pc_of, jump="source")]
@@ -231,7 +238,7 @@ def _rules() -> dict[str, list[Rule]]:
                  label=lambda e: _body(e, "text")),
             Rule("fpga", "number", "values", ("signal_number",), key=row, title=lambda e: _body(e, "title"),
                  label=lambda e: _body(e, "text"), value=lambda e: None if _body(e, "unknown") else float(e.b)),
-            Rule("fpga", "gap", "points", ("gap",), label=lambda e: f"-{e.a}", tone=lambda e: "bad"),
+            Rule("fpga", "gap", "points", ("gap",), label=lambda e: f"-{e.a}", tone=lambda e: "failure"),
             Rule("fpga", "hidden", "points", ("hidden",), label=lambda e: f"+{e.a}"),     # 標本型の標本の間の変化
             Rule("fpga", "group", "points", ("group",), label=lambda e: f"#{e.a}"),
             Rule("fpga", "other", "points", label=lambda e: e.kind)]
@@ -419,20 +426,44 @@ CARRY_LOOKBACK = 16                    # 状態・値の段の、t0 の前を探
 CARRY_TRIES = 3
 
 
-def carry_in(rec: Any, stream: str, t0: int, t1: int) -> list[Event]:
-    """状態（state）・値（values）の段の、t0 の前の最後の出来事（段ごと）。範囲の始めでの状態・保たれている値を
-    描くため。範囲の幅の 16 倍・256 倍・4096 倍と前を探し（それでも何も無ければ記録の始めまで）、見つかった段だけ返す
-    （長い間変わらない段がほかにあっても、そこまでは探さない）。"""
-    rules = rules_of(stream)
-    held = [r for r in rules if r.type in ("state", "values")]
-    if not held:
-        return []
-    span = rec.span()
+@dataclass(frozen=True)
+class CarryIn:
+    """範囲の前の最後の出来事（段ごと）と、探した範囲の始め searched_from（None = 範囲の前に記録が無く探していない）。
+    complete = 記録の始めまで探したか。False なら、searched_from より前に変わったきりの段は返っていない（範囲の始めの値は
+    探していないので分からない。無いのではない）。"""
+    events: list[Event]
+    searched_from: int | None
+    complete: bool
+
+    def facts(self) -> dict:
+        """時間軸の段に載せる事実（carry_from・carry_complete）。"""
+        return {"carry_from": self.searched_from, "carry_complete": self.complete}
+
+
+def lookback_ranges(span: tuple[int, int] | None, t0: int, t1: int):
+    """範囲の前を探す始めの時刻の列: 範囲の幅の 16 倍・256 倍・4096 倍、最後は記録の始め（同じ時刻は 1 回）。"""
     if span is None or span[0] >= t0:
         return []
     width = max(1, t1 - t0)
+    out: list[int] = []
     for k in range(CARRY_TRIES + 1):
         lo = max(span[0], t0 - width * CARRY_LOOKBACK ** (k + 1)) if k < CARRY_TRIES else span[0]
+        if not out or lo != out[-1]:
+            out.append(lo)
+    return out
+
+
+def carry_in(rec: Any, stream: str, t0: int, t1: int) -> CarryIn:
+    """状態（state）・値（values）の段の、t0 の前の最後の出来事（段ごと）。範囲の始めでの状態・保たれている値を
+    描くため。範囲の幅の 16 倍・256 倍・4096 倍と前を探し（それでも何も無ければ記録の始めまで）、何か見つかった所で
+    止める。長い間変わらない段がほかにあっても、そこまでは探さない: 探した始めを searched_from に返す（黙って打ち切らない）。"""
+    rules = rules_of(stream)
+    held = [r for r in rules if r.type in ("state", "values")]
+    span = rec.span()
+    starts = lookback_ranges(span, t0, t1) if held else []
+    if not starts:
+        return CarryIn([], None, True)
+    for lo in starts:
         queries = []
         for rule in held:
             where, args = rule.where_sql(rules)
@@ -448,5 +479,5 @@ def carry_in(rec: Any, stream: str, t0: int, t1: int) -> list[Event]:
             if rid not in latest or latest[rid].t < e.t:
                 latest[rid] = e
         if latest or lo == span[0]:
-            return sorted(latest.values(), key=lambda e: e.t)
-    return []
+            return CarryIn(sorted(latest.values(), key=lambda e: e.t), lo, lo == span[0])
+    raise AssertionError("lookback_ranges の最後は記録の始め")

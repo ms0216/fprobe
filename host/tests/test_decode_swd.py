@@ -20,7 +20,7 @@ def bus(rate=F * 8, **kw):
 
 def decode(w, b, start_s=0.0, end_s=None, **kw):
     t = w.build(start_s=start_s, end_s=end_s if end_s is not None else b.t + 2e-6)
-    return decode_swd(t, swclk=SWCLK, swdio=SWDIO, **kw)
+    return decode_swd(t, swclk=SWCLK, swdio=SWDIO, **({"drive": None, "turnaround": 1, "orundetect": False} | kw))
 
 
 def transfers(d):
@@ -200,7 +200,7 @@ def test_ten_thousand_transfers_decode_quickly():
         b.read(AP, 0xC, rng.getrandbits(32))
     t = w.build(end_s=b.t + 1e-6)
     t0 = time.perf_counter()
-    d = decode_swd(t, swclk=SWCLK, swdio=SWDIO, drive=DRIVE)
+    d = decode_swd(t, swclk=SWCLK, swdio=SWDIO, drive=DRIVE, turnaround=1, orundetect=False)
     elapsed = time.perf_counter() - t0
     assert len(d.of("transfer")) == 10_000
     assert elapsed < 5.0, elapsed                     # 手元で約 0.8 秒

@@ -1,0 +1,952 @@
+# ヒューリスティックの監査: host/fprobe の下位（api・data・decode・dwarf・export・gdb・linux・logfmt・testpoint）
+
+2026-10-23。ブランチ audit/heuristics-2（39cbe14）の作業ツリーを読んだ。コードは変更していない。
+
+原則（CLAUDE.md）: fprobe 本体にヒューリスティックを入れない。結果は「何を測ったか」だけで決まる事実にし、境界の値は使う側が明示して渡す引数にする。
+
+## 1. 実行した検索
+
+| # | パターン | ヒット | 機械的に除外（理由と件数） | 見た行 |
+|---|---|---|---|---|
+| 1a | `[<>]=?\s*-?\d*\.?\d+` | 233 | シフト `<<`/`>>` と数 75・0 と 1 との比較 76 | 82 |
+| 1b | `-?\d*\.?\d+\s*[<>]=?` | 126 | シフト 66・0 と 1 との比較 33 | 27 |
+| 2a | `\b\d+\.\d+\b` | 111 | IP アドレス・JSON-RPC 2.0・XML 1.0・仕様の節番号（2.1 節等）36・0.0 の初期値 28・単位換算 0 | 47 |
+| 2b | `\*\s*\d+(\.\d+)?\b` | 20 | 単位換算（×8 ビット・×1000・1_000_000_000・×1024）13 | 7 |
+| 3a | `:\s*\w+[^,)]*=\s*-?\d` | 122 | なし（3b と合わせて重複を除き 152 行を見た） | 122 |
+| 3b | `=\s*-?\d+(\.\d+)?\s*[,)]` | 108 | なし | 108 |
+| 3c | `^[A-Z_]+\s*=\s*` | 194 | なし | 194 |
+| 4 | ` in \(\| in \{\| in \[\|startswith\|endswith\|re\.(match\|search)` | 200 | なし | 200 |
+| 5 | `sorted\(\|\.sort\(\|max\(\|min\(\|\[:\d+\]\|most_common` | 152 | なし | 152 |
+| 6 | `推定\|経験\|目安\|典型\|typical\|guess\|heuristic\|likely\|probably\|assume\|みなす\|とみなし\|らしい\|疑い\|suspect\|verdict\|healthy\|risk\|warn\|baud` | 32 | なし | 32 |
+| 7 | `timeout\|retry\|retries\|sleep\(` | 36 | なし | 36 |
+| 追加 | `近似\|閾値\|しきい\|許容\|tolerance\|margin\|ゆるく\|多めに\|余裕\|たぶん\|おそらく\|だろう\|はず\|仮に\|適当\|十分` | 22 | なし（目で見て、新しい H・? は無かった。tolerance を必須にした manchester・docstring 等） | 22 |
+
+合わせた行（重複を除く）: 862。分類の件数（行の単位）:
+
+| 分類 | 件数 |
+|---|---|
+| H（ヒューリスティック） | 11 |
+| ?（判断がつかない） | 20 |
+| F（事実・仕様の規則） | 570 |
+| E（使う側が明示する引数） | 2 |
+| O（操作の既定） | 139 |
+| D（見せ方） | 111 |
+
+行の単位の件数。下の表では、同じ箇所の複数の行を 1 件にまとめた（H 6 件・? 14 件）。H・? の表には、拾った行の前後を読んで見つけた行（onewire の使う所・unwind.py:196-201・analysis.py:327 等）も入れた。
+
+参考: 台帳（.superpowers/sdd/heuristics-ledger.md）で済とされた担当範囲の項目は今のコードで確かめた。testpoint/analysis の long_call（long_s を使う側が渡す。既定 None）、decode/uart のボーレートの推定（baud が必須）、decode/manchester（tolerance が必須）、decode/modbus（区切りの既定は規格の t3.5）、export の min_fraction（既定 0.0）は除かれている。dwarf/unwind の CFI が無いときの葉の仮定は、印（lr_without_cfi）が付いたが仮定は残っている（? に入れた）。
+
+## 2. H と ? の全件
+
+### H（ヒューリスティック）
+
+| # | ファイル:行 | コード | 何をしているか | なぜ H か |
+|---|---|---|---|---|
+| H1 | decode/can.py:158 | `sample_point: float = 0.75` | CAN のビットを読むサンプル点（ビットの始まりからの割合）の既定 | バスの設定で決まる値を、典型の 0.75 で暗黙に補う。違うバスでは読みの位置がずれ、誤りが本体の結果（stuff・crc の誤り）として出る。境界の値は使う側が明示する原則に反する |
+| H2 | decode/onewire.py:15-16（使う所 144・145・150・153・156・157） | `TIMING = {False: {"sample": 15.0, "bit_max": 150.0, "reset_min": 380.0, "presence_window": 80.0, "slot": 60.0}, True: {...2.0, 20.0, 40.0, 10.0, 6.0}}` | 線を 0 にした長さで 1 / 0 / リセット / プレゼンスを分ける時間 | sample 15 µs は規格の tMSR に沿うが、reset_min 380 µs（規格の tRSTL は 480 µs 以上）・bit_max 150 µs・presence_window 80 µs・オーバードライブの値は規格の範囲の間に本体が置いた区別の境界。引数で変えられず既定で固定 |
+| H3 | logfmt/trice.py:12, 284-285 | `if cycle == CYCLE_START and expected != CYCLE_START: return ["…ターゲットのリセットとみなして合わせ直した"]` | 回の番号が 0xC0 に飛んだとき、失った数を数えずリセットと判定する | 回の番号が 0xC0 になる飛びは、取りこぼしでも起こる（0xC0 は 1 周の途中の値）。「リセット」は仮定による判定で、その場合 cycle_errors に数えない（欠けが事実から消える） |
+| H4 | logfmt/addresses.py:4, 22 | `_HEX = re.compile(r"\b0[xX]([0-9a-fA-F]{4,8})\b")` | ログの文字の中の 0x の 16 進のうち 4〜8 桁で、ELF の実行区画に入るものを「コードの番地」として関数・行を付ける | 4 桁という下限は暗黙の境界（3 桁以下は見ない）。区画に入る数を番地「とみなす」のは仮定（区画に入るデータの値も同じ扱い）。付けた結果は推定であることが結果に出ていない |
+| H5 | export/profile_formats.py:172-174 | `home = Counter(file for file, _ in f.lines).most_common(1)[0][0]` | 関数の行が複数のファイルにまたがる（インライン展開等）とき、行の数が最も多いファイルをその関数の「所在」とし、関数の記録（FN）をそこに置く | 最頻のファイルを所在とみなす経験則。DWARF の DW_AT_decl_file という事実があるのに使っていない。同数のときの選び方も Counter の順に依る |
+| H6 | testpoint/decode.py:96-100, 268 | `def __init__(self, clock_channel, data_channel, guard: int = 1)` | 2 線のテストポイントで、開始・終了の印を認めるまで CLK が 1 のままであるべきサンプル数 | ピンのずれ（スキュー）を雑音として捨てる境界の値を、既定 1 サンプルとして暗黙に持つ。サンプル周波数とスキューの関係で正しい値が変わる |
+
+### ?（判断がつかない）
+
+| # | ファイル:行 | コード | 何をしているか | 判断がつかない理由 |
+|---|---|---|---|---|
+| ?1 | decode/can.py:164-165 | `if not 0.2 <= sp <= 0.95: raise` | サンプル点の範囲を 0.2〜0.95 に制限 | 出典が書かれていない。結果を変えるのではなく入力を拒むだけなので判定ではないが、範囲の根拠が不明 |
+| ?2 | decode/modbus.py:105-115（_is_response） | `return fits and (answered or len(p) != 4) / return answered` | フレームを要求か応答かに分ける | 形（規格で要求の長さが決まる）と直前の要求で決めるのは仕様どおりだが、決められないもの（直前の要求が見えない FC5/6/15/16/23 等）を「要求」にする。分からないことを示す値（不明）が無い |
+| ?3 | decode/eeprom.py:15 | `device: int = 0x50, address_bytes: int = 1` | 対象のデバイスアドレス・語アドレスの長さの既定 | 典型の 24C02 を仮定した既定。device は I2C の転送を絞る条件になり、違うと黙って何も出ない |
+| ?4 | decode/spiflash.py:36 | `address_bytes: int = 3` | 始まりのアドレス長 | JEDEC の電源投入の既定は 3 バイトが多いが機器による（4 バイトの既定の機器もある） |
+| ?5 | decode/jtag.py:150 | `ir_bits: int = 4, ir_offset: int = 0, dr_offset: int = 0` | JTAG-DP の位置 | ir_bits=4 は ADIv5 の規定（F）。offset 0 は「鎖に DP だけ」を仮定した既定 |
+| ?6 | decode/uart.py:16-17 | `data_bits: int = 8, parity: str = 'none', stop_bits: float = 1` | UART の枠の設定の既定 | 典型の 8N1。baud は必須にした（台帳の済）が、枠の設定は暗黙の既定のまま。違えば parity・framing の誤りとして出る |
+| ?7 | decode/spi.py:20 | `mode: int = 0, msb_first: bool = True, word_bits: int = 8` | SPI の設定の既定 | 典型の値の暗黙の既定 |
+| ?8 | decode/manchester.py:20 | `convention: str = "ieee", word_bits: int = 8, msb_first: bool = True` | Manchester の設定の既定 | tolerance は必須にした（台帳の済）。convention 等は典型の暗黙の既定 |
+| ?9 | dwarf/info.py:301-313 | `return sorted(found, key=lambda v: v.kind != "global")[0]` | 同じ名前の大域・static が複数あるとき 1 つを選ぶ | 外部結合を先にするのは C の規則に沿うが、外部が無く static が複数あるときは最初の 1 つを黙って選ぶ（曖昧であることを示さない） |
+| ?10 | dwarf/unwind.py:196-201 | `cfa = regs.read(SP)  # 葉と仮定する … note = "lr_without_cfi"` | 最内の関数に CFI が無いとき、葉と仮定して LR から呼び出し元を出す | 台帳で「印を付けた」で済とされたもの。仮定に頼る推定は残っている（結果に note が付くので使う側が気づける）。原則の「仮定に頼る推定を入れない」に照らして残すかの判断が要る |
+| ?11 | testpoint/analysis.py:197-203 | `def to_dict(self, top: int \| None = 20): … funcs[:top]` | 解析の要約（MCP・AI 向け）の関数を時間の多い順に 20 個で切る | 並べ替えは事実（時間の合計）だが、既定で切り、全体の数（functions_total）も切ったことも出さない。live.report_dict の方は functions_total を出す |
+| ?12 | testpoint/analysis.py:234, 327 | `max_depth: int = 64 … node = parent.child(name) if len(self.stack) < self.max_depth else parent` | 呼び出しの木の深さの上限 | 上限を超えた呼び出しは親の節に黙って合流する（欠けの印が無い） |
+| ?13 | testpoint/instrument.py:30, 264 | `_MACRO_LIKE = re.compile(r"^[A-Z_][A-Z0-9_]+$") … rtype = "__auto_type"` | 戻り値の型の語が大文字だけならマクロとみなし __auto_type にする | 名前の慣習による判定。測定の結果ではなくソースの書き換えで、__auto_type は同じ型になるので結果は変わらない見込み。ヒューリスティックに当たるかの判断が要る |
+| ?14 | logfmt/trice.py:35-37, 330 | `_LEVELS = {"err": "error", "e": "error", "w": "warn", "i": "info", "d": "debug", "tr": "trace", …}` | 行頭のチャンネルのタグを重要度に写す | Trice の側の規約（色分けのチャンネル）に沿うなら F。出典が書かれておらず、e・w・i・d・tr のような短い名前の写しが fprobe の決めかどうか確かめる要 |
+
+?3〜?8（eeprom・spiflash・jtag_arm・uart・spi・manchester の既定）は同じ種類: 境界の値ではないプロトコルの設定を典型の値で暗黙に補う。原則の「境界の値は使う側が明示」の対象に入れるか（必須の引数にするか）は利用者の判断が要る。違えば誤り（parity・stuff・crc 等）か、何も出ないことで現れる。
+
+## 3. F・E・O・D の列挙（ファイル:行 — 一言）
+
+拾った行をそのまま並べた（行の単位）。一言は、その行が従う規格・形式、または操作・見せ方の理由。
+
+### F（事実・仕様の規則） — 570 行
+
+- api/__init__.py:3 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:6 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:7 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:8 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:9 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:10 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:11 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:12 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:13 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:14 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:15 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:16 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/__init__.py:17 — JSON-RPC 2.0 のエラーコード・fprobe API の版
+- api/binary.py:27 — fprobe のバイナリ応答の形式（MAGIC・整列）
+- api/binary.py:28 — fprobe のバイナリ応答の形式（MAGIC・整列）
+- api/binary.py:30 — fprobe のバイナリ応答の形式（MAGIC・整列）
+- api/binary.py:31 — fprobe のバイナリ応答の形式（MAGIC・整列）
+- api/binary.py:91 — fprobe のバイナリ応答の形式（MAGIC・整列）
+- decode/__init__.py:32 — 解読器の一覧
+- decode/__init__.py:33 — 解読器の一覧
+- decode/__init__.py:43 — 解読器の一覧
+- decode/can.py:5 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:7 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:20 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:24 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:25 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:57 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:58 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:70 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:71 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:72 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:74 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:106 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:115 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:160 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:163 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:174 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:199 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:236 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:251 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:253 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/can.py:301 — ISO 11898-1（DLC・CRC・スタッフ・SOF の前の 11 劣勢ビット）
+- decode/core.py:50 — 注釈の並び
+- decode/eeprom.py:20 — 24 系 EEPROM の形式
+- decode/eeprom.py:22 — 24 系 EEPROM の形式
+- decode/i2c.py:8 — I2C の START/STOP・8 ビット + ACK
+- decode/i2c.py:52 — I2C の START/STOP・8 ビット + ACK
+- decode/i2c.py:154 — I2C の START/STOP・8 ビット + ACK
+- decode/i2s.py:4 — I2S の形式の定義
+- decode/i2s.py:5 — I2S の形式の定義
+- decode/i2s.py:6 — I2S の形式の定義
+- decode/i2s.py:15 — I2S の形式の定義
+- decode/i2s.py:23 — I2S の形式の定義
+- decode/jtag.py:15 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:33 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:34 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:52 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:87 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:109 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:113 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:120 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:146 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:147 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:172 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:178 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/jtag.py:192 — IEEE 1149.1 の TAP（TMS=1 5 回で Test-Logic-Reset）・ADIv5 の JTAG-DP（DR 35 ビット）
+- decode/manchester.py:8 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/manchester.py:16 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/manchester.py:25 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/manchester.py:26 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/manchester.py:30 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/manchester.py:62 — Manchester の規則（tolerance は使う側が渡す。0.25 以下は窓が重ならない数学の条件）
+- decode/modbus.py:3 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:4 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:14 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:18 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:42 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:48 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:76 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:120 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:122 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:124 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:126 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:132 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:134 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:136 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:138 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:143 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/modbus.py:155 — Modbus の規格（機能コード・t3.5・CRC）
+- decode/onewire.py:17 — 1-Wire の ROM コマンド・CRC8
+- decode/onewire.py:19 — 1-Wire の ROM コマンド・CRC8
+- decode/onewire.py:74 — 1-Wire の ROM コマンド・CRC8
+- decode/onewire.py:76 — 1-Wire の ROM コマンド・CRC8
+- decode/onewire.py:93 — 1-Wire の ROM コマンド・CRC8
+- decode/onewire.py:110 — 1-Wire の ROM コマンド・CRC8
+- decode/parallel.py:13 — パラレルの辺・settle（使う側が渡す。既定 0）
+- decode/parallel.py:17 — パラレルの辺・settle（使う側が渡す。既定 0）
+- decode/parallel.py:27 — パラレルの辺・settle（使う側が渡す。既定 0）
+- decode/registry.py:7 — 解読器の登録
+- decode/registry.py:30 — 解読器の登録
+- decode/registry.py:59 — 解読器の登録
+- decode/registry.py:185 — 解読器の登録
+- decode/registry.py:188 — 解読器の登録
+- decode/spi.py:23 — SPI のモード・語長の検査
+- decode/spi.py:27 — SPI のモード・語長の検査
+- decode/spi.py:31 — SPI のモード・語長の検査
+- decode/spi.py:54 — SPI のモード・語長の検査
+- decode/spiflash.py:32 — JEDEC の SPI Flash のコマンド
+- decode/spiflash.py:33 — JEDEC の SPI Flash のコマンド
+- decode/spiflash.py:40 — JEDEC の SPI Flash のコマンド
+- decode/spiflash.py:71 — JEDEC の SPI Flash のコマンド
+- decode/spiflash.py:76 — JEDEC の SPI Flash のコマンド
+- decode/swd.py:13 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:16 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:17 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:18 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:20 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:21 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:29 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:30 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:58 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:62 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:73 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:102 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:116 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:131 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:145 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:161 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:170 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:194 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:203 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:208 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:216 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:223 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/swd.py:244 — ADIv5 の SWD（line reset 50 ビット・要求 8 ビット・ACK・dormant の合図）
+- decode/uart.py:3 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:13 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:19 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:23 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:25 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:26 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:27 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:29 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:31 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:50 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:78 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- decode/uart.py:105 — UART のフレーム（ビットの中央で読む・データ 5〜9 ビット・停止 1/1.5/2）
+- dwarf/access.py:37 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:39 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:41 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:52 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:54 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:56 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/access.py:95 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/cexpr.py:57 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:66 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:67 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:68 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:84 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/cexpr.py:88 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:123 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:124 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:167 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:176 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:186 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:191 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:326 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:347 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/cexpr.py:367 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/info.py:82 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/info.py:171 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:190 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:197 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:200 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:207 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:229 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/info.py:239 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/info.py:329 — PC のある CU の static を先に引く（C のスコープの規則）
+- dwarf/inspector.py:7 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:24 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:53 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:94 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:103 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:116 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:128 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:131 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:143 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:147 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:159 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/inspector.py:173 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/location.py:20 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:21 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:73 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:95 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/location.py:104 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:114 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/location.py:139 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/location.py:152 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:154 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:158 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:162 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:166 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:198 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:203 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:214 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:226 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:238 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:266 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/location.py:273 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/typesys.py:14 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/typesys.py:37 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/typesys.py:150 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/typesys.py:187 — ['F', 'C の式・型の規則（cexpr・typesys）']
+- dwarf/typesys.py:189 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/typesys.py:217 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/typesys.py:230 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/typesys.py:242 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/typesys.py:272 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:24 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:26 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:27 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:28 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:29 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:30 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/unwind.py:57 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:87 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/unwind.py:246 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/unwind.py:253 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/values.py:26 — DWARF・Arm の規約（DW_TAG/DW_OP/DW_FORM・レジスタ番号 256〜287 = d0〜d31 等）
+- dwarf/values.py:34 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/values.py:64 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- dwarf/values.py:154 — ['O', '読む量の上限・既定の引数（max_elements・frame 等。判断に関わらない）']
+- export/perfetto.py:46 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:47 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:49 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:86 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:95 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:122 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:123 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:208 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:217 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:218 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:223 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:224 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/perfetto.py:270 — Perfetto（Chrome trace JSON）の形式・不確かさは大きい方（事実の上限）
+- export/profile_formats.py:29 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:30 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:31 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:32 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:45 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:46 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:59 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:60 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:173 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:191 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:198 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- export/profile_formats.py:285 — gmon.out・callgrind・lcov・gcov・dot の形式（色は D）
+- gdb/agent.py:3 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:17 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:18 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:19 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:61 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:107 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:144 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:169 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:175 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:176 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:195 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:205 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:266 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:289 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/agent.py:302 — GDB のエージェント式のバイトコードの仕様（MAX_STACK/STEPS は暴走止めの上限 O）
+- gdb/client.py:58 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/client.py:89 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/client.py:91 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/description.py:12 — GDB の target description の XML（m-profile・vfp）
+- gdb/description.py:13 — GDB の target description の XML（m-profile・vfp）
+- gdb/description.py:14 — GDB の target description の XML（m-profile・vfp）
+- gdb/description.py:32 — GDB の target description の XML（m-profile・vfp）
+- gdb/description.py:33 — GDB の target description の XML（m-profile・vfp）
+- gdb/rsp.py:14 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/rsp.py:30 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/rsp.py:31 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/rsp.py:32 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/rsp.py:33 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:24 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:25 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:26 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:27 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:28 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:29 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:60 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:170 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:172 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:181 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:186 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:188 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:190 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:198 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:223 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:225 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:227 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:229 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:234 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:235 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:236 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:237 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:239 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:246 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:390 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:400 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:471 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:550 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:562 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:565 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:577 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:579 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:602 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:606 — 止まった回数・時間・最大（測った事実）
+- gdb/session.py:609 — 止まった回数・時間・最大（測った事実）
+- gdb/session.py:616 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:625 — 止まった回数・時間・最大（測った事実）
+- gdb/session.py:634 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:646 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/session.py:653 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:22 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:23 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:24 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:25 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:26 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:27 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:47 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:48 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:49 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:50 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:65 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:66 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:121 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:245 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:246 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:259 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:262 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:280 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:301 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:342 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:352 — 止まった回数・時間・最大（測った事実）
+- gdb/trace.py:357 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:378 — 止まった回数・時間・最大（測った事実）
+- gdb/trace.py:386 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:420 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- gdb/trace.py:524 — GDB RSP のパケットの形・gdbserver と同じ数え方
+- linux/caps.py:6 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:10 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:12 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:19 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:21 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:22 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:36 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:55 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/caps.py:57 — Linux の設定・tracefs の場所（調べるだけ）
+- linux/clock.py:20 — 2 つの組の直線の内挿・範囲の外を outside で示す（事実）
+- linux/clock.py:24 — 2 つの組の直線の内挿・範囲の外を outside で示す（事実）
+- linux/clock.py:27 — 2 つの組の直線の内挿・範囲の外を outside で示す（事実）
+- linux/clock.py:28 — 2 つの組の直線の内挿・範囲の外を outside で示す（事実）
+- linux/perf.py:12 — ftrace の trace・perf script の出力の形式
+- linux/perf.py:39 — ftrace の trace・perf script の出力の形式
+- linux/perf.py:45 — ftrace の trace・perf script の出力の形式
+- linux/ptrace_plan.py:15 — 分岐の命令（capstone の命令の群）は置き換えない規則
+- linux/ptrace_plan.py:33 — 分岐の命令（capstone の命令の群）は置き換えない規則
+- linux/ring.py:18 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:19 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:20 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:21 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:22 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:23 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:24 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:25 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:26 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:33 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:55 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:62 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:70 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:76 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:81 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:86 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/ring.py:94 — fprobe のリングの形式（自前の定義: 見出し 64・記録 48 バイト・CRC32）
+- linux/uprobe.py:12 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:13 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:14 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:16 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:17 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:18 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:19 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:20 — ftrace の trace・perf script の出力の形式
+- linux/uprobe.py:53 — ftrace の trace・perf script の出力の形式
+- logfmt/addresses.py:23 — ELF の区画のフラグ・結果の項目
+- logfmt/addresses.py:39 — ELF の区画のフラグ・結果の項目
+- logfmt/compact.py:32 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:33 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:35 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:98 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:102 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:103 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:105 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:106 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:117 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:130 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:132 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:156 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:170 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:181 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:184 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:186 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:191 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:199 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:241 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:285 — CBOR（RFC 8949）・compact の形式
+- logfmt/compact.py:305 — CBOR（RFC 8949）・compact の形式
+- logfmt/defmt.py:36 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:37 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:40 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:71 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:77 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:80 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:82 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:97 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:124 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:128 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:133 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:180 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:190 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:193 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:197 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:307 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:313 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:365 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:395 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:404 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:406 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:425 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:435 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:474 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:501 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:507 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:511 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:516 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:530 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:542 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:544 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:579 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:590 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:604 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:621 — defmt のワイヤ形式・書式の仕様
+- logfmt/defmt.py:641 — defmt のワイヤ形式・書式の仕様
+- logfmt/framing.py:17 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:46 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:64 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:66 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:102 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:156 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:158 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:160 — COBS / TCOBS の枠の仕様
+- logfmt/framing.py:162 — COBS / TCOBS の枠の仕様
+- logfmt/printf.py:23 — C の printf の書式の規則
+- logfmt/printf.py:24 — C の printf の書式の規則
+- logfmt/printf.py:26 — C の printf の書式の規則
+- logfmt/printf.py:90 — C の printf の書式の規則
+- logfmt/printf.py:104 — C の printf の書式の規則
+- logfmt/printf.py:191 — C の printf の書式の規則
+- logfmt/printf.py:199 — C の printf の書式の規則
+- logfmt/record.py:3 — ログの記録の形（重要度の名前の順）
+- logfmt/record.py:16 — ログの記録の形（重要度の名前の順）
+- logfmt/record.py:17 — ログの記録の形（重要度の名前の順）
+- logfmt/record.py:18 — ログの記録の形（重要度の名前の順）
+- logfmt/record.py:52 — ログの記録の形（重要度の名前の順）
+- logfmt/stream.py:24 — 行の上限・形式の名前（LINE_LIMIT は長すぎる行を切るだけ）
+- logfmt/stream.py:25 — 行の上限・形式の名前（LINE_LIMIT は長すぎる行を切るだけ）
+- logfmt/trice.py:8 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:32 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:33 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:34 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:38 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:80 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:83 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:174 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:217 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:299 — Trice のバイナリ形式（rokath/trice）
+- logfmt/trice.py:322 — Trice のバイナリ形式（rokath/trice）
+- testpoint/analysis.py:40 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:91 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:94 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:105 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:106 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:107 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:126 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:127 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:128 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:137 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:226 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:232 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:286 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:383 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:384 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:422 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/analysis.py:472 — 数えた値・最小・最大・区切り（bucket_s は使う側が渡す区切りの幅。既定 1 秒は O）
+- testpoint/clex.py:12 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:18 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:42 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:46 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:133 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:136 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:146 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:161 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:164 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:167 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/clex.py:203 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:16 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:24 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:26 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:27 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:66 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:75 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:81 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:150 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:250 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:260 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:273 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:288 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:311 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:336 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:371 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:390 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:440 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/cparse.py:456 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/decode.py:18 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:19 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:36 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:48 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:108 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:168 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:226 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/decode.py:273 — テストポイントの線・ITM の形式（fprobe の定義）
+- testpoint/instrument.py:27 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:28 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:29 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:49 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:83 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:85 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:137 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:142 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:270 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:280 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:304 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:322 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:326 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:340 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:372 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/instrument.py:420 — C の字句・構文（C17・GCC の拡張）による書き換え
+- testpoint/live.py:41 — 時刻の写像（範囲の外は端に寄せる）・既定 0 の値
+- testpoint/live.py:42 — 時刻の写像（範囲の外は端に寄せる）・既定 0 の値
+- testpoint/live.py:69 — 時刻の写像（範囲の外は端に寄せる）・既定 0 の値
+- testpoint/live.py:71 — 時刻の写像（範囲の外は端に寄せる）・既定 0 の値
+- testpoint/probes.py:13 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:14 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:15 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:16 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:17 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:57 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:115 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+- testpoint/probes.py:126 — 印の表の形式（ID の上限 0xFFFF・種類の名前）
+
+### E（使う側が明示する引数） — 2 行
+
+- export/profile_formats.py:306 — min_fraction（使う側が渡す。既定 0.0 は何も落とさない）
+- export/profile_formats.py:323 — min_fraction（使う側が渡す。既定 0.0 は何も落とさない）
+
+### O（操作の既定） — 139 行
+
+- api/arbiter.py:32 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- api/arbiter.py:92 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- api/client.py:80 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- api/daemon.py:5 — 待ち受けのアドレス・ポート
+- api/daemon.py:7 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:49 — 待ち受けのアドレス・ポート
+- api/daemon.py:50 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:51 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:52 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:53 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:57 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:58 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:60 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:115 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- api/daemon.py:205 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:223 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:225 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:552 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:555 — 待ち受けのアドレス・ポート
+- api/daemon.py:560 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:573 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- api/daemon.py:587 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:589 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:692 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/daemon.py:725 — 待ち受けのアドレス・ポート
+- api/daemon.py:732 — 待ち受けのアドレス・ポート
+- api/gen.py:10 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/gen.py:11 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/gen.py:12 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/gen.py:13 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- api/spec.py:11 — デーモン・クライアントの操作の既定（ポート・通知の上限・JSON-RPC の形）
+- data/connect_scripts/reset_with_nreset.py:8 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/reset_with_nreset.py:14 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/reset_with_nreset.py:16 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/stm32_debug_low_power.py:7 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/stm32_debug_low_power.py:8 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/stm32_debug_low_power.py:9 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- data/connect_scripts/stm32_debug_low_power.py:14 — 接続スクリプト（レジスタ番地・リセットのパルス幅）
+- decode/synth.py:22 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:47 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:49 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:79 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:105 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:106 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:107 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:110 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:138 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:139 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:145 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:151 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:176 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:228 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:241 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:243 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:245 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:265 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:268 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:280 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:284 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:319 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:328 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:329 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:359 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:407 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:408 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:415 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:425 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:428 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:470 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:506 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:511 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:527 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:539 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:544 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:547 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:554 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:561 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:564 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- decode/synth.py:580 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- gdb/client.py:18 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:19 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:40 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:41 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:44 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:51 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:54 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:65 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/client.py:67 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/server.py:13 — 待ち受けのアドレス・ポート
+- gdb/session.py:61 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- gdb/session.py:171 — 待ち受けのアドレス・ポート
+- linux/agent.py:16 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/agent.py:17 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/agent.py:19 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/agent.py:33 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/agent.py:128 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/agent.py:141 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/agent.py:144 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/agent.py:169 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/gdb_relay.py:12 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/gdb_relay.py:14 — 待ち受けのアドレス・ポート
+- linux/memap.py:5 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:17 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:20 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:21 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/memap.py:23 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/memap.py:41 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:48 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/memap.py:73 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:75 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:77 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/memap.py:81 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/memap.py:97 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:12 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:25 — SSH・エージェント・xsdb の操作の既定（待ち時間・出力の末尾の量）
+- linux/ssh.py:32 — 待ち受けのアドレス・ポート
+- linux/ssh.py:42 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:44 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:46 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:53 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:56 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:58 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:62 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:63 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:65 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- linux/ssh.py:67 — 通信・プロセスの待ち時間（時間切れは誤りとして返すだけ）
+- testpoint/__init__.py:8 — 引数の既定・出力の整形
+- testpoint/__main__.py:54 — 引数の既定・出力の整形
+- testpoint/__main__.py:56 — 引数の既定・出力の整形
+- testpoint/record.py:22 — 引数の既定・出力の整形
+- testpoint/record.py:29 — 引数の既定・出力の整形
+- testpoint/record.py:59 — 引数の既定・出力の整形
+- testpoint/synth.py:14 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:25 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:49 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:50 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:75 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:81 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+- testpoint/synth.py:84 — 試験用の波形・バイト列の合成（解析の結果に関わらない）
+
+### D（見せ方） — 111 行
+
+- api/activity.py:12 — 操作の記録を短くする（長さを併せて残す）
+- api/activity.py:18 — 操作の記録を短くする（長さを併せて残す）
+- api/activity.py:19 — 操作の記録を短くする（長さを併せて残す）
+- api/activity.py:43 — 操作の記録を短くする（長さを併せて残す）
+- api/client.py:76 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- api/daemon.py:77 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- api/daemon.py:199 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- api/daemon.py:496 — 文字の整形・丸め
+- api/spec.py:42 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/can.py:187 — 文字の整形・丸め
+- decode/can.py:188 — 文字の整形・丸め
+- decode/can.py:302 — 注釈の幅を 1 サンプル以上にする
+- decode/core.py:44 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/eeprom.py:84 — 文字の整形・丸め
+- decode/i2c.py:43 — 注釈の幅を 1 サンプル以上にする
+- decode/i2c.py:56 — 文字の整形・丸め
+- decode/i2c.py:71 — 注釈の幅を 1 サンプル以上にする
+- decode/i2c.py:114 — 注釈の幅を 1 サンプル以上にする
+- decode/i2s.py:22 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/i2s.py:52 — 文字の整形・丸め
+- decode/jtag.py:50 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/jtag.py:72 — 注釈の幅を 1 サンプル以上にする
+- decode/jtag.py:90 — 注釈の幅を 1 サンプル以上にする
+- decode/jtag.py:129 — 注釈の幅を 1 サンプル以上にする
+- decode/jtag.py:140 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/manchester.py:27 — 文字の整形・丸め
+- decode/manchester.py:66 — 注釈の幅を 1 サンプル以上にする
+- decode/manchester.py:79 — 文字の整形・丸め
+- decode/manchester.py:80 — 注釈の幅を 1 サンプル以上にする
+- decode/manchester.py:87 — 注釈の幅を 1 サンプル以上にする
+- decode/manchester.py:95 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/modbus.py:154 — 文字の整形・丸め
+- decode/onewire.py:139 — 注釈の幅を 1 サンプル以上にする
+- decode/onewire.py:157 — 文字の整形・丸め
+- decode/onewire.py:158 — 注釈の幅を 1 サンプル以上にする
+- decode/onewire.py:160 — 注釈の幅を 1 サンプル以上にする
+- decode/parallel.py:42 — 文字の整形・丸め
+- decode/registry.py:118 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/registry.py:124 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/registry.py:197 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- decode/spi.py:60 — 文字の整形・丸め
+- decode/spi.py:80 — 注釈の幅を 1 サンプル以上にする
+- decode/uart.py:24 — 文字の整形・丸め
+- decode/uart.py:28 — 文字の整形・丸め
+- decode/uart.py:83 — 注釈の幅を 1 サンプル以上にする
+- dwarf/access.py:32 — 文字の整形・丸め
+- dwarf/cexpr.py:65 — 文字の整形・丸め
+- dwarf/info.py:145 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- dwarf/info.py:352 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- dwarf/typesys.py:174 — 文字の整形・丸め
+- dwarf/unwind.py:119 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/perfetto.py:129 — 文字の整形・丸め
+- export/profile_formats.py:63 — 文字の整形・丸め
+- export/profile_formats.py:91 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:93 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:131 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:135 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:175 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:206 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:220 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:224 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:228 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:236 — 文字の整形・丸め
+- export/profile_formats.py:240 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- export/profile_formats.py:252 — 文字の整形・丸め
+- export/profile_formats.py:254 — 文字の整形・丸め
+- export/profile_formats.py:286 — 文字の整形・丸め
+- export/profile_formats.py:299 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- gdb/description.py:26 — 文字の整形・丸め
+- gdb/description.py:34 — 文字の整形・丸め
+- gdb/description.py:81 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- gdb/description.py:101 — 文字の整形・丸め
+- gdb/session.py:592 — 文字の整形・丸め
+- gdb/trace.py:469 — 文字の整形・丸め
+- gdb/trace.py:548 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- linux/agent.py:18 — 文字の整形・丸め
+- linux/caps.py:9 — 文字の整形・丸め
+- linux/memap.py:53 — 文字の整形・丸め
+- logfmt/addresses.py:50 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- logfmt/compact.py:34 — 文字の整形・丸め
+- logfmt/compact.py:48 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- logfmt/compact.py:304 — 文字の整形・丸め
+- logfmt/defmt.py:38 — 文字の整形・丸め
+- logfmt/defmt.py:252 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- logfmt/defmt.py:368 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- logfmt/defmt.py:536 — 文字の整形・丸め
+- logfmt/defmt.py:602 — 文字の整形・丸め
+- testpoint/analysis.py:119 — 測った量（時間の合計）の多い順に並べる（事実の値による順。選び出しはしない）
+- testpoint/analysis.py:199 — 測った量（時間の合計）の多い順に並べる（事実の値による順。選び出しはしない）
+- testpoint/analysis.py:240 — 文字の整形・丸め
+- testpoint/analysis.py:408 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/analysis.py:427 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/analysis.py:474 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/clex.py:14 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/instrument.py:67 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/instrument.py:119 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/instrument.py:284 — 文字の整形・丸め
+- testpoint/instrument.py:464 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/instrument.py:494 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/instrument.py:502 — 文字の整形・丸め
+- testpoint/live.py:32 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/live.py:183 — 測った量（時間の合計）の多い順に並べる（事実の値による順。選び出しはしない）
+- testpoint/live.py:191 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/live.py:192 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/live.py:196 — 測った量（時間の合計）の多い順に並べる（事実の値による順。選び出しはしない）
+- testpoint/live.py:211 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/live.py:224 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/live.py:230 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/live.py:241 — 要約の件数の上限（functions_total・anomalies_total・truncated・children_omitted 等で欠けを示す）
+- testpoint/probes.py:95 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+- testpoint/probes.py:104 — 並びを決めるだけ（番地・名前・時刻・ID の順。値で選び出さない）
+
+### H・? に分類した行（行の単位。表の根拠の行）
+
+- [H] decode/can.py:158 — sample_point の既定 0.75（典型の値を暗黙に使う）
+- [H] decode/onewire.py:15 — 1-Wire の区別の時間（reset_min 380 µs・bit_max 150 µs・presence_window 80 µs 等）を本体が決めて既定にしている
+- [H] decode/onewire.py:16 — 1-Wire の区別の時間（reset_min 380 µs・bit_max 150 µs・presence_window 80 µs 等）を本体が決めて既定にしている
+- [H] export/profile_formats.py:172 — 関数の「本籍」のファイルを行の最頻のファイルで選ぶ
+- [H] logfmt/addresses.py:4 — 0x の 4〜8 桁を番地の候補とする桁数の境界（暗黙）と「実行区画の中なら番地」とみなす仮定
+- [H] logfmt/addresses.py:22 — 0x の 4〜8 桁を番地の候補とする桁数の境界（暗黙）と「実行区画の中なら番地」とみなす仮定
+- [H] logfmt/trice.py:12 — 回の番号が 0xC0 に戻ったら「ターゲットのリセット」とみなし cycle_errors に数えない
+- [H] logfmt/trice.py:285 — 回の番号が 0xC0 に戻ったら「ターゲットのリセット」とみなし cycle_errors に数えない
+- [H] testpoint/decode.py:96 — guard=1（開始・終了を認めるまで CLK が 1 のままのサンプル数）の暗黙の既定
+- [H] testpoint/decode.py:100 — guard=1（開始・終了を認めるまで CLK が 1 のままのサンプル数）の暗黙の既定
+- [H] testpoint/decode.py:268 — guard=1（開始・終了を認めるまで CLK が 1 のままのサンプル数）の暗黙の既定
+- [?] decode/can.py:164 — サンプル点の許す範囲 0.2〜0.95（根拠の出典なし。結果は変えず入力を拒むだけ）
+- [?] decode/can.py:165 — サンプル点の許す範囲 0.2〜0.95（根拠の出典なし。結果は変えず入力を拒むだけ）
+- [?] decode/eeprom.py:15 — device=0x50・address_bytes=1 の既定（典型の 24C02 を仮定。対象を絞る条件になる）
+- [?] decode/jtag.py:150 — ir_offset=0・dr_offset=0 の既定（鎖に DP だけと仮定）。ir_bits=4 は ADIv5 の JTAG-DP の規定
+- [?] decode/manchester.py:20 — convention=ieee・word_bits=8・msb_first の既定（典型の値。tolerance は必須）
+- [?] decode/modbus.py:107 — 要求か応答かを形と直前の要求で決め、決められないものは request にする
+- [?] decode/modbus.py:109 — 要求か応答かを形と直前の要求で決め、決められないものは request にする
+- [?] decode/modbus.py:110 — 要求か応答かを形と直前の要求で決め、決められないものは request にする
+- [?] decode/modbus.py:112 — 要求か応答かを形と直前の要求で決め、決められないものは request にする
+- [?] decode/spi.py:20 — mode=0・word_bits=8・msb_first の既定（典型の値）
+- [?] decode/spiflash.py:36 — address_bytes=3 の既定（JEDEC の電源投入の既定だが機器による）
+- [?] decode/uart.py:16 — data_bits=8・parity=none・stop_bits=1 の既定（典型の 8N1。baud は必須）
+- [?] decode/uart.py:17 — data_bits=8・parity=none・stop_bits=1 の既定（典型の 8N1。baud は必須）
+- [?] dwarf/info.py:313 — 同じ名前の大域・static が複数あるとき外部のものを先に、static 同士なら最初の 1 つを黙って選ぶ
+- [?] logfmt/trice.py:35 — 行頭のタグ名（err・e・w・i 等）を重要度に写す表（Trice の色分けの規約か fprobe の決めかを確かめる要）
+- [?] logfmt/trice.py:36 — 行頭のタグ名（err・e・w・i 等）を重要度に写す表（Trice の色分けの規約か fprobe の決めかを確かめる要）
+- [?] testpoint/analysis.py:197 — to_dict の top=20: 関数を 20 個で切り、全体の数（functions_total）を出さない
+- [?] testpoint/analysis.py:203 — to_dict の top=20: 関数を 20 個で切り、全体の数（functions_total）を出さない
+- [?] testpoint/analysis.py:234 — max_depth=64: 深さを超えた呼び出しは木で親に黙って合流（欠けの印なし）。silence_s・open_s・long_s は既定 None で E
+- [?] testpoint/instrument.py:30 — 大文字だけの語の戻り値の型をマクロとみなして __auto_type にする（名前の慣習による判定。結果の型は同じになる）
+
+## 4. 担当範囲と対象のファイル
+
+- 担当範囲のフォルダ: `host/fprobe/{api,data,decode,dwarf,export,gdb,linux,logfmt,testpoint}` の下の `*.py`（下位フォルダを含む）。
+- ファイルの数: **80**（api 9・data 2・decode 17・dwarf 9・export 3・gdb 8・linux 11・logfmt 9・testpoint 12）。行の数は合わせて約 1.67 万。
+- すべての検索は、この 9 フォルダをそのまま `rg -g '*.py'` に渡して実行した（ファイルを選んでいない。80 ファイルすべてが対象）。
+- 除外: テスト（`host/tests` 等は範囲の外）。`decode/synth.py`・`testpoint/synth.py` は試験用の波形の合成で、拾った行は O に入れた（解析の結果に関わらない）。`data/connect_scripts/` は接続スクリプトで O。
+- 拾った行の重複を除くと **862 行**（機械的な除外の後）。そのうえで、検索 1〜7 のヒットは全部を目で見て、疑わしい所はコードの前後を読んだ。
+

@@ -54,12 +54,15 @@ class MulticoreTools:
         return entry
 
     def _multicore_status(self, status: dict) -> dict:
-        """target_status に足す: core（接続中のコア）と cores（各コアの状態。読めなければ error）。"""
+        """target_status に足す: core（接続中のコア）と cores（各コアの状態。読めなければ error）、部品の表
+        （fprobe.multidrop.PARTS）に救済の DP があれば rescue_dp（その TARGETSEL。target_reset の kind=rescue が使える）。"""
         found = self._multidrop()
         if found is None:
             return status
         part, home = found
         status["core"] = home
+        if part.rescue is not None:
+            status["rescue_dp"] = part.rescue
         cores = []
         for core in part.cores:
             if core.index == home:

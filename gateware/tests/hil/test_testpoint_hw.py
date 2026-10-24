@@ -31,7 +31,7 @@ def test_two_wire_testpoints_are_decoded_and_analyzed(probe):
     time.sleep(0.1)
     probe.la_deep_capture(rate_hz=50e6, rise=1 << 4, before_beats=0, after_beats=100_000)
     tr = probe._capture
-    decoded = decode_gpio_serial(tr, 4, 5)
+    decoded = decode_gpio_serial(tr, 4, 5, guard=1)
     report = analyze(decoded.items, ProbeTable.load(DEMO / "testpoints.json"), hz=decoded.hz)
     losses = [a for a in report.anomalies if a.type == "loss"]
     assert report.hits > 1000 and len(losses) <= 2, (report.hits, losses[:3])   # 端で切れた記録だけ

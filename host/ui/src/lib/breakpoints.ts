@@ -3,6 +3,7 @@
 // （debug.breakpoint.log）の読み続けと表示、ベクタキャッチ（target.vector_catch / .get）の名前。
 import type { DaemonConnection } from "./api";
 import type { Mark } from "./timeline/state";
+import { kindOf } from "./vartree";
 
 /** debug.breakpoint.list の action（fprobe.probe_breakpoints._Action.describe） */
 export interface BreakpointAction {
@@ -55,19 +56,27 @@ export function setParams(location: string, edit: ActionEdit) {
            log: log?.log ?? null, message: log?.message ?? null };
 }
 
-/** 式の値の表示（数・列挙・文字の配列・構造体） */
+/** 式の値の表示。値は fprobe.dwarf.values の形（kind で表し方を選ぶ。読めなかった式は unavailable）。
+ *  数は 10 進、列挙は名前と数、ポインタは 16 進、文字の配列は文字列、ほかは JSON */
 export function formatValue(v: unknown): string {
   if (v === null || v === undefined) return "?";
-  if (typeof v === "number") return String(v);
-  if (typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if ("error" in o) return `<${o.error}>`;
-    if ("string" in o) return JSON.stringify(o.string);
-    if ("name" in o && "value" in o) return `${o.name} (${o.value})`;
-    if ("pointer" in o && typeof o.pointer === "number") return `0x${(o.pointer >>> 0).toString(16)}`;
-    return JSON.stringify(v);
+  const o = v as Record<string, any>;
+  switch (kindOf(v)) {
+    case "int":
+    case "float":
+    case "bool":
+      return String(o.value);
+    case "enum":
+      return o.name === null ? String(o.value) : `${o.name} (${o.value})`;
+    case "pointer":
+      return `0x${(o.address >>> 0).toString(16)}`;
+    case "array":
+      return typeof o.string === "string" ? JSON.stringify(o.string) : JSON.stringify(v);
+    case "unavailable":
+      return `<${o.reason}>`;
+    default:                                               // struct・bytes と、kind の無い古い形（JSON のまま）
+      return JSON.stringify(v);
   }
-  return String(v);
 }
 
 /** debug.breakpoint.log の 1 件 */
@@ -81,7 +90,7 @@ export interface LogEntry {
   line?: number;
   hit: number;
   message: string | null;
-  values: Record<string, unknown>;
+  values: Record<string, unknown>;   // 式 → 値（fprobe.dwarf.values の形）
   t?: number;                 // 記録中なら記録のタイムベースの時刻
 }
 
@@ -100,7 +109,8 @@ export function logMarks(entries: LogEntry[]): Mark[] {
   return entries.filter((e) => e.t !== undefined).map((e) => ({ t: e.t!, label: formatLog(e) }));
 }
 
-const KEEP = 2000;            // 手元に持つログの件数
+/** 画面に持つログの件数の上限（古いものから捨てる。捨てた数は discarded。デーモンには残る） */
+export const BREAKPOINT_LOG_KEEP = 2000;
 
 type Call = Pick<DaemonConnection, "call">["call"];
 
@@ -109,6 +119,7 @@ type Call = Pick<DaemonConnection, "call">["call"];
 export class BreakpointLog {
   private entries: LogEntry[] = [];
   private since = 0;
+  discarded = 0;                                        // 画面に持つ上限を超えて捨てた行の数
   private listeners = new Set<(e: LogEntry[]) => void>();
 
   constructor(private call: Call) {}
@@ -120,26 +131,32 @@ export class BreakpointLog {
   }
 
   async poll(): Promise<void> {
-    let page: { entries: LogEntry[]; next: number };
+    let page: { entries: LogEntry[]; next: number; last?: number };
     try {
       page = await this.call("debug.breakpoint.log", { since: this.since, limit: 500 }, { quiet: true });
     } catch {
-      return;                                           // 未接続・古いデーモン: そのまま
+      return;                                           // 未接続: そのまま
     }
-    if (page.next < this.since) {                       // 起動し直した: 番号が戻った
+    // 読み手の位置がログに無い（API のいちばん新しい seq より後。デーモンが起動し直した等）: 0 から読み直す。
+    // 番号の戻りから推さない（API の last の事実だけで決める）
+    if (typeof page.last === "number" && this.since > page.last) {
       this.since = 0;
       this.entries = [];
+      this.discarded = 0;
       return this.poll();
     }
     if (!page.entries.length) return;
     this.since = page.next;
-    this.entries = [...this.entries, ...page.entries].slice(-KEEP);
+    const all = [...this.entries, ...page.entries];
+    this.discarded += Math.max(0, all.length - BREAKPOINT_LOG_KEEP);
+    this.entries = all.slice(-BREAKPOINT_LOG_KEEP);
     this.listeners.forEach((fn) => fn(this.entries));
   }
 
   /** 画面の表示だけを消す（デーモンの記録は残る。続きから読む） */
   clear(): void {
     this.entries = [];
+    this.discarded = 0;
     this.listeners.forEach((fn) => fn(this.entries));
   }
 }

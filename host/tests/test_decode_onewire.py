@@ -32,7 +32,7 @@ def test_read_rom_then_function_bytes():
         b.read_byte(byte)
     b.write_byte(0x44)                                                   # CONVERT T
     b.reset(presence=False)
-    d = decode_onewire(finish(w, b), CH)
+    d = decode_onewire(finish(w, b), CH, overdrive=False)
     resets = d.of("reset")
     assert [r.fields["presence"] for r in resets] == [True, False] and len(d.of("presence")) == 1
     (cmd,) = d.of("rom_command")
@@ -55,7 +55,7 @@ def test_match_rom_with_a_bad_crc_and_skip_rom():
     b.write_byte(0xBE)
     b.read_byte(0x50)
     b.read_byte(0x05)
-    d = decode_onewire(finish(w, b), CH)
+    d = decode_onewire(finish(w, b), CH, overdrive=False)
     rom = d.of("rom")[0]
     assert rom.error == "crc" and not rom.fields["crc_ok"]
     assert [a.text for a in d.of("rom_command")] == ["MATCH ROM", "SKIP ROM"]
@@ -68,7 +68,7 @@ def test_search_rom_with_two_devices():
     b.reset()
     b.rom_command(0xF0)
     b.search(ROM, others=[other])
-    d = decode_onewire(finish(w, b), CH)
+    d = decode_onewire(finish(w, b), CH, overdrive=False)
     (rom,) = d.of("rom")
     assert rom.value == ROM and rom.fields["search"] and rom.error is None
 
@@ -83,7 +83,7 @@ def test_overdrive_switch_and_back():
     b.read_byte(0xA5)
     b.reset(overdrive=False)                                            # 標準のリセットで戻る
     b.rom_command(0xCC)
-    d = decode_onewire(finish(w, b), CH)
+    d = decode_onewire(finish(w, b), CH, overdrive=False)
     assert [r.fields["overdrive"] for r in d.of("reset")] == [False, True, False]
     assert all(r.fields["presence"] for r in d.of("reset"))
     assert [a.value for a in d.of("data")] == [0x4E, 0xA5]
@@ -99,7 +99,30 @@ def test_timing_error_and_truncation_and_by_name():
     b.t += 300e-6
     b.write_bit(1)
     w.set(CH, 0, b.t)
-    d = decode("onewire", w.build(end_s=b.t + 10e-6), channel=CH)
+    d = decode("onewire", w.build(end_s=b.t + 10e-6), channel=CH, overdrive=False)
     assert [a.error for a in d.errors()] == ["timing", "truncated"]
     with pytest.raises(TypeError):
-        decode_onewire(finish(w, b))                                    # チャンネルが要る
+        decode_onewire(finish(w, b), overdrive=False)                                    # チャンネルが要る
+
+
+def test_a_low_shorter_than_the_spec_reset_is_not_a_reset():
+    # 総点検 S2: 区別の時間は規格（データシートの tRSTL ≥ 480 µs 等）の値。以前は余裕を足した 380 µs でリセットとみなした
+    w, b = bus()
+    b.reset()
+    w.set(CH, 0, b.t)
+    w.set(CH, 1, b.t + 420e-6)                                          # 規格のリセットより短く、0 のビットより長い
+    b.t += 500e-6
+    d = decode("onewire", finish(w, b), channel=CH, overdrive=False)
+    assert len(d.of("reset")) == 1 and [a.error for a in d.errors()] == ["timing"]
+
+
+def test_the_timing_can_be_given_explicitly():
+    from fprobe.decode.onewire import TIMING
+    w, b = bus()
+    b.reset()
+    w.set(CH, 0, b.t)
+    w.set(CH, 1, b.t + 420e-6)
+    b.t += 500e-6
+    loose = {False: {**TIMING[False], "reset_min": 400.0}, True: TIMING[True]}
+    d = decode_onewire(finish(w, b), CH, timing=loose, overdrive=False)                   # 使う側が明示すれば、その値で区別する
+    assert len(d.of("reset")) == 2 and d.params["timing"][False]["reset_min"] == 400.0

@@ -58,8 +58,10 @@ def test_glob_matcher_is_case_insensitive_and_substring_without_wildcards():
 
 def test_find_lists_parts_with_their_pack_and_whether_installed(packs):
     p, cache = packs
-    found = p.find("stm32f4")
+    result = p.find("stm32f4")
+    found = result["parts"]
     assert [f["part"] for f in found] == ["STM32F401RETx", "STM32F407VGTx"]
+    assert (result["total"], result["truncated"], result["limit"]) == (2, False, 200)
     assert found[0] == {"part": "STM32F401RETx", "vendor": "STMicroelectronics", "pack": "Keil.STM32F4xx_DFP",
                         "version": "3.0.0", "installed": False}
     assert cache.descriptors == 0                                   # 索引があればネットに出ない
@@ -68,7 +70,7 @@ def test_find_lists_parts_with_their_pack_and_whether_installed(packs):
 def test_find_fetches_the_index_when_empty_or_asked(tmp_path):
     cache = FakeCache(tmp_path)
     p = Packs(cache_factory=lambda: cache)
-    assert [f["part"] for f in p.find("h743")] == ["STM32H743ZITx"] and cache.descriptors == 1
+    assert [f["part"] for f in p.find("h743")["parts"]] == ["STM32H743ZITx"] and cache.descriptors == 1
     p.find("h743", update=True)
     assert cache.descriptors == 2
 
@@ -79,7 +81,7 @@ def test_install_downloads_the_packs_of_the_matching_parts(packs):
     assert [r.pack for r in cache.downloaded] == ["STM32F4xx_DFP"]          # 1 つの Pack にまとまる
     assert result["packs"] == [{"pack": "Keil.STM32F4xx_DFP", "version": "3.0.0"}]
     assert result["parts"] == ["STM32F401RETx", "STM32F407VGTx"]
-    assert p.find("f401")[0]["installed"] is True
+    assert p.find("f401")["parts"][0]["installed"] is True
     assert p.installed() == [{"pack": "Keil.STM32F4xx_DFP", "version": "3.0.0",
                               "path": os.path.join(cache.data_path, "Keil/STM32F4xx_DFP/3.0.0.pack")}]
     with pytest.raises(ValueError, match="無い"):
@@ -104,3 +106,12 @@ def test_load_registers_the_devices_of_a_pack_file(monkeypatch, tmp_path):
     assert out == {"path": str(pack), "targets": ["abc123", "abc124"]} and registered == [str(pack)]
     with pytest.raises(FileNotFoundError):
         Packs(cache_factory=lambda: None).load(tmp_path / "missing.pack")
+
+
+def test_find_says_it_cut_the_list_and_the_limit_it_used(packs):
+    """上限で切ったことを黙らない（点検 2 回目 ?: packs.py:62）。"""
+    p, _ = packs
+    result = p.find("*", limit=2)
+    assert len(result["parts"]) == 2 and (result["total"], result["truncated"], result["limit"]) == (3, True, 2)
+    with pytest.raises(ValueError):
+        p.find("*", limit=0)

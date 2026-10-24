@@ -26,17 +26,20 @@ from serial.tools import list_ports
 from . import fault
 from . import generated as g
 from . import probe_names
+from .api import NoData
 from .aux_mcu import Aux
 from .collector import Collector, add_capture
 from .events import INJECT_KINDS, EventLog, resolve
 from .fpga_obs import FpgaObs, compile_match, samples as obs_samples
-from .correlate import ConditionWatcher, correlate, durations, transactions
+from .correlate import ConditionError, ConditionWatcher, correlate, durations, transactions
 from .fpga_signals import FpgaSignals
 from .export import write_trace
-from .la import DeepAnalyzer, LogicAnalyzer, Transitions, Waveform, channel_names, write_vcd
+from .la import DeepAnalyzer, LogicAnalyzer, Transitions, Waveform, channel_names, external_pattern, write_vcd
 from .debug import Debugger, Stop
 from .frame_link import FrameLink
+from .obs_condition import count_condition
 from .probe_analysis import AnalysisTools
+from .voltage import VoltageHistory
 from .probe_breakpoints import BreakpointActions
 from .probe_connect import ConnectTools
 from .probe_cycles import CyclesTools
@@ -64,6 +67,7 @@ from .probe_observe import ByteLog, ObserveTools
 from .probe_profile import ProfileTools
 from .probe_profile_export import ProfileExportTools
 from .probe_rtos import RtosTools
+from .probe_recording_rtos import RecordingRtosTools
 from .probe_rtos_analysis import RtosAnalysisTools
 from .probe_rules import RulesTools
 from .probe_safety import SafetyTools
@@ -96,14 +100,15 @@ from .xtrig import CrossTrigger, Event, Pattern, Source, Stage, TriggerSequencer
 __all__ = ["Probe", "SOURCE_LIMIT", "build_server", "main"]
 
 TRIGGER_PERIOD_S = 0.5                 # recording_trigger: 記録を調べる周期
-TRIGGER_LAG_S = 2.0                    # recording_trigger: 今からこれだけ前までを調べる（流れ・取り込みが記録に届くまで）
+UART_DEFAULT_BAUD = 115_200            # UART を頼まれた速さ無しで開くときの速さ（使った速さは結果の baud に出す）
 REOPEN_PERIOD_S = 1.0                  # fpga_obs_open の auto_reopen: 止まっていないか見る周期
+FIND_LIMIT = 1000                      # recording_find・recording_intervals が返す一覧の上限の既定（総数と切ったかも返す）
 
 INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - まず `probe_info` でケイパビリティ（ロジアナのチャンネル数・深さ等）を確認する。
 - ターゲットの操作は `target_connect` の後。target は pyOCD のターゲット名（例: stm32f401xe, cortex_m）。
   "auto" なら部品を判別して選ぶ。つながらないときは未接続で `target_diagnose`（電圧 → SWD / JTAG → DP → AP →
-  部品 → 保護を順に調べ、verdict と suggested_connect）。
+  部品 → 保護を順に調べ、段ごとに読めた事実。試す速さは frequencies_hz で渡す）。
 - Primer の構成（ビットストリーム）は 3 つ: 標準（SWD・DAP サンプラ・故障注入）、JTAG（JTAG と SWD。サンプラ・故障注入
   なし）、fprobe_la（SWD とロジアナの専用の入力 6 本。サンプラ・故障注入なし。明示の書き替えで選び、SWD の接続では
   標準に戻さない）。`target_connect` は要る線の構成でなければ自動で書き替えてからつなぐ（数十秒。結果の design_switch。
@@ -154,10 +159,11 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   故障（HardFault 等）で止まったら `target_fault` で原因・故障した行・その時のレジスタ（run_until_halt にも要約が付く）。
   故障の入口で止めるには `target_vector_catch`（例 ["hard_fault", "bus_fault"]。読むだけは `target_vector_catch_get`）。
   リセットの種類は `target_reset` の kind（system / core / hardware = nRESET の線）。
-- 止めると壊れるターゲット: 止める・ブレークポイント・ステップ・`debug_call` の前に `debug_halt_risk`（ELF の無線・USB・
-  ウォッチドッグ・RTOS の名前が ELF にあるか。事実だけで判定はしない）。matched なら人に知らせ、止めずに調べる道具か
-  モニタ方式を先に。走っているのに
-  致命的エラーで回り続けている（ロックアップ・arch_system_halt 等）と `target_status` に fatal が付く（止めずに見張る）。
+- 止めると壊れうるターゲット: 止める・ブレークポイント・ステップ・`debug_call` の前に `debug_halt_risk`（`debug_halt_risk_set`
+  で渡した名前・正規表現に合うシンボルが ELF にあるか。本体は名前の表を持たず、事実だけで判定はしない）。どの名前を
+  探すかは使う側が決める（慣習の表はプラグイン fprobe.plugins.heuristics の halt_risk_conventions。経験則）。合えば
+  人に知らせ、止めずに調べる道具かモニタ方式を先に。走っているのにロックアップしている・`target_liveness_set` で渡した
+  関数の中を回り続けている・ティックが変わっていないと `target_status` に fatal が付く（止めずに見張る）。
 - 止めずにデバッグする（モニタ方式。モーター制御・通信の割り込みを止められないとき）: ファームにモニタ
   （host/firmware/monitor）を組み込み、`target_debug_mode_set`（mode="monitor"、priority = DebugMon の優先度）。
   以後も停止・ステップ・ブレークポイント・レジスタ・呼び出し履歴は同じ道具で、止まっている間も DebugMon より優先度の
@@ -170,8 +176,11 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   "head->samples[1]"、frame で呼び出し元の変数）、`debug_frame_variables`、書くのは `debug_write_expression`、
   型は `debug_type_info`。走らせたまま式を読むのは `debug_evaluate` の live=true（大域・静的。止めない）、ターゲット
   なしで式と型を調べるのは `debug_expression_check`（ELF だけ）。命令は `debug_disasm_text`（ソースの行を挟む。省略時は PC の前後）。
-- 周辺レジスタ: `target_peripheral_read`（"RCC.CR" か "GPIOA"。フィールドと列挙の名前に解読。SVD はターゲット名から
-  自動、無ければ `target_svd_load`）、`target_peripheral_write`（fields で名前の値）。メモリは `target_memory_view`
+  読んだ値（evaluate・変数・watch・戻り値等）はどれも kind（値の種類。DWARF の型で決まる）を持つ object: int・float・
+  bool（value）/ bytes（hex）/ enum（name・value）/ pointer（address・to）/ struct（members）/ array（length・items。
+  items が length より少なければ max_elements で切った）/ unavailable（reason）。
+- 周辺レジスタ: `target_peripheral_read`（"RCC.CR" か "GPIOA"。フィールドと列挙の名前に解読。SVD は先に
+  `target_svd_load`（SVD のファイル名か path）。周辺の全部を読むとき、読まないものは skip）、`target_peripheral_write`（fields で名前の値）。メモリは `target_memory_view`
   （compare で前回の読みとの差）。
 - 止めずに見る: RTT は `rtt_start` → `rtt_read`（前回の続き。timeout_s で待つ）/ `rtt_write`。ターゲットの線を
   空けたいときは `rtt_start` の wake="sampler"（FPGA が WrOff を見張り、変化したときだけ読む）。速さは `rtt_measure`。
@@ -191,7 +200,7 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   プリトリガ）→ `watch_capture`。走行中に書くのは `watch_write`。ファームが配列に貯める値は `watch_buffer_start` →
   `watch_buffer_read`（取りこぼさない）。
 - 既存のログ・トレースの形式: ログは `log_start`（defmt・trice・compact・memfault・text。source rtt / swo / uart）→
-  `log_read`（記録中なら stream "log"）。文字の中のコードの番地は `log_annotate`。トレースは `trace_start`（systemview・ctf・
+  `log_read`（記録中なら stream "log"）。文字の中の 0x の数のうち実行区画に入る値の場所は `log_annotate`。トレースは `trace_start`（systemview・ctf・
   tracealyzer、eventrecorder は RAM を止めずに）→ `trace_stop`（時間軸になり `rtos_timeline_load` 等で解析）、RAM から
   `trace_snapshot`（ポストモーテム）、ファイルから `trace_import` → `trace_events`。Component Viewer は `scvd_load` → `scvd_view`。
 - 命令トレース（ETM、ETMv4 = Cortex-M33 等）: `trace_etm_start`（CoreSight の ETM・ファンネル・TPIU を設定）→ 走らせて止める →
@@ -218,11 +227,15 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   `debug_stack_static`（静的な最大。.su と呼び出しグラフ。再帰・関数ポインタは上限不明 = indirect で候補を渡す）。
   ベアメタルの MSP は止めて `target_stack_paint` → 走らせる → `target_stack_usage`（使った最大・あふれ）。
 - 性能解析: `profile_start`（method itm は core_clock_hz が要る。pcsr は SWO 不要）→ `profile_stop` → `profile_result`
-  （by function / line / instruction。割合は信頼区間つき）/ `profile_exceptions`（割り込みの時間）/ `profile_coverage`
+  （by function / line / instruction。サンプル数と割合）/ `profile_exceptions`（割り込みの時間）/ `profile_coverage`
   （近似）。記録の 2 点間の時間のばらつき・長い順は `timing_measure`（条件は `recording_find` と同じ）。
   区間（t0_s / t1_s、pcsr は記録の時間軸の t0 / t1）に限る集計・関数のグループ（by file / prefix / groups）は
   `profile_aggregate`、CPU 使用率の推移は `profile_timeline`、gprof / KCacheGrind / lcov / gcov / dot へは `profile_export`。
   テストポイントは `testpoint_aggregate`（区間）/ `testpoint_export`（callgrind・lcov の C0 / C1 等）。
+- 記録の時刻のコードの位置: `recording_code_at`（t = タイムベース）で、その時刻の直前・直後の PC のサンプル（記録中に
+  `profile_start` の method pcsr で DWT_PCSR を読んでおく）の行と t との差・その間の幅、t の時点で記録された状態と前後の
+  止まった出来事（止まった PC は正確）、動いていたタスク。行は推定しない（サンプルの間に何を実行したかは記録に無い）。
+  材料の無いものは missing の理由。
 - 記録の集計・検索は `recording_query`（読み取り専用の SQL。表 events(t, t_end, stream, kind, a, b, body, unc)。時刻 t は
   タイムベース（recording_status の timebase_hz、多くは 100 MHz）。body は json_extract で。a・b の意味は stream ごと:
   sample = a 番地・b 値（32 ビット）、fpga の kind value = a 組・b 生の値（信号は fpga_obs_signals_get の lsb・width で
@@ -284,10 +297,13 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - DAP サンプラは 1 つ: いま使っている道具と止める API は `probe_sampler_status`。
 - DAP サンプラは 1 つ: `watch_set`・`rtos_timeline_start`（sampled、または memory / mutexes）・`profile_start`（pcsr）は
   同時に使えない。
-- 通信の解読: 捕捉の後 `la_decode`（protocol と settings。例 uart は {"channel": 5}、swd は {"swclk": 0, "swdio": 3,
-  "drive": 8}）。errors_only で誤りだけ、件数が多ければ offset / limit。解読器は `la_decoders` で一覧（CAN/CAN FD・
-  1-Wire・JTAG・I2S・パラレル・Manchester 等）。積み重ね（spiflash・eeprom24・modbus・jtag_arm）は下の設定を下の名前の
-  キーに（例 modbus は {"uart": {"channel": 5, "baud": 9600, "parity": "even"}}）。足りない解読器は Python で書いて
+- 通信の解読: 捕捉の後 `la_decode`（protocol と settings。通信の設定（枠の値・線の割り当て）は既定を持たないので
+  すべて渡す。つながない線は null。例 uart は {"channel": 5, "baud": 115200, "data_bits": 8, "parity": "none",
+  "stop_bits": 1, "invert": false, "lsb_first": true}、swd は {"swclk": 0, "swdio": 3, "drive": 8, "turnaround": 1,
+  "orundetect": false}。足りなければ誤りが要る設定の名前を挙げる）。errors_only で誤りだけ、件数が多ければ
+  offset / limit。解読器と設定（required・nullable）は `la_decoders` で一覧（CAN/CAN FD・1-Wire・JTAG・I2S・
+  パラレル・Manchester 等）。積み重ね（spiflash・eeprom24・modbus・jtag_arm）は下の設定を下の名前のキーに（例 modbus
+  は {"uart": {…uart の設定…}}、spiflash は {"spi": {…}, "address_bytes": 3}）。足りない解読器は Python で書いて
   `la_decoder_load`。PulseView・sigrok で見るなら `la_export`（.sr）、他のロジアナの .sr は `la_load` で読み込む。
 - 波形の測定: `la_measure`（最後の捕捉。周波数・周期・デューティ・パルス幅の統計、relations で delay・setup_hold）、
   記録の波形は `recording_waveform_measure`（時刻の範囲 t0 / t1）。
@@ -318,21 +334,27 @@ def _transition_summary(tr) -> dict:
     return out
 
 
+FIRST_EDGES = 16                       # la_collect の要約で時刻を並べる先頭の変化の数（切ったかは結果に出す）
+
+
 def _channel_summary(cap) -> dict:
+    """{channels: {ch: {initial, edges, first_edges_ns（トリガ = 0 ns からの先頭 FIRST_EDGES 個）, first_edges_truncated}},
+    first_edges_limit, constant_low（常に 0 で省いたチャンネル）}。"""
     period_ns = cap.sample_period_s * 1e9
-    out = {}
+    out, low = {}, []
     for ch in range(cap.channels):
         bits = cap.channel(ch)
         edges = [i for i in range(1, len(bits)) if bits[i] != bits[i - 1]]
         if not edges and not bits[0]:
-            continue                                       # 常に 0 のチャンネルは省く
+            low.append(ch)                                 # 常に 0 のチャンネルは省く（どれを省いたかは返す）
+            continue
         out[ch] = {
             "initial": bits[0],
             "edges": len(edges),
-            # トリガ（0 ns）からの相対時刻。多いときは先頭だけ
-            "first_edges_ns": [round((i - cap.trigger) * period_ns) for i in edges[:16]],
+            "first_edges_ns": [round((i - cap.trigger) * period_ns) for i in edges[:FIRST_EDGES]],
+            "first_edges_truncated": len(edges) > FIRST_EDGES,
         }
-    return out
+    return {"channels": out, "first_edges_limit": FIRST_EDGES, "constant_low": low}
 
 
 class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, SwoTools, CyclesTools, WindowTools,
@@ -340,7 +362,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             RtosAnalysisTools, RulesTools, HookTools, FlashBreakpointTools, DecodeTools, UserTools,
             LongRecordingTools, HeapTools, LowLevelTools, ConnectTools, ElfWatchTools, StreamTools, FormatTools,
             ProfileExportTools, StackTools, TimelineTools, ElfFileTools, TerminalTools, UiStateTools, DesignTools,
-            MonitorModeTools, XtrigOutputTools, GpioTools, SafetyTools, MulticoreTools, EtmTools, LinuxTools):
+            MonitorModeTools, XtrigOutputTools, GpioTools, SafetyTools, MulticoreTools, EtmTools, LinuxTools,
+            RecordingRtosTools):
 
     def __init__(self, serial: str | None = None, port: str | None = None, baud: int = DEFAULT_BAUD,
                  eth: str | None = None, bitstreams: str | None = None):
@@ -348,6 +371,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         self._port, self._baud = port, baud               # port を指定すると SerialLink で開く
         self._eth = eth                                   # IP アドレスを指定すると EthLink で開く
         self._lock = threading.RLock()
+        self._voltage_history = VoltageHistory()
         self._session: Session | None = None
         self._debug = None
         self._symbols: Symbols | None = None                # elf_load / program_ram / flash（ELF）で読み込む
@@ -520,12 +544,17 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             self.session.device.write(address, words)
 
     def target_voltage(self) -> dict:
-        """ターゲットの電源電圧（補助マイコン Pico の ADC、V）。live が False なら Pico が計測値を送っていない。
-        over_range が True なら測れる上限を超えている（volts は None。配線の分圧を確認）。"""
+        """ターゲットの電源電圧（補助マイコン Pico の ADC、V）。live = window_s 秒待つ間に計測値の数が増えた
+        （samples_before → samples）。over_range が True なら測れる上限を超えている（volts は None。配線の分圧を確認）。"""
         with self._lock:
-            r = Aux(self.session.device).read()
-            return {"volts": r.target_volts, "over_range": r.over_range, "live": r.live, "samples": r.samples,
-                    "errors": r.errors}
+            reading = Aux(self.session.device).read().as_dict()
+        self._voltage_history.add(reading)
+        return reading
+
+    def probe_voltage_history(self, since: float | None = None) -> dict:
+        """デーモンが読んだ電圧（だれの probe_voltage でも）の履歴: since（UNIX 秒）より後の読み {time, volts,
+        over_range, live} と統計（fprobe.voltage.VoltageHistory.read）。機器には触れない。"""
+        return self._voltage_history.read(since)
 
     # --- ターゲット ------------------------------------------------------------------
 
@@ -547,9 +576,9 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         auto = None
         if target == "auto":
             target, auto = self._resolve_auto_target(frequency_hz, switches)
-            frequency_hz = min(frequency_hz, auto["suggested_connect"]["frequency_hz"])
+            frequency_hz = auto["frequency_hz"]               # 判別で DP が応答した速さ（頼まれた速さ）
             if jtag_chain is None:
-                jtag_chain = auto["suggested_connect"].get("jtag_chain")
+                jtag_chain = auto["jtag_chain"]
         if riscv_part(target) is None and arm_a_part(target) is None:
             target, _, core = resolve_target(target, core)
         switch = self._ensure_design(protocol_for_target(target, jtag_chain))
@@ -639,7 +668,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
     def target_status(self) -> dict:
         """コアの状態（RUNNING / HALTED 等）と、停止中なら PC と止まった理由 halt_reason（request = 停止要求・ステップ・
         クロストリガ / breakpoint / bkpt_instruction = ファームウェア自身の BKPT（panic・assert 等）/ watchpoint /
-        vector_catch / external。fprobe.fault.halt_reason）。つないでいる先（target・frequency_hz・wire）も。
+        vector_catch / external。fprobe.fault.halt_reason）と、DFSR の立っていたビット全部 halt_bits（HALTED / BKPT /
+        DWTTRAP / VCATCH / EXTERNAL。複数立っていても halt_reason は 1 語）。つないでいる先（target・frequency_hz・wire）も。
         走っているのに致命的エラーで回り続けていれば fatal（fprobe.probe_safety）。複数ドロップの部品（RP2040）なら
         core（接続中のコア）と cores（各コアの状態。fprobe.probe_multicore）。"""
         with self._lock:
@@ -649,9 +679,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                 pc = self.target.read_core_register("pc")
                 status["pc"] = pc
                 status.update(self._place_of(pc))
-                reason = self._halt_reason(pc)
-                if reason is not None:
-                    status["halt_reason"] = reason
+                status.update(self._halt_reason(pc))
             if self._monitor is not None:
                 status["debug_mode"] = "monitor"              # 止まっているのは DebugMon の中（優先度の高い割り込みは動く）
             fatal = self._fatal_state(state)
@@ -670,17 +698,19 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         with self._lock:                                      # 読み直すときは機器を使う（ほかのスレッドと混ぜない）
             return device.capabilities()
 
-    def _halt_reason(self, pc: int) -> str | None:
-        """DFSR（と BKPT なら PC の命令）から止まった理由（_lock の中で）。Cortex-M 以外・読めなければ None。"""
+    def _halt_reason(self, pc: int) -> dict:
+        """DFSR（と BKPT なら PC の命令）から止まった理由（_lock の中で）: halt_reason（1 語）と、DFSR の立っていた
+        ビット全部の halt_bits。Cortex-M 以外・読めなければ空。"""
         if not _cortex_m(getattr(self, "_link", None)):
-            return None
+            return {}
         try:
             dfsr = self.target.read32(fault.DFSR)
             instruction = self.target.read16(pc & ~1) if dfsr & 0x02 else None
         except Exception:                                   # noqa: BLE001  理由は状態の添え物。読めなくても状態は返す
-            return None
+            return {}
         dbg = self._dbg                                     # 置いたブレークポイント（無ければまだ置いていない）
-        return fault.halt_reason(dfsr, instruction, breakpoint=dbg is not None and pc in dbg.breakpoints)
+        reason = fault.halt_reason(dfsr, instruction, breakpoint=dbg is not None and pc in dbg.breakpoints)
+        return {**({"halt_reason": reason} if reason is not None else {}), "halt_bits": fault.dfsr_bits(dfsr)}
 
     def _clear_halt_reason(self) -> None:
         """DFSR をクリアする（W1C。pyOCD は自分の再開・ステップでだけクリアする）。Cortex-M 以外は何もしない。"""
@@ -779,12 +809,17 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                     **self.source_list()}
 
     def source_list(self) -> dict:
-        """読み込んだ ELF の行番号の情報が参照するソース（名前・場所・この PC にあるか）。"""
+        """読み込んだ ELF の行番号の情報が参照するソース（名前・場所・この PC にあるか）。同じ名前の別のファイルは
+        files には最初のものだけで、same_name に名前 → 場所の一覧（"ファイル:行" はディレクトリを添えて選ぶ）。"""
         with self._lock:
             if self._symbols is None:
-                return {"files": []}
-            return {"files": [{"name": name, "path": str(path), "exists": not is_network_path(path) and path.is_file()}
-                              for name, path in sorted(self._symbols.sources().items())]}
+                return {"files": [], "same_name": {}}
+            relocated = self._symbols.relocated()
+            return {"files": [{"name": name, "path": str(path), "exists": not is_network_path(path) and path.is_file(),
+                               **({"built_path": str(relocated[name]["built"])} if name in relocated else {})}
+                              for name, path in sorted(self._symbols.sources().items())],
+                    "same_name": {name: [str(p) for p in paths]
+                                  for name, paths in sorted(self._symbols.source_conflicts().items())}}
 
     def source_read(self, name: str) -> dict:
         """ソースの本文と、命令のある行（ブレークポイントを置ける行）。読めるのは ELF が参照するファイルだけ。"""
@@ -802,25 +837,31 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                     "lines": self._symbols.lines_of(name)}
 
     def symbol_info(self, location: str) -> dict:
-        """場所（関数名・変数名・"ファイル:行"・"0x..."）の番地と、その番地の関数名・ファイル:行。"""
+        """場所（関数名・変数名・"ファイル:行"・"0x..."）の番地と、その番地の関数名・ファイル:行（where の文字と、
+        欄 function・offset・file・line。分からない欄は None）。"""
         with self._lock:
             if self._symbols is None:
                 raise RuntimeError("ELF が読み込まれていない（elf_load）")
             address = self._symbols.resolve(location)
-            out = {"address": address, "where": str(self._symbols.describe(address))}
+            place = self._symbols.describe(address)
+            out = {"address": address, "where": str(place), "function": place.function, "offset": place.offset,
+                   "file": place.file, "line": place.line}
             if not location.startswith("0x") and not is_line_location(location):
                 s = self._symbols.symbol(location)
                 out.update(kind=s.kind, size=s.size)
             return out
 
-    def program_ram(self, path: str) -> dict:
-        """ELF を RAM に読み込み、そのベクタ表から起動できる状態で止める（Flash には書かない。RAM で動く試験用の
-        プログラム向け）。ターゲットはリセットされる。続けて run_until_halt / target_resume で走らせる。"""
+    def program_ram(self, path: str, vector_table: int | None = None) -> dict:
+        """ELF を RAM に読み込み、起動できる状態で止める（Flash には書かない。RAM で動く試験用のプログラム向け）。
+        vector_table（ベクタ表の番地。使う側が明示する）を渡せばその表の初期の MSP・リセットの処理から（VTOR も
+        設定）、渡さなければ ELF の入口（e_entry）から（SP・VTOR は変えない。ベクタ表の場所を推定しない）。
+        ターゲットはリセットされる。続けて run_until_halt / target_resume で走らせる。結果の start = {from:
+        vector_table / entry, entry, vector_table}。"""
         with self._lock:
             self.elf_load(path)
-            stop = self.dbg.load_to_ram()
+            stop, start = self.dbg.load_to_ram(vector_table)
             self._image_written(elf=True)
-            return self._stop_dict(stop)
+            return {**self._stop_dict(stop), "start": start}
 
     def breakpoint_set(self, location: str, condition: str | None = None, ignore_count: int = 0,
                        log: list[str] | None = None, message: str | None = None) -> dict:
@@ -829,6 +870,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         breakpoint_log と記録に残す。message は添える文）。動作のあるブレークポイントは当たるたびにコアを数 ms 止める。"""
         with self._lock:
             address = self.dbg.breakpoint(location if not location.startswith("0x") else int(location, 16))
+            self._disabled.pop(address, None)                       # 無効にしてあったものは置き直しで有効に
             self._set_action(address, condition, ignore_count, log, message)
             if self._actions:
                 self._watch_stops(self.target.get_state().name != "HALTED")
@@ -844,17 +886,23 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                 self._gdb_trace_detached()                        # GDB のトレースポイントも外れた
             else:
                 address = self.dbg.breakpoint_address(location if not location.startswith("0x") else int(location, 16))
-                self.dbg.remove_breakpoint(address)
+                if address not in self._disabled:
+                    self.dbg.remove_breakpoint(address)
                 self._drop_actions(address)
             return self.breakpoint_list()
 
     def breakpoint_list(self) -> dict:
-        """置いているブレークポイントとウォッチポイント。"""
+        """置いているブレークポイント（enabled = false は breakpoint_enable で無効にしたもの。機器には置いていない）と
+        ウォッチポイント。"""
         with self._lock:
-            return {"breakpoints": [{"address": a, "location": n, **self._place_of(a), **self._breakpoint_kind(a),
-                                     **({"action": self._actions[a].describe()} if a in self._actions else {}),
-                                     **({"tool": self._break_hooks[a][0]} if a in self._break_hooks else {})}
-                                    for a, n in self.dbg.breakpoints.items()],
+            placed = [{"address": a, "location": n, "enabled": True, **self._place_of(a), **self._breakpoint_kind(a),
+                       **({"action": self._actions[a].describe()} if a in self._actions else {}),
+                       **({"tool": self._break_hooks[a][0]} if a in self._break_hooks else {})}
+                      for a, n in self.dbg.breakpoints.items()]
+            disabled = [{"address": a, "location": n, "enabled": False, **self._place_of(a),
+                         **({"action": action.describe()} if action is not None else {})}
+                        for a, (n, action) in self._disabled.items()]
+            return {"breakpoints": sorted(placed + disabled, key=lambda b: b["address"]),
                     "watchpoints": [{"address": w.address, "size": w.size, "kind": w.kind}
                                     for w in self.dbg.watches.values()]}
 
@@ -887,16 +935,22 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         with self._lock:
             self.dbg.write_variable(name, value, index)
 
-    def backtrace(self, variables: bool = False, max_frames: int = 64, max_elements: int = 64) -> list[dict]:
+    def backtrace(self, variables: bool = False, max_frames: int = 64, max_elements: int = 64,
+                  assume_leaf: bool = False) -> list[dict]:
         """呼び出し履歴（ELF に CFI があれば CFI で巻き戻し、例外のフレームも越える。無ければいまの位置と戻り先）。
         各段は index・pc・where・note（"exception" = 例外で中断された位置）・cfa・function・offset・file・line。
+        CFI で巻き戻したときは最後の段に stop（その先へ巻き戻さなかった理由と、上限で切ったなら使った max_frames）。
+        assume_leaf なら CFI の無い最内の関数を葉と仮定して LR から呼び出し元を出す（その段の note は lr_without_cfi）。
         variables なら各段の引数とローカル変数（arguments・locals）も。停止中に呼ぶ。"""
         with self._lock:
-            return self._backtrace(variables, max_frames, max_elements)
+            return self._backtrace(variables, max_frames, max_elements, assume_leaf)
 
     @staticmethod
     def _stop_dict(stop: Stop) -> dict:
-        return {"reason": stop.reason, "pc": stop.pc, **Probe._place(stop.where), "elapsed_s": stop.elapsed_s}
+        out = {"reason": stop.reason, "pc": stop.pc, **Probe._place(stop.where), "elapsed_s": stop.elapsed_s}
+        if stop.halt_bits is not None:
+            out["halt_bits"] = stop.halt_bits
+        return out
 
     # --- SWO --------------------------------------------------------------------------
 
@@ -956,7 +1010,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             self._la_period = self._la.start(rate_hz=rate_hz, pretrigger=pretrigger, mask=mask, value=value,
                                              rise=rise, fall=fall, filter_channels=filter_channels,
                                              filter_ns=filter_ns, pulse=pulse, external_only=external_only)
-            return {"sample_period_ns": self._la_period * 1e9, "depth": self._la.depth, **self._la.front_info}
+            return {"sample_period_ns": self._la_period * 1e9, "depth": self._la.depth, "pretrigger": pretrigger,
+                    **self._la.front_info}
 
     def la_collect(self, timeout_s: float = 5.0, vcd_path: str | None = None) -> dict:
         """完了を待って読み出し、チャンネルごとの要約（トリガ = 0 ns）を返す。vcd_path があれば VCD も書く。"""
@@ -971,8 +1026,9 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             if vcd_path:
                 write_vcd(cap, Path(vcd_path), names)
             return {"trigger_index": cap.trigger, "trigger_time": cap.trigger_time,
+                    "trigger_time_span": self.session.device.capabilities().la_phase_span,
                     "sample_period_ns": cap.sample_period_s * 1e9, "samples": len(cap.samples),
-                    "channels": _channel_summary(cap), "vcd": vcd_path}
+                    **_channel_summary(cap), "vcd": vcd_path}
 
     def _keep_capture(self, tr: Transitions, source: str, names: dict[int, str] | None = None) -> None:
         """最後の捕捉を画面の波形（la_view）のために持つ。変化点の表はここでは作らない（画面を使わない操作を遅くしない）。
@@ -992,7 +1048,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         呼ばれるので、機器の操作のロック（_lock。la_collect 等が長く持つ）ではなく捕捉の小さなロックで読む。"""
         with self._capture_lock:
             if self._capture is None:
-                raise RuntimeError("捕捉が無い（la_capture / la_deep_capture を先に）")
+                raise NoData("捕捉が無い（la_capture / la_deep_capture を先に）")
             tr, info, wave = self._capture, self._capture_info, self._wave
         if wave is None:
             wave = Waveform(tr)                                       # 長い捕捉では時間がかかるので、ロックの外で作る
@@ -1009,9 +1065,54 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         levels = wave.view(start, end, width)
         return {"capture": info, "start": max(0, start), "end": min(info["length"], end), "width": width, "levels": levels}
 
+    def la_trigger_status(self) -> dict:
+        """ロジアナのトリガの条件と状態（la ブロックのレジスタの読み戻し。la_arm・la_deep_arm が書いたもの）:
+        mask・value・rise・fall、external_only（パターンが決して成り立たない形 = クロストリガでだけ捕捉。la_arm の
+        external_only が書く形そのもの）、rate_hz・pretrigger、filter（ケイパビリティ la_filter）・pulse（la_pulse）、
+        internal（内蔵バッファの捕捉の状態: capturing・triggered・done・trigger_time）・deep（深いバッファの同じもの。
+        外部メモリがあれば）。trigger_time はトリガした後だけ（それまで None）。トリガの回数を数えるレジスタは無い。"""
+        with self._lock:
+            dev = self.session.device
+            caps = dev.capabilities()
+            if not getattr(caps, "la_channels", 0):
+                raise RuntimeError("このデバイスにはロジックアナライザが無い")
+            rate, pretrigger, mask, value, rise, fall = dev.read(g.LA_RATE, 6)
+            out: dict = {"mask": mask, "value": value, "rise": rise, "fall": fall,
+                         "external_only": (mask, value, rise, fall) == external_pattern(True, 0, 0, 0, 0, None)
+                         and not (getattr(caps, "la_pulse", False) and dev.read32(g.LA_PULSE) & 3),
+                         "rate_hz": caps.la_sample_hz / ((rate & 0xFFFF) + 1), "pretrigger": pretrigger}
+            clock = caps.sys_clock_hz
+            if getattr(caps, "la_filter", False):
+                word = dev.read32(g.LA_FILTER)
+                cycles = word >> g.LA_FILTER_CYCLES[0] & (1 << g.LA_FILTER_CYCLES[1]) - 1
+                out["filter"] = {"channels": word >> g.LA_FILTER_CHANNELS[0] & (1 << g.LA_FILTER_CHANNELS[1]) - 1,
+                                 "cycles": cycles, "min_width_ns": cycles / clock * 1e9 if cycles > 1 else None}
+            if getattr(caps, "la_pulse", False):
+                word, low, high = dev.read(g.LA_PULSE, 3)
+                mode = ("none", "width", "timeout", "none")[word >> g.LA_PULSE_MODE[0] & 3]
+                out["pulse"] = {"mode": mode} if mode == "none" else {
+                    "mode": mode, "level": word >> g.LA_PULSE_LEVEL[0] & 1,
+                    "channel": word >> g.LA_PULSE_CHANNEL[0] & (1 << g.LA_PULSE_CHANNEL[1]) - 1,
+                    "min_ns": low / clock * 1e9, "max_ns": None if high == 0xFFFF_FFFF else high / clock * 1e9}
+
+            def state(status_addr, fields, time_addr) -> dict:
+                status = dev.read32(status_addr)
+                lo, hi = dev.read(time_addr, 2)
+                bits = {k: bool(status >> f[0] & 1) for k, f in fields.items()}
+                return {**bits, "trigger_time": hi << 32 | lo if bits["triggered"] else None}
+            if getattr(caps, "la_depth", 0):
+                out["internal"] = state(g.LA_STATUS, {"capturing": g.LA_STATUS_CAPTURING, "triggered": g.LA_STATUS_TRIGGERED,
+                                                      "done": g.LA_STATUS_DONE}, g.LA_TRIGGER_TIME_LO)
+            if getattr(caps, "mem_bytes", 0):
+                out["deep"] = state(g.LA_DEEP_STATUS, {"capturing": g.LA_DEEP_STATUS_CAPTURING,
+                                                       "triggered": g.LA_DEEP_STATUS_TRIGGERED,
+                                                       "done": g.LA_DEEP_STATUS_DONE}, g.LA_DEEP_TRIGGER_TIME_LO)
+            return out
+
     def la_capture(self, timeout_s: float = 5.0, vcd_path: str | None = None, **trigger) -> dict:
         armed = self.la_arm(**trigger)
-        return {**self.la_collect(timeout_s, vcd_path), **{k: armed[k] for k in ("filter", "pulse") if k in armed}}
+        return {**self.la_collect(timeout_s, vcd_path), **{k: armed[k] for k in ("filter", "pulse", "pretrigger")
+                                                            if k in armed}}
 
     # --- クロストリガ ----------------------------------------------------------------
 
@@ -1070,10 +1171,24 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             return {"stages": len(seq_stages), "armed": arm, "stage": stage, "fired": fired}
 
     def xtrig_sequence_status(self) -> dict:
-        """多段トリガの状態（今の段、発火したか、発火した時刻 = タイムベースのカウント）。"""
+        """多段トリガの状態（レジスタの事実）: 今の段、発火したか、発火した時刻（タイムベースのカウント）、仕掛けているか
+        （armed）、設定した段の数（stages）と、段ごとの状態 stage_states（done = 済んだ・current = 待っている段・
+        waiting = まだ・idle = 仕掛けていない。発火したら全部 done）。config は段とピンの条件のレジスタの読み戻し
+        （xtrig_set_sequence の stages・pattern_a・pattern_b と同じ形。within_us は刻みに丸めた値、制限なしは None）。"""
         with self._lock:
-            stage, fired, time_ = TriggerSequencer(self.session.device).status()
-            return {"stage": stage, "fired": fired, "time": time_}
+            seq = TriggerSequencer(self.session.device)
+            stage, fired, time_ = seq.status()
+            armed, stages = seq.control()
+            configured, a, b = seq.config(stages)
+        states = ["done" if fired else "idle" if not armed else
+                  "done" if k < stage else "current" if k == stage else "waiting" for k in range(stages)]
+        names = {Event.PATTERN_A: "pattern_a", Event.PATTERN_B: "pattern_b", Event.DAP_MATCH: "dap_match",
+                 Event.HOST: "host"}
+        config = {"stages": [{"when": [n for e, n in names.items() if st.when & e], "count": st.count,
+                              "within_us": None if st.within_s is None else st.within_s * 1e6} for st in configured],
+                  "pattern_a": vars(a), "pattern_b": vars(b)}
+        return {"stage": stage, "fired": fired, "time": time_, "armed": armed, "stages": stages,
+                "stage_states": states, "config": config}
 
     def xtrig_fire(self) -> None:
         """源 host を 1 回発火する。"""
@@ -1081,18 +1196,22 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             CrossTrigger(self.session.device).fire()
 
     def xtrig_status(self) -> dict:
-        """割り込み書き込みの状態（結果・回数・時刻）と番地一致の回数・時刻（タイムベースのカウント）と、いまの経路 route
+        """割り込み書き込みの状態（結果・回数・時刻）と中身（ap・address・value。レジスタの読み戻し）、番地一致の回数・
+        時刻（タイムベースのカウント）と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route
         （レジスタから読んだ to_la・to_inject の源の名前。xtrig_route 以外の道具（fpga_obs.trigger_set・sampler.trigger_set・
         ルール）が書いたビットも含む）。"""
         with self._lock:
             xt = CrossTrigger(self.session.device)
             count, time_ = xt.match_status()
+            match = xt.match_config()
+            ap, address, value = xt.inject_config()
             route = self.session.device.read32(g.XTRIG_ROUTE)
 
             def names(field) -> list[str]:
                 bits = route >> field[0] & (1 << field[1]) - 1
                 return [s.name.lower() for s in Source if bits & int(s)]
-            return {"inject": vars(xt.inject_status()), "match": {"count": count, "time": time_},
+            return {"inject": {**vars(xt.inject_status()), "ap": ap, "address": address, "value": value},
+                    "match": {"count": count, "time": time_, **match},
                     "route": {"to_la": names(g.XTRIG_ROUTE_TO_LA), "to_inject": names(g.XTRIG_ROUTE_TO_INJECT)}}
 
     def la_deep_capture(self, rate_hz: float | None = None, mask: int = 0, value: int = 0, rise: int = 0,
@@ -1106,7 +1225,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         armed = self.la_deep_arm(rate_hz, mask, value, rise, fall, rle, after_beats, filter_channels, filter_ns, pulse,
                                  external_only)
         result = self.la_deep_collect(timeout_s, before_beats, vcd_path)
-        return {**result, **{k: armed[k] for k in ("filter", "pulse") if k in armed}}
+        return {**result, **{k: armed[k] for k in ("filter", "pulse", "after_beats") if k in armed}}
 
     def la_deep_arm(self, rate_hz: float | None = None, mask: int = 0, value: int = 0, rise: int = 0, fall: int = 0,
                     rle: bool = True, after_beats: int = 4096, filter_channels: int = 0, filter_ns: float = 0.0,
@@ -1120,7 +1239,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             period = self._deep.start(rate_hz=rate_hz, mask=mask, value=value, rise=rise, fall=fall, rle=rle,
                                       post_beats=after_beats, filter_channels=filter_channels, filter_ns=filter_ns,
                                       pulse=pulse, external_only=external_only)
-            return {"sample_period_ns": period * 1e9, "capacity_beats": self._deep.beats, **self._deep.front_info}
+            return {"sample_period_ns": period * 1e9, "capacity_beats": self._deep.beats, "after_beats": after_beats,
+                    **self._deep.front_info}
 
     def la_deep_collect(self, timeout_s: float = 10.0, before_beats: int = 4096, vcd_path: str | None = None) -> dict:
         """深いバッファの完了を待って、トリガ前 before_beats 拍から後ろを読み、要約を返す。"""
@@ -1139,8 +1259,9 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             if vcd_path:
                 write_vcd(tr, Path(vcd_path), names)
             return {"trigger_index": tr.trigger, "trigger_time": tr.trigger_time,
+                    "trigger_time_span": self.session.device.capabilities().la_phase_span,
                     "sample_period_ns": tr.sample_period_s * 1e9, "samples": tr.length,
-                    "duration_s": tr.length * tr.sample_period_s,
+                    "duration_s": tr.length * tr.sample_period_s, "before_beats": before_beats,
                     "channels": _transition_summary(tr), "vcd": vcd_path}
 
     def la_stream(self, vcd_path: str, duration_s: float = 1.0, rate_hz: float | None = None,
@@ -1286,7 +1407,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
     def _reading(self) -> Recording:
         view, recorder = self._view, self._recorder     # 別のスレッドが替える・None にするので一度だけ読む
         if view is None:
-            raise RuntimeError("読む記録が無い（recording_start か recording_open を先に）")
+            raise NoData("読む記録が無い（recording_start か recording_open を先に）")
         if recorder is not None:
             recorder.flush()
         return view
@@ -1295,7 +1416,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                          kinds: list[str] | None = None, limit: int = 1000) -> dict:
         """時刻（タイムベース）の範囲の出来事を時刻順に。streams の例: waveform 以外の dap / uart / swo / rtt / aux /
         host / target / annotation / sample（a 番地・b 値・name 記録の変数の名前）/ fpga（kind value の a 組・b 生の値。fields に記録の信号の
-        定義で名前ごとの値。fpga の value_untimed・gap_untimed・group_untimed は、時刻合わせの印が来ないまま鎖が終わって時刻の決まらない記録（t は受けた時 = 起きた時刻の上限））/ clock。"""
+        定義で名前ごとの値。fpga の value_untimed・gap_untimed・group_untimed は、時刻合わせの印が来ないまま鎖が終わって時刻の決まらない記録（t は受けた時 = 起きた時刻の上限））/ clock。
+        先頭 limit 件（total = 範囲の総数・truncated = 切ったか・limit = 使った上限）。"""
         view = self._reading()
         signals = FpgaSignals.from_dict(view.meta.get("fpga.signals"))
         names = {int(a, 16): n for a, n in (view.meta.get("sample.names") or {}).items()}
@@ -1307,7 +1429,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             if e.stream == "fpga" and e.kind == "value":
                 item["fields"] = signals.fields(e.a, e.b)
             out.append(item)
-        return {"events": out}
+        total = view.count_events(t0, t1, streams, kinds)
+        return {"events": out, "total": total, "truncated": total > len(out), "limit": limit}
 
     def recording_correlate(self, effect: str, causes: list[str] | None = None, window_s: float | None = None,
                             t0: int | None = None, t1: int | None = None, examples: int = 5, limit: int = 20,
@@ -1320,7 +1443,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         項: <変数> changed / rose / fell、<変数>=<値>（列挙の名前も）を and でつなぐ。sampling = 変数の読みの間隔（秒。
         遅れの分解能）、fpga_hidden = 標本型で標本の間に見えなかった変化の数。causes を省くと記録の変数から候補を作って
         調べ（auto。信号の変化・列挙の値に入った瞬間・変化 かつ 列挙 = 値の組・ピンの rose / fell・ほかのメモリの変化）、
-        上位 limit 個を返す（max_coverage を渡せば coverage がそれを超える候補を除く）。gap_s を渡せば、それより長い
+        上位 limit 個を返す（切る前の数 causes_total・切ったか truncated・使った limit。max_coverage を渡せば coverage が
+        それを超える候補を除く）。gap_s を渡せば、それより長い
         MCU のメモリの読みの空白を欠けにする（既定は欠けにしない。読みの事実は reads）。gaps = 使った変数の
         データの欠け（時刻・reason。warnings にも合計）。judged = 先行率の分母（窓が候補の変数の欠けにかかる結果と、結果の変数の欠けの直後の読みで見えた結果は除く）。
         fpga_hidden = 標本型の FPGA の観測で、標本の間に変わって見えなかった変化の数（信号を問わない合計。多ければ
@@ -1329,34 +1453,39 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         読みで何回分も動いている）。"""
         return correlate(self._reading(), effect, causes, window_s, t0, t1, examples, limit, gap_s, max_coverage)
 
-    def recording_trigger_set(self, condition: str, action: str = "mark", post_s: float = 1.0) -> dict:
+    def recording_trigger_set(self, condition: str, action: str = "mark", post_s: float = 1.0,
+                              lag_s: float = 2.0) -> dict:
         """記録中に、条件（recording_correlate と同じ書き方。MCU のメモリ・FPGA の信号・ピンをまたげる）が成り立つたびに
         記録に印を付ける（stream annotation の mark）。action = stop なら、最初に成り立った時刻から post_s 秒が記録に
-        入ったら記録を止める（めったに起きない不具合を前後つきで残す）。判定は PC で、数秒遅れる（TRIGGER_LAG_S）。
+        入ったら記録を止める（めったに起きない不具合を前後つきで残す）。判定は PC で、今から lag_s 秒前までを調べる
+        （流れ・取り込みが記録に届くのを待つ）。調べ終えた時刻より前に後から届いた出来事は調べず、その数を late に返す。
         記録の始めから調べる。様子は recording_trigger_status、やめるのは recording_trigger_clear。"""
         if action not in ("mark", "stop"):
             raise ValueError("action は mark / stop")
         if not post_s >= 0:
             raise ValueError("post_s は 0 以上")
+        if not lag_s >= 0:
+            raise ValueError("lag_s は 0 以上")
         with self._lock:
             if self._recorder is None:
                 raise RuntimeError("記録していない（recording_start を先に）")
             watcher = ConditionWatcher(condition)                      # 条件の形はここで確かめる
             self._clear_trigger()
             # 記録中の記録を自分で開いて読む（画面・AI が別の記録を開いて読む記録 _view を替えても、見張りは替わらない）
-            self._trigger = {"condition": watcher.condition.text, "action": action, "post_s": post_s,
+            self._trigger = {"condition": watcher.condition.text, "action": action, "post_s": post_s, "lag_s": lag_s,
                              "watcher": watcher, "view": Recording.open(self._recorder.directory), "checked": 0, "hits": 0, "first_t": None, "last_t": None,
-                             "state": "armed", "error": None}
+                             "state": "armed", "error": None, "late": 0, "_checked_count": 0}
             self._add_job("recording.trigger", TRIGGER_PERIOD_S, self._trigger_poll)
             return self.recording_trigger_status()
 
     def recording_trigger_status(self) -> dict:
-        """条件・action・回数 hits・最初と最後に成り立った時刻（タイムベース）・調べ終えた時刻 checked・状態
-        （off / armed = まだ / fired = 成り立った / stopped = 記録を止めた / error）。"""
+        """条件・action・lag_s・回数 hits・最初と最後に成り立った時刻（タイムベース）・調べ終えた時刻 checked・
+        調べ終えた後に届いて調べなかった出来事の数 late・状態（off / armed = まだ / fired = 成り立った / stopped = 記録を
+        止めた / error）。"""
         trig = getattr(self, "_trigger", None)
         if trig is None:
             return {"state": "off"}
-        return {k: v for k, v in trig.items() if k not in ("watcher", "view")}
+        return {k: v for k, v in trig.items() if k not in ("watcher", "view") and not k.startswith("_")}
 
     def recording_trigger_clear(self) -> dict:
         """条件の見張りをやめる。"""
@@ -1372,7 +1501,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         self._trigger = None
 
     def _trigger_poll(self, now: int | None = None) -> None:
-        """recording_trigger の周期の仕事（_lock の中で）: 前に調べた所から now（既定: 今 − TRIGGER_LAG_S）までを調べる。"""
+        """recording_trigger の周期の仕事（_lock の中で）: 前に調べた所から now（既定: 今 − lag_s）までを調べる。"""
         trig = getattr(self, "_trigger", None)
         if trig is None or trig["state"] in ("stopped", "error"):
             return
@@ -1383,10 +1512,13 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             return
         hz = self._recorder.timebase_hz
         if now is None:
-            now = self.session.device.time() - int(TRIGGER_LAG_S * hz)
+            now = self.session.device.time() - int(trig["lag_s"] * hz)
         try:
             self._recorder.flush()
-            hits = trig["watcher"].scan(trig["view"], trig["checked"], now)
+            view = trig["view"]
+            if trig["checked"]:                                         # 調べ終えた所より前に後から届いた出来事
+                trig["late"] += view.count_events(t1=trig["checked"]) - trig["_checked_count"]
+            hits = trig["watcher"].scan(view, trig["checked"], now)
         except Exception as e:                                          # 条件の変数が記録に無い等
             trig.update(state="error", error=f"{type(e).__name__}: {e}")
             self._remove_job("recording.trigger")
@@ -1395,6 +1527,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         trig["checked"] = max(trig["checked"], now)
         for t in hits:
             self._recorder.add("annotation", "mark", t, body={"text": f"条件が成り立った: {trig['condition']}"})
+        self._recorder.flush()                                          # 自分の印も数えた後で、届いた分の数を覚える
+        trig["_checked_count"] = trig["view"].count_events(t1=trig["checked"])
         if hits:
             trig["hits"] += len(hits)
             trig["first_t"] = trig["first_t"] if trig["first_t"] is not None else hits[0]
@@ -1419,7 +1553,8 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
     def recording_durations(self, variable: str, t0: int | None = None, t1: int | None = None, limit: int = 20,
                             gap_s: float | None = None) -> dict:
         """変数（recording_correlate と同じ指し方）の値ごとの回数・続いた時間（両端の見えている区間。秒の最小・中央値・
-        90 % 点・最大）・その値だった時間の割合。例: FPGA の state が BUSY のまま続く時間を MCU の待ち時間と比べる。データの欠け
+        90 % 点・最大）・その値だった時間の割合。続いた時間の合計の大きい順に limit 個（値の総数 values_total・切ったか
+        truncated・使った limit）。例: FPGA の state が BUSY のまま続く時間を MCU の待ち時間と比べる。データの欠け
         にかかる回は数えず excluded（欠けは gaps）。"""
         return durations(self._reading(), variable, t0, t1, limit, gap_s)
 
@@ -1431,7 +1566,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         start（瞬間の項のある条件）が成り立ってから次に成り立つまで。区間ごとに by の開始時の値・counts の各条件の回数・
         effect が起きたか（by_at "end" なら by は区間の終わりの値。例 start "requests changed"・by "last_b"・by_at "end" で
         要求ごとの B）。groups = by の値ごとの区間の数・effect の割合（effect_rate）・counts の平均、rows = 最初の rows
-        区間。例: start "state changed and state=BUSY"、by "left_hi"、counts ["restart changed and state=BUSY"]、
+        区間（入れうる区間の数 rows_total・切ったか rows_truncated・使った rows は rows_limit）。例: start "state changed and state=BUSY"、by "left_hi"、counts ["restart changed and state=BUSY"]、
         effect "errors changed" → どの入力の要求が再試行され、再試行された要求が誤るか。データの欠けにかかる区間は groups・rows に
         入れず excluded（変数ごとの内訳は excluded_by、欠けは gaps）。length_s = 区間の長さ、effect_offset_s = 区間の始め
         から結果までの時間（秒の分位。結果が始めの直後に集まるなら、前の区間の結果が次に入っている可能性: 区間の切り方を
@@ -1439,22 +1574,36 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         数・counts の平均（失敗した回と普段の回の違い）。"""
         return transactions(self._reading(), start, by, counts, effect, t0, t1, rows, by_at, effect_lag_s, gap_s)
 
-    def recording_find(self, query: dict) -> dict:
+    def recording_find(self, query: dict, limit: int = FIND_LIMIT) -> dict:
         """条件に一致する出来事の一覧。query: stream / kind / t0 / t1 / a / b（値か {"eq"|"lt"|"ge"…: 値}）/
-        body（{欄: 値か {"regex": …}}）。"""
+        body（{欄: 値か {"regex": …}}）。events は時刻の順に先頭 limit 件（count = 総数、truncated = 切ったか、
+        limit = 使った上限）。"""
+        if limit < 0:
+            raise ValueError("limit は 0 以上")
         found = self._reading().find(query)
-        return {"count": len(found), "events": [asdict(e) for e in found[:1000]]}
+        return {"count": len(found), "events": [asdict(e) for e in found[:limit]], "truncated": len(found) > limit,
+                "limit": limit}
 
-    def recording_intervals(self, start: dict, end: dict) -> dict:
-        """開始の条件から次の終了の条件までの時間（タイムベース）の一覧と統計（最小・最大・平均・標準偏差）。"""
+    def recording_intervals(self, start: dict, end: dict, limit: int = FIND_LIMIT) -> dict:
+        """開始の条件から次の終了の条件までの時間（タイムベース）の一覧と統計（最小・最大・平均・標準偏差。統計は
+        全部の組から）。intervals は先頭 limit 組（count = 総数、intervals_truncated = 切ったか、limit = 使った上限）。"""
+        if limit < 0:
+            raise ValueError("limit は 0 以上")
         stats = self._reading().intervals(start, end)
-        stats["intervals"] = stats["intervals"][:1000]
+        stats["intervals_truncated"] = len(stats["intervals"]) > limit
+        stats["intervals"] = stats["intervals"][:limit]
+        stats["limit"] = limit
         return stats
 
     def recording_density(self, t0: int, t1: int, width: int = 1000, streams: list[str] | None = None) -> dict:
-        """画素ごとの出来事の件数（縮図・タイムラインの要約）。長期の記録で間引いた・消した部分にかかれば coverage。"""
+        """画素ごとの出来事の件数（縮図・タイムラインの要約）。長期の記録で間引いた・消した部分にかかれば coverage と、
+        端がそこにかかって数えられない画素の inexact（[{pixel, max}]。counts はその画素では残っている出来事だけの下限、
+        max は上限。消した分割なら None。按分で推定しない）。"""
         view = self._reading()
-        out = {"counts": view.density(t0, t1, width, streams)}
+        bounds = view.density_bounds(t0, t1, width, streams)
+        out = {"counts": bounds["counts"]}
+        if bounds["inexact"]:
+            out["inexact"] = bounds["inexact"]
         coverage = view.coverage(t0, t1)
         if not coverage["complete"]:
             out["coverage"] = coverage
@@ -1464,18 +1613,20 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         """記録の波形を画素ごとに '0' / '1' / 'x'（変化）/ '-'（波形が無い）。"""
         return {"levels": self._reading().waveform_view(t0, t1, width)}
 
-    def recording_mark(self, text: str, t: int | None = None) -> dict:
+    def recording_mark(self, text: str, t: int | None = None, caller: dict | None = None) -> dict:
         """印とメモを残す（調査の経緯）。t（タイムベース）を省くと記録中の記録のいまの時刻、指定するとその時刻
-        （記録中の記録か、開いた記録。時間軸で選んだ時刻に後から印を置く）。"""
+        （記録中の記録か、開いた記録。時間軸で選んだ時刻に後から印を置く）。caller（デーモンが渡す呼び出し元
+        {id, name, role}。引数の仕様には出ない）は置いた者として印の本文の client に残す（デーモンを通さなければ無し）。"""
+        body: dict = {"text": text, **({"client": dict(caller)} if caller is not None else {})}
         rec = self._recorder
         if rec is not None:
             if t is None:
-                return {"t": rec.add_host("annotation", "mark", time.monotonic(), body={"text": text})}
-            rec.add("annotation", "mark", t, body={"text": text})
+                return {"t": rec.add_host("annotation", "mark", time.monotonic(), body=body)}
+            rec.add("annotation", "mark", t, body=body)
             return {"t": t}
         if t is None:
             raise RuntimeError("記録していない（recording_start を先に。開いた記録には t（タイムベース）を指定して印を足す）")
-        self._reading().add("annotation", "mark", t, body={"text": text})
+        self._reading().add("annotation", "mark", t, body=body)
         return {"t": t}
 
     def recording_export(self, format: str, path: str, t0: int | None = None, t1: int | None = None,
@@ -1565,16 +1716,17 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
     # --- 対象の FPGA の観測（FEATURES の FPGA_OBS がある構成だけ。値はイベント 8・9 で記録に入る） -------------
 
     def fpga_obs_open(self, chain: dict | None = None, user_ir: int = 2, half_period: int = 10, words: int = 64,
-                      sync_period: int = 100, auto_reopen: bool = False) -> dict:
+                      sync_period: int = 100, auto_reopen: bool = False, id_scans: int = 0) -> dict:
         """対象の FPGA の JTAG で観測の回路 v2（target_ip/fprobe_obs）を読み始め、その申告（id・version・width・groups・
         fifo_depth・clock_hz・sync_delay・sample_delay・lost_bits）を返す。chain = 鎖での対象の位置 {ir_len（既定 4）,
         ir_before, ir_after, dr_before, dr_after}、user_ir = 対象の USER の命令、half_period = TCK の半周期（sys の周期数。
         obs_soft_core の 1 クロック版は TCK ≤ 対象の clk / 8）、words = 1 スキャンの記録の語数、sync_period = 印（時刻
-        合わせ）の間隔（スキャンの数）。値を記録に残すには events_start も要る。auto_reopen = 観測の回路が答えなくなって
+        合わせ）の間隔（スキャンの数）、id_scans = 始めに ID の応答を待つスキャンの上限（0 = 上限なし。上限まで来なければ
+        止まり、status の stuck・id_timeout）。値を記録に残すには events_start も要る。auto_reopen = 観測の回路が答えなくなって
         止まったら（stuck。対象の FPGA を書き直した・電源を入れ直した等）、1 秒ごとに同じ設定で開き直す（記録中なら印を
         残す。回数は fpga_obs_status の reopened）。止まった回路の線をまた動かすので、利用者が選んだときだけ。"""
         config = {"chain": chain, "user_ir": user_ir, "half_period": half_period, "words": words,
-                  "sync_period": sync_period}
+                  "sync_period": sync_period, "id_scans": id_scans}
         with self._lock:
             info = self._open_obs(config)
             self._fpga_obs_opened.update(auto_reopen=auto_reopen, reopened=0)
@@ -1604,7 +1756,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             self._fpga_latest = {}                           # 別の回路・設定かもしれない: 前の最後の値は捨てる
             self._fpga_obs = FpgaObs(self.session.device)
             info = self._fpga_obs.open(config["chain"], config["user_ir"], config["half_period"], config["words"],
-                                       config["sync_period"])
+                                       config["sync_period"], id_scans=config.get("id_scans", 0))
             # 開いた設定と申告を覚える（別の窓・開き直した画面が見る。対象を書き直した後に同じ設定で開き直す）
             previous = getattr(self, "_fpga_obs_opened", None) or {}
             self._fpga_obs_opened = {**previous, "config": config, "declared": info}
@@ -1860,6 +2012,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         def item(s) -> dict:
             fields = signals is not None and s.kind == "value"
             return {"time_us": None if s.time_fprobe is None else s.time_fprobe * 1e6 / hz,
+                    "time_basis": getattr(s, "time_basis", None),
                     "target_cycles": s.target_cycles, "kind": s.kind, "group": s.group, "value": s.value,
                     "lost": s.lost, **({"fields": signals.fields(s.group, s.value)} if fields else {})}
 
@@ -1878,6 +2031,19 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
             items = [item(s) for s in obs_samples(events, **getattr(self, "_obs_delays", {}))]
             return {"written": written, "lost": lost, "first": first, "next": first + len(events), **extra,
                     "items": items, **extra_out}
+
+    def fpga_obs_count(self, conditions: list[str], last: int) -> dict:
+        """観測した値の最後の last 件（fpga_obs_read の窓。使う側が明示する。既定の値は無い）で、条件ごとに成り立った
+        回数と、数えた範囲の事実（数えた値の数・最初と最後の値の時刻 t0_us / t1_us・その間の秒 span_s・切れ目の数 gaps・
+        失った変化の数 lost）を返す（fprobe.obs_condition）。読めない条件は error に理由を返す（ほかの条件は数える）。"""
+        items = self.fpga_obs_read(last=last)["items"]
+        out = []
+        for text in conditions:
+            try:
+                out.append(count_condition(items, text))
+            except ConditionError as e:
+                out.append({"condition": text, "error": str(e)})
+        return {"last": last, "conditions": out}
 
     # --- システム（MCU と FPGA を並べて） ----------------------------------------------------------------------
 
@@ -1916,6 +2082,7 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                 signals = FpgaSignals.from_dict(defs["recording"] or defs["signals"])
                 fpga["latest"] = [{**latest[g], "fields": signals.fields(g, latest[g]["value"])} for g in sorted(latest)]
                 fpga["gaps"] = sum(1 for it in items if it["kind"] == "gap")
+                fpga["window"] = {"last": fpga_last, "items": len(items)}     # 見た窓（latest のうち窓の外のものもある）
             except Exception as e:                           # イベントの記録を始めていない等
                 fpga["latest_error"] = str(e)
             out["fpga"] = fpga
@@ -1924,10 +2091,11 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
     # --- UART（USB では CDC-ACM、フレームのリンクでは ch 3 = UART0） -----------------
 
     def _uart_link(self, baud: int | None) -> FrameLink | None:
-        """フレームのリンクで開いているならそのリンク（ボーレートを LINE_CODING で合わせる）。USB なら None。"""
+        """フレームのリンクで開いているならそのリンク（ボーレートを LINE_CODING で合わせる。頼まれず、まだ決まって
+        いなければ UART_DEFAULT_BAUD。使った速さは結果の baud に出す）。USB なら None。"""
         link = self.session.link
         if link is not None:
-            want = baud or link.uart_baud or 115200
+            want = baud or link.uart_baud or UART_DEFAULT_BAUD
             if link.uart_baud != want:
                 link.set_uart_baud(want)
         return link
@@ -1939,20 +2107,21 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
                      and (serial_number is None or p.serial_number == serial_number)]
             if len(ports) != 1:
                 raise RuntimeError(f"fprobe の COM ポートが特定できない: {ports}")
-            self._uart = Serial(ports[0], baud or 115200, timeout=0)
+            self._uart = Serial(ports[0], baud or UART_DEFAULT_BAUD, timeout=0)
         elif baud and self._uart.baudrate != baud:
             self._uart.baudrate = baud                     # ボーレートはライン設定でプローブに伝わる
         return self._uart
 
-    def uart_write(self, data: str, baud: int | None = None) -> int:
-        """ターゲットの UART に送る（latin-1）。baud を指定するとボーレートも変える。"""
+    def uart_write(self, data: str, baud: int | None = None) -> dict:
+        """ターゲットの UART に送る（latin-1）。baud を指定するとボーレートも変える。written（送ったバイト数）と、
+        使ったボーレート baud（頼まれず、まだ開いていなければ UART_DEFAULT_BAUD）。"""
         with self._lock:
             if link := self._uart_link(baud):
-                return link.uart_write(data.encode("latin-1"))
+                return {"written": link.uart_write(data.encode("latin-1")), "baud": link.uart_baud}
             port = self._uart_port(baud)
             n = port.write(data.encode("latin-1"))
             port.flush()
-            return n
+            return {"written": n, "baud": port.baudrate}
 
     def _uart_fetch(self, baud: int | None = None) -> None:
         """UART の届いた分を読んで貯める（_lock の中で）。"""
@@ -1961,13 +2130,15 @@ class Probe(InspectTools, ObserveTools, WatchTools, RtosTools, ProfileTools, Swo
         if data:
             self._received("uart", bytes(data), time.monotonic())
 
-    def uart_read(self, timeout_s: float = 0.5, baud: int | None = None) -> str:
-        """timeout_s の間に届いたものを返す（latin-1 で文字列化）。背景で読んでいる（TCP の口・ファイルへ流している）
-        なら、前回の読みからの分も含む。"""
+    def uart_read(self, timeout_s: float = 0.5, baud: int | None = None) -> dict:
+        """timeout_s の間に届いたもの data（latin-1 で文字列化）と、受けたボーレート baud（頼まれず、まだ開いて
+        いなければ UART_DEFAULT_BAUD）。背景で読んでいる（TCP の口・ファイルへ流している）なら、前回の読みからの分も含む。"""
         if baud is not None:
             with self._lock:
                 self._uart_fetch(baud)                     # ボーレートを先に合わせる
-        return self._collect("uart", timeout_s).decode("latin-1")
+        data = self._collect("uart", timeout_s).decode("latin-1")
+        with self._lock:
+            return {"data": data, "baud": self._uart_baud_now()}
 
     def uart_configure(self, baud: int) -> dict:
         """ターゲットの UART のボーレートを変える（送らない・読まない。端末の画面の設定）。変えた後の baud を返す。"""
@@ -2119,23 +2290,34 @@ NOTICE_LIMIT = 20
 
 class Notices:
     """デーモンの通知のうち AI に知らせるもの。MCP には押し出しが無いので、次に返す道具の結果（辞書）に
-    notices = [{"topic", "message", ...}] として添える（添えたら消す。溜めるのは最新 NOTICE_LIMIT 件）。"""
+    notices = [{"topic", "message", ...}] として添える（添えたら消す。溜めるのは最新 NOTICE_LIMIT 件。古いものを
+    捨てたら notices_dropped = 捨てた数・notices_limit も添える）。"""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._pending: list[dict] = []
+        self._dropped = 0
 
     def add(self, topic: str, params: dict) -> None:
         with self._lock:
             self._pending.append({"topic": topic, **params})
-            del self._pending[:-NOTICE_LIMIT]
+            over = len(self._pending) - NOTICE_LIMIT
+            if over > 0:
+                del self._pending[:over]
+                self._dropped += over
 
     def attach(self, result):
         if not isinstance(result, dict):
             return result                               # 辞書でない結果の形は変えない（次の辞書の結果に添える）
         with self._lock:
             pending, self._pending = self._pending, []
-        return {**result, "notices": pending} if pending else result
+            dropped, self._dropped = self._dropped, 0
+        if not pending:
+            return result
+        out = {**result, "notices": pending}
+        if dropped:
+            out.update(notices_dropped=dropped, notices_limit=NOTICE_LIMIT)
+        return out
 
 
 def tool_function(client, method: Method, notices: Notices | None = None):

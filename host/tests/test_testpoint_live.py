@@ -129,6 +129,9 @@ def test_report_dict_is_json_with_relative_seconds_and_timebase_ticks():
     assert d["variables"][0]["variable"] == "state" and d["variables"][0]["last"] == 3
     assert d["tree"]["children"][0]["function"] == "main" and d["tree"]["children"][0]["children"] == []
     assert d["tree"]["children"][0]["children_omitted"] == 1
+    # 使った件数と、解析の木の深さの上限・入れなかった数も事実として返す（黙って切らない）
+    assert d["limits"] == {"top": 1, "anomalies": 2, "buckets": 10, "tree_depth": 1}
+    assert d["tree_max_depth"] == 64 and d["tree_cut"] == 0 and d["tree"]["cut"] == 0
 
 
 def test_calls_dict_filters_by_time_and_function_and_renders_text():
@@ -140,7 +143,7 @@ def test_calls_dict_filters_by_time_and_function_and_renders_text():
     assert all(c["function"] == "f" and c["depth"] == 1 and "t" not in c for c in d["calls"])
     assert d["total"] == 2 and "f" in d["text"]
     d = calls_dict(calls, dropped, live.report(), None, limit=3)
-    assert len(d["calls"]) == 3 and d["total"] == 6 and d["truncated"]
+    assert len(d["calls"]) == 3 and d["total"] == 6 and d["truncated"] and d["limit"] == 3
 
 
 def test_coverage_dict_filters_the_uncovered_list():
@@ -154,3 +157,4 @@ def test_coverage_dict_filters_the_uncovered_list():
     assert [u["kind"] for u in d["uncovered"]] == ["entry", "exit"] and d["decisions"] == []
     d = coverage_dict(live.report().coverage, file=None, function=None, limit=1)
     assert len(d["uncovered"]) == 1 and d["uncovered_total"] == 5
+    assert d["limit"] == 1                                       # 切ったときに使った上限

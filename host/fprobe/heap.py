@@ -5,11 +5,13 @@
 - FreeRTOS heap_4 / heap_5（portable/MemMang）: ブロック = {pxNextFreeBlock, xBlockSize}（使用中は最上位ビット、
   次は NULL）。領域を先頭から物理的に辿り、番地順の空きのリスト（xStart → pxEnd。heap_5 は領域の終わりの大きさ 0 の
   印をはさむ）と突き合わせる。configENABLE_HEAP_PROTECTOR のポインタは xHeapCanary で戻す。heap_5 の領域は
-  アプリの表（xHeapRegions）か引数 regions から（無ければ空きのリストだけ）。カウンタ（残量・最小残量・回数）は
-  rtos/freertos_objects（U08）と同じ変数。
+  引数 regions か、使う側が名前を渡すアプリの表（regions_symbol。vPortDefineHeapRegions に渡した HeapRegion_t の配列。
+  名前はアプリが決めるので慣習の名前を探さない）から（無ければ空きのリストだけ）。カウンタ（残量・最小残量・回数）は
+  rtos/freertos_objects（U08）と同じ変数（FreeRTOS の heap_4.c / heap_5.c が定める名前）。
 - newlib-nano（nano-mallocr.c）: かたまり = {long size, 本体}、本体は 8 に揃え、詰め物があれば ptr − 4 に負の位置。
   __malloc_sbrk_start から program break まで並び、空きは番地順の __malloc_free_list（次は本体の位置）。
-  break は sbrk の実装の変数（__sbrk_heap_end・heap_end）か引数 end。
+  break は引数 end か、使う側が名前を渡す sbrk の実装の変数（break_symbol。sbrk はアプリ・BSP が書くので慣習の名前を
+  探さない）。どちらも無ければ形の崩れた所で止まり、complete = false（そこが終わりか壊れかは決めない）。
 - newlib（mallocr.c、dlmalloc 2.6）: かたまり = {prev_size, size（bit 0 = 前が使用中）, fd, bk}。
   __malloc_sbrk_base から top（__malloc_av_[2]）まで。使用中かは次のかたまりの PREV_INUSE。空きは双方向の箱。
 
@@ -34,14 +36,15 @@ __all__ = ["ALLOCATORS", "AllocationTracker", "Block", "HeapError", "HeapScan", 
            "detect", "scan"]
 
 ALLOCATORS = ("freertos", "newlib_nano", "newlib")
+POINTERS = 8                             # 呼び出し元ごとに返す生きている番地の数（表示の量。切ったら pointers_truncated）
 MAX_BLOCKS = 1 << 16                     # 物理的に辿るブロックの上限（壊れた大きさで止まらないとき）
 BLOCK_HEADER = 8                         # heap_4/5 の xHeapStructSize（32 ビット・8 揃え）
 MIN_BLOCK = 2 * BLOCK_HEADER             # heapMINIMUM_BLOCK_SIZE
 NANO_CHUNK_OFFSET, NANO_ALIGN, NANO_MIN_CHUNK = 4, 8, 16
 DL_SIZE_SZ, DL_ALIGN, DL_MIN_CHUNK, DL_PREV_INUSE, DL_FLAGS = 4, 8, 16, 1, 3
-NANO_BREAK_NAMES = ("__sbrk_heap_end", "heap_end", "heap_end.0", "heap_end.1")
-HEAP_REGION_TABLES = ("xHeapRegions", "xHeapRegion")
 MAX_REGIONS = 16
+ISSUES_LIMIT = 200                       # 記録の誤りを持つ数の既定（AllocationTracker の issues_limit。総数は数える）
+SERIES_POINTS = 512                      # 使用量の推移を返す点の数の既定（report の series_points）
 
 
 class HeapError(RuntimeError):
@@ -151,13 +154,22 @@ def detect(symbols: HeapSymbols) -> list[str]:
 
 
 def scan(read_memory: Callable[[int, int], bytes], symbols: HeapSymbols, allocator: str,
-         regions: list[tuple[int, int]] | None = None, end: int | None = None) -> HeapScan:
+         regions: list[tuple[int, int]] | None = None, end: int | None = None, regions_symbol: str | None = None,
+         break_symbol: str | None = None) -> HeapScan:
     """ヒープを走査する。allocator: freertos / newlib_nano / newlib。regions: heap_5 の領域 [(先頭, 大きさ)]、
-    end: newlib-nano の program break（無ければ sbrk の変数から）。"""
+    regions_symbol: heap_5 の領域の表（HeapRegion_t の配列）の変数の名前、end: newlib-nano の program break、
+    break_symbol: program break を持つ変数の名前（sbrk の実装の変数）。名前は使う側が明示する（慣習の名前を探さない）。"""
     mem = Memory(read_memory)
     if allocator == "freertos":
-        return _FreeRTOS(mem, symbols).scan(regions)
+        return _FreeRTOS(mem, symbols).scan(regions, regions_symbol)
     if allocator == "newlib_nano":
+        if end is None and break_symbol is not None:
+            address = symbols.address(break_symbol)
+            if address is None:
+                raise ValueError(f"break_symbol {break_symbol!r} が ELF に無い")
+            end = mem.u32(address)
+            if not end:
+                raise ValueError(f"break_symbol {break_symbol!r} が 0（sbrk がまだ呼ばれていない）")
         return _scan_nano(mem, symbols, end)
     if allocator == "newlib":
         return _scan_dlmalloc(mem, symbols)
@@ -178,7 +190,7 @@ class _FreeRTOS:
     def unprotect(self, p: int) -> int:
         return p ^ self.canary
 
-    def scan(self, regions: list[tuple[int, int]] | None) -> HeapScan:
+    def scan(self, regions: list[tuple[int, int]] | None, regions_symbol: str | None = None) -> HeapScan:
         sym, mem = self.sym, self.mem
         heap = sym.address("ucHeap")
         out = HeapScan("freertos", "heap_4" if heap is not None else "heap_5")
@@ -193,32 +205,38 @@ class _FreeRTOS:
         if not end:
             out.notes.append("ヒープはまだ初期化されていない（最初の pvPortMalloc の前）")
             return out
-        out.regions = self._regions(out, heap, end, regions)
+        out.regions = self._regions(out, heap, end, regions, regions_symbol)
         listed = self._free_list(out, end)
         if not out.regions:
             out.complete = False
             out.blocks = [Block(a, s, False) for a, s in listed if s]
-            out.notes.append("heap_5 の領域が分からない（xHeapRegions が無い）: 空きのリストだけ。使用中は regions で")
+            out.notes.append("heap_5 の領域を渡していない（regions か、領域の表の変数の名前 regions_symbol）: 空きの"
+                             "リストだけ")
             return out
         for start, stop in out.regions:
             self._walk(out, start, stop)
         self._cross_check(out, listed)
         return out
 
-    def _regions(self, out: HeapScan, heap: int | None, end: int,
-                 given: list[tuple[int, int]] | None) -> list[tuple[int, int]]:
-        """[(最初のブロック, 終わりの印)]。heap_4 は ucHeap と pxEnd、heap_5 は領域の表か引数。"""
+    def _regions(self, out: HeapScan, heap: int | None, end: int, given: list[tuple[int, int]] | None,
+                 table_symbol: str | None) -> list[tuple[int, int]]:
+        """[(最初のブロック, 終わりの印)]。heap_4 は ucHeap と pxEnd、heap_5 は引数か、使う側が名前を渡した領域の表。"""
         if heap is not None:
             return [(_align_up(heap, PORT_BYTE_ALIGNMENT), end)]
         pairs = list(given or [])
-        if not pairs:
-            table = next((a for a in (self.sym.address(n) for n in HEAP_REGION_TABLES) if a is not None), None)
-            if table is not None:
-                for i in range(MAX_REGIONS):
-                    start, size = self.mem.u32(table + 8 * i), self.mem.u32(table + 8 * i + 4)
-                    if not size:
-                        break
-                    pairs.append((start, size))
+        if not pairs and table_symbol is not None:
+            table = self.sym.address(table_symbol)
+            if table is None:
+                raise ValueError(f"regions_symbol {table_symbol!r} が ELF に無い")
+            for i in range(MAX_REGIONS):
+                start, size = self.mem.u32(table + 8 * i), self.mem.u32(table + 8 * i + 4)
+                if not size:
+                    break
+                pairs.append((start, size))
+            else:                                               # 終わりの印（大きさ 0）が無い: 切ったことを黙らない
+                out.complete = False
+                out.notes.append(f"{table_symbol} の先頭 {MAX_REGIONS} 個に終わりの印（大きさ 0）が無い: その先は読んで"
+                                 "いない（regions で渡せる）")
         out_regions = []
         for start, size in pairs:
             first = _align_up(start, PORT_BYTE_ALIGNMENT)
@@ -235,7 +253,10 @@ class _FreeRTOS:
             if block in seen:
                 out.issue("free_list_loop", block, "空きのリストが輪になっている")
                 break
-            if not block or len(items) >= MAX_FREE_BLOCKS or not self._inside(out, block):
+            if len(items) >= MAX_FREE_BLOCKS:
+                _free_list_limit(out)
+                break
+            if not block or not self._inside(out, block):
                 out.issue("free_list_outside", block, "空きのリストがヒープの外を指す（ポインタが壊れた）")
                 break
             if block <= previous:
@@ -322,21 +343,17 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
         out.notes.append("まだ malloc が呼ばれていない（__malloc_sbrk_start が 0）")
         return out
     start = _align_up(start, 4)
-    if end is None:
-        for name in NANO_BREAK_NAMES:
-            a = sym.address(name)
-            if a is not None and mem.u32(a):
-                end = mem.u32(a)
-                out.counters["break"] = end
-                break
-    if end is None:
-        out.notes.append("ヒープの終わり（program break）が分からない: 形の崩れたところで止めた（end で指定できる）")
+    if end is not None:
+        out.counters["break"] = end
     # 空きのリスト
     listed, seen, previous = [], set(), 0
     node = mem.u32(lst)
     while node:
-        if node in seen or len(listed) >= MAX_FREE_BLOCKS:
+        if node in seen:
             out.issue("free_list_loop", node, "空きのリストが輪になっている")
+            break
+        if len(listed) >= MAX_FREE_BLOCKS:
+            _free_list_limit(out)
             break
         if node < start or (end is not None and node >= end):
             out.issue("free_list_outside", node, "空きのリストがヒープの外を指す（ポインタが壊れた）")
@@ -354,14 +371,18 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
     while a < limit:
         if len(out.blocks) >= MAX_BLOCKS:
             out.complete = False
+            out.notes.append(f"かたまりが {MAX_BLOCKS} 個を超えたので止めた")
             break
         try:
             size = _signed(mem.u32(a))
-        except Exception:                                  # 読めない（RAM の外）: 終わりが分からないときの止まり
+        except Exception as e:                             # 読めない（RAM の外）: 終わりが分からないときの止まり
+            if end is None:
+                _stopped_without_end(out, a, f"読めない（{type(e).__name__}）")
             break
         if size < NANO_MIN_CHUNK or size % 4 or a + size > limit:
-            if end is None:
-                break                                      # 終わりが分からない: ここを終わりとみなす
+            if end is None:                                # 終わりを渡されていない: 終わりか壊れかは決めない
+                _stopped_without_end(out, a, f"大きさの語 0x{size & 0xFFFF_FFFF:08X} がかたまりにならない")
+                break
             _bad_size(out, a, size & 0xFFFF_FFFF, last_used)
             break
         used = a not in free_set
@@ -384,6 +405,18 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
         if not x.used and not y.used and x.address + x.size == y.address:
             out.issue("unmerged_free", y.address, "隣り合う空きが繋がれていない（nano の free は繋ぐ）")
     return out
+
+
+def _free_list_limit(out: HeapScan) -> None:
+    """空きのリストを辿る数の上限に着いた（壊れとは言わない。輪・外は別に見つける）。"""
+    out.complete = False
+    out.notes.append(f"空きのリストが {MAX_FREE_BLOCKS} 個を超えたので、その先は辿っていない")
+
+
+def _stopped_without_end(out: HeapScan, address: int, why: str) -> None:
+    out.complete = False
+    out.notes.append(f"ヒープの終わり（program break）を渡していない（end か break_symbol）: 0x{address:08X} で{why}"
+                     "ので止めた（そこが終わりか、壊れたかは決めない）")
 
 
 # --- newlib（dlmalloc） ------------------------------------------------------------------------------
@@ -411,6 +444,7 @@ def _scan_dlmalloc(mem: Memory, sym: HeapSymbols) -> HeapScan:
     while a < top:
         if len(out.blocks) >= MAX_BLOCKS:
             out.complete = False
+            out.notes.append(f"かたまりが {MAX_BLOCKS} 個を超えたので止めた")
             break
         size = mem.u32(a + DL_SIZE_SZ) & ~DL_FLAGS
         if size == DL_SIZE_SZ:
@@ -457,12 +491,14 @@ class _Live:
 
 
 class AllocationTracker:
-    """alloc / free の出来事（時刻は秒）から、生きている確保・最大・誤り・呼び出し元ごとの生きている確保を出す。"""
+    """alloc / free の出来事（時刻は秒）から、生きている確保・最大・誤り・呼び出し元ごとの生きている確保を出す。
+    誤りは issues_limit 件まで持つ（総数は issues_total に数える）。"""
 
-    SERIES_POINTS = 512
-    MAX_ISSUES = 200
-
-    def __init__(self):
+    def __init__(self, issues_limit: int = ISSUES_LIMIT):
+        if issues_limit < 0:
+            raise ValueError("issues_limit は 0 以上")
+        self.issues_limit = issues_limit
+        self.issues_total = 0
         self.live: dict[int, _Live] = {}
         self.freed: set[int] = set()
         self.allocations = self.frees = self.untracked_frees = 0
@@ -475,7 +511,8 @@ class AllocationTracker:
         self.last: float | None = None
 
     def _issue(self, kind: str, t: float, pointer: int, caller: str, detail: str) -> None:
-        if len(self.issues) < self.MAX_ISSUES:
+        self.issues_total += 1
+        if len(self.issues) < self.issues_limit:
             self.issues.append({"kind": kind, "t": t, "pointer": pointer, "caller": caller, "detail": detail})
 
     def _count(self, caller: str, t: float, delta: int) -> None:
@@ -516,17 +553,23 @@ class AllocationTracker:
             if pointer in self.freed:
                 self._issue("double_free", t, pointer, caller, "二重の解放")
             else:
-                self.untracked_frees += 1                           # 記録を始める前の確保
+                self.untracked_frees += 1                           # 記録に無いポインタの解放（いつの確保かは決めない）
             return
         self.freed.add(pointer)
         self.bytes -= entry.size
         self._count(entry.caller, t, -1)
         self.series.append((t, self.bytes))
 
-    def report(self, now: float, min_age_s: float = 0.0, top: int = 20) -> dict:
-        """要約・呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。バイトの多い順。live_counts =
-        最初と最後の出来事の間を 4 つに分けた 5 つの時点での、その呼び出し元の生きている数。リークかは判定しない）・
-        使用量の推移。"""
+    def report(self, now: float, min_age_s: float = 0.0, top: int = 20, series_points: int = SERIES_POINTS,
+               live_points: int = 5) -> dict:
+        """要約・呼び出し元ごとの生きている確保（live_by_caller: min_age_s より古いもの。バイトの多い順に top 個。
+        callers_total = 切る前の呼び出し元の数、truncated = 切ったか、top = 使った値。pointers は先頭の POINTERS 個で、
+        pointers_truncated = count より少ないか。live_counts = 最初と最後の出来事の間を 4 つに分けた 5 つの時点での、
+        その呼び出し元の生きている数。リークかは判定しない）・誤り（issues。issues_total = 総数、issues_truncated =
+        持つ上限で切ったか、issues_limit = 上限）・使用量の推移（series。series_points 点まで等間隔に間引く:
+        series_total = 元の点の数、series_downsampled = 間引いたか、series_points = 使った点の数）。"""
+        if series_points < 2 or live_points < 2:
+            raise ValueError("series_points・live_points は 2 以上（最初と最後の点）")
         groups: dict[str, dict] = {}
         for pointer, e in self.live.items():
             if now - e.t < min_age_s:
@@ -536,20 +579,27 @@ class AllocationTracker:
             g["count"] += 1
             g["bytes"] += e.size
             g["oldest_t"] = min(g["oldest_t"], e.t)
-            if len(g["pointers"]) < 8:
+            if len(g["pointers"]) < POINTERS:
                 g["pointers"].append(pointer)
         for g in groups.values():
-            g["live_counts"] = self._live_counts(g["caller"])
+            g["live_counts"] = self._live_counts(g["caller"], live_points)
+            g["pointers_truncated"] = len(g["pointers"]) < g["count"]
         callers = sorted(groups.values(), key=lambda g: (-g["bytes"], g["caller"]))[:top]
-        return {"allocations": self.allocations, "frees": self.frees, "untracked_frees": self.untracked_frees,
+        return {"callers_total": len(groups), "truncated": len(callers) < len(groups), "top": top,
+                "allocations":self.allocations, "frees": self.frees, "untracked_frees": self.untracked_frees,
                 "live": {"count": len(self.live), "bytes": self.bytes}, "peak_bytes": self.peak,
-                "issues": list(self.issues), "live_by_caller": callers, "series": self._downsampled()}
+                "issues": list(self.issues), "issues_total": self.issues_total,
+                "issues_truncated": self.issues_total > len(self.issues), "issues_limit": self.issues_limit,
+                "live_by_caller": callers, "series": self._downsampled(series_points), "series_total": len(self.series),
+                "series_downsampled": len(self.series) > series_points, "series_points": series_points,
+                "live_points": live_points}                 # live_counts の点の数（最初から最後まで等間隔の時刻）
 
-    def _live_counts(self, caller: str) -> list[tuple[float, int]]:
+    def _live_counts(self, caller: str, points: int) -> list[tuple[float, int]]:
+        """呼び出し元の生きている数を、最初から最後まで points 個の等間隔の時刻で（その時刻の値。間の山は落ちうる）。"""
         history = self.history.get(caller, [])
         if self.first is None:
             return []
-        marks = [self.first + (self.last - self.first) * k / 4 for k in range(5)]
+        marks = [self.first + (self.last - self.first) * k / (points - 1) for k in range(points)]
         out, i, n = [], 0, 0
         for m in marks:
             while i < len(history) and history[i][0] <= m:
@@ -558,9 +608,9 @@ class AllocationTracker:
             out.append((m, n))
         return out
 
-    def _downsampled(self) -> list[tuple[float, int]]:
+    def _downsampled(self, points: int) -> list[tuple[float, int]]:
         s = self.series
-        if len(s) <= self.SERIES_POINTS:
+        if len(s) <= points:
             return list(s)
-        step = len(s) / (self.SERIES_POINTS - 1)
-        return [s[int(i * step)] for i in range(self.SERIES_POINTS - 1)] + [s[-1]]
+        step = len(s) / (points - 1)
+        return [s[int(i * step)] for i in range(points - 1)] + [s[-1]]

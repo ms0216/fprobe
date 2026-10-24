@@ -91,7 +91,7 @@ class ArmATarget:
         self.core.step(mask_interrupts=disable_interrupts)
 
     def get_halt_reason(self):
-        return _REASONS.get(self.core.halt_cause(), Target.HaltReason.USER)
+        return _REASONS.get(self.core.halt_cause())                  # 表に無い理由は None（分からない）
 
     @contextlib.contextmanager
     def _halted(self):

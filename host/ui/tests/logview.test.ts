@@ -55,16 +55,29 @@ describe("レビューの指摘（重なる読み取り・200 件で止まる・
     expect(v.records).toEqual([]);
   });
 
-  it("返った件数が上限に達している間は続けて読む（止まったログを最後まで）", async () => {
-    const page = (from: number, n: number, last: boolean) => ({
-      records: Array.from({ length: n }, (_, k) => ({ seq: from + k, text: "" })), next: from + n - 1, dropped: 0, running: false, last });
-    const pages = [page(1, 200, false), page(201, 200, false), page(401, 5, true)];
+  it("API が続きがある（more）と言う間は続けて読む（返った件数・デーモンの既定の件数で推さない）", async () => {
+    const page = (from: number, n: number, more: boolean) => ({
+      records: Array.from({ length: n }, (_, k) => ({ seq: from + k, text: "" })), next: from + n - 1, dropped: 0, running: false, more });
+    const pages = [page(1, 3, true), page(4, 200, true), page(204, 200, false)];
     let i = 0;
     const conn = new FakeConn({ "log.read": () => pages[i++] });
     const v = new LogView(conn);
     await v.more({ level: "", contains: "" });
-    expect(v.records.length).toBe(405);
-    expect(conn.calls.map((c) => c[1].since)).toEqual([0, 200, 400]);
+    expect(v.records.length).toBe(403);
+    expect(conn.calls.map((c) => c[1].since)).toEqual([0, 3, 203]);
+  });
+
+  it("画面に持つ上限を超えたら古い行を捨て、捨てた数を数える（黙って捨てない）", async () => {
+    const { LOG_KEEP } = await import("../src/lib/logview");
+    const n = LOG_KEEP + 3;
+    const conn = new FakeConn({ "log.read": { records: Array.from({ length: n }, (_, k) => ({ seq: k + 1, text: "" })),
+                                              next: n, dropped: 0, running: false, more: false } });
+    const v = new LogView(conn);
+    await v.more({ level: "", contains: "" });
+    expect(v.records.length).toBe(LOG_KEEP);
+    expect(v.discarded).toBe(3);
+    v.reset();
+    expect(v.discarded).toBe(0);
   });
 
   it("場所は file:line（関数があれば添える）", () => {

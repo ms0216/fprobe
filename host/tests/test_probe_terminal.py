@@ -65,7 +65,7 @@ def test_uart_is_received_in_the_background_and_still_readable_by_tools(probe):
     assert probe.terminal_read("uart")["data"] == ""
     link.rx += b"boot ok\r\n"
     wait_for(lambda: probe.terminal_read("uart")["data"] == "boot ok\r\n")
-    assert probe.uart_read(timeout_s=0) == "boot ok\r\n"
+    assert probe.uart_read(timeout_s=0) == {"data": "boot ok\r\n", "baud": link.uart_baud}   # 使った速さも返す
 
 
 def test_semihosting_and_bad_names(probe):

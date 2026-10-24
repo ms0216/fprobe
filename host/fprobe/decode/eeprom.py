@@ -12,9 +12,10 @@ from .core import Annotation, Decoding
 __all__ = ["decode_eeprom24"]
 
 
-def decode_eeprom24(lower: Decoding, *, device: int = 0x50, address_bytes: int = 1, block_bits: int = 0,
+def decode_eeprom24(lower: Decoding, *, device: int, address_bytes: int, block_bits: int,
                     page_size: int | None = None) -> Decoding:
-    """I2C の解読の上で 24 系の EEPROM の読み書きを読む。device はデバイスアドレス（block_bits の分を除いた基準）。"""
+    """I2C の解読の上で 24 系の EEPROM の読み書きを読む。device はデバイスアドレス（block_bits の分を除いた基準）。
+    device・address_bytes・block_bits は機器で決まるので既定を持たない。page_size を省くとページの回り込みを調べない。"""
     if lower.protocol != "i2c":
         raise ValueError("i2c の解読の上に重ねる")
     if address_bytes not in (1, 2):

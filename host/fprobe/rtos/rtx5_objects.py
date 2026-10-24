@@ -13,8 +13,8 @@ RTX5 はオブジェクトの一覧を持たない。次の 4 つから集める
 from __future__ import annotations
 
 from ..dwarf.access import AccessError
+from .base import stopped_note
 from .model import KernelObject, Task, Waiter
-from .objects import typed_variables
 from .structs import StructLayout
 
 __all__ = ["KINDS", "RTX5Objects"]
@@ -46,7 +46,7 @@ class RTX5Objects:
         found: dict[int, tuple[str, list[str], str]] = {}             # 番地 → (種類, 変数の式, 見つけた所)
         structs = {name: kind for kind, name in KINDS.items() if kind in self.layouts}
         structs["osRtxThread_t"] = "thread"                           # スレッドの中（mutex_list 等）は辿らない
-        for f in sorted(typed_variables(self.rtos.info, self.mem, structs, exclude=frozenset({"osRtxInfo"})),
+        for f in sorted(self.rtos.typed_objects(structs, exclude=frozenset({"osRtxInfo"})),
                         key=lambda f: f.pointer):                     # 変数そのものの名前を先に
             if f.family != "thread":
                 found.setdefault(f.address, (f.family, [], "variable"))[1].append(f.expression)
@@ -91,7 +91,7 @@ class RTX5Objects:
         out: list[int] = []
         while head:
             if head in out or len(out) >= MAX_ITEMS:
-                self.rtos.warnings.append(f"{what} の列が壊れている（{len(out)} 個で止めた）")
+                self.rtos.warnings.append(stopped_note(f"{what} の列", len(out), "cycle" if head in out else "limit", MAX_ITEMS))
                 break
             out.append(head)
             head = self.mem.u32(head + link)

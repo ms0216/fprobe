@@ -108,13 +108,13 @@ class FlashBreakpoints:
     書き込みアルゴリズムが使う RAM の先頭。止めている間だけ借りて戻す）。"""
 
     def __init__(self, target, journal: Journal | None = None, persistent=None, scratch: int | None = None,
-                 enabled: bool = True, dormant_limit: int = DORMANT_LIMIT):
+                 enabled: bool = True, dormant_limit: int = DORMANT_LIMIT, guards: list | None = None):
         self.target = target
         self.journal = journal
         self.persistent = persistent if persistent is not None else (lambda address: True)
         self.enabled = enabled
         self.dormant_limit = dormant_limit
-        self._memory = FlashMemory(target)
+        self._memory = FlashMemory(target, guards=guards)        # guards: 書き込みアルゴリズムの間の守り
         self._scratch = scratch
         self._hw: set[int] = set()                       # 比較器に置いた（このクラスが置いたもの）
         self._flash: set[int] = set()                    # Flash に置きたいもの（書いた・まだのどちらも）

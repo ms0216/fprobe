@@ -28,8 +28,9 @@ from fprobe.dwarf.info import FrameView
 from fprobe.dwarf.location import NotAvailable
 from fprobe.dwarf.typesys import type_name
 from fprobe.dwarf.values import encode
-from fprobe.probe_watch import _RAW, WatchTools, _read_value
+from fprobe.probe_watch import _RAW, ValueStats, WatchTools, _read_value, measure, pair_latest, rates, xy_result
 from fprobe.sampler import plan_slots
+from fprobe.voltage import VoltageHistory
 from fprobe.watch_trigger import Capture, Condition
 
 __all__ = ["SamplingDemo"]
@@ -59,6 +60,7 @@ class _Watch:
     def __init__(self, name: str, address: int | None, size: int, value=None, raw: bool = False):
         self.name, self.address, self.size, self.value, self.raw = name, address, size, value, raw
         self.series: collections.deque = collections.deque(maxlen=SERIES_LIMIT)
+        self.stats = ValueStats()                                      # 本物と同じく watch_set からのすべての値
 
     @property
     def chase(self) -> bool:
@@ -83,10 +85,12 @@ class SamplingDemo:
         self._watch_rate = 0.0
         self._chase_rate = 0.0
         self._watch_started = 0.0
+        self._watch_client = None                          # 最後に watch_set した呼び出し元（本物と同じ）
         self._watch_thread: threading.Thread | None = None
         self._watch_stop_flag = threading.Event()
         self._capture: Capture | None = None
         self._volt_started = time.monotonic()
+        self._voltage_history = VoltageHistory()
 
     # --- ターゲットの模擬 ---------------------------------------------------------------------------
 
@@ -134,15 +138,15 @@ class SamplingDemo:
             raise ValueError(f"{expression!r} はメモリ上の値ではない（レジスタ・定数・不完全型）")
         return _Watch(expression, None if chase else v.address, v.type.size, v)
 
-    def _read_watch(self, w: _Watch) -> object:
-        if w.raw:
-            return int.from_bytes(self._mem.read(w.address, w.size), "little")
+    def _read_watch(self, w: _Watch) -> dict:
+        if w.raw:                                  # 番地の式: 符号なし整数（本物の probe_watch と同じ int の形）
+            return {"kind": "int", "value": int.from_bytes(self._mem.read(w.address, w.size), "little")}
         v = w.value
         if w.chase:
             v = evaluate(w.name, self._values.info, FrameView(None, self._mem.read, _no_register))
         return _read_value(v, self._mem.read)
 
-    def watch_set(self, expressions, rate_hz=1000.0, ap=0, chase_rate_hz=100.0, jitter=0):
+    def watch_set(self, expressions, rate_hz=1000.0, ap=0, chase_rate_hz=100.0, jitter=0, caller=None):
         if not 0 < chase_rate_hz <= 10_000:
             raise ValueError("chase_rate_hz は 0 より大きく 10000 以下")
         if not 0 <= jitter <= 15:
@@ -157,6 +161,7 @@ class SamplingDemo:
             self._watches, self._watch_rate, self._chase_rate = watches, float(rate_hz), float(chase_rate_hz)
             self._watch_rejected = rejected
             self._watch_started = time.monotonic()
+            self._watch_client = dict(caller) if caller is not None else None
             self._capture = None
         if watches:
             self._watch_stop_flag = threading.Event()
@@ -180,6 +185,7 @@ class SamplingDemo:
                 except Exception:                                       # NULL を指した等: その周期は値なし
                     continue
                 w.series.append((t, value))
+                w.stats.add(value)
                 if self._capture is not None:
                     self._capture.feed(t, w.name, value)
             if self._capture is not None:
@@ -210,7 +216,8 @@ class SamplingDemo:
         with self._sim_lock:
             sampled = any(not w.chase for w in self._watches)
             return {"user": "watch" if sampled else None, "release": "watch.stop" if sampled else None,
-                    "since": time.time() - (time.monotonic() - self._watch_started) if sampled else None}
+                    "since": time.time() - (time.monotonic() - self._watch_started) if sampled else None,
+                    "client": self._watch_client if sampled else None}
 
     def watch_stop(self):
         sampled = any(not w.chase for w in self._watches)
@@ -224,11 +231,15 @@ class SamplingDemo:
         with self._sim_lock:
             sampled = any(not w.chase for w in self._watches)
             c = self._capture
-            return {"watches": [w.describe() for w in self._watches], "rejected": list(self._watch_rejected),
+            out = {"watches": [w.describe() for w in self._watches], "rejected": list(self._watch_rejected),
+                   "stats": {w.name: w.stats.as_dict() for w in self._watches},
+                   "stats_lost_events": 0 if sampled else None,
                     "since_start_s": time.monotonic() - self._watch_started if self._watches else None,
                     "rate_hz": self._watch_rate, "chase_rate_hz": self._chase_rate, "chase_errors": {},
+                    "client": self._watch_client,
                     "capture": None if c is None else {"state": c.state, "reason": c.reason},
                     **(self._sampler_status(True) if sampled else {})}
+            return {**out, **rates(out)}
 
     def _need_watch(self) -> None:
         if not self._watches:
@@ -247,8 +258,40 @@ class SamplingDemo:
             w = next((w for w in self._watches if w.name == name), None)
             if w is None:
                 raise KeyError(f"{name!r} は観測していない")
-            samples = list(w.series)[-min(last, SERIES_LIMIT):]
-        return {"name": name, "samples": [{"time_us": t * 1e6 / HZ, "value": v} for t, v in samples]}
+            kept = list(w.series)
+            samples = kept[-min(last, SERIES_LIMIT):]
+        older = len(kept) > len(samples)                     # 読まなかった古い値（本物の from_us と同じ意味）
+        return {"name": name, "samples": [{"time_us": t * 1e6 / HZ, "value": v} for t, v in samples],
+                "from_us": samples[0][0] * 1e6 / HZ if older and samples else None}
+
+    def watch_xy(self, x, y, last=1000, max_dt_us=None):
+        self._need_watch()
+        with self._sim_lock:
+            series = {w.name: list(w.series)[-min(last, SERIES_LIMIT):] for w in self._watches}
+        for name in (x, y):
+            if name not in series:
+                raise KeyError(f"{name!r} は観測していない")
+        us = 1e6 / HZ
+        pairs, unpaired, excluded = pair_latest(series[x], series[y], None if max_dt_us is None else max_dt_us / us)
+        return xy_result(x, y, pairs, unpaired, excluded, max_dt_us, us, {x: None, y: None})
+
+    def watch_measure(self, a_us, b_us, names=None, source="live"):
+        self._need_watch()
+        with self._sim_lock:
+            if source == "live":
+                points = {w.name: [(t * 1e6 / HZ, v) for t, v in w.series] for w in self._watches}
+            elif source == "capture":
+                if self._capture is None:
+                    raise RuntimeError("条件つきの取得が無い（watch_trigger を先に）")
+                points = {w.name: [] for w in self._watches}
+                for t, name, value in sorted(self._capture.samples, key=lambda x: x[0]):
+                    points.setdefault(name, []).append((t * 1e6 / HZ, value))
+            else:
+                raise ValueError("source は live か capture")
+        for n in names or []:
+            if n not in points:
+                raise KeyError(f"{n!r} は観測していない")
+        return measure({n: points[n] for n in (names or points)}, a_us, b_us)
 
     def watch_trigger(self, start=None, stop=None, pre_s=0.0, post_s=None, max_samples=100_000):
         self._need_watch()
@@ -304,7 +347,8 @@ class SamplingDemo:
                     raise ValueError("番地には 1 / 2 / 4 / 8 バイトの整数を書く")
                 self._mem.write(address, (int(value) & ((1 << 8 * size) - 1)).to_bytes(size, "little"))
                 return {"expression": expression, "address": f"0x{address:08X}", "type": None,
-                        "value": int.from_bytes(self._mem.read(address, size), "little"), "atomic": True}
+                        "value": {"kind": "int", "value": int.from_bytes(self._mem.read(address, size), "little")},
+                        "atomic": True}
             v = evaluate(expression, self._values.info, FrameView(None, self._mem.read, _no_register))
             if v.address is None:
                 raise ValueError(f"{expression!r} はメモリ上に無い（レジスタ・定数には書かない）")
@@ -319,12 +363,21 @@ class SamplingDemo:
     # --- 電圧・記録 -----------------------------------------------------------------------------------
 
     def target_voltage(self):
+        reading = self._demo_voltage()
+        self._voltage_history.add(reading)                             # 本物と同じくデーモンが読んだ電圧を残す
+        return reading
+
+    def probe_voltage_history(self, since=None):
+        return self._voltage_history.read(since)
+
+    def _demo_voltage(self):
         """3.28〜3.31 V をゆっくり揺れ、20 秒ごとに 0.6 秒ほど下がる（負荷の入り。最低 3.0 V 近く）。"""
         t = time.monotonic() - self._volt_started
         phase = t % 20.0
         dip = 0.28 * math.exp(-((phase - 12.0) / 0.25) ** 2)
         volts = 3.295 + 0.012 * math.sin(t / 7.0) + self._sim_rng.gauss(0, 0.002) - dip
-        return {"volts": round(volts, 4), "over_range": False, "live": True, "samples": int(t * 100) + 1,
-                "errors": 0}
+        samples = int(t * 100) + 1
+        return {"volts": round(volts, 4), "over_range": False, "live": True, "samples": samples + 1,
+                "samples_before": samples, "window_s": 0.01, "errors": 0}
 
     # 記録の読み（recording_find）は fake_demo_search.py（SearchDemo）

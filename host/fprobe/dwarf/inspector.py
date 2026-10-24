@@ -50,11 +50,12 @@ def check_expression(info, expression: str) -> dict:
 
 
 class Inspector:
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, max_frames: int = 64):
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, max_frames: int = 64,
+                 assume_leaf: bool = False):
         self.info = info
         self.access = access
         self.symbols = symbols                       # fprobe.symbols.Symbols（任意。ファイル:行・番地のシンボル名）
-        self.unwinder = Unwinder(CallFrameTable.from_dwarf(info.dwarf), max_frames)
+        self.unwinder = Unwinder(CallFrameTable.from_dwarf(info.dwarf), max_frames, assume_leaf)
         self._frames: list[FrameState] | None = None
 
     def invalidate(self) -> None:
@@ -92,9 +93,12 @@ class Inspector:
         return out
 
     def backtrace(self, variables: bool = False, max_elements: int = 64) -> list[dict]:
+        """各段の dict。最後の段には stop（その先へ巻き戻さなかった理由。Unwinder.unwind の説明）。"""
         out = []
         for state in self.frames():
             entry = {"index": state.index, "pc": state.pc, **self.where(state), "cfa": state.cfa, "note": state.note}
+            if state.stop is not None:
+                entry["stop"] = state.stop
             if variables:
                 entry.update(self._variables(state.index, max_elements))
             out.append(entry)

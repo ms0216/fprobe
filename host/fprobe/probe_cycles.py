@@ -9,7 +9,8 @@ WindowTools（DAP サンプラの持ち主・出来事の窓・write_registers�
   カウンタを読み、終わりで止まったらもう一度読んで差を取る。CYCCNT はコアが止まっている間は進まないので、
   止まる・再開の手間は区間に入らない（始めの命令は数に入り、終わりの命令は入らない）。
 - 8 ビットのカウンタは 256 で折り返す。swo_configure の counters で溢れを数えていればその分を足す（正確）。
-  数えていなければ 256 未満とみなす（counters_exact = false）。
+  数えていない・数えた溢れと値が合わない（パケットが欠けた）ときは、増分は 256 で割った余り（本当の増分は 256 の倍数だけ
+  多いこともある。counters_exact = false。instructions・ipc もその余りから出した値）。
 - CPU クロック: サンプラが CYCCNT を周期的に読み、デバイスのタイムベースの時刻との直線の傾き（最小二乗）。
   サンプラが無い・ほかの道具が使っているときは、ホストから 2 回読んでその前後のタイムベースの時刻で挟む。
 """
@@ -81,6 +82,7 @@ class CyclesTools:
         deltas: list[dict] = []
         notes: list[str] = []
         exact = True
+        mismatched: set[str] = set()                  # 数えた溢れと値が合わなかったカウンタ
         restarts = 0                                             # 終わりの前にまた始めに来た回（その回は測り直す）
         deadline = time.monotonic() + timeout_s
         try:
@@ -109,9 +111,13 @@ class CyclesTools:
                     notes.append("区間が CYCCNT の 1 周（2^32 サイクル）を超えたかもしれない: その回の値は 2^32 の倍数ずれる")
                 intervals.append(cycles)
                 if counters:
-                    delta = {name: counter_delta(k0[name], k1[name], None if o0 is None or name not in o0
+                    found = {name: counter_delta(k0[name], k1[name], None if o0 is None or name not in o0
                                                  else o1[name] - o0[name]) for name in COUNTERS}
-                    exact &= o0 is not None and all(name in o0 for name in COUNTERS)
+                    delta = {name: value for name, (value, _) in found.items()}
+                    uncounted = [name for name, (_, counted) in found.items() if not counted]
+                    if uncounted and o0 is not None:
+                        mismatched.update(n for n in uncounted if n in o0)
+                    exact &= not uncounted
                     delta["cycles"] = cycles
                     delta["instructions"] = instructions(delta)
                     delta["ipc"] = delta["instructions"] / cycles if cycles else None
@@ -133,7 +139,10 @@ class CyclesTools:
             out["counters_exact"] = exact
             if not exact:
                 notes.append("8 ビットのイベントカウンタは 256 で折り返す: 溢れを数えていない（swo_configure の counters）"
-                             "ので、各カウンタの増分は 256 未満とみなした")
+                             "か、数えた溢れと値が合わない回があったので、その増分は 256 で割った余り（本当の増分は 256 の"
+                             "倍数だけ多いこともある。instructions・ipc もその余りから出した）")
+            if mismatched:
+                notes.append(f"数えた溢れと値が合わない（溢れのパケットが欠けた）カウンタ: {', '.join(sorted(mismatched))}")
         return out
 
     def _run_to(self, address: int, deadline: float) -> bool:
@@ -161,9 +170,11 @@ class CyclesTools:
 
     # --- CPU クロック -----------------------------------------------------------------------------
 
-    def cycles_clock(self, duration_s: float = 1.0, rate_hz: float = 100.0, ap: int = 0) -> dict:
+    def cycles_clock(self, duration_s: float = 1.0, rate_hz: float = 100.0, ap: int = 0,
+                     caller: dict | None = None) -> dict:
         """CPU クロックを実測する（コアが走っている間に、CYCCNT の進みをデバイスのタイムベースと比べる）。DAP サンプラが
-        使えれば rate_hz で duration_s の間読んで直線の傾き、使えなければ前後 2 回の読み。CYCCNT を有効にする。"""
+        使えれば rate_hz で duration_s の間読んで直線の傾き、使えなければ前後 2 回の読み。CYCCNT を有効にする。
+        caller: デーモンが渡す呼び出し元 {id, name, role}（引数の仕様には出ない。sampler_status の client に残す）。"""
         if duration_s <= 0 or rate_hz <= 0:
             raise ValueError("duration_s と rate_hz は正")
         warnings: list[str] = []
@@ -176,7 +187,7 @@ class CyclesTools:
             hz = device.capabilities().timebase_hz
             window = None
             try:
-                self._claim_sampler("clock")
+                self._claim_sampler("clock", caller)
             except RuntimeError as e:
                 warnings.append(f"{e}: 2 回の読みで測った（誤差は USB の往復の幅）")
             else:

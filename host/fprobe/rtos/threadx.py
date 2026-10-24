@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
-from .base import KernelAwareness
+from .base import NAME_LIMIT, KernelAwareness, stopped_note
 from .cortexm import EXC_RETURN_FIRST_LAYOUTS, SavedContext, arm_baseline, read_exc_return_first_context
-from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo
+from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .stackcheck import check_stack
 from .structs import StructLayout
 from .threadx_objects import IDS, KINDS, ThreadXObjects
@@ -31,7 +31,6 @@ __all__ = ["FILL_BYTE", "ThreadX"]
 
 FILL_BYTE = 0xEF                  # TX_STACK_FILL（0xEFEFEFEF）
 MAX_ITEMS = 4096
-NAME_LIMIT = 64
 VERSION_LIMIT = 160
 TX_THREAD_ID = 0x54485244
 INITIALIZING = (0xF0F0_F0F0, 0xF0F0_F0F1)            # TX_INITIALIZE_IN_PROGRESS・TX_INITIALIZE_ALMOST_DONE
@@ -49,8 +48,9 @@ class ThreadX(KernelAwareness):
     name = "ThreadX"
     priority_order = -1           # 小さい方が高い（0 〜 TX_MAX_PRIORITIES - 1）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, port: str = "auto"):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, port: str = "auto",
+                 name_limit: int = NAME_LIMIT):
+        super().__init__(info, access, symbols, name_limit)
         self.thread = StructLayout.of(info, "TX_THREAD", "struct TX_THREAD_STRUCT")
         self.timer = StructLayout.of(info, "TX_TIMER_INTERNAL", "struct TX_TIMER_INTERNAL_STRUCT")
         self.layouts: dict[str, tuple[StructLayout, str]] = {}            # 種類 → (構造体, メンバーの接頭辞)
@@ -99,7 +99,7 @@ class ThreadX(KernelAwareness):
         if not pointer:
             return None
         try:
-            return self.mem.cstring(pointer, NAME_LIMIT) or None
+            return self.mem.cstring(pointer, self.name_limit) or None
         except AccessError:
             return None
 
@@ -152,7 +152,7 @@ class ThreadX(KernelAwareness):
         node, seen = head, set()
         while node:
             if node in seen or len(seen) >= MAX_ITEMS:
-                self.warnings.append(f"{what} の環が壊れている（{len(seen)} 個で止めた）")
+                self.warnings.append(stopped_note(f"{what} の環", len(seen), "cycle" if node in seen else "limit", MAX_ITEMS))
                 return out
             seen.add(node)
             if ident is not None and self.mem.u32(node) != ident:
@@ -226,8 +226,11 @@ class ThreadX(KernelAwareness):
         stack = self._stack(handle, running)
         if stack.overflow:
             notes.append("SP がスタックの底（tx_thread_stack_start）より下")
-        return Task(handle, self.thread_name(handle), self._field(handle, "tx_thread_priority"), state, stack, wait,
+        task = Task(handle, self.thread_name(handle), self._field(handle, "tx_thread_priority"), state, stack, wait,
                     self._field(handle, "tx_thread_user_priority"), notes=notes)
+        task.locations["priority"] = field_location(self.thread, handle, "tx_thread_priority")
+        task.locations["base_priority"] = field_location(self.thread, handle, "tx_thread_user_priority")
+        return task
 
     def _wait(self, handle: int, state_value: int, tick: int | None) -> WaitInfo:
         reason, kind = WAITS.get(state_value, ("unknown", None))

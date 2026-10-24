@@ -85,13 +85,15 @@ def read_dpidr(dev: Device, swclk: int, swdio: int) -> int | None:
         bb.release()
 
 
-def find_swd_pins(dev: Device, pins: int = PINS) -> SwdPins | None:
-    """全ての (SWCLK, SWDIO) の組を試し、DPIDR が読めた組を返す。"""
+def find_swd_pins(dev: Device, pins: int = PINS) -> list[SwdPins]:
+    """全ての (SWCLK, SWDIO) の組を試し、DPIDR が読めた組を全部返す（最初の 1 つで決めない: 複数のターゲットが
+    つながっていることもある。どれを使うかは使う側が決める）。"""
+    found = []
     for swclk, swdio in permutations(range(pins), 2):
         dpidr = read_dpidr(dev, swclk, swdio)
         if dpidr is not None:
-            return SwdPins(swclk, swdio, dpidr)
-    return None
+            found.append(SwdPins(swclk, swdio, dpidr))
+    return found
 
 
 class BitBangSwd:

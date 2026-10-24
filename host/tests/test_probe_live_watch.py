@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from test_probe_inspect import BusTarget, connect
+from value_kinds import vint
 
 from fprobe.dwarf.cexpr import ExpressionError
 from fprobe.mcp_server import Probe
@@ -29,11 +30,11 @@ def running():
 
 
 def test_live_evaluate_reads_globals_and_statics_while_running(running):
-    assert running.evaluate("negative", live=True)["value"] == -5
+    assert running.evaluate("negative", live=True)["value"] == vint(-5)
     out = running.evaluate("matrix[1][2]", live=True)
-    assert out["value"] == 12 and out["type"] == "uint16_t"
-    assert running.evaluate("s_ticks", live=True)["value"] == 7
-    assert running.evaluate("*message", live=True)["value"] == ord("h")          # ポインタの先も読む
+    assert out["value"] == vint(12) and out["type"] == "uint16_t"
+    assert running.evaluate("s_ticks", live=True)["value"] == vint(7)
+    assert running.evaluate("*message", live=True)["value"] == vint(ord("h"))    # ポインタの先も読む
 
 
 def test_live_evaluate_explains_that_locals_need_a_halt(running):

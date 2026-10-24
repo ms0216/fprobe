@@ -284,7 +284,8 @@ def test_la_delays_are_declared_from_the_pipeline():
 
     from fprobe.caps import parse
     with_filter = parse(caps.encode(TEST_CAPS))
-    assert with_filter.la_delay_internal == caps.LA_FILTER_DELAY + caps.LA_INTERNAL_DELAY + 0.5 == 6.5
-    assert with_filter.la_delay_deep == caps.LA_FILTER_DELAY + caps.LA_DEEP_DELAY + 0.5 == 7.5
+    assert with_filter.la_delay_internal == caps.LA_FILTER_DELAY + caps.LA_INTERNAL_DELAY == 6
+    assert with_filter.la_delay_deep == caps.LA_FILTER_DELAY + caps.LA_DEEP_DELAY == 7
+    assert with_filter.la_phase_span == caps.LA_PHASE_SPAN_TICKS == 1
     plain = parse(caps.encode(dataclasses.replace(TEST_CAPS, la_filter=False)))
-    assert (plain.la_delay_internal, plain.la_delay_deep) == (3.5, 4.5)
+    assert (plain.la_delay_internal, plain.la_delay_deep, plain.la_phase_span) == (3, 4, 1)

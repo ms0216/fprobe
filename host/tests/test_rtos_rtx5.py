@@ -152,7 +152,7 @@ def test_backtrace_of_waiting_thread(image):
     assert ctx.registers["pc"] == pc and ctx.sp == b.regs["sp"] and not ctx.fp
     frames = rtos.backtrace("sensor", variables=True)
     assert [f["function"] for f in frames] == ["osSemaphoreAcquire", "sensor_entry"]
-    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["semaphore_id"]["pointer"] == sem
+    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["semaphore_id"]["address"] == sem
     assert rtos.saved_context("main") is None
 
 
@@ -235,3 +235,18 @@ def test_mutex_words_for_the_sampler(image):
     assert int.from_bytes(access.read_memory(head, 4), "little") - delta == symbols.variable("th_ctl").address
     assert rtos.mutex_empty_head(mutex) == 0
     assert rtos.mutex_words(by_name(rtos.objects())["sem_data"]) is None
+
+
+def test_a_name_without_nul_within_the_limit_is_reported_with_the_limit(image):
+    """名前（const char *）の先に上限まで NUL が無ければ、切ったことと使った上限を warnings に。上限は name_limit で渡せる。"""
+    info, symbols = image
+    rtos, access = rtx(image)
+    th = symbols.variable("th_sensor").address
+    long_name = 0x2000_7000
+    access.write_memory(long_name, b"S" * 40 + bytes(40))
+    access.write_u32(th + rtos.object.offset("name"), long_name)
+    rtos = RTX5(info, access, symbols, name_limit=16)
+    assert by_name(rtos.tasks())["S" * 16].handle == th
+    assert any("16" in w and "名前" in w for w in rtos.warnings)
+    rtos = RTX5(info, access, symbols)
+    assert "S" * 40 in by_name(rtos.tasks()) and rtos.warnings == []

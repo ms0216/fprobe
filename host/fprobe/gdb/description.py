@@ -91,14 +91,17 @@ def fill_gaps(regions: list[Region]) -> list[Region]:
 
 
 def memory_map_xml(regions: list[Region]) -> str:
+    """GDB のメモリマップ。flash の blocksize（消去の単位）は機器の値（pyOCD の Flash の領域の情報）だけを申告する。
+    分からない flash は単位を推さず（GDB はこの値で書き込みの区切りを決める）、書けない rom として申告する。"""
     out = ['<?xml version="1.0"?>',
            '<!DOCTYPE memory-map PUBLIC "+//IDN gnu.org//DTD GDB Memory Map V1.0//EN" '
            '"http://sourceware.org/gdb/gdb-memory-map.dtd">',
            "<memory-map>"]
     for r in regions:
-        head = f'<memory type="{r.kind}" start="0x{r.start:x}" length="0x{r.length:x}"'
-        if r.kind == "flash":
-            out.append(f'{head}><property name="blocksize">0x{r.blocksize or 0x400:x}</property></memory>')
+        kind = "rom" if r.kind == "flash" and not r.blocksize else r.kind
+        head = f'<memory type="{kind}" start="0x{r.start:x}" length="0x{r.length:x}"'
+        if kind == "flash":
+            out.append(f'{head}><property name="blocksize">0x{r.blocksize:x}</property></memory>')
         else:
             out.append(f"{head}/>")
     out.append("</memory-map>")

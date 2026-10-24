@@ -68,6 +68,18 @@ class CrossTrigger:
                             ack=_field(status, g.XTRIG_INJECT_STATUS_ACK),
                             count=_field(status, g.XTRIG_INJECT_STATUS_COUNT), time=hi << 32 | lo)
 
+    def inject_config(self) -> tuple[int, int, int]:
+        """割り込み書き込みの中身のレジスタの読み戻し: (AP, 番地, 値)。"""
+        ap, address, value = self.dev.read(g.XTRIG_INJECT_AP, 3)
+        return _field(ap, (0, 8)), address, value
+
+    def match_config(self) -> dict:
+        """番地一致の条件のレジスタの読み戻し（set_match の引数と同じ名前）。"""
+        address, address_mask, data, data_mask, mode = self.dev.read(g.XTRIG_MATCH_ADDR, 5)
+        return {"address": address, "address_mask": address_mask, "data": data, "data_mask": data_mask,
+                "on_write": bool(_field(mode, g.XTRIG_MATCH_MODE_ON_WRITE)),
+                "on_read": bool(_field(mode, g.XTRIG_MATCH_MODE_ON_READ))}
+
     def match_status(self) -> tuple[int, int]:
         """(一致した回数, 最後に一致した時のタイムベース)。"""
         count, lo, hi = self.dev.read(g.XTRIG_MATCH_COUNT, 3)
@@ -138,6 +150,27 @@ class TriggerSequencer:
     def disarm(self) -> None:
         self.dev.write32(g.TRIGSEQ_CONTROL, self.dev.read32(g.TRIGSEQ_CONTROL) & ~1)
 
+    def config(self, stages: int) -> tuple[list[Stage], Pattern, Pattern]:
+        """段（使う stages 段）とピンの条件 A・B のレジスタの読み戻し（configure の逆）。count の 0 は回路で 1。"""
+        pa, ea, pb, eb = self.dev.read(g.TRIGSEQ_PATTERN_A, 4)
+        words = self.dev.read(g.TRIGSEQ_STAGE0, 7)
+        out = []
+        for k in range(min(stages, 4)):
+            word = words[k]
+            cycles = words[4 + k - 1] if k else 0
+            out.append(Stage(Event(_field(word, g.TRIGSEQ_STAGE0_COND)), max(1, _field(word, g.TRIGSEQ_STAGE0_COUNT)),
+                             cycles / self.clock_hz if cycles else None))
+
+        def pattern(values: int, edges: int) -> Pattern:
+            return Pattern(_field(values, g.TRIGSEQ_PATTERN_A_MASK), _field(values, g.TRIGSEQ_PATTERN_A_VALUE),
+                           _field(edges, g.TRIGSEQ_EDGE_A_RISE), _field(edges, g.TRIGSEQ_EDGE_A_FALL))
+        return out, pattern(pa, ea), pattern(pb, eb)
+
+    def control(self) -> tuple[bool, int]:
+        """(仕掛けているか, 設定した段の数)。"""
+        control = self.dev.read32(g.TRIGSEQ_CONTROL)
+        return bool(_field(control, g.TRIGSEQ_CONTROL_ENABLE)), _field(control, g.TRIGSEQ_CONTROL_STAGES)
+
     def status(self) -> tuple[int, bool, int]:
         """(今の段, 発火した, 発火した時のタイムベース)。"""
         status = self.dev.read32(g.TRIGSEQ_STATUS)
@@ -185,7 +218,9 @@ class ActionState:
     pin: int
     enabled: bool
     active: bool                # 端子を駆動している
-    config: OutputConfig
+    config: OutputConfig        # 読み戻した設定（定義の外の値は丸めてある。読んだ値そのものは mode_raw・length_raw）
+    mode_raw: int | None = None
+    length_raw: int | None = None
 
     @property
     def in_use(self) -> bool:
@@ -284,15 +319,17 @@ class PinOutputs:
         states = []
         for k in range(self.actions):
             when, ctrl = words[1 + 2 * k], words[2 + 2 * k]
+            mode_raw, length_raw = _field(ctrl, g.XTRIG_OUT_CTRL0_MODE), _field(ctrl, g.XTRIG_OUT_CTRL0_LENGTH)
             cfg = OutputConfig(
-                mode=OutputMode(min(_field(ctrl, g.XTRIG_OUT_CTRL0_MODE), 2)),
+                mode=OutputMode(min(mode_raw, 2)),
                 mask=_field(when, g.XTRIG_OUT_WHEN0_MASK), value=_field(when, g.XTRIG_OUT_WHEN0_VALUE),
                 any=bool(_field(when, g.XTRIG_OUT_WHEN0_ANY)), sources=Source(_field(when, g.XTRIG_OUT_WHEN0_SOURCES)),
                 high=bool(_field(ctrl, g.XTRIG_OUT_CTRL0_LEVEL)),
                 length=max(1, _field(ctrl, g.XTRIG_OUT_CTRL0_LENGTH)), unit=_field(ctrl, g.XTRIG_OUT_CTRL0_UNIT),
                 claim=bool(_field(ctrl, g.XTRIG_OUT_CTRL0_CLAIM)))
             states.append(ActionState(k, _field(ctrl, g.XTRIG_OUT_CTRL0_PIN),
-                                      bool(_field(ctrl, g.XTRIG_OUT_CTRL0_ENABLE)), bool(active >> k & 1), cfg))
+                                      bool(_field(ctrl, g.XTRIG_OUT_CTRL0_ENABLE)), bool(active >> k & 1), cfg,
+                                      mode_raw, length_raw))
         return states
 
     def action_for(self, pin: int, states: list[ActionState] | None = None, *, allocate: bool) -> int | None:

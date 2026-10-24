@@ -70,15 +70,33 @@ def test_stop_disables_and_flushes(probe, memory):
     assert out["flushed"]
 
 
+# 偽の ETM（M-profile。TRCIDR0.COMMOPT = 1、VMID・CID を出さない）の構成。trace.etm.start が無いときは使う側が渡す
+CONFIG = {"commit_opt1": True, "vmid_bytes": 1, "cid_bytes": 4}
+
+
 def decoded(probe, data: bytes, **kw):
     probe._symbols = Symbols(ELF)
+    if probe._etm_session is None:
+        kw.setdefault("etm_config", CONFIG)
     return probe.etm_decode(data_hex=data.hex(), **kw)
+
+
+def test_decode_without_the_id_registers_needs_the_config(probe):
+    # TRCIDRn を読んでいない（trace.etm.start が無い）とき、ETM の構成を暗黙の値で補わない
+    probe._symbols = Symbols(ELF)
+    with pytest.raises(ValueError, match="etm_config"):
+        probe.etm_decode(data_hex=SCENARIO.hex(), formatted=False)
+    out = probe.etm_decode(data_hex=SCENARIO.hex(), formatted=False, etm_config=CONFIG)
+    assert out["etm_config"] == {**CONFIG, "from": "etm_config"} and out["instructions"] == len(EXPECTED)
+    with pytest.raises(ValueError, match="cid_bytes"):
+        probe.etm_decode(data_hex=SCENARIO.hex(), formatted=False, etm_config={"commit_opt1": True, "vmid_bytes": 1})
 
 
 def test_decode_formatted_trace_and_list_instructions(probe):
     probe.etm_start(trace_id=0x10)
     data = enc.FSYNC + enc.frames([(0x10, SCENARIO[:20]), (0x01, b"\x01\x41"), (0x10, SCENARIO[20:])])
     out = decoded(probe, data)
+    assert out["etm_config"]["from"] == "id_registers"                   # trace.etm.start で読んだ TRCIDRn から
     assert out["trace_id"] == 0x10 and out["streams"] == {"0x01": 2, "0x10": len(SCENARIO)}
     assert out["instructions"] == len(EXPECTED) and out["errors"] == []
     assert out["last"]["function"] == "reset_handler" and out["next_address"] == B
@@ -90,6 +108,26 @@ def test_decode_formatted_trace_and_list_instructions(probe):
     assert [p["kind"] for p in packets["packets"]] == ["async", "trace_info"] and packets["total"] > 10
 
 
+def test_errors_cut_to_the_limit_report_the_total_and_the_cut(probe, monkeypatch):
+    # 黙って切らない（総点検 Q4）: 解読の誤りを errors_limit 件に切ったら、誤りの総数・切った印・使った値を返す
+    import fprobe.probe_etm as pe
+    run = pe.Reconstructor.run
+
+    def noisy(self, elements):
+        flow = run(self, elements)
+        flow.errors.extend(f"誤り {i}" for i in range(25))
+        return flow
+    monkeypatch.setattr(pe.Reconstructor, "run", noisy)
+    out = decoded(probe, SCENARIO, formatted=False)
+    assert len(out["errors"]) == 20 and out["errors_total"] == 25 and out["errors_truncated"] is True
+    assert out["errors_limit"] == 20
+    out = decoded(probe, SCENARIO, formatted=False, errors_limit=100)
+    assert len(out["errors"]) == 25 and out["errors_truncated"] is False and out["errors_limit"] == 100
+    history = probe.etm_history(count=3, errors_limit=5)
+    assert len(history["errors"]) == 5 and history["errors_total"] == 25 and history["errors_truncated"] is True
+    assert history["errors_limit"] == 5
+
+
 def test_history_is_the_last_n_instructions_before_the_end(probe):
     decoded(probe, SCENARIO, formatted=False)
     out = probe.etm_history(count=3)
@@ -98,10 +136,15 @@ def test_history_is_the_last_n_instructions_before_the_end(probe):
     assert "推定" in out["note"] or "データ" in out["note"]
 
 
-def test_the_id_with_most_data_is_used_when_none_was_set(probe):
+def test_without_a_trace_id_several_streams_are_not_chosen_by_size(probe):
+    # 「最も多い ID」を選ばない（点検 2 回目 H8）: ID が 1 つだけならそれ（事実）、複数なら流れの大きさを添えて断る
     data = enc.FSYNC + enc.frames([(0x01, b"\x01\x41\x42"), (0x12, SCENARIO)])
-    out = decoded(probe, data)
+    with pytest.raises(ValueError, match=r"0x01.*0x12.*trace_id"):
+        decoded(probe, data)
+    out = decoded(probe, data, trace_id=0x12)
     assert out["trace_id"] == 0x12 and out["instructions"] == len(EXPECTED)
+    only = decoded(probe, enc.FSYNC + enc.frames([(0x12, SCENARIO)]))
+    assert only["trace_id"] == 0x12 and only["instructions"] == len(EXPECTED)
 
 
 def test_decode_a_ring_from_target_memory(probe, memory):
@@ -114,7 +157,7 @@ def test_decode_a_ring_from_target_memory(probe, memory):
     ring = linear[ring_size - oldest:] + linear[:ring_size - oldest]
     memory.write_memory(0x2007_8000, ring)
     probe._symbols = Symbols(ELF)
-    out = probe.etm_decode(address=0x2007_8000, length=ring_size, oldest=oldest)
+    out = probe.etm_decode(address=0x2007_8000, length=ring_size, oldest=oldest, etm_config=CONFIG)
     assert out["instructions"] == len(EXPECTED) and out["bytes"] == ring_size
 
 
@@ -122,7 +165,7 @@ def test_decode_from_a_file(probe, tmp_path):
     path = tmp_path / "trace.bin"
     path.write_bytes(SCENARIO)
     probe._symbols = Symbols(ELF)
-    assert probe.etm_decode(path=str(path), formatted=False)["instructions"] == len(EXPECTED)
+    assert probe.etm_decode(path=str(path), formatted=False, etm_config=CONFIG)["instructions"] == len(EXPECTED)
 
 
 def test_decode_needs_exactly_one_source(probe):
@@ -140,5 +183,5 @@ def test_reading_before_decoding_is_an_error(probe):
 def test_code_comes_from_the_target_when_no_elf_is_loaded(probe, memory):
     from fprobe.memview import ElfImage
     memory.write_memory(B, ElfImage(ELF).read_memory(B, 0x54))
-    out = probe.etm_decode(data_hex=SCENARIO.hex(), formatted=False)
+    out = probe.etm_decode(data_hex=SCENARIO.hex(), formatted=False, etm_config=CONFIG)
     assert out["code"] == "target" and out["instructions"] == len(EXPECTED)

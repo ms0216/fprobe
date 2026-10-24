@@ -81,7 +81,7 @@ def test_convert_truncates_and_sign_extends():
 
 
 def test_unavailable_values_say_why():
-    assert evaluate_location([], context()) == Unavailable("最適化で消えた")
+    assert evaluate_location([], context()) == Unavailable("位置式が空（DWARF に位置が無い）")
     entry = evaluate_location(ops(0xA3, 0x01, 0x50, 0x9F), context())                  # entry_value(reg0)
     assert isinstance(entry, Unavailable) and "entry value" in entry.reason
     missing = evaluate_location(ops(0x70, 0x00), context())                            # breg0、r0 が分からない

@@ -1,12 +1,14 @@
-"""PC サンプリングのプロファイル: サンプルを関数・行・命令・例外に割り当て、割合と信頼区間（Wilson）を付ける。
+"""PC サンプリングのプロファイル: サンプルを関数・行・命令・例外に割り当て、サンプル数と割合を数える。
 
     profiler = Profiler(Symbols("app.elf"), Disassembler.from_elf("app.elf"))
     prof = profiler.profile(PcSamples.from_itm(packets))
-    prof.top(10, by="function")            # 上位 10 関数（サンプル数・割合・信頼区間）
+    prof.top(10, by="function")            # 上位 10 関数（サンプル数・割合）
     prof.as_dict()                         # JSON にできる形
 
 割合は「自分の時間」（その関数の命令にいた時間）。呼び出し先の時間は含まない（PC サンプリングでは分からない）。
 仕様: docs/superpowers/specs/2026-10-17-f5-profile-design.md の 3 節。
+割合の信頼区間は付けない: 独立な二項の試行という仮定の上の推定で、周期の抽出では成り立たない（点検 3 回目の H1。
+使う側が仮定を承知で付けるなら plugins.heuristics.sampling_intervals）。
 """
 
 from collections import Counter
@@ -18,7 +20,6 @@ from ..memview import MemoryReadError
 from ..symbols import Location, Symbol
 from .exceptions import exception_name
 from .samples import PcSamples
-from .stats import wilson_interval
 
 __all__ = ["CATEGORIES", "Profile", "Profiler", "SymbolSource"]
 
@@ -75,9 +76,8 @@ class Profiler:
                           if i.kind == "code" and i.mnemonic in _SLEEP_MNEMONICS)
         return f
 
-    def profile(self, samples: PcSamples, *, confidence: float = 0.95,
-                names: Mapping[int, str] | None = None) -> "Profile":
-        prof = Profile(source=samples.source, confidence=confidence, unavailable=samples.unavailable,
+    def profile(self, samples: PcSamples, *, names: Mapping[int, str] | None = None) -> "Profile":
+        prof = Profile(source=samples.source, unavailable=samples.unavailable,
                        overflows=samples.overflows, exception_trace=samples.exception_trace, names=names)
         places: dict[int, tuple[Location, _Function | None]] = {}     # 番地 → 割り当て（同じ番地は 1 回だけ引く）
         for s in samples.samples:
@@ -115,7 +115,6 @@ class Profiler:
 @dataclass
 class Profile:
     source: str
-    confidence: float = 0.95
     unavailable: int = 0
     overflows: int = 0
     exception_trace: bool = False
@@ -144,8 +143,7 @@ class Profile:
 
     def _stat(self, n: int, total: int | None = None) -> dict:
         total = self.total if total is None else total
-        lo, hi = wilson_interval(n, total, self.confidence)
-        return {"samples": n, "fraction": n / total if total else 0.0, "ci": [lo, hi]}
+        return {"samples": n, "fraction": n / total if total else 0.0}
 
     def _active(self, n: int) -> dict:
         return {"active_fraction": n / self.active if self.active else 0.0}
@@ -183,6 +181,10 @@ class Profile:
 
     def top(self, n: int = 20, by: str = "function", function: str | None = None) -> list[dict]:
         """by の表のサンプルの多い順の上位 n（line / instruction は function で絞れる）。"""
+        return self.table(by, function)[:n]
+
+    def table(self, by: str = "function", function: str | None = None) -> list[dict]:
+        """by の表の全部（サンプルの多い順。line / instruction は function で絞れる）。"""
         if by not in _BY:
             raise ValueError(f"by は {', '.join(_BY)} のどれか: {by!r}")
         if by == "function":
@@ -193,11 +195,11 @@ class Profile:
             rows = self.instructions(function)
         else:
             rows = self.exceptions()
-        return rows[:n]
+        return rows
 
     def notes(self) -> list[str]:
-        out = ["割合はサンプリングによる推定。信頼区間はサンプル数による誤差だけで、サンプルの周期と同期した処理の偏り"
-               "（エイリアシング）は含まない。割合は自分の時間（呼び出し先の時間は含まない）。"]
+        out = ["割合はサンプルの回数の割合（自分の時間。呼び出し先の時間は含まない）。サンプルの周期と同期した処理は"
+               "実際の時間の割合から偏りうる（エイリアシング）。"]
         if self.overflows:
             out.append(f"SWO のオーバーフローが {self.overflows} 回: サンプルが欠け、パケットの多い区間が少なく見える。")
         if self.unavailable:
@@ -213,7 +215,7 @@ class Profile:
         def cut(rows):
             return rows if top is None else rows[:top]
         return {"source": self.source, "total": self.total, "active": self.active, "unavailable": self.unavailable,
-                "overflows": self.overflows, "confidence": self.confidence, "categories": self.category_table(),
+                "overflows": self.overflows, "categories": self.category_table(),
                 "functions": cut(self.functions()), "lines": cut(self.lines()),
                 "instructions": cut(self.instructions()), "exceptions": cut(self.exceptions()),
                 "notes": self.notes()}

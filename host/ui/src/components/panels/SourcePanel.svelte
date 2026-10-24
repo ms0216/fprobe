@@ -4,6 +4,7 @@
   import { tick } from "svelte";
   import { command, type CommandState } from "../../lib/commands";
   import { shared } from "../../lib/context";
+  import { lineMenu, openMenu } from "../../lib/contextmenu";
   import { frameLine, markedLines, type Instruction } from "../../lib/debugger";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
@@ -11,9 +12,41 @@
   import { baseName, sourceHeat } from "../../lib/profile";
   import { confirmer } from "../../lib/confirm";
   import { lineSpec, measureParams } from "../../lib/cycles";
+  import { haltedAt, lineMarks, missingList, missingText, sampleText, signedDuration,
+           type CodeAtSample } from "../../lib/codeat";
+  import { formatDuration, timeText } from "../../lib/time";
+  import CodeAtToggle from "./CodeAtToggle.svelte";
 
   const ctx = shared();
-  const { app, dbg, ui, safety } = ctx;
+  const { app, dbg, ui, safety, tl, codeAt } = ctx;
+  const origins = tl.origins;
+
+  // 時刻に連動（時間軸の選択カーソルの記録の時刻 → recording.code_at の直前・直後の PC のサンプルの行と止まった場所）
+  let linked = $state(true);
+  const atTime = $derived(linked && $tl.source === "recording" ? $codeAt : null);
+  const at = $derived(atTime?.result ?? null);
+  const atMarks = $derived(lineMarks(at, $dbg.open));
+  const atHalt = $derived(haltedAt(at));
+  const atText = (t: number) => timeText($origins, { source: "recording", t }) ?? `t = ${t}`;
+  const markText: Record<string, string> = { before: "‹", after: "›", halt: "■" };
+  let atShown: number | null = null;
+
+  // 応答が替わったら、止まった場所の行を開いて見せる（止まっていなければ開かない。直前・直後のサンプルの
+  // どちらを見るかは使う人が下の欄で選ぶ）
+  $effect(() => {
+    const go = atHalt;
+    if (!at || !go?.file || go.line == null || at.t === atShown) return;
+    atShown = at.t;
+    void showPlace(go);
+  });
+
+  async function showPlace(p: { file?: string | null; line?: number | null }) {
+    if (!p.file || p.line == null) return;
+    if (dbg.snapshot.files.some((f) => f.name === p.file)) await dbg.openFile(p.file);
+    await tick();
+    code?.querySelector(`[data-line="${p.line}"]`)?.scrollIntoView({ block: "center" });
+  }
+  const placeTip = (s: CodeAtSample) => `${s.where ?? ""} · ${$i18n("codeAt.pc", { pc: `0x${(s.value >>> 0).toString(16)}` })}`;
 
   let code = $state<HTMLElement>();
   let mixed = $state(load("source.mixed", "0") === "1");
@@ -21,7 +54,7 @@
   let cyclesOpen = $state(false);
   let cycStart = $state(load("cycles.start", ""));
   let cycEnd = $state(load("cycles.end", ""));
-  let cycCount = $state(load("cycles.count", "1"));
+  let cycCount = $state(load("cycles.count", ""));
   let cycResult = $state<any>(null);
   let cycError = $state<string | null>(null);
   $effect(() => save("source.mixed", mixed ? "1" : "0"));
@@ -30,6 +63,7 @@
   const lines = $derived($dbg.source ? $dbg.source.text.replace(/\n$/, "").split("\n") : []);
   const breakable = $derived(new Set($dbg.source?.lines ?? []));
   const marked = $derived(markedLines($dbg));
+  const disabledMarks = $derived(markedLines($dbg, (b) => b.enabled === false));
   const stopLine = $derived($dbg.stop?.file === $dbg.open ? $dbg.stop?.line : undefined);
   // 呼び出し履歴で選んだ呼び出し元のフレームの行（VS Code の「フォーカスのあるフレーム」）
   const framePlace = $derived($dbg.frame > 0 && $dbg.stop ? frameLine($dbg.backtrace[$dbg.frame]) : null);
@@ -72,6 +106,21 @@
     if (!c.blocked(cs)) void c.run(ctx, cs);
   }
 
+  /** 行の右クリック（lib/contextmenu.ts の lineMenu）: その行を選び、ブレークポイント・ここまで実行のコマンドを
+   *  その行で（使えない理由もコマンドと同じ） */
+  function lineContext(e: MouseEvent, n: number) {
+    if (!$dbg.open) return;
+    ui.select($dbg.open, n);
+    const at = { ...cs, selection: { file: $dbg.open, line: n } };
+    const toggle = command("toggleBreakpoint"), runTo = command("runToCursor");
+    const bp = dbg.breakpointAt(n);
+    openMenu(e, lineMenu(bp, toggle.blocked(at) ?? (bp || breakable.has(n) ? null : "menu.bp.noCode"), runTo.blocked(at), {
+      toggle: () => toggle.run(ctx, at),
+      enable: async (enabled) => (await allowed(app)) && bp && dbg.enableBreakpoint(bp.location, enabled),
+      runTo: () => runTo.run(ctx, at),
+    }));
+  }
+
   async function openRecent(path: string) {
     if ((await allowed(app)) && (await dbg.loadElf(path))) ui.remember(path);
   }
@@ -104,6 +153,48 @@
 </script>
 
 <div class="pane source">
+  {#if $tl.source === "recording"}
+    <!-- 時刻に連動: 時間軸で選んだ記録の時刻の、直前・直後の PC のサンプルの行と止まった場所（recording.code_at） -->
+    <div class="pane-bar codeat" title={at ? `elf: ${at.elf ?? "—"} · recorded_elf: ${at.recorded_elf ?? "—"}` : undefined}>
+      <CodeAtToggle panel="source" bind:linked />
+      {#if atTime && atTime.t !== null}
+        <span class="muted">{$i18n("codeAt.at", { time: atText(atTime.t) })}</span>
+        {#if atTime.loading}<span class="muted">{$i18n("codeAt.loading")}</span>{/if}
+        {#if atTime.error}<span class="bad">{atTime.error}</span>{/if}
+        {#if at}
+          {#each [["before", at.pc_before], ["after", at.pc_after]] as const as [kind, s] (kind)}
+            <span class="at-item {kind}" title={$i18n(kind === "before" ? "codeAt.beforeTip" : "codeAt.afterTip")}>
+              <span class="at-mark">{markText[kind]}</span>
+              <span class="muted">{$i18n(kind === "before" ? "codeAt.before" : "codeAt.after")}</span>
+              {#if s?.file}
+                <button class="link mono" title={placeTip(s)} onclick={() => void showPlace(s)}>{sampleText($i18n, s)}</button>
+                <span class="muted mono">{signedDuration(s.dt_s, (x) => formatDuration(x))}</span>
+              {:else if s}
+                <span class="mono">{sampleText($i18n, s)}</span>
+                <span class="muted mono">{signedDuration(s.dt_s, (x) => formatDuration(x))}</span>
+              {:else}
+                <span class="muted">{$i18n("codeAt.none")}</span>
+              {/if}
+            </span>
+          {/each}
+          {#if at.pc_gap_s !== null}
+            <span class="muted mono" title={$i18n("codeAt.gapTip")}>{$i18n("codeAt.gap", { gap: formatDuration(at.pc_gap_s) })}</span>
+          {/if}
+          {#if atHalt}
+            <span class="at-item halt" title={$i18n("codeAt.haltedTip")}>
+              <span class="at-mark">{markText.halt}</span>
+              <span>{$i18n("codeAt.halted")}</span>
+              <button class="link mono" disabled={!atHalt.file} onclick={() => void showPlace(atHalt)}>
+                {atHalt.where ?? (atHalt.pc !== undefined ? $i18n("codeAt.pc", { pc: `0x${(atHalt.pc >>> 0).toString(16)}` }) : "")}</button>
+              {#if atHalt.halt_reason}<span class="muted">{atHalt.halt_reason}</span>{/if}
+              <span class="muted mono">{signedDuration(atHalt.dt_s, (x) => formatDuration(x))}</span>
+            </span>
+          {/if}
+          {#each missingList(at) as m (m.key)}<span class="muted note">{missingText($i18n, m.key, m.reason)}</span>{/each}
+        {/if}
+      {/if}
+    </div>
+  {/if}
   {#if $dbg.files.length}
     <div class="pane-bar">
       <select aria-label={$i18n("panel.source")} value={$dbg.open ?? ""}
@@ -126,7 +217,8 @@
         <input class="mono" bind:value={cycEnd} placeholder={$i18n("cycles.end")} aria-label={$i18n("cycles.end")} />
         <button type="button" class="small" disabled={selected === undefined} title={$i18n("cycles.useLineTip")}
                 onclick={() => pickLine("end")}>{$i18n("cycles.useLine")}</button>
-        <input class="mono num" bind:value={cycCount} aria-label={$i18n("cycles.count")} title={$i18n("cycles.count")} />
+        <label class="muted">{$i18n("cycles.count")}<span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={cycCount} inputmode="numeric" aria-required="true" /></label>
         <button class="small" disabled={!online}>{$i18n("cycles.measure")}</button>
         {#if cycError}<span class="bad">{cycError}</span>{/if}
         {#if cycResult?.summary}
@@ -142,17 +234,20 @@
       <div class="lines mono" bind:this={code}>
         {#each lines as text, i (i)}
           {@const n = i + 1}
+          {@const atLine = atMarks.get(n)}
+          <!-- svelte-ignore a11y_no_static_element_interactions（右クリックのメニュー。キーでは F9・Ctrl+F10 が同じ操作） -->
           <div class="line" class:stop={n === stopLine} class:frame={n === frameLineNo} class:selected={n === selected}
-               data-line={n}>
+               class:at-before={atLine?.includes("before")} class:at-after={atLine?.includes("after")}
+               class:at-halt={atLine?.includes("halt")} data-line={n} oncontextmenu={(e) => lineContext(e, n)}>
             <button class="gutter" disabled={!breakable.has(n) || !online}
                     title={$i18n("source.breakpointTip", { line: n })} aria-label={$i18n("source.breakpointTip", { line: n })}
                     onclick={async () => (await allowed(app))
                                          && (marked.has(n) || await safety.confirmHalt("breakpoint", $i18n))
                                          && dbg.toggleBreakpoint(n)}>
-              {#if marked.has(n)}<span class="dot"></span>{:else if breakable.has(n)}<span class="can"></span>{/if}
+              {#if marked.has(n)}<span class="dot" class:off={disabledMarks.has(n)}></span>{:else if breakable.has(n)}<span class="can"></span>{/if}
             </button>
-            <span class="arrow" class:caller={n === frameLineNo && n !== stopLine}>
-              {n === stopLine ? "▶" : n === frameLineNo ? "▷" : ""}</span>
+            <span class="arrow" class:caller={n === frameLineNo && n !== stopLine} class:at={!!atLine && n !== stopLine && n !== frameLineNo}>
+              {n === stopLine ? "▶" : n === frameLineNo ? "▷" : atLine ? atLine.map((k) => markText[k]).join("") : ""}</span>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <span class="no" class:missed={missed?.has(n)} onclick={() => ui.select($dbg.open!, n)}
                   style:background={heat?.has(n) ? `color-mix(in srgb, var(--warn) ${Math.round(15 + 60 * heat.get(n)!.samples / heat.get(n)!.max)}%, transparent)` : null}
@@ -208,6 +303,17 @@
   .line.selected { background: var(--select); }
   .line.stop { background: color-mix(in srgb, var(--warn) 22%, transparent); }
   .line.frame { background: color-mix(in srgb, var(--ok) 18%, transparent); }
+  /* 記録の時刻の行（止まった行 = 黄色とは別の色）: 直前・直後のサンプルは青の左の線、止まった場所は青の枠 */
+  .line.at-before, .line.at-after { box-shadow: inset 3px 0 0 var(--accent);
+                                    background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .line.at-after:not(.at-before) { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  .line.at-halt { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .arrow.at { color: var(--accent); }
+  .codeat { flex-wrap: wrap; row-gap: 2px; font-size: 12px; }
+  .codeat .at-item { display: inline-flex; gap: 4px; align-items: baseline; }
+  .codeat .at-mark { color: var(--accent); }
+  .codeat .bad { color: var(--bad); }
+  .codeat .note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 28em; }
   .asm.frame { color: var(--text); background: color-mix(in srgb, var(--ok) 10%, transparent); }
   .arrow.caller { color: var(--ok); }
   /* 命令の番地は 8 桁の 16 進で行番号（44px）より広い: 番地の列だけ広げる（重なって読めなかった） */
@@ -217,6 +323,7 @@
   .gutter { border: none; background: none; padding: 0; height: 19px; display: grid; place-items: center; cursor: pointer; }
   .gutter:disabled { cursor: default; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
+  .dot.off { background: none; box-shadow: inset 0 0 0 2px var(--bad); }         /* 無効（中抜き） */
   .can { width: 8px; height: 8px; border-radius: 50%; }
   .gutter:not(:disabled):hover .can { background: color-mix(in srgb, var(--bad) 45%, transparent); }
   .arrow { color: var(--warn); font-size: 11px; text-align: center; }

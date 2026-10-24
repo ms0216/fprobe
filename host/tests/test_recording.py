@@ -15,19 +15,34 @@ HZ = 100_000_000                                   # タイムベース 100 MHz
 
 # --- 時計の対応付け --------------------------------------------------------------
 
-def test_one_point_uses_the_nominal_rate():
+def test_one_point_uses_the_nominal_rate_and_says_the_rate_is_not_known():
+    # 1 点では速さが分からない: 公称の速さで写し、不確かさには点からの経過時間をそのまま入れる（速さの誤りの上限を
+    # 仮定しない）。点の上では往復の半分だけ
     m = ClockMap(HZ)
     m.add(host_s=10.0, ticks=5_000, round_trip_s=0.0002)
     t, unc = m.to_ticks(10.5)
-    assert t == 5_000 + HZ // 2 and unc == HZ * 0.0001
+    assert t == 5_000 + HZ // 2 and unc == pytest.approx(HZ * 0.0001 + HZ * 0.5)
+    assert m.to_ticks(10.0)[1] == pytest.approx(HZ * 0.0001)
 
 
-def test_offset_and_drift_are_fitted():
+def test_offset_and_drift_are_fitted_with_the_slope_uncertainty():
     m = ClockMap(HZ)
     for i in range(10):                             # デバイスの時計がホストより 100 ppm 速い
         m.add(host_s=100.0 + i, ticks=round(7_000 + i * HZ * 1.0001), round_trip_s=0.0004)
     t, unc = m.to_ticks(105.5)
-    assert abs(t - (7_000 + 5.5 * HZ * 1.0001)) < 2 and unc == pytest.approx(HZ * 0.0002)
+    u = HZ * 0.0002                                  # 各点の誤りの上限（往復の半分）
+    slope = u * 25 / 82.5                            # 傾きの誤りの上限 = u Σ|x − x̄| / Σ(x − x̄)²（x̄ = 104.5）
+    assert abs(t - (7_000 + 5.5 * HZ * 1.0001)) < 2 and unc == pytest.approx(u + slope * 1.0)
+
+
+def test_close_points_are_fitted_without_a_threshold_and_the_slope_uncertainty_grows_with_distance():
+    # 以前は点の幅が 1 ms 未満なら公称の速さ（境界の値）だった。幅が狭いことは傾きの不確かさに出す
+    m = ClockMap(HZ)
+    m.add(host_s=1.0, ticks=1_000, round_trip_s=0.0001)
+    m.add(host_s=1.0002, ticks=1_000 + round(HZ * 0.0002), round_trip_s=0.0001)
+    near = m.to_ticks(1.0001)[1]
+    far = m.to_ticks(2.0)[1]
+    assert near < far and far > HZ * 0.1                # 0.2 ms の幅から 1 秒先へ伸ばすと大きく外れうる
 
 
 def test_without_points_host_times_cannot_be_placed():

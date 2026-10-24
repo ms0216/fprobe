@@ -5,7 +5,7 @@ import { callApi } from "../src/lib/apicall";
 import { apiMethods, type ApiSpec } from "../src/lib/apiform";
 import { Confirmer } from "../src/lib/confirm";
 import { Favorites, checkFavorite } from "../src/lib/favorites";
-import { FakeConn } from "./fake-conn";
+import { FakeConn, deviceError } from "./fake-conn";
 
 const METHODS = apiMethods(spec as unknown as ApiSpec);
 const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
@@ -63,7 +63,7 @@ describe("callApi", () => {
   it("read は確かめずに呼び、結果を返す", async () => {
     const conn = new FakeConn({ "recording.list": { recordings: [] } });
     const ask = new Confirmer();
-    expect(await callApi(read, {}, { conn, app: { aiWorking: false }, ask })).toEqual({ ok: true, text: '{\n  "recordings": []\n}' });
+    expect(await callApi(read, {}, { conn, app: { aiConnectedUnpaused: false }, ask })).toEqual({ ok: true, text: '{\n  "recordings": []\n}' });
     expect(conn.calls).toEqual([["recording.list", {}]]);
   });
 
@@ -72,13 +72,13 @@ describe("callApi", () => {
     const ask = new Confirmer();
     let danger_ = false;
     ask.subscribe((r) => { if (r) danger_ = !!r.danger; });
-    const p = callApi(control, {}, { conn, app: { aiWorking: false }, ask });
+    const p = callApi(control, {}, { conn, app: { aiConnectedUnpaused: false }, ask });
     await flush();
     expect(danger_).toBe(false);
     ask.answer(false);
     expect(await p).toBeNull();
     expect(conn.calls).toEqual([]);
-    const q = callApi(danger, { mode: "chip" }, { conn, app: { aiWorking: false }, ask });
+    const q = callApi(danger, { mode: "chip" }, { conn, app: { aiConnectedUnpaused: false }, ask });
     await flush();
     expect(danger_).toBe(true);
     ask.answer(true);
@@ -87,8 +87,8 @@ describe("callApi", () => {
   });
 
   it("誤りは結果の誤りとして返す", async () => {
-    const conn = new FakeConn({ "recording.list": () => { throw new Error("RuntimeError: 記録が無い"); } });
-    expect(await callApi(read, {}, { conn, app: { aiWorking: false }, ask: new Confirmer() })).toEqual({ ok: false, text: "記録が無い" });
+    const conn = new FakeConn({ "recording.list": () => { throw deviceError("記録が無い"); } });
+    expect(await callApi(read, {}, { conn, app: { aiConnectedUnpaused: false }, ask: new Confirmer() })).toEqual({ ok: false, text: "記録が無い" });
   });
 });
 

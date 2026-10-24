@@ -87,16 +87,32 @@ def test_without_regions_sections_are_outside_and_noted(layout):
     assert any("領域" in n for n in report["notes"])
 
 
-def test_stack_bounds_from_the_linker_symbols(layout):
-    b = stack_bounds(layout, [FLASH, RAM])
+def test_stack_bounds_from_the_linker_symbols_the_caller_names(layout):
+    b = stack_bounds(layout, [FLASH, RAM], top_symbol="_estack", size_symbol="_Min_Stack_Size")
     assert b.top == 0x2001_8000 and b.nominal_size == 0x400
     assert b.bottom == 0x2001_8000 - 0x400 and b.top_source == "_estack"
-    free = stack_bounds(layout, [FLASH, RAM], nominal=False)
-    assert free.bottom == 0x2000_0A48                                # 最後の RAM の区画（._user_heap_stack）の終わり
+    assert b.bottom_source == "_estack - _Min_Stack_Size"
+    limit = stack_bounds(layout, [FLASH, RAM], top_symbol="_estack", limit_symbol="_Min_Stack_Size")
+    assert limit.bottom == 0x400 and limit.bottom_source == "_Min_Stack_Size"     # 渡した名前のとおりに使う
+    free = stack_bounds(layout, [FLASH, RAM], top_symbol="_estack")
+    assert free.bottom == 0x2000_0A48 and free.bottom_source == "end_of_ram_sections"   # 最後の RAM の区画の終わり
+    with pytest.raises(ValueError, match="no_such_symbol"):
+        stack_bounds(layout, [FLASH, RAM], top_symbol="no_such_symbol")
 
 
-def test_stack_top_falls_back_to_the_vector_table(tmp_path):
+def test_stack_bounds_do_not_choose_by_symbol_names(layout):
+    # リンカのシンボル名の慣習の表（_estack・__StackTop・g_pfnVectors 等）で選ばない。使う側が名前か番地を渡す
+    import fprobe.elfsize as elfsize
+    assert not any(hasattr(elfsize, n) for n in ("TOP_SYMBOLS", "LIMIT_SYMBOLS", "SIZE_SYMBOLS", "VECTOR_SYMBOLS"))
+    with pytest.raises(ValueError, match="top_symbol"):
+        stack_bounds(layout, [FLASH, RAM])
+
+
+def test_stack_top_from_the_vector_table_the_caller_names(tmp_path):
     sram = Path(__file__).resolve().parents[1] / "firmware" / "sram_demo" / "sram_demo.elf"
-    b = stack_bounds(ElfLayout.from_elf(sram), [MemoryRegion("RAM", 0x2000_0000, 32 * 1024)])
-    assert b.top == 0x2000_8000 and b.top_source in ("__stack_top", "vector_table")
+    layout = ElfLayout.from_elf(sram)
+    b = stack_bounds(layout, [MemoryRegion("RAM", 0x2000_0000, 32 * 1024)], vector_table=0x2000_0000)
+    assert b.top == 0x2000_8000 and b.top_source == "vector_table 0x20000000"     # ベクタ表の最初の語（初期の MSP）
     assert b.nominal_size is None and b.bottom % 8 == 0 and b.bottom < b.top
+    with pytest.raises(ValueError, match="0x10000000"):
+        stack_bounds(layout, [], vector_table=0x1000_0000)                          # ELF に中身の無い番地

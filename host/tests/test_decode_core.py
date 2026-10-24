@@ -32,7 +32,8 @@ def test_channel_levels_look_up_by_bisection():
 
 
 def test_decoding_times_filters_and_json():
-    anns = (Annotation(10, 20, "data", "0x41", value=0x41), Annotation(30, 40, "data", "0x42", value=0x42, error="parity"),
+    anns = (Annotation(10, 20, "data", "0x41",
+                       value=0x41), Annotation(30, 40, "data", "0x42", value=0x42, error="parity"),
             Annotation(50, 60, "break", "BREAK"))
     d = Decoding("uart", anns, sample_period_s=1e-6, trigger=25, length=100, params={"baud": 9600})
     assert d.seconds(10) == pytest.approx(10e-6) and d.since_trigger(10) == pytest.approx(-15e-6)
@@ -72,7 +73,8 @@ def test_decode_by_name():
     from fprobe.decode.synth import uart
     w = Wave(channels=8, sample_rate_hz=16 * 9600, idle={5: 1})
     end = uart(w, 5, b"ok", 1e-3, baud=9600)
-    d = decode("uart", w.build(end_s=end), channel=5, baud=9600)
+    d = decode("uart", w.build(end_s=end), channel=5, baud=9600, data_bits=8, parity="none", stop_bits=1, invert=False,
+               lsb_first=True)
     assert d.protocol == "uart" and [a.value for a in d.of("data")] == list(b"ok")
     assert {"i2c", "spi", "swd", "uart"} <= {d.name for d in decoders()}
     with pytest.raises(ValueError):

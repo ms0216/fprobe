@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from .probe_window import EventWindow, write_registers
 from .profile.dwt import ITM_TER, RegisterWrite, itm_port_writes, plan_swo
+from .profile.timing import limit_intervals
 from .recording import ClockMap
 from .rtos.kernel_trace import KERNEL_PORT, PAYLOAD_PORT
 from .rtos.timeline import TRACE_PORT, itm_packets
@@ -180,11 +181,11 @@ class UserTools:
         out = self._user_state(run)
         out.update(records=len(records), intervals=len(pairing.intervals), errors=errors,
                    unmatched_stops=pairing.unmatched_stops, open_intervals=pairing.open,
-                   started_before=pairing.started_before)
+                   stops_before_first_start=pairing.stops_before_first_start)
         if run.window is not None:
             out["window"] = self._window_info(run.window, run.timebase_hz)
         if errors.get("lost"):
-            out["warnings"].append("ITM があふれた・解読を誤った: その間の値・イベントは無い（SWO を速くする）")
+            out["warnings"].append("ITM があふれた・解読を誤った（errors の lost）: その間の値・イベントは無い")
         return out
 
     def user_trace_get(self, name: str | None = None, kinds: list[str] | None = None, offset: int = 0,
@@ -216,10 +217,7 @@ class UserTools:
             intervals = {k: v for k, v in intervals.items() if k == name}
             marks = {k: v for k, v in marks.items() if k == name}
         for row in intervals.values():
-            for key in ("intervals",):
-                if len(row.get(key, ())) > limit:
-                    row[f"{key}_total"] = len(row[key])
-                    row[key] = row[key][:limit]
+            limit_intervals(row, limit)
         out = self._user_summary(run, records, pairing, errors)
         out.update(values=values, intervals=intervals, marks=marks)
         return out

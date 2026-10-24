@@ -31,7 +31,17 @@ export interface EtmHistory {
   markers: EtmMarker[];
   next_address: number | null;
   errors: string[];
+  errors_total?: number;        // 切る前の誤りの数（errors は先頭 errors_limit 件）
+  errors_truncated?: boolean;
+  errors_limit?: number;
   note?: string;
+}
+
+/** 切った一覧の事実（表示した数・総数・上限）。切っていなければ null */
+export interface Cut { shown: number; total: number; limit: number }
+
+function errorsCut(r: { errors?: string[]; errors_total?: number; errors_truncated?: boolean; errors_limit?: number } | null): Cut | null {
+  return r?.errors_truncated ? { shown: r.errors?.length ?? 0, total: r.errors_total ?? 0, limit: r.errors_limit ?? 0 } : null;
 }
 
 const INTEGER = /^(0x[0-9a-f]+|\d+)$/i;
@@ -48,18 +58,35 @@ export function decodeParams(form: EtmSourceForm): { params: Record<string, unkn
   if (address === null) return { error: "address" };
   const length = parseInteger(form.length);
   if (length === null || length < 1) return { error: "length" };
-  const oldest = form.oldest.trim() === "" ? 0 : parseInteger(form.oldest);
+  const oldest = parseInteger(form.oldest);                       // 空を 0 とみなさない（画面の既定を持たない）
   if (oldest === null) return { error: "oldest" };
   return { params: { address, length, oldest } };
 }
 
+/** ETM の構成の欄（commitOpt1: "" / "1" / "0"、VMID・Context ID のバイト数） */
+export interface EtmConfigForm { commitOpt1: string; vmidBytes: string; cidBytes: string }
+
+/** 構成の欄から etm_config。全部空なら渡さない（API は trace.etm.start で読んだ ID レジスタを使い、無ければ断る）。
+ *  1 つでも入れたら 3 つとも要る（足りない欄の名前を誤りに） */
+export function configParam(form: EtmConfigForm): { params: Record<string, unknown> } | { error: string } {
+  if (!form.commitOpt1 && !form.vmidBytes.trim() && !form.cidBytes.trim()) return { params: {} };
+  if (form.commitOpt1 !== "1" && form.commitOpt1 !== "0") return { error: "commit_opt1" };
+  const vmid = parseInteger(form.vmidBytes);
+  if (vmid === null) return { error: "vmid_bytes" };
+  const cid = parseInteger(form.cidBytes);
+  if (cid === null) return { error: "cid_bytes" };
+  return { params: { etm_config: { commit_opt1: form.commitOpt1 === "1", vmid_bytes: vmid, cid_bytes: cid } } };
+}
+
 export async function readHistory(conn: Pick<DaemonConnection, "call">, params: Record<string, unknown>, count: number):
-  Promise<{ history: EtmHistory | null; error: string | null; decodeErrors?: string[]; decodeNote?: string }> {
+  Promise<{ history: EtmHistory | null; error: string | null; decodeErrors?: string[]; decodeErrorsCut?: Cut | null;
+            decodeNote?: string }> {
   try {
     const decoded = (await conn.call("trace.etm.decode" as never, params as never)) as any;
     const history = (await conn.call("trace.etm.history" as never, { count } as never)) as EtmHistory;
-    // 解読の誤り（トレース ID の流れが無い 等）は decode の結果にだけある
-    return { history, error: null, decodeErrors: decoded?.errors ?? [], decodeNote: decoded?.note };
+    // 解読の誤り（トレース ID の流れが無い 等）は decode の結果にだけある。切ったときは総数と上限も
+    return { history, error: null, decodeErrors: decoded?.errors ?? [], decodeErrorsCut: errorsCut(decoded),
+             decodeNote: decoded?.note };
   } catch (e) {
     return { history: null, error: errorText(e) };
   }

@@ -3,7 +3,9 @@
 
 - CPU クロック: DAP サンプラ（FPGA）が CYCCNT を周期的に読み、デバイスのタイムベースの時刻を付ける。その (時刻, CYCCNT)
   の直線の傾き（最小二乗）がクロック。サンプラが無ければ、ホストから 2 回読んだ値と、その前後のタイムベースの時刻で
-  挟む（clock_from_two_reads。誤差は USB の往復の幅で決まる）。
+  挟む（clock_from_two_reads。読みの前後の時刻で挟んだ範囲 clock_min_hz〜clock_max_hz を返す）。
+  直線の傾きの標準誤差は出さない（残差が独立・等分散という仮定の上の推定。点検 3 回目の ?7。残差の事実 =
+  最大・二乗平均は返す。仮定を承知で使うなら plugins.heuristics.clock_stderr）。
 - 命令数（ARMv7-M C1.8.1）: 命令 = CYCCNT − CPICNT − EXCCNT − SLEEPCNT − LSUCNT + FOLDCNT。
 """
 
@@ -30,16 +32,19 @@ def unwrap(values: list[int], bits: int = 32) -> list[int]:
 @dataclass
 class ClockEstimate:
     clock_hz: float
-    stderr_hz: float                       # 推定の標準誤差（2 点のときは読みの時刻の幅による上限）
     samples: int
     span_s: float
-    max_residual_cycles: float = 0.0
+    max_residual_cycles: float | None = None   # 直線からの残差の最大（最小二乗のとき。2 回の読みでは None）
+    residual_rms_cycles: float | None = None   # 残差の二乗平均の平方根（同上）
+    clock_min_hz: float | None = None          # 読みの前後の時刻で挟んだ範囲（2 回の読みのとき。直線では None）
+    clock_max_hz: float | None = None
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"clock_hz": self.clock_hz, "clock_mhz": self.clock_hz / 1e6, "stderr_hz": self.stderr_hz,
-                "ppm": self.stderr_hz / self.clock_hz * 1e6 if self.clock_hz else None, "samples": self.samples,
-                "span_s": self.span_s, "max_residual_cycles": self.max_residual_cycles, "warnings": list(self.warnings)}
+        return {"clock_hz": self.clock_hz, "clock_mhz": self.clock_hz / 1e6, "samples": self.samples,
+                "span_s": self.span_s, "max_residual_cycles": self.max_residual_cycles,
+                "residual_rms_cycles": self.residual_rms_cycles, "clock_min_hz": self.clock_min_hz,
+                "clock_max_hz": self.clock_max_hz, "warnings": list(self.warnings)}
 
 
 def estimate_clock(samples: list[tuple[int, int]], timebase_hz: float) -> ClockEstimate:
@@ -60,37 +65,40 @@ def estimate_clock(samples: list[tuple[int, int]], timebase_hz: float) -> ClockE
     intercept = my - slope * mx
     residuals = [y - (intercept + slope * x) for x, y in zip(xs, ys)]
     n = len(xs)
-    stderr = (sum(r * r for r in residuals) / (n - 2) / sxx) ** 0.5 if n > 2 else 0.0
     warnings = []
     stalled = sum(1 for a, b in zip(ys, ys[1:]) if a == b)
     if stalled:
         warnings.append(f"CYCCNT が {stalled} 回の読みの間で止まった（コアの停止・クロックを止める眠り）: その分だけ"
                         "見かけのクロックが下がる。走っている区間で測る")
-    return ClockEstimate(slope, stderr, n, xs[-1], max(abs(r) for r in residuals), warnings)
+    rms = (sum(r * r for r in residuals) / n) ** 0.5
+    return ClockEstimate(slope, n, xs[-1], max(abs(r) for r in residuals), rms, warnings=warnings)
 
 
 def clock_from_two_reads(first: tuple[int, int, int], second: tuple[int, int, int],
                          timebase_hz: float) -> ClockEstimate:
-    """2 回の読み（読む前のタイムベース, 読んだ後のタイムベース, CYCCNT）から。読みの時刻は前後の中点、誤差は幅の半分ずつ。"""
+    """2 回の読み（読む前のタイムベース, 読んだ後のタイムベース, CYCCNT）から。clock_hz は読みの時刻を前後の中点と
+    したときの値、clock_min_hz〜clock_max_hz は読みが前後のどこで起きても入る範囲（進みを最も長い間 b1 − a0 と最も
+    短い間 b0 − a1 で割る。最も短い間が 0 以下なら上は None）。CYCCNT の 1 周未満の進みとみなす。"""
     (a0, a1, c0), (b0, b1, c1) = first, second
     span = ((b0 + b1) - (a0 + a1)) / 2 / timebase_hz
     if span <= 0:
         raise ValueError("2 回目の読みが 1 回目より後でない")
     delta = (c1 - c0) % (1 << 32)
-    clock = delta / span
-    width = ((a1 - a0) + (b1 - b0)) / 2 / timebase_hz
-    return ClockEstimate(clock, clock * width / span, 2, span)
+    longest, shortest = (b1 - a0) / timebase_hz, (b0 - a1) / timebase_hz
+    return ClockEstimate(delta / span, 2, span, clock_min_hz=delta / longest,
+                         clock_max_hz=delta / shortest if shortest > 0 else None)
 
 
-def counter_delta(start: int, end: int, overflows: int | None = None, bits: int = 8) -> int:
-    """イベントカウンタ（bits ビット）の start → end の増分。overflows は間に受けた溢れのパケットの数（SWO）。
-    無ければ 1 周未満とみなす。数えた溢れと値が合わない（パケットが欠けた）ときも 1 周未満の分だけ。"""
+def counter_delta(start: int, end: int, overflows: int | None = None, bits: int = 8) -> tuple[int, bool]:
+    """イベントカウンタ（bits ビット）の start → end の増分と、溢れを数えて決めたか（counted）。overflows は間に受けた
+    溢れのパケットの数（SWO）。overflows が無い・数えた溢れと値が合わない（パケットが欠けた）ときは 1 周未満の分と
+    counted = False（何周したかは測れていない）。"""
     modulo = 1 << bits
     if overflows is not None:
         delta = end - start + modulo * overflows
         if delta >= 0:
-            return delta
-    return (end - start) % modulo
+            return delta, True
+    return (end - start) % modulo, False
 
 
 def instructions(counts: dict[str, int]) -> int:

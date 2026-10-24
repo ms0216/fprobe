@@ -94,7 +94,7 @@ def test_cycles_between_two_breakpoints(probe, monkeypatch):
 
 def test_counters_are_exact_with_swo_overflows(probe, monkeypatch):
     probe._debug.probe = SimpleNamespace(swo_start=lambda baud: None, swo_stop=lambda: None, swo_read=lambda: b"")
-    probe.swo_configure(counters=["cpi", "exc", "sleep", "lsu", "fold"], swo_baud=2_000_000, trace_pin=False)
+    probe.swo_configure(counters=["cpi", "exc", "sleep", "lsu", "fold"], swo_baud=2_000_000)
     start = probe.dbg.breakpoint_address("tick")
     end = probe.dbg.breakpoint_address("reached_milestone")
     zero = dict(cpi=0, exc=0, sleep=0, lsu=0, fold=0)
@@ -185,3 +185,20 @@ def test_nocyccnt_bit_is_refused(probe, monkeypatch):
     probe._debug.target.memory = DictMemory({dwt.DWT_CTRL: 1 << 25, st.CPUID: 0x410FC241})
     with pytest.raises(RuntimeError, match="CYCCNT"):
         probe.cycles_measure("tick", "reached_milestone", counters=False)
+
+
+def test_counters_with_overflows_that_do_not_match_the_values_are_not_exact(probe, monkeypatch):
+    """数えた溢れ（0 回）と値（200 → 7 で減った）が合わない: 1 周未満とみなした値と、exact = false・そのカウンタの名前。"""
+    probe._debug.probe = SimpleNamespace(swo_start=lambda baud: None, swo_stop=lambda: None, swo_read=lambda: b"")
+    probe.swo_configure(counters=["cpi", "exc", "sleep", "lsu", "fold"], swo_baud=2_000_000)          # SWO のピンは書かない（trace_pin を渡さない）
+    start = probe.dbg.breakpoint_address("tick")
+    end = probe.dbg.breakpoint_address("reached_milestone")
+    zero = dict(cpi=0, exc=0, sleep=0, lsu=0, fold=0)
+    script(probe, monkeypatch, [
+        (start, dict(cyccnt=0, swo=SYNC, **{**zero, "cpi": 200})),
+        (end, dict(cyccnt=5000, swo=SYNC, **{**zero, "cpi": 7})),
+    ])
+    out = probe.cycles_measure("tick", "reached_milestone")
+    assert out["counters_exact"] is False and out["counters"][0]["cpi"] == 63
+    assert any("cpi" in n and "合わない" in n for n in out["notes"])
+    probe.swo_unconfigure()

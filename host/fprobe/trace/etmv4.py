@@ -5,7 +5,7 @@ mispredict）・条件命令のトレース・Q パケットは M-profile に無
 読み飛ばす。リターンスタック（TRCCONFIGR.RS）・分岐の全出力（BB）は再構成の側で使わない前提（fprobe が設定する
 ときは切る。coresight.Etmv4Setup）。
 
-    items = Etmv4Decoder(Etmv4Config()).decode(data)      # 共通の要素（fprobe.trace.elements）の並び
+    items = Etmv4Decoder(Etmv4Config(commit_opt1=True, vmid_bytes=1, cid_bytes=4)).decode(data)      # 共通の要素（fprobe.trace.elements）の並び
 
 ヘッダ（1 バイト目）の割り当て:
   0x00 拡張（0x00×11 + 0x80 = A-sync、0x00 0x03 = Discard、0x00 0x05 = Overflow）、0x01 Trace Info、
@@ -29,10 +29,11 @@ _ASYNC_ZEROS = 11
 class Etmv4Config:
     """解読に要る ETM の構成（TRCIDRn から。fprobe.trace.coresight.Etmv4Info.decoder_config）。
     commit_opt1: TRCIDR0.COMMOPT = 1（Cycle Count 形式 1 にコミットの欄が無い）。
-    vmid_bytes / cid_bytes: Context の VMID・Context ID の大きさ（TRCIDR2。M-profile では出ない）。"""
-    commit_opt1: bool = True
-    vmid_bytes: int = 1
-    cid_bytes: int = 4
+    vmid_bytes / cid_bytes: Context の VMID・Context ID の大きさ（TRCIDR2。M-profile では出ない）。
+    機器ごとに TRCIDRn で決まる値なので既定を持たない（違う値で解読すると黙って誤った要素になる）。"""
+    commit_opt1: bool
+    vmid_bytes: int
+    cid_bytes: int
 
 
 class _Short(Exception):
@@ -70,8 +71,8 @@ class _Reader:
 
 
 class Etmv4Decoder:
-    def __init__(self, config: Etmv4Config | None = None):
-        self.config = config or Etmv4Config()
+    def __init__(self, config: Etmv4Config):
+        self.config = config
 
     def decode(self, data: bytes) -> list[el.Element]:
         data = bytes(data)
@@ -254,8 +255,12 @@ class Etmv4Decoder:
         info = r.byte()
         vmid = cid = None
         if info & 0x40:
+            if not self.config.vmid_bytes:
+                raise _Bad("Context に VMID の印があるが、ETM の構成（TRCIDR2）は VMID 0 バイト")
             vmid = int.from_bytes(bytes(r.byte() for _ in range(self.config.vmid_bytes)), "little")
         if info & 0x80:
+            if not self.config.cid_bytes:
+                raise _Bad("Context に Context ID の印があるが、ETM の構成（TRCIDR2）は Context ID 0 バイト")
             cid = int.from_bytes(bytes(r.byte() for _ in range(self.config.cid_bytes)), "little")
         raw = r.raw if offset == r.start else bytes(r.data[start:r.pos])
         return el.Context(offset=offset, raw=raw, non_secure=bool(info & 0x20), exception_level=info & 0x03,

@@ -34,5 +34,6 @@ export function plainNumber(v: number): string {
 export function outcome(e: ActivityEntry): string {
   if (e.error !== undefined) return `${t("activity.error")}: ${e.error}`;
   if (e.result === null || e.result === undefined) return t("activity.done");
-  return JSON.stringify(e.result).slice(0, 80);
+  const text = JSON.stringify(e.result);
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;            // 切ったら印を付ける（全部は詳細の欄に出る）
 }

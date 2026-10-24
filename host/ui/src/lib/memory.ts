@@ -1,17 +1,18 @@
 // Memory のパネルの計算（Svelte に依らない）: 番地の式 → 番地、書く値 → バイト列。
 import type { DaemonConnection } from "./api";
+import { kindOf } from "./vartree";
 
 type Call = DaemonConnection["call"];
 
 /** 番地の欄の式を番地にする（Ozone・Keil の Memory の Address と同じ考え）:
- *  0x… と数字だけの並びは 16 進の番地（J-Link Commander の mem と同じ。20000000 = 0x20000000）。C の式は debug.evaluate で、ポインタなら指す先、メモリ上の変数（配列・構造体・
+ *  0x… と数字で始まる 16 進の並びは 16 進の番地（J-Link Commander の mem と同じ。20000000 = 0x20000000。数字で始まる語は
+ *  C の名前になりえないので曖昧でない）。英字で始まる語（beef 等）は名前として引くだけで、無くても 16 進と推し直さない。C の式は debug.evaluate で、ポインタなら指す先、メモリ上の変数（配列・構造体・
  *  基本型）ならその番地、それ以外の整数（`0x20000000 + 16` 等）ならその値。式にならないもの（関数名・"ファイル:行"）は
  *  debug.symbol.info で引く。frame は Call Stack で選んだフレーム（ローカル変数を使える） */
 export async function resolveAddress(call: Call, text: string, frame = 0): Promise<number> {
   const s = text.trim();
   if (/^0x[0-9a-f]+$/i.test(s)) return parseInt(s.slice(2), 16);
-  if (/^\d+$/.test(s)) return parseInt(s, 16);
-  const bareHex = /^[0-9a-f]+$/i.test(s) ? parseInt(s, 16) : null;     // 2000A0FC。同じ名前の変数があれば変数
+  if (/^\d[0-9a-f]*$/i.test(s)) return parseInt(s, 16);
   let evaluated: { address?: number; value?: unknown } | null = null;
   try {
     evaluated = await call("debug.evaluate", { expression: s, frame }, { quiet: true });
@@ -20,17 +21,12 @@ export async function resolveAddress(call: Call, text: string, frame = 0): Promi
   }
   if (evaluated) {
     const v = evaluated.value as any;
-    if (v && typeof v === "object" && typeof v.pointer === "number") return v.pointer;
+    if (kindOf(v) === "pointer") return v.address;
     if (typeof evaluated.address === "number") return evaluated.address;
-    if (typeof v === "number" && Number.isInteger(v)) return v >>> 0;
+    if (kindOf(v) === "int") return v.value >>> 0;
   }
-  try {
-    const info = await call("debug.symbol.info", { location: s }, { quiet: true });
-    return info.address;
-  } catch (e) {
-    if (bareHex !== null) return bareHex;
-    throw e;
-  }
+  const info = await call("debug.symbol.info", { location: s }, { quiet: true });
+  return info.address;
 }
 
 /** 16 進の欄の文字 → 単位（8/16/32 ビット）の値。範囲の外・16 進でなければ null */

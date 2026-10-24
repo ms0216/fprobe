@@ -20,9 +20,11 @@ class TaskUnwinder:
         self.stop_pcs = frozenset(pc & ~1 for pc in stop_pcs)
 
     def unwind(self, access: TargetAccess) -> list[FrameState]:
+        """止めたフレームの stop は {"reason": "stop_pc", "pc": 戻り先}（戻り先がタスクの関数の戻り先の罠）。"""
         frames = self.inner.unwind(access)
         for i, frame in enumerate(frames):
             if i > 0 and frame.pc in self.stop_pcs:
+                frames[i - 1].stop = {"reason": "stop_pc", "pc": frame.pc}
                 return frames[:i]
         return frames
 

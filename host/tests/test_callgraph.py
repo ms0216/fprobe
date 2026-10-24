@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from fprobe.callgraph import CallGraph, analyze_function
+from fprobe.callgraph import CallGraph, analyze_function, vector_table
 from fprobe.disasm import Disassembler, Instruction
+from fprobe.memview import ElfImage
 
 ELF = Path(__file__).resolve().parents[1] / "firmware" / "stack_demo" / "stack_demo.elf"
 
@@ -38,14 +39,28 @@ def test_call_sites_with_their_depth(graph):
     assert graph.callers("leaf") == ["middle", "SysTick_Handler"]
 
 
-def test_address_taken_functions(graph):
-    # ops[] の関数ポインタ（ベクタ表の処理は除く）
-    assert graph.address_taken == {"op_double", "op_inc"}
+def test_the_vector_table_is_not_found_by_a_name_convention(graph):
+    # g_pfnVectors・__isr_vector 等の名前の表や「最も低い区画の先頭の変数」でベクタ表を推さない。使う側が番地を渡す
+    assert graph.vector_table is None and graph.vectors == {}
+    # 渡さなければベクタ表の語もデータの語: 処理の関数は「番地がデータにある」（事実）
+    assert {"Reset_Handler", "SysTick_Handler", "Default_Handler", "op_double", "op_inc"} <= graph.address_taken
 
 
-def ins(address, mnemonic, operands="", *, flow="", target=None, conditional=False, size=2, kind="code", value=None):
+def test_the_vector_table_the_caller_names():
+    named = CallGraph.build(Disassembler.from_elf(ELF), vector_table=0x0800_0000)
+    assert named.vector_table == (0x0800_0000, 64)                          # 大きさは ELF のその番地の変数の大きさ
+    assert named.vectors[1] == "Reset_Handler" and named.vectors[15] == "SysTick_Handler"
+    assert named.address_taken == {"op_double", "op_inc"}                    # ops[] の関数ポインタ（表の語は除く）
+    sized = CallGraph.build(Disassembler.from_elf(ELF), vector_table=0x0800_0000, vector_table_size=8)
+    assert sized.vector_table == (0x0800_0000, 8) and sized.vectors == {1: "Reset_Handler"}
+    with pytest.raises(ValueError, match="vector_table_size"):
+        vector_table(ElfImage(ELF), 0x0800_0004)                             # その番地に大きさの分かる変数が無い
+
+
+def ins(address, mnemonic, operands="", *, flow="", target=None, conditional=False, size=2, kind="code", value=None,
+        basis=None):
     return Instruction(address, bytes(size), mnemonic, operands, kind, target, None, None, value, None, flow,
-                       conditional)
+                       conditional, data_basis=basis)
 
 
 def names(address):
@@ -86,13 +101,36 @@ def test_pre_decrement_stores_vpush_and_post_increment_return():
 def test_table_branch_targets_are_followed():
     code = [ins(0x100, "push", "{lr}"), ins(0x102, "cmp", "r0, #1"),
             ins(0x104, "tbb", "[pc, r0]", flow="jump", size=4),
-            ins(0x108, ".byte", "0x02", kind="data", size=1, value=2),
-            ins(0x109, ".byte", "0x03", kind="data", size=1, value=3),
+            ins(0x108, ".byte", "0x02", kind="data", size=1, value=2, basis="branch_table"),   # 使う側が渡した表の大きさ
+            ins(0x109, ".byte", "0x03", kind="data", size=1, value=3, basis="branch_table"),
             ins(0x10A, "b", "#0x10a", flow="jump", target=0x10A),          # 表の後（届かない）
             ins(0x10C, "sub", "sp, #8"), ins(0x10E, "bl", "#0x300", flow="call", target=0x300, size=4),
             ins(0x112, "add", "sp, #8"), ins(0x114, "pop", "{pc}", flow="return")]
     f = analyze_function(code, "f", 0x100, 0x116, names)
     assert f.frame == 12 and [(c.callee, c.depth) for c in f.calls] == [("h", 12)] and not f.uncertain
+
+
+def test_data_after_a_table_branch_is_not_taken_for_the_table_without_its_size():
+    # 表の大きさを渡されていなければ、直後のデータ（$d のリテラル等）を表とみなさない: 分かれ先は分からない（?6）
+    code = [ins(0x100, "push", "{lr}"), ins(0x102, "tbb", "[pc, r0]", flow="jump", size=4),
+            ins(0x106, ".byte", "0x02", kind="data", size=1, value=2, basis="mapping"),
+            ins(0x107, ".byte", "0x03", kind="data", size=1, value=3, basis="mapping"),
+            ins(0x108, "pop", "{pc}", flow="return")]
+    f = analyze_function(code, "f", 0x100, 0x10A, names)
+    assert f.uncertain
+
+
+def test_the_revisit_cut_is_its_own_mark_and_the_unreached_frame_is_separate():
+    # 解析の打ち切りは dynamic（上限の無い確保）と別の印 truncated。たどれない所の分は frame に混ぜない（?5・?7）
+    loop = [ins(0x100, "push", "{r4}"), ins(0x102, "b", "#0x100", flow="jump", target=0x100)]
+    g = analyze_function(loop, "f", 0x100, 0x104, names)
+    assert g.truncated and not g.dynamic
+    code = [ins(0x100, "push", "{lr}"), ins(0x102, "tbb", "[pc, r0]", flow="jump", size=4),
+            ins(0x106, "sub", "sp, #16"), ins(0x108, "bl", "#0x200", flow="call", target=0x200, size=4),
+            ins(0x10C, "pop", "{pc}", flow="return")]
+    f = analyze_function(code, "f", 0x100, 0x10E, names)
+    assert f.frame == 4 and f.unreached_frame == 16 and f.frame_bound == 20
+    assert f.as_dict()["unreached_frame"] == 16
 
 
 def test_indirect_jumps_and_growing_loops():
@@ -102,7 +140,7 @@ def test_indirect_jumps_and_growing_loops():
     loop = [ins(0x100, "push", "{r4}"), ins(0x102, "b", "#0x100", flow="jump", target=0x100)]
     g = analyze_function(loop, "f", 0x100, 0x104, names)
     # 「伸び続ける」と断定しない: 解析を打ち切った事実と、その回数・深さが下限であることを書く
-    assert g.dynamic and any("打ち切った" in r and "下限" in r for r in g.reasons)
+    assert g.truncated and any("打ち切った" in r and "下限" in r for r in g.reasons)
     assert not any("伸び続ける" in r for r in g.reasons)
 
 
@@ -111,4 +149,4 @@ def test_unknown_table_counts_the_unreached_code():
             ins(0x106, "sub", "sp, #16"), ins(0x108, "bl", "#0x200", flow="call", target=0x200, size=4),
             ins(0x10C, "pop", "{pc}", flow="return")]
     f = analyze_function(code, "f", 0x100, 0x10E, names)
-    assert f.uncertain and f.frame == 4 + 16 and [(c.callee, c.depth) for c in f.calls] == [("g", 20)]
+    assert f.uncertain and f.frame_bound == 4 + 16 and [(c.callee, c.depth) for c in f.calls] == [("g", 20)]

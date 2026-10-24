@@ -106,13 +106,17 @@ class MonitorModeTools:
                 raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
             self.target
             raw = self._debug.target
+            left = None
             if mode == "monitor" and self._monitor is None:
                 self._enter_monitor_mode(raw, priority)
             elif mode == "halt" and self._monitor is not None:
-                self._leave_monitor_mode(raw)
+                left = self._leave_monitor_mode(raw)
             if priority is not None:
                 write_priority(raw, priority)
-            return self.debug_mode_get()
+            out = self.debug_mode_get()
+            if left is not None:
+                out["left"] = left                             # 停止方式へ戻るときにどう止めたか（leave_monitor）
+            return out
 
     def _enter_monitor_mode(self, raw, priority: int | None) -> None:
         check_architecture(raw)
@@ -132,13 +136,14 @@ class MonitorModeTools:
         self._switch_halt_inject((DHCSR, HALT), (DEMCR, MONITOR_HALT))
         self._repoint_debugger()
 
-    def _leave_monitor_mode(self, raw) -> None:
+    def _leave_monitor_mode(self, raw) -> dict:
         monitor = self._monitor
         self._watch_stops(False)
-        leave_monitor(monitor, raw)
+        left = leave_monitor(monitor, raw)
         self._monitor = None
         self._switch_halt_inject((DEMCR, MONITOR_HALT), (DHCSR, HALT))
         self._repoint_debugger()
+        return left
 
     def _repoint_debugger(self) -> None:
         """Debugger（置いたブレークポイントの名前を持つ）を作り直さずに、新しい Probe.target に向ける。"""

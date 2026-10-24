@@ -2,8 +2,10 @@
 
 1. 番地のログ（`AddressLogDecoder`。TZ-11。Percepio の xTracePrintCompactF・SystemView の PRINT_ELF と同じ考え）:
    流れは 32 ビットの語（リトルエンディアン）の列で、1 つのログ = 書式の文字列の番地（ELF の読み込む区画にある
-   文字列の先頭）+ 書式が取る引数の語（`ll` の整数と double は 2 語、%s は文字列の番地）。書式の番地でない語は
-   読み飛ばして同期を取り直す（読み飛ばした語は undecoded の 1 行にまとめる）。ターゲットは
+   文字列）+ 書式が取る引数の語（`ll` の整数と double は 2 語、%s は文字列の番地）。書式の番地でない語（ELF の
+   読み込む区画の中で、区画の終わりまでに NUL で終わる 1 文字以上の列を指さない語）は読み飛ばして同期を取り直す
+   （読み飛ばした語は undecoded の 1 行にまとめる）。書式の番地かは ELF の中身だけで決め、文字の見た目や長さでは
+   決めない（同期を取り直す所で、引数の語がたまたまそういう番地なら書式として読む。結果の行で分かる）。ターゲットは
    `fprobe_log(fmt, ...)` のように、文字列の番地と引数を RTT・ITM（32 ビットの書き込み）・UART に書くだけでよい。
 2. Memfault の compact log（`MemfaultDecoder`。MF-07。memfault-firmware-sdk の compact_log_*、ホストの
    mflt-compact-log）: 書式は読み込まない区画 `log_fmt` に "引数の数;ファイル;行;書式" の NUL 終端で並び、先頭に
@@ -29,7 +31,6 @@ from .record import LogRecord
 
 __all__ = ["AddressLogDecoder", "ElfStrings", "MemfaultDecoder", "MemfaultTable", "cbor_decode", "cbor_encode"]
 
-STRING_LIMIT = 512
 _SHF_ALLOC = 0x2
 _LOG_FMT_MAGIC = 0x66474F4C              # "LOGf"
 _ML = re.compile(r"ML:([A-Za-z0-9+/=]+):")
@@ -42,6 +43,7 @@ class ElfStrings:
         self._ranges: list[tuple[int, bytes]] = []
         with open(path, "rb") as f:
             elf = ELFFile(f)
+            self.pointer_bits = elf.elfclass                    # ELF の EI_CLASS（32 / 64）: ポインタ・long の大きさ
             for s in elf.iter_sections():
                 if s["sh_flags"] & _SHF_ALLOC and s["sh_type"] == "SHT_PROGBITS" and s["sh_size"]:
                     self._ranges.append((s["sh_addr"], s.data()))
@@ -56,38 +58,32 @@ class ElfStrings:
         offset = address - base
         return (data, offset) if offset < len(data) else None
 
-    def get(self, address: int, limit: int = STRING_LIMIT) -> str | None:
+    def get(self, address: int) -> str | None:
+        """番地から NUL までの文字列（UTF-8。誤ったバイトは置き換える）。区画の外・区画の終わりまでに NUL が無ければ None。"""
         found = self._locate(address)
         if found is None:
             return None
         data, offset = found
-        end = data.find(b"\0", offset, offset + limit)
+        end = data.find(b"\0", offset)
         if end < 0:
             return None
         return data[offset:end].decode("utf-8", errors="replace")
 
-    def is_start(self, address: int) -> bool:
-        """番地が文字列の先頭か（前のバイトが NUL か区画の先頭で、印字できる文字の NUL 終端の列が続く）。"""
+    def has_string(self, address: int) -> bool:
+        """番地に、区画の終わりまでに NUL で終わる 1 文字以上の列があるか（中身の文字・長さ・前のバイトは問わない）。"""
         found = self._locate(address)
         if found is None:
             return False
         data, offset = found
-        if offset > 0 and data[offset - 1] != 0:
-            return False
-        end = data.find(b"\0", offset, offset + STRING_LIMIT)
-        if end <= offset:
-            return False
-        try:
-            text = data[offset:end].decode("utf-8")
-        except UnicodeDecodeError:
-            return False
-        return all(c.isprintable() or c in "\t\r\n" for c in text)
+        return data.find(b"\0", offset) > offset
 
 
 class AddressLogDecoder:
     def __init__(self, symbols: Symbols):
         self.symbols = symbols
         self.strings = ElfStrings(symbols.path)
+        if self.strings.pointer_bits != 32:
+            raise ValueError(f"番地のログは 32 ビットの語で書式の番地を送る形式: ELF が {self.strings.pointer_bits} ビット")
         self._buf = bytearray()
         self._skipped = bytearray()
         self.errors = 0
@@ -97,12 +93,12 @@ class AddressLogDecoder:
         out: list[LogRecord] = []
         while len(self._buf) >= 4:
             address = struct.unpack_from("<I", self._buf)[0]
-            fmt = self.strings.get(address) if self.strings.is_start(address) else None
+            fmt = self.strings.get(address) if self.strings.has_string(address) else None
             if fmt is None:
                 self._skipped += self._buf[:4]
                 del self._buf[:4]
                 continue
-            need = sum(2 if c.bits > 32 else 1 for c in conversions(fmt))
+            need = sum(2 if c.bits > 32 else 1 for c in conversions(fmt, pointer_bits=32))
             if len(self._buf) < 4 * (1 + need):
                 break
             if self._skipped:
@@ -112,7 +108,7 @@ class AddressLogDecoder:
                 self._skipped.clear()
             args = list(struct.unpack_from(f"<{need}I", self._buf, 4))
             del self._buf[:4 * (1 + need)]
-            text = format_c(fmt, Words(args, string=self.strings.get))
+            text = format_c(fmt, Words(args, string=self.strings.get), pointer_bits=32)
             sym = self.symbols.symbol_at(address)
             location = {"symbol": sym[0].name} if sym is not None and sym[1] == 0 else None
             out.append(LogRecord(text, "compact", None, address, fmt, tuple(args), location=location))
@@ -250,8 +246,9 @@ def _half(h: int) -> float:
 # --- Memfault -----------------------------------------------------------------------------------
 
 class MemfaultTable:
-    def __init__(self, entries: dict[int, tuple[int, str, int, str]], path: str | None = None):
+    def __init__(self, entries: dict[int, tuple[int, str, int, str]], *, pointer_bits: int, path: str | None = None):
         self.entries = entries                              # 位置 → (引数の数, ファイル, 行, 書式)
+        self.pointer_bits = pointer_bits                    # ポインタ・long の大きさ（ELF の EI_CLASS）
         self.path = path
 
     @classmethod
@@ -264,6 +261,7 @@ class MemfaultTable:
             if s["sh_flags"] & _SHF_ALLOC:
                 raise ValueError(f"{section} が読み込む区画になっている（リンカスクリプトで INFO にする）")
             data = s.data()
+            pointer_bits = elf.elfclass
         magic, version = struct.unpack_from("<IB", data)
         if magic != _LOG_FMT_MAGIC:
             raise ValueError(f"{section} の見出しが 'LOGf' でない")
@@ -275,7 +273,7 @@ class MemfaultTable:
                 if len(fields) == 4 and fields[0].isdigit() and fields[2].isdigit():
                     entries[offset] = (int(fields[0]), fields[1], int(fields[2]), fields[3])
             offset += len(part) + 1
-        return cls(entries, str(path))
+        return cls(entries, pointer_bits=pointer_bits, path=str(path))
 
 
 class MemfaultDecoder:
@@ -342,9 +340,9 @@ class MemfaultDecoder:
         rest = value[1:]
         if len(rest) == 1 and isinstance(rest[0], dict):
             size = rest[0].get(1)
-            return LogRecord(format_c(fmt, Values([])), "memfault", None, offset, fmt, (), location=location,
+            return LogRecord(format_c(fmt, Values([]), pointer_bits=self.table.pointer_bits), "memfault", None, offset, fmt, (), location=location,
                              notes=(f"引数が大きすぎて送られなかった（本来 {size} バイト）",))
         args = tuple(v[0] if isinstance(v, list) and len(v) == 1 else v for v in rest)
         notes = () if len(args) == n_args else (f"引数の数 {len(args)} が書式の {n_args} と合わない",)
-        return LogRecord(format_c(fmt, Values(args)), "memfault", None, offset, fmt, args, location=location,
+        return LogRecord(format_c(fmt, Values(args), pointer_bits=self.table.pointer_bits), "memfault", None, offset, fmt, args, location=location,
                          notes=notes)

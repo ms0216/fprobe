@@ -14,7 +14,6 @@ from __future__ import annotations
 from ..dwarf.access import AccessError
 from ..dwarf.typesys import ArrayType, StructType, strip
 from .model import KernelObject, Task, Waiter
-from .objects import typed_variables
 
 __all__ = ["MHOLDER_MASK", "MRESET", "NO_MHOLDER", "NuttXObjects", "SEM_PRIO_INHERIT", "SEM_TYPE_MUTEX"]
 
@@ -38,7 +37,7 @@ class NuttXObjects:
                    if (family == "sem" and rtos.sem is not None) or (family == "message_queue" and rtos.mq is not None)}
         found: dict[int, str] = {}                                        # 番地 → 分類（見つけた順）
         names: dict[int, list[str]] = {}
-        for f in sorted(typed_variables(rtos.info, self.mem, structs, exclude=self._tcb_variables()),
+        for f in sorted(rtos.typed_objects(structs, exclude=self._tcb_variables()),
                         key=lambda f: f.pointer):
             found.setdefault(f.address, f.family)
             names.setdefault(f.address, []).append(f.expression)
@@ -81,7 +80,9 @@ class NuttXObjects:
         waiters = self._waiters(h + s.offset("waitlist.head"), "receive")
         if not flags & SEM_TYPE_MUTEX:
             count = self._u(s, h, "val.semcount", signed=True)
-            return KernelObject(h, "semaphore", "", "", {"count": max(count, 0)}, waiters, wait_lists=(h,))
+            # semcount: 正 = 取れる数、負 = 待っているタスクの数（NuttX の sem_t）。生の値も残す
+            return KernelObject(h, "semaphore", "", "", {"count": max(count, 0), "semcount": count}, waiters,
+                                wait_lists=(h,))
         holder = self.rtos.mutex_holder(h)
         fields: dict = {"available": holder is None, "holder": None,
                         "priority_inherit": bool(flags & SEM_PRIO_INHERIT)}

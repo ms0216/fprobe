@@ -43,7 +43,10 @@ class ObsSample:
     kind: "value"（値が変わった）・"gap"（溢れの切れ目。value = None、lost = 失った値の変化の数（観測の回路の
     LOST_BITS の上限で止まる）、時刻は再開の時刻）・"group"（観測する組が group になった。value = None）・
     "hidden"（標本型: 前の標本からこの標本までに見えなかった値の変化。lost = その回数。値は失っていない）。
-    received = その記録のイベントを fprobe が受けた時刻（起きた時刻の上限。time_fprobe が None のときの手がかり）。"""
+    received = その記録のイベントを fprobe が受けた時刻（起きた時刻の上限。time_fprobe が None のときの手がかり）。
+    time_basis = time_fprobe の決め方: "pairs"（その鎖の印の組 2 つ以上の直線。直近 SYNC_WINDOW 組）/
+    "previous_ratio"（印 1 つと、前の鎖の印の組から求めた傾き）/ "nominal_ratio"（印 1 つと、申告の CLOCK_HZ の比）/
+    None（時刻が無い）。"""
     time_fprobe: float | None
     target_cycles: int
     value: int | None
@@ -51,6 +54,7 @@ class ObsSample:
     group: int = 0
     kind: str = "value"
     received: int | None = field(default=None, compare=False)   # 手がかり（値の比べには入れない）
+    time_basis: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,7 @@ class _Chain:
     """1 本の鎖（delta を続けて足せる区間）と、その印の組。"""
     pairs: list[tuple[float, float]] = field(default_factory=list)
     segment: SyncSegment | None = None
+    basis: str | None = None                       # 時刻の決め方（ObsSample.time_basis）
 
 
 @dataclass
@@ -237,6 +242,7 @@ class ObsDecoder:
             chain, instant = self._marks.pop(seq)
             f = self._events.pop(seq)
             chain.pairs = (chain.pairs + [(instant - self.sync_delay, float(f))])[-self.SYNC_WINDOW:]
+            chain.basis = "pairs" if len(chain.pairs) >= 2 else "previous_ratio" if self._ratio else "nominal_ratio"
             segs = fit_sync(chain.pairs, self._ratio or self.nominal_ratio)
             chain.segment = segs[0] if segs else None
             if chain.segment is not None and len(chain.pairs) >= 2:
@@ -266,7 +272,8 @@ class ObsDecoder:
 
     def _sample(self, p: _Pending, seg: SyncSegment | None) -> ObsSample:
         at = seg.to_fprobe(p.t - self.sample_delay) if seg is not None else None
-        return ObsSample(at, p.t, p.value, p.lost, p.group, p.kind, p.received)
+        return ObsSample(at, p.t, p.value, p.lost, p.group, p.kind, p.received,
+                         p.chain.basis if seg is not None else None)
 
 
 def samples(events, nominal_ratio: float | None = None, sync_delay: float = 0.0,
@@ -296,15 +303,18 @@ class FpgaObs:
         return samples(events, nominal_ratio, sync_delay=self.sync_delay, sample_delay=self.sample_delay)
 
     def open(self, chain: dict | None = None, user_ir: int = 2, half_period: int = 10, words: int = 64,
-             sync_period: int = 100, timeout_s: float = 1.0) -> dict:
+             sync_period: int = 100, timeout_s: float = 1.0, id_scans: int = 0) -> dict:
         """対象の JTAG の鎖での位置（chain: CHAIN_FIELDS のうち要るもの。ir_len の既定は 4）・USER の命令・TCK の半周期
         （sys の周期数。1 クロック版の観測の回路は TCK ≤ 対象の clk / 8）・1 スキャンの記録の語数・印の間隔（スキャンの
-        数）を設定して始め、観測の回路の申告を返す。"""
+        数）を設定して始め、観測の回路の申告を返す。id_scans = 始めに ID の応答を待つスキャンの上限（使う側が渡す。
+        0 = 上限なし。上限まで来なければ回路が stuck・id_timeout で止める）。"""
         unknown = set(chain or {}) - set(CHAIN_FIELDS)
         if unknown:
             raise ValueError(f"chain に知らない項目: {sorted(unknown)}（使えるのは {sorted(CHAIN_FIELDS)}）")
         if not 2 <= half_period <= 0xFFFF or not 1 <= words <= 256 or not 0 <= sync_period <= 0xFFFF:
             raise ValueError("half_period は 2〜65535、words は 1〜256、sync_period は 0〜65535")
+        if not 0 <= id_scans <= 0xFF:
+            raise ValueError("id_scans は 0〜255（0 = 上限なし）")
         fields = {"ir_len": 4, **(chain or {})}
         packed = 0
         for name, value in fields.items():
@@ -321,9 +331,13 @@ class FpgaObs:
         self.dev.write32(g.OBS_USER_IR, user_ir)
         self.dev.write32(g.OBS_WORDS, words)
         self.dev.write32(g.OBS_SYNC_PERIOD, sync_period)
+        self.dev.write32(g.OBS_ID_SCANS, id_scans)
         self.dev.write32(g.OBS_CONTROL, 1)
         self._wait(lambda s: s["id_ok"] or s["stuck"], timeout_s, "ID を読めない")
         status = self.status()
+        if not status["id_ok"] and status["id_timeout"]:
+            self.close()
+            raise RuntimeError(f"観測の回路の ID の応答が id_scans = {id_scans} スキャンで来なかった（ID {status['id']:#010x}）")
         if not status["id_ok"]:
             self.close()
             raise RuntimeError(f"観測の回路が答えない（ID {status['id']:#010x}。鎖の位置・USER の命令・配線・TCK の速さ"
@@ -357,7 +371,7 @@ class FpgaObs:
         s = self.dev.read32(g.OBS_STATUS)
         out = {name.lower(): bool(s >> getattr(g, f"OBS_STATUS_{name}")[0] & 1)
                for name in ("RUNNING", "ID_OK", "STUCK", "CMD_PENDING", "OVERFLOW_SEEN", "CMD_DROPPED", "TARGET_RUNNING",
-                            "DRIVING")}
+                            "DRIVING", "ID_TIMEOUT")}
         out["scans"] = self.dev.read32(g.OBS_SCANS)
         out["id"] = self.dev.read32(g.OBS_ID)
         return out

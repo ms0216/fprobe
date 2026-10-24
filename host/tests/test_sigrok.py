@@ -42,7 +42,8 @@ def test_round_trip_in_chunks_and_channel_subset(tmp_path, monkeypatch):
     assert (back.length, back.channels, list(back.values), list(back.starts)) == \
         (tr.length, tr.channels, list(tr.values), list(tr.starts))
     assert back.sample_period_s == pytest.approx(tr.sample_period_s) and names[0] == "ch0"
-    d = decode("uart", back, channel=5, baud=115200)
+    d = decode("uart", back, channel=5, baud=115200, data_bits=8, parity="none", stop_bits=1, invert=False,
+               lsb_first=True)
     assert bytes(a.value for a in d.of("data")) == b"sigrok!"
     write_sr(tr, tmp_path / "s.sr", channels=[5, 2])
     sub, names = read_sr(tmp_path / "s.sr")

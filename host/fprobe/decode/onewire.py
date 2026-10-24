@@ -7,13 +7,19 @@
 """
 
 from ..la import Transitions
-from .core import Annotation, ChannelLevels, Decoding
+from .core import Annotation, Channel, ChannelLevels, Decoding
 
 __all__ = ["ROM_COMMANDS", "decode_onewire", "onewire_crc8"]
 
-# 速度ごとの時間（µs）: ビットのサンプル点、ビットの 0 の最長、リセットの最短、プレゼンスを待つ最長、スロットの長さ
-TIMING = {False: {"sample": 15.0, "bit_max": 150.0, "reset_min": 380.0, "presence_window": 80.0, "slot": 60.0},
-          True: {"sample": 2.0, "bit_max": 20.0, "reset_min": 40.0, "presence_window": 10.0, "slot": 6.0}}
+# 速度ごとの時間（µs）の区別。規格の値（経験の余裕を足さない）: ビットのサンプル点 = tRDV、ビットの 0 の最長 = tLOW0 の最大、
+# リセットの最短 = tRSTL の最小、プレゼンスを待つ最長 = tPDHIGH の最大 + tPDLOW の最大、スロットの長さ = tSLOT の最小。
+# 出典: 1-Wire の時間の定義 = Maxim AN937「Book of iButton Standards」の 1-Wire の信号の時間（標準: tRDV 15・tLOW0 60〜120・
+# tRSTL ≥ 480・tPDH 15〜60・tPDL 60〜240・tSLOT 60〜120、オーバードライブ: tRDV 2・tLOW0 6〜16・tRSTL 48〜80・tPDH 2〜6・
+# tPDL 8〜24・tSLOT 6〜16）。Maxim AN126「1-Wire Communication Through Software」の主の推奨の時間（標準: 読みのサンプル点
+# A + E = 15・リセット H = 480、オーバードライブ: A + E = 2・H = 70）もこの範囲の中。個々の機器のデータシートの値ではない。
+# 規格の外のパルスは "timing" の誤り（長さ low_us を付ける）。別の値で区別するときは decode_onewire の timing で明示する
+TIMING = {False: {"sample": 15.0, "bit_max": 120.0, "reset_min": 480.0, "presence_window": 300.0, "slot": 60.0},
+          True: {"sample": 2.0, "bit_max": 16.0, "reset_min": 48.0, "presence_window": 30.0, "slot": 6.0}}
 ROM_COMMANDS = {0x33: "READ ROM", 0x55: "MATCH ROM", 0xCC: "SKIP ROM", 0xF0: "SEARCH ROM", 0xEC: "ALARM SEARCH",
                 0x3C: "OVERDRIVE SKIP ROM", 0x69: "OVERDRIVE MATCH ROM", 0xA5: "RESUME"}
 _TO_OVERDRIVE = (0x3C, 0x69)
@@ -115,8 +121,10 @@ class _Net:
                                            "command": self.command}))
 
 
-def decode_onewire(tr: Transitions, channel: int, *, overdrive: bool = False) -> Decoding:
-    """1-Wire を解読する。overdrive は捕捉の始まりの速度（ROM コマンドで切り替わるのは自動で追う）。"""
+def decode_onewire(tr: Transitions, channel: Channel, *, overdrive: bool, timing: dict | None = None) -> Decoding:
+    """1-Wire を解読する。overdrive は捕捉の始まりの速度（既定を持たない。ROM コマンドで切り替わるのは自動で追う）。timing: 区別の時間
+    {False: 標準, True: オーバードライブ}（省略は規格の値 TIMING。使った値は params に入る）。"""
+    timing = TIMING if timing is None else timing
     lv = ChannelLevels(tr, channel)
     us = 1e-6 / tr.sample_period_s                  # 1 µs のサンプル数
     out: list[Annotation] = []
@@ -134,20 +142,20 @@ def decode_onewire(tr: Transitions, channel: int, *, overdrive: bool = False) ->
             out.append(Annotation(fall, tr.length, "bit", "?", error="truncated"))
             break
         low = (rise - fall) / us
-        t = TIMING[od]
+        t = timing[od]
         if presence_until is not None and fall <= presence_until:
             out.append(Annotation(fall, rise, "presence", "presence", value=1))
             out[reset_index] = _with_presence(out[reset_index], True)
             presence_until = None
             continue
         presence_until = None
-        if low >= TIMING[False]["reset_min"] or (od and low >= t["reset_min"]):
-            if low >= TIMING[False]["reset_min"]:
+        if low >= timing[False]["reset_min"] or (od and low >= t["reset_min"]):
+            if low >= timing[False]["reset_min"]:
                 od = False                          # 標準のリセットは標準の速度に戻す
             out.append(Annotation(fall, rise, "reset", "RESET" + (" (OD)" if od else ""),
                                   fields={"overdrive": od, "presence": False, "low_us": round(low, 2)}))
             reset_index = len(out) - 1
-            presence_until = rise + TIMING[od]["presence_window"] * us
+            presence_until = rise + timing[od]["presence_window"] * us
             net.reset()
             continue
         if low > t["bit_max"]:
@@ -160,7 +168,7 @@ def decode_onewire(tr: Transitions, channel: int, *, overdrive: bool = False) ->
         if net.bit(value, fall, max(end, fall + 1)):
             od = True
     return Decoding("onewire", tuple(out), tr.sample_period_s, tr.trigger, tr.length,
-                    {"channel": channel, "overdrive": overdrive})
+                    {"channel": channel, "overdrive": overdrive, "timing": timing})
 
 
 def _with_presence(a: Annotation, presence: bool) -> Annotation:

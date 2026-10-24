@@ -9,7 +9,7 @@ import pytest
 
 from fprobe.itm import DecodeError, Instrumentation, Overflow
 from fprobe.rtos.analysis import find_jobs, job_summary
-from fprobe.rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, job_events,
+from fprobe.rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, isr_pairing, job_events,
                               overhead, queue_usage)
 from fprobe.rtos.kernel_trace import (CLASSES, EVENTS, KERNEL_PORT, PAYLOAD_PORT, QUEUE_TYPES, WAITS, KernelOp,
                                       kernel_trace, object_table)
@@ -221,11 +221,11 @@ def test_inversion_from_events_is_exact_and_tells_the_inheritance_and_interferen
     tr.at(45).obj("receive", MUTEX, "mutex", arg=1)
     trace = kernel_trace(tr.packets)
     tl = timeline_from_events(task_events(tr.packets), NAMES, t_end=60)
-    found = inversions_from_ops(tl, trace, PRIO, names=NAMES, objects={MUTEX: {"name": "log_mutex", "kind": "mutex"}})
+    found = inversions_from_ops(tl, trace, PRIO, 1, names=NAMES, objects={MUTEX: {"name": "log_mutex", "kind": "mutex"}})
     assert found["available"] and found["source"] == "trace" and found["count"] == 1
     (ep,) = found["episodes"]
     assert (ep["mutex"], ep["holder"], ep["waiter"], ep["t0"], ep["t1"]) == ("log_mutex", "lo", "hi", 20, 40)
-    assert ep["interference"] == {"mid": 10} and ep["unbounded"] and ep["holder_time"] == 6
+    assert ep["interference"] == {"mid": 10} and ep["interfered"] and ep["holder_time"] == 6
     assert ep["inherited"] == {"t": 21, "priority": 3, "latency": 1}
 
 
@@ -255,11 +255,13 @@ def test_overhead_counts_words_and_bandwidth_without_a_cpu_estimate():
     # 命令数の見積もり（1 語 14 サイクル等）で CPU の負荷を推定しない（2026-10-18 の実機で見積もり 1.5 % に対し実測
     # 6.2 % だった）。返すのは数えた語・バイトと、SWO の帯域の使用率（送ったビット ÷ 帯域）だけ
     trace = kernel_trace(producer_consumer().packets)
-    out = overhead(trace, duration=1000, timebase_hz=1000, baud=2_000_000)
+    out = overhead(trace, duration=1000, timebase_hz=1000, baud=2_000_000, bits_per_byte=10)
     words = trace.words["task"] + trace.words["kernel"] + trace.words["payload"]
     assert out["words"] == words and out["bytes"] == 5 * words
     assert out["swo_share"] == pytest.approx(5 * words * 10 / 2e6) and out["by_kind"]["send"] == 2
     assert overhead(trace, duration=1000, timebase_hz=1000)["swo_share"] is None
+    # 1 バイトのビット数（線の枠: UART 方式 = スタート + 8 + ストップ）は使う側が渡す。無ければ使用率を出さない
+    assert overhead(trace, duration=1000, timebase_hz=1000, baud=2_000_000)["swo_share"] is None
     assert not {"cpu_share", "cycles", "instruction_cycles", "fifo_wait_cycles", "cycles_model"} & set(out)
     assert not any("8 割" in n for n in overhead(trace, duration=1, timebase_hz=1000, baud=1000)["notes"])
 
@@ -298,3 +300,31 @@ def test_a_failed_operation_after_a_wait_is_failed_not_assumed_timeout():
     result = blocking(kernel_trace(tr.packets), NAMES, {}, t_end=50)
     assert [w["outcome"] for w in result["waits"]] == ["failed"]
     assert result["tasks"]["hi"]["failed"] == 1 and "timeouts" not in result["tasks"]["hi"]
+
+
+def test_the_outcome_is_only_the_next_operation_of_the_woken_task():
+    """起きたタスクの次の操作が別のオブジェクトなら、待った呼び出しの結果は記録に無い（outcome = None）。後の同じ
+    オブジェクトへの操作（別の呼び出し）を待ちの結果に対応付けない。"""
+    tr = Trace().at(0).switch_in(HI)
+    tr.at(5).obj("block", QUEUE, "queue")
+    tr.at(6).switch_out(HI).at(7).switch_in(MID)
+    tr.at(20).record("ready", HI, ipsr=15)
+    tr.at(21).switch_out(MID).at(22).switch_in(HI)
+    tr.at(23).obj("send", SEM, "semaphore")
+    tr.at(30).obj("receive", QUEUE, "queue", arg=1)
+    result = blocking(kernel_trace(tr.packets), NAMES, {}, t_end=50)
+    assert [w["outcome"] for w in result["waits"]] == [None]
+
+
+def test_isr_pairing_counts_what_it_could_not_pair():
+    """出の欠けた内側の回・入りの無い出・あふれで捨てた開いた回を、捨てずに数えて返す。"""
+    tr = Trace()
+    tr.at(10).record("isr_enter", ipsr=20)
+    tr.at(12).record("isr_enter", ipsr=15)                          # 出が欠けた（内側）
+    tr.at(18).record("isr_exit", ipsr=20)
+    tr.at(30).record("isr_exit", ipsr=16)                           # 入りの無い出
+    tr.at(40).record("isr_enter", ipsr=17)
+    tr.packets.append((45, Overflow()))                             # 開いていた 1 回をあふれで忘れる
+    pairs = isr_pairing(kernel_trace(tr.packets))
+    assert [(a.number, a.start, a.end) for a in pairs.activations] == [(20, 10, 18)]
+    assert (pairs.missing_exit, pairs.missing_enter, pairs.lost_open) == (1, 1, 1)

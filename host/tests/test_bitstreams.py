@@ -32,9 +32,13 @@ def test_the_designs_come_from_the_gateware():
 
 @pytest.mark.parametrize("target, chain, protocol", [
     ("stm32f401xe", None, "swd"), ("cortex_m", None, "swd"), ("cortex_m", [4, 5], "jtag"),
-    ("cortex_a7", None, "jtag"), ("bcm2836", None, "jtag"), ("arm1176", None, "jtag"), ("raspberry_pi_zero", None, "jtag")])
+    # JTAG で直接つなぐ部品の表（fprobe.arm_a_target.ARM_A_PARTS）の名前と完全に一致するものだけ JTAG
+    ("cortex_a", None, "jtag"), ("bcm2836", None, "jtag"), ("arm11", None, "jtag"), ("bcm2835", None, "jtag"),
+    # 名前の部分一致（cortex-a・raspberry・rpi 等の正規表現）で JTAG と推さない
+    ("cortex_a7", None, "swd"), ("arm1176", None, "swd"), ("raspberry_pi_zero", None, "swd"), ("rpi2", None, "swd")])
 def test_the_line_a_target_needs(target, chain, protocol):
     assert bs.protocol_for_target(target, chain) == protocol
+    assert not hasattr(bs, "_JTAG_ONLY")
 
 
 def test_which_design_to_switch_to():
@@ -203,13 +207,13 @@ def test_a_missing_bitstream_or_a_device_that_does_not_come_back_is_an_error(boa
     try:
         (tmp_path / "fprobe_jtag" / "top.fs").unlink()
         with pytest.raises(bs.DesignSwitchError, match="fprobe_gw build fprobe_jtag"):
-            p.target_connect("cortex_a7")
+            p.target_connect("cortex_m", jtag_chain=[4, 5])
         assert board.programmed == []
         (tmp_path / "fprobe_jtag" / "top.fs").write_bytes(b"bitstream")
         board.absent_polls = 10 ** 6
         p._reenumerate_s = 0.0
         with pytest.raises(bs.DesignSwitchError, match="USB に現れない"):
-            p.target_connect("cortex_a7")
+            p.target_connect("cortex_m", jtag_chain=[4, 5])
     finally:
         p.close()
 

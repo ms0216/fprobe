@@ -33,7 +33,6 @@ HEADER_SIZE = 24                      # ID（16）+ 上りの数（4）+ 下り�
 DESCRIPTOR_SIZE = 24                  # 名前・リングの番地・大きさ・WrOff・RdOff・フラグ
 WR_OFF = 12                           # 記述子の中の WrOff の位置
 RD_OFF = 16                           # 記述子の中の RdOff の位置
-MAX_BUFFERS = 64                      # 制御ブロックを検めるときの、チャンネル数の上限
 NAME_LIMIT = 32                       # チャンネル名を読む長さの上限
 COALESCE_LIMIT = 1 << 16              # まとめ読み 1 回の上限
 
@@ -156,32 +155,36 @@ def _check_descriptor(desc: bytes, where: str) -> tuple[int, int, int, int, int,
     return name, buf, size, wr, rd, flags
 
 
-def _parse_header(header: bytes, address: int) -> tuple[int, int]:
+def _parse_header(header: bytes, address: int, end: int = 1 << 32) -> tuple[int, int]:
+    """見出しの上り・下りの数。記述子の並びが end（制御ブロックが置かれうる範囲の終わり）に収まらなければ誤り
+    （経験の上限は使わない。収まるかは事実）。"""
     if header[:len(ID)] != ID:
         raise RttError(f"0x{address:08X} に RTT の制御ブロックが無い（ID が違う）")
     num_up, num_down = struct.unpack_from("<II", header, 16)
-    if not (1 <= num_up <= MAX_BUFFERS and 0 <= num_down <= MAX_BUFFERS):
-        raise RttError(f"0x{address:08X}: バッファの数が不正（上り {num_up}、下り {num_down}）")
+    last = address + HEADER_SIZE + DESCRIPTOR_SIZE * (num_up + num_down)
+    if last > end:
+        raise RttError(f"0x{address:08X}: 上り {num_up}・下り {num_down} の記述子が範囲に収まらない"
+                       f"（0x{last:X} まで要る。範囲の終わり 0x{end:X}）")
     return num_up, num_down
 
 
-def _validate(memory: MemoryAccess, address: int) -> bool:
-    """候補の番地が本物の制御ブロックか（走査で見つけた ID の文字列の検め）。"""
+def _validate(memory: MemoryAccess, address: int, end: int) -> bool:
+    """候補の番地の構造が制御ブロックとして成り立つか（見出しが範囲に収まり、記述子がどれも壊れていない）。"""
     try:
-        num_up, num_down = _parse_header(memory.read_memory(address, HEADER_SIZE), address)
+        num_up, num_down = _parse_header(memory.read_memory(address, HEADER_SIZE), address, end)
         descs = memory.read_memory(address + HEADER_SIZE, DESCRIPTOR_SIZE * (num_up + num_down))
-        sizes = [_check_descriptor(descs[i:i + DESCRIPTOR_SIZE], "")[2]
-                 for i in range(0, DESCRIPTOR_SIZE * num_up, DESCRIPTOR_SIZE)]
-        for i in range(DESCRIPTOR_SIZE * num_up, len(descs), DESCRIPTOR_SIZE):
+        for i in range(0, len(descs), DESCRIPTOR_SIZE):
             _check_descriptor(descs[i:i + DESCRIPTOR_SIZE], "")
     except RttError:
         return False
-    return any(sizes)
+    return True
 
 
 def find_control_block(memory: MemoryAccess, ranges: Iterable[tuple[int, int]], chunk: int = 4096) -> int:
     """RAM の範囲（(番地, 長さ) の並び）を走査して制御ブロックの番地を返す。かたまりの境目をまたぐ ID も
-    見つかるよう、読みを len(ID) - 1 バイト重ねる。候補は中身を検め、偽物（文字列だけ）は読み飛ばす。"""
+    見つかるよう、読みを len(ID) - 1 バイト重ねる。候補は構造を検め（_validate）、成り立たないものは読み飛ばす。
+    成り立つ候補が複数あれば選ばずに誤り（番地の一覧。address で指定する）。"""
+    found_at: list[int] = []
     for start, length in ranges:
         end, pos, carry = start + length, start, b""
         while pos < end:
@@ -190,12 +193,17 @@ def find_control_block(memory: MemoryAccess, ranges: Iterable[tuple[int, int]], 
             origin = pos - len(carry)
             found = data.find(ID)
             while found >= 0:
-                if _validate(memory, origin + found):
-                    return origin + found
+                if origin + found not in found_at and _validate(memory, origin + found, end):
+                    found_at.append(origin + found)
                 found = data.find(ID, found + 1)
             carry = data[-(len(ID) - 1):]
             pos += n
-    raise ControlBlockNotFound("RTT の制御ブロックが見つからない（ターゲットが初期化する前か、範囲の外）")
+    if len(found_at) > 1:
+        raise RttError("RTT の制御ブロックの候補が複数: " + "、".join(f"0x{a:08X}" for a in found_at)
+                       + "（address で指定する）")
+    if not found_at:
+        raise ControlBlockNotFound("RTT の制御ブロックが見つからない（ターゲットが初期化する前か、範囲の外）")
+    return found_at[0]
 
 
 def rtt_address_from_elf(path: str | Path, symbol: str = "_SEGGER_RTT") -> int:
@@ -215,9 +223,10 @@ class Rtt:
     """
 
     def __init__(self, memory: MemoryAccess, address: int, *, speculate: int = 64, merge_gap: int = 256,
-                 max_read: int = 4096):
+                 max_read: int = 4096, end: int = 1 << 32):
         self.memory = CountingMemory(memory)
         self.address = address
+        self.end = end                                      # 制御ブロックが置かれうる範囲の終わり（記述子の数の検め）
         self.speculate, self.merge_gap, self.max_read = speculate, merge_gap, max_read
         self._cb: RttControlBlock | None = None
         self.polls = 0
@@ -246,7 +255,7 @@ class Rtt:
 
     def open(self) -> RttControlBlock:
         """制御ブロックを読む: 見出し（1 回）、記述子（1 回）、名前（名前のあるチャンネルごとに 1 回）。"""
-        num_up, num_down = _parse_header(self.memory.read_memory(self.address, HEADER_SIZE), self.address)
+        num_up, num_down = _parse_header(self.memory.read_memory(self.address, HEADER_SIZE), self.address, self.end)
         first = self.address + HEADER_SIZE
         descs = self.memory.read_memory(first, DESCRIPTOR_SIZE * (num_up + num_down))
         channels = []

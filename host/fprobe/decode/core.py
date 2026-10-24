@@ -8,10 +8,16 @@ from array import array
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Annotated
 
 from ..la import Transitions
 
-__all__ = ["Annotation", "ChannelLevels", "Decoding", "project"]
+__all__ = ["CHANNEL", "Annotation", "Channel", "ChannelLevels", "Decoding", "project"]
+
+# 解読器の引数の型の印: ロジアナのチャンネルの番号（線の割り当て）。la.decoders の params の type = "channel"
+# （list[Channel] は "channels"）になり、使う側（画面）は設定の名前でなくこの申告でチャンネルの欄かを決める
+CHANNEL = "fprobe.decode.channel"
+Channel = Annotated[int, CHANNEL]
 
 
 @dataclass(frozen=True, slots=True)

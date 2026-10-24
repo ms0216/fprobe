@@ -26,7 +26,7 @@
   let role = $state<RoleFilter>(load("activity.role", "") as RoleFilter);
   let errorsOnly = $state(load("activity.errorsOnly", "0") === "1");
   let selected = $state<number | null>(null);
-  let calls = $state<{ name: string; index: HostCallIndex } | null>(null);   // 記録の操作の索引
+  let calls = $state<Awaited<ReturnType<typeof loadHostCalls>>>(null);   // 記録の操作の索引
   let recording = $state(false);                                               // 記録中（索引を読み足す）
   let notice = $state<string | null>(null);
   let stale = false;                                                           // 索引の後に記録へ操作が入った
@@ -147,6 +147,8 @@
     {#if notice}<span class="muted notice">{notice}</span>{/if}
     <span class="spacer"></span>
     {#if calls}<span class="muted" title={$i18n("activity.linkedTip")}>{$i18n("activity.linked", { name: calls.name })}</span>{/if}
+    {#if calls?.cut?.truncated}<span class="muted">{$i18n("common.queryTruncated", { shown: calls.cut.shown, limit: calls.cut.limit })}</span>{/if}
+    {#if calls?.cut && calls.cut.segments !== null}<span class="muted">{$i18n("common.querySegments", { segments: calls.cut.segments })}</span>{/if}
     {#if !follow}
       <button class="small" onclick={() => { follow = true; if (box) box.scrollTop = box.scrollHeight; }}>
         {$i18n("activity.latest")}</button>

@@ -4,6 +4,8 @@
   // 仕様: docs/superpowers/specs/2026-10-18-ui-layout-design.md
   import { onDestroy, setContext } from "svelte";
   import { DaemonConnection } from "./lib/api";
+  import { sourcedApp, sourcedConn } from "./lib/source";
+  import { CodeAtLink } from "./lib/codeat";
   import { commandForKey, type CommandState } from "./lib/commands";
   import { SHARED, type Shared } from "./lib/context";
   import { Debugger, focusFrame } from "./lib/debugger";
@@ -17,6 +19,7 @@
   import { TimelineState, type Reveal } from "./lib/timeline/state";
   import { UiState } from "./lib/ui";
   import ConfirmDialog from "./components/shell/ConfirmDialog.svelte";
+  import ContextMenu from "./components/shell/ContextMenu.svelte";
   import Dialogs from "./components/shell/Dialogs.svelte";
   import DebugToolbar from "./components/shell/DebugToolbar.svelte";
   import DockArea from "./components/shell/DockArea.svelte";
@@ -28,22 +31,27 @@
   const hash = new URLSearchParams(location.hash.slice(1));
   const token = hash.get("token") ?? undefined;
   // #layout=system: 開いたときにその配置にする（配置ごとの URL を残せる）
-  const initialLayout = hash.get("layout") === "system" ? "system" as const
-    : hash.get("layout") === "default" ? "default" as const : null;
+  const initialLayout = (["analysis", "debug", "system"] as const).find((n) => n === hash.get("layout")) ?? null;
   const conn = new DaemonConnection(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api`, {
     name: "gui", role: "human", token, topics: ["activity", "control", "clients", "target.state"],
-    optionalTopics: ["ui.state", "flash.progress", "recording"],
+    optionalTopics: ["ui.state", "flash.progress", "recording", "hook"],
+    automated: navigator.webdriver === true,        // 自動操作のブラウザ（試験・確かめ）か。操作の記録に残す
   });
-  const app = new AppState(conn);
-  const dbg = new Debugger(conn, app);
-  const tl = new TimelineState(conn, app);
+  const base = new AppState(conn);
+  // 共有の部品の要求は部品の名前を source に（lib/source.ts）。窓の要求は窓ごとに（lib/dock.ts）
+  const by = (source: string) => ({ conn: sourcedConn(conn, source), app: sourcedApp(base, source) });
+  const app = by("shell").app;
+  const dbg = new Debugger(by("debugger").conn, by("debugger").app);
+  const tl = new TimelineState(by("timeline").conn, by("timeline").app);
   const ui = new UiState();
-  const safety = new Safety(conn, app);
+  const safety = new Safety(by("safety").conn, by("safety").app);
   // 画面の状態（視点・カーソル・段・出来事・フレーム）をデーモン（AI・別の窓）と URL にそろえる
-  const screen = new ScreenSync(conn, tl, dbg, (i) => void focusFrame(dbg, ui, i));
+  const screen = new ScreenSync(by("screen").conn, tl, dbg, (i) => void focusFrame(dbg, ui, i));
+  // 時間軸の選択カーソル（記録の時刻）→ その時刻のコードの位置（recording.code_at）。連動する窓が使う
+  const codeAt = new CodeAtLink(by("codeAt").conn, tl);
   let dockRef: Dock | null = null;
   const dock = { show: (id: string) => dockRef?.show(id), reset: () => dockRef?.reset(),
-                 layout: (name: "default" | "system") => dockRef?.layout(name) };
+                 layout: (name: "analysis" | "debug" | "system") => dockRef?.layout(name) };
   // ビューの行 → 時間軸のその時刻、時間軸・ビュー → ソースの行・逆アセンブル・メモリ（UI/UX の調査の規則: 1 回クリック
   // = 選ぶ、ダブルクリック = 元を開く）
   const reveal = (r: Reveal) => {
@@ -63,7 +71,7 @@
     ui.openApi(method, params, favorite);
     dock.show("api");
   };
-  const ctx: Shared = { conn, app, dbg, tl, ui, safety, screen, dock, reveal, showAddress: (a) => void showAddress(a),
+  const ctx: Shared = { conn: sourcedConn(conn, "shell"), app, dbg, tl, ui, safety, screen, codeAt, dock, reveal, showAddress: (a) => void showAddress(a),
                         showMemory, showApi };
   setContext(SHARED, ctx);
   const context = new Map<any, any>([[SHARED, ctx]]);
@@ -80,7 +88,7 @@
   });
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
-                                         selection: $ui.selection, part: $app.target?.target });
+                                         selection: $ui.selection, rescueDp: $app.target?.rescue_dp });
 
   function onKey(e: KeyboardEvent) {
     if ($ui.dialog) return;
@@ -104,6 +112,7 @@
     stopFaults();
     conn.stop();
     screen.dispose();
+    codeAt.dispose();
     tl.dispose();
   });
 </script>
@@ -119,6 +128,7 @@
   <StatusLine />
   <Dialogs />
   <ConfirmDialog />
+  <ContextMenu />
   {#if $app.error}
     <div class="toast" role="alert">
       <span>{$app.error}</span>

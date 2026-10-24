@@ -62,9 +62,10 @@ def test_zephyr_ztest_results():
 def test_defmt_test_running_lines_and_all_passed():
     log = TestLog()
     feed_lines(log, "(1/2) running `add`...\n(2/2) running `sub`...\n")
-    assert [(c.name, c.status) for c in log.cases] == [("add", "passed"), ("sub", "running")]
+    # 次の試験が始まった = 前の試験の関数が戻った（事実）。合否の行は defmt-test に無いので passed とは推定しない
+    assert [(c.name, c.status) for c in log.cases] == [("add", "returned"), ("sub", "running")]
     feed_lines(log, "all tests passed!\n")
-    assert log.finished and log.verdict == "passed" and log.cases[1].status == "passed"
+    assert log.finished and log.verdict == "passed" and [c.status for c in log.cases] == ["passed", "passed"]
 
 
 def test_a_crash_fails_the_running_test():
@@ -154,8 +155,8 @@ class ScriptedProbe:
         self._call("connect", target, frequency_hz, connect_mode)
         return {"state": "HALTED"}
 
-    def program_ram(self, path):
-        self._call("program_ram", path)
+    def program_ram(self, path, vector_table=None):
+        self._call("program_ram", path, vector_table)
         return {"reason": "user"}
 
     def flash(self, path, address=None):
@@ -333,8 +334,20 @@ def test_a_breakpoint_instruction_ends_the_run_like_probe_rs(tmp_path):
     probe = ScriptedProbe([{"rtt": "(1/1) running `add`...\nall tests passed!\n"}, {"bkpt": True}])
     probe.steps[0]["rtt"] = "(1/1) running `add`...\n"
     probe.steps.insert(1, {"rtt": "all tests passed!\n"})
-    result, _ = run(probe, tmp_path, stop_on_summary=False)
-    assert result.exit_code == 0 and result.outcome == "bkpt"
+    result, _ = run(probe, tmp_path, stop_on_summary=False, end_bkpt=0)    # 終わりの合図の即値は使う側が渡す
+    assert result.exit_code == 0 and result.outcome == "bkpt" and result.bkpt == 0
+    # 使った設定（既定のときも）を結果に出す（?1）
+    assert result.settings["end_bkpt"] == 0 and result.settings["timeout_s"] == 2.0
+    assert result.as_dict()["settings"]["frequency_hz"] == 4_000_000
+
+
+def test_a_breakpoint_instruction_is_not_the_end_unless_its_immediate_was_given(tmp_path):
+    # BKPT を終わりの合図とするのはファームとの約束（probe-rs 流の慣習）: 即値を渡さなければ思いがけない停止（3 回目 H3）
+    result, _ = run(ScriptedProbe([{"bkpt": True}]), tmp_path)
+    assert result.exit_code == EXIT_ABNORMAL and result.outcome == "halted" and result.bkpt == 0
+    assert "BKPT 0x00" in result.reason
+    other, _ = run(ScriptedProbe([{"bkpt": True}]), tmp_path, end_bkpt=0x01)       # 別の即値（assert・panic 等）
+    assert other.exit_code == EXIT_ABNORMAL and other.outcome == "halted" and other.bkpt == 0
 
 
 def test_an_unexpected_halt_is_abnormal(tmp_path):
@@ -354,6 +367,52 @@ def test_flash_load_resets_and_variables_are_set_before_running(tmp_path):
     names = probe.names()
     assert names.index("flash") < names.index("reset") < names.index("write_expression") < names.index("resume")
     assert ("reset", True) in probe.calls and ("write_expression", "semihosting_enabled", 1) in probe.calls
+
+
+def test_waiting_for_the_set_location_uses_the_time_the_user_gave(tmp_path):
+    # 利用者が渡していない 10 秒で待ちを切らない（総点検）: --set-at まで待つ時間は set_timeout_s（省けば timeout_s）。
+    # 着かなかったときは待った秒を事実として出す
+    waited = []
+
+    class AtProbe:
+        def breakpoint_set(self, location):
+            pass
+
+        def breakpoint_clear(self, location):
+            pass
+
+        def run_until_halt(self, timeout_s):
+            waited.append(timeout_s)
+            return {"reason": "timeout", "where": "loop"}
+
+        def write_expression(self, expression, value):
+            raise AssertionError("着かなければ書かない")
+
+    for kw, expected in (({"timeout_s": 60.0}, 60.0), ({"timeout_s": 60.0, "set_timeout_s": 25.0}, 25.0)):
+        runner = Runner(AtProbe(), options(tmp_path, set_values={"x": "1"}, set_at="main", **kw))
+        with pytest.raises(RuntimeError, match=f"{expected:g} 秒"):
+            runner._write_values()
+        assert waited[-1] == expected
+
+
+def test_set_values_without_set_at_are_written_now_not_at_a_conventional_main(tmp_path):
+    # 「main があれば main まで走らせる」は名前の慣習（点検 2 回目）: 書く場所は --set-at で使う側が明示する
+    probe = ScriptedProbe([{"exit": 0}])
+
+    def no_breakpoint(*args, **kwargs):
+        raise AssertionError("main を探して置かない")
+
+    probe.breakpoint_set = no_breakpoint
+    with_main = FIRMWARE / "stack_demo" / "stack_demo.elf"                      # main のある ELF
+    result, _ = run(probe, tmp_path, elf=with_main, load="none", set_values={"x": "1"})
+    assert ("write_expression", "x", 1) in probe.calls
+    assert any("--set-at" in w for w in result.warnings)
+
+
+def test_ram_load_passes_the_vector_table_the_user_gave(tmp_path):
+    probe = ScriptedProbe([{"exit": 0}])
+    run(probe, tmp_path, load="ram", vector_table=0x20000000)
+    assert ("program_ram", str(RTT_DEMO), 0x20000000) in probe.calls
 
 
 def test_swo_is_started_when_asked(tmp_path):

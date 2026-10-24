@@ -28,6 +28,7 @@ Item = Hit | Loss
 class Decoded:
     items: list[Item]
     hz: float                       # 時刻の単位（1 秒あたりの数）
+    wraps: int | None = None        # 時刻の回り込みを仮定して戻した回数（RTT の CYCCNT。回り込みの無い方式は None）
 
     @property
     def hits(self) -> list[Hit]:

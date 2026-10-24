@@ -1,7 +1,7 @@
 // ヒープ（lib/heap.ts）: heap.scan の引数と、heap.trace.report の読み取り
 import { describe, expect, it } from "vitest";
 import { readReport, scanParams } from "../src/lib/heap";
-import { FakeConn } from "./fake-conn";
+import { FakeConn, deviceError } from "./fake-conn";
 
 describe("scanParams", () => {
   it("アロケータを選ばなければ送らない（ELF にあるもの全部）。走行中は live", () => {
@@ -15,7 +15,7 @@ describe("readReport", () => {
     const conn = new FakeConn({ "heap.trace.report": { allocations: 3, frees: 1, issues: [{ kind: "double_free" }] } });
     expect(await readReport(conn)).toEqual({ report: { allocations: 3, frees: 1, issues: [{ kind: "double_free" }] }, error: null });
     expect(conn.quiet).toEqual(["heap.trace.report"]);
-    const bad = new FakeConn({ "heap.trace.report": () => { throw new Error("RuntimeError: 記録が無い"); } });
+    const bad = new FakeConn({ "heap.trace.report": () => { throw deviceError("記録が無い"); } });
     expect(await readReport(bad)).toEqual({ report: null, error: "記録が無い" });
   });
 });

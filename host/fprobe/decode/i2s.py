@@ -4,20 +4,22 @@ SCK の立ち上がりで WS と SD（直前の値）を読む。WS が変わる
 - "i2s": WS が変わった次のクロックから MSB（1 クロック遅れ）。WS = 0 が左。
 - "left_justified": WS が変わったクロックから MSB。WS = 1 が左。
 - "right_justified": スロットの最後の word_bits ビットが値（LSB がスロットの最後）。WS = 1 が左。
-捕捉の始まりの途中のスロット（始まりが見えない）は読まない。
+捕捉の始まりの途中のスロット（始まりが見えない）は読まない。捕捉の終わりで WS が変わっていない最後のスロットは
+終わりが見えていないので error = "truncated"（ビット数で完全かを推し量らない。読めたビット数は fields.bits）。
 """
 
 from ..la import Transitions
-from .core import Annotation, Decoding, project
+from .core import Annotation, Channel, Decoding, project
 
 __all__ = ["FORMATS", "decode_i2s"]
 
 FORMATS = {"i2s": (1, 0), "left_justified": (0, 1), "right_justified": (0, 1)}     # (遅れ, 左の WS)
 
 
-def decode_i2s(tr: Transitions, *, sck: int, ws: int, sd: int, format: str = "i2s", word_bits: int | None = None,
-               signed: bool = True) -> Decoding:
-    """I2S を解読する。word_bits を省くとスロットの全ビットを値とする（right_justified では必須）。"""
+def decode_i2s(tr: Transitions, *, sck: Channel, ws: Channel, sd: Channel, format: str, word_bits: int | None,
+               signed: bool) -> Decoding:
+    """I2S を解読する。設定はすべて既定を持たない。word_bits = None はスロットの全ビットを値とする
+    （right_justified では数が要る）。"""
     if format not in FORMATS:
         raise ValueError(f"形式は {sorted(FORMATS)} のどれか（{format!r}）")
     if word_bits is not None and not 1 <= word_bits <= 64:
@@ -32,14 +34,10 @@ def decode_i2s(tr: Transitions, *, sck: int, ws: int, sd: int, format: str = "i2
     slot_ws = None
     slot_start = 0
     bits: list[int] = []
-    expected = None                                   # 前の完全なスロットのビット数
     bits_started = False                              # 今のスロットの始まりが見えたか（最初のスロットは途中から）
 
     def emit(end: int, truncated: bool) -> None:
-        nonlocal expected
         n = len(bits)
-        if not truncated:
-            expected = n
         take = word_bits or n
         chosen = bits[-take:] if format == "right_justified" else bits[:take]
         raw = 0
@@ -69,6 +67,6 @@ def decode_i2s(tr: Transitions, *, sck: int, ws: int, sd: int, format: str = "i2
                     slot_ws, slot_start, bits = current, at, []
                 bits.append(d)
         prev = now
-    if slot_ws is not None and bits and bits_started and expected is not None:
-        emit(tr.length, len(bits) < expected)
+    if slot_ws is not None and bits and bits_started:
+        emit(tr.length, True)                         # 終わり（WS の変化）が見えていない
     return Decoding("i2s", tuple(out), tr.sample_period_s, tr.trigger, tr.length, params)

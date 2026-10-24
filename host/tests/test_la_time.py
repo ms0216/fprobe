@@ -41,12 +41,12 @@ class FakeDevice:
 
 
 def test_internal_capture_time_is_the_pin_time():
-    la = LogicAnalyzer(FakeDevice(la_depth=64, la_delay_internal=6.5))
-    assert la.read(1e-8).trigger_time == RAW_TIME - 7          # 半刻みは切り上げ（±0.5 刻み）
+    la = LogicAnalyzer(FakeDevice(la_depth=64, la_delay_internal=6, la_phase_span=1))
+    assert la.read(1e-8).trigger_time == RAW_TIME - 7          # ピンの変化の下限（段数 + 位相の幅。変化はそこから 1 刻み未満）
 
 
 def test_deep_capture_time_is_the_pin_time():
-    la = DeepAnalyzer(FakeDevice(mem_bytes=1 << 20, la_delay_deep=7.5))
+    la = DeepAnalyzer(FakeDevice(mem_bytes=1 << 20, la_delay_deep=7, la_phase_span=1))
     assert la.read(before_beats=2, after_beats=2).trigger_time == RAW_TIME - 8
     assert la.read_transitions(before_beats=2, after_beats=2).trigger_time == RAW_TIME - 8
 

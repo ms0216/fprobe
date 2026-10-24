@@ -28,7 +28,7 @@ export interface CommandState {
   target: string | undefined;                // RUNNING / HALTED / DISCONNECTED / undefined（不明）
   elf: string | null;
   selection: { file: string; line: number } | null;
-  part?: string;                             // 接続中の pyOCD のターゲット名（rp2040_core0 等。部品に固有のコマンド用）
+  rescueDp?: number;                         // ホストが申告した救済の DP（target.status の rescue_dp。無ければ無い）
 }
 
 export interface Command {
@@ -53,7 +53,7 @@ const withElf = (s: CommandState): Key | null => online(s) ?? (s.elf ? null : "t
 const withLine = (base: (s: CommandState) => Key | null) => (s: CommandState): Key | null =>
   base(s) ?? (s.selection ? null : "tip.noLine");
 
-/** 人の操作の前の確認（AI の作業中）を通してから実行する */
+/** 人の操作の前の確認（AI がつながっていて一時停止していないとき）を通してから実行する */
 const guarded = (fn: (ctx: CommandContext, s: CommandState) => unknown) =>
   async (ctx: CommandContext, s: CommandState) => ((await allowed(ctx.app)) ? fn(ctx, s) : undefined);
 /** コアを止める操作: 止めると壊れうるターゲットなら先に確かめる（lib/safety.ts） */
@@ -75,7 +75,7 @@ export const COMMANDS: Command[] = [
   { id: "reset", label: "cmd.reset", tip: "tip.reset", shortcut: "Ctrl+Shift+F5", icon: "reset", blocked: connected,
     run: guarded(({ app }) => app.act("target.reset", resetParams(execution.get()))) },
   { id: "rescueReset", label: "cmd.rescueReset", tip: "tip.rescueReset",
-    blocked: (s) => connected(s) ?? (s.part?.startsWith("rp2040") ? null : "tip.noRescue"),
+    blocked: (s) => connected(s) ?? (s.rescueDp != null ? null : "tip.noRescue"),
     run: guarded(({ app }) => app.act("target.reset", { kind: "rescue" })) },
   { id: "continue", label: "cmd.continue", tip: "tip.continue", shortcut: "F5", icon: "continue", blocked: halted,
     run: guarded(({ app }) => app.act("target.resume")) },
@@ -103,7 +103,7 @@ export const COMMANDS: Command[] = [
   { id: "loadSvd", label: "cmd.loadSvd", tip: "tip.loadSvd", icon: "chip", blocked: online,
     run: ({ ui }) => ui.open("loadSvd") },
   { id: "capture", label: "cmd.capture", tip: "tip.capture", icon: "capture", blocked: online,
-    run: guarded(({ tl }) => tl.capture({ rate_hz: null, pretrigger: 1024, deep: false })) },
+    run: guarded(({ tl }) => tl.captureSaved({ deep: false })) },
 ];
 
 export const command = (id: string): Command => {

@@ -1,16 +1,18 @@
 // Activity: 役割の絞り込み・誤りだけ、行 ↔ 記録の時刻（host.call の seq と time）
 import { describe, expect, it } from "vitest";
-import { HOST_CALLS_SQL, HostCallIndex, filterActivity, loadHostCalls, roleOf } from "../src/lib/activity";
+import { HOST_CALLS_LIMIT, HOST_CALLS_SQL, HostCallIndex, filterActivity, loadHostCalls, roleOf } from "../src/lib/activity";
 import type { ActivityEntry } from "../src/lib/state";
 import { FakeConn } from "./fake-conn";
 
-const entry = (seq: number, client: string, role: string, error?: string): ActivityEntry =>
-  ({ seq, time: `2026-10-18T10:00:0${seq}.000`, client, role, method: "m", params: {}, ...(error ? { error } : {}) });
+const entry = (seq: number, client: string, role: string, error?: string, via = "api"): ActivityEntry =>
+  ({ seq, time: `2026-10-18T10:00:0${seq}.000`, client, role, via, method: "m", params: {}, ...(error ? { error } : {}) });
 
 describe("絞り込み", () => {
-  const rows = [entry(1, "claude", "ai"), entry(2, "gui", "human", "bad"), entry(3, "hook 4", "human"), entry(4, "ci", "script")];
-  it("フックは役割 hook に分ける", () => {
+  const rows = [entry(1, "claude", "ai"), entry(2, "gui", "human", "bad"), entry(3, "hook 4", "human", undefined, "hook"),
+                entry(4, "ci", "script")];
+  it("フックは役割 hook に分ける（デーモンが記録したつながり方 via = hook で。利用者の名前の形では決めない）", () => {
     expect(rows.map(roleOf)).toEqual(["ai", "human", "hook", "script"]);
+    expect(roleOf(entry(5, "hook me", "script"))).toBe("script");          // 名前が "hook " で始まるだけの利用者
   });
   it("利用者・役割・誤りだけ", () => {
     expect(filterActivity(rows, { role: "human" }).map((e) => e.seq)).toEqual([2]);
@@ -37,8 +39,16 @@ describe("記録の時刻", () => {
     const got = await loadHostCalls(c.call.bind(c) as any);
     expect(got?.name).toBe("r1");
     expect(got?.index.timeOf(entry(1, "x", "ai"))).toBe(10);
-    expect(c.calls[1]).toEqual(["recording.query", { sql: HOST_CALLS_SQL, limit: 100000 }]);
+    expect(got?.cut).toBeNull();
+    expect(c.calls[1]).toEqual(["recording.query", { sql: HOST_CALLS_SQL, limit: HOST_CALLS_LIMIT }]);
     expect(c.quiet).toEqual(["recording.status", "recording.query"]);
     expect(await loadHostCalls(new FakeConn({ "recording.status": { name: null } }).call as any)).toBeNull();
+  });
+
+  it("上限で切ったら、切ったことと上限を返す（黙って切らない）", async () => {
+    const c = new FakeConn({ "recording.status": { name: "r1" },
+                             "recording.query": { columns: [], rows: [[10, 1, "x"]], count: 1, truncated: true } });
+    expect((await loadHostCalls(c.call.bind(c) as any))?.cut)
+      .toEqual({ shown: 1, limit: HOST_CALLS_LIMIT, truncated: true, segments: null });
   });
 });

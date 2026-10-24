@@ -1,22 +1,23 @@
 """プラグイン zmk_health: ZMK のキーボードを止めずに診断する（BLE・チャタリング除け・電池・起動からの時間・スタック）。"""
 
 import pytest
+from value_kinds import venum, vint, vna
 
 from fprobe.plugins.zmk_health import ZmkHealth
 
 VALUES = {
-    "acl_conns[0].state": {"enum": "BT_CONN_CONNECTED", "value": 7},
-    "acl_conns[0].role": 1,
-    "acl_conns[0].le.interval": 6,
-    "acl_conns[0].le.latency": 30,
-    "acl_conns[0].le.timeout": 400,
-    "acl_conns[0].le.phy.tx_phy": 2,
-    "kscan_matrix_config_0.debounce_config.debounce_press_ms": 3,
-    "kscan_matrix_config_0.debounce_config.debounce_release_ms": 5,
-    "kscan_matrix_config_0.debounce_scan_period_ms": 1,
-    "kscan_matrix_config_0.poll_period_ms": 10,
-    "last_state_of_charge": 0,
-    "curr_tick": 32768 * 3600,
+    "acl_conns[0].state": venum("BT_CONN_CONNECTED", 7),
+    "acl_conns[0].role": vint(1),
+    "acl_conns[0].le.interval": vint(6),
+    "acl_conns[0].le.latency": vint(30),
+    "acl_conns[0].le.timeout": vint(400),
+    "acl_conns[0].le.phy.tx_phy": vint(2),
+    "kscan_matrix_config_0.debounce_config.debounce_press_ms": vint(3),
+    "kscan_matrix_config_0.debounce_config.debounce_release_ms": vint(5),
+    "kscan_matrix_config_0.debounce_scan_period_ms": vint(1),
+    "kscan_matrix_config_0.poll_period_ms": vint(10),
+    "last_state_of_charge": vint(0),
+    "curr_tick": vint(32768 * 3600),
 }
 TASKS = {"tasks": [
     {"name": "BT LW WQ", "stack": {"size": 1408, "peak_used": 936}},
@@ -64,3 +65,10 @@ def test_missing_symbols_are_reported_as_unavailable_and_the_rest_continues():
     r = ZmkHealth(FakeApi(values=values)).report()
     assert r["ble"] == [] and "BLE" in " ".join(r["unavailable"])
     assert r["debounce"]["press_ms"] == 3
+
+
+def test_a_value_that_is_not_a_number_is_unavailable_not_passed_on():
+    """読めない値（kind が unavailable）を数として渡さず、理由を unavailable に残す。"""
+    values = {**VALUES, "last_state_of_charge": vna("optimized out")}
+    r = ZmkHealth(FakeApi(values=values)).report()
+    assert r["battery_percent"] is None and any("optimized out" in u for u in r["unavailable"])

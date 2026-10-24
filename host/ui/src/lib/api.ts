@@ -14,28 +14,23 @@ export const E_NO_DATA = -32023;
 
 export type Role = "human" | "ai" | "script";
 
+/** 誤りの構造の欄（デーモンが付ける。機器の誤りなら exception = 例外の型の名前・detail = 例外の文そのまま） */
+export interface RpcErrorData {
+  exception?: string;
+  detail?: string;
+}
+
 export class RpcError extends Error {
-  constructor(public code: number, message: string) {
+  constructor(public code: number, message: string, public data?: RpcErrorData) {
     super(message);
   }
 }
 
-/** API の名前空間（MCP の道具の名前の頭: target_halt・profile_start 等）。誤りの文の AI 向けの案内を見分ける */
-export const TOOL_NAMESPACES = ["session", "ui", "probe", "target", "jtag", "debug", "la", "timeline", "events", "watch",
-  "rtos", "profile", "cycles", "timing", "testpoint", "xtrig", "swo", "rtt", "terminal", "user", "uart", "recording",
-  "snapshot", "rules", "inject", "hooks", "heap", "stream", "log", "trace", "scvd", "gpio", "spi", "fpga_obs", "system", "linux", "sampler"];
-const TOOL = new RegExp(`\\b(?:${TOOL_NAMESPACES.join("|")})_[a-z0-9_]+\\b`);
-const PARAM = /\b[a-z][a-z0-9_]*=[^\s、。）]+/;
-
-/** 誤りを人に見せる文: デーモンが付ける Python の例外の名前（"RuntimeError: " 等）と JSON-RPC の番号は外す
- *  （利用者には意味が無く、本文が隠れる）。AI 向けの道具の名前・引数の案内（「（target_halt）」「live=true で…」）も
- *  外す（画面ではその操作のボタンの名前が違い、利用者の言葉でない） */
+/** 誤りを人に見せる文: デーモンが構造の欄 data.detail（例外の文そのまま）を付けていればそれ、無ければ文のまま。
+ *  文の形（例外の名前らしい頭・道具の名前らしい語）を推して消さない（事実の文まで消えうる。画面は応答をそのまま描く） */
 export function errorText(e: unknown): string {
-  const message = (e instanceof Error ? e.message : String(e))
-    .replace(/^(?:[A-Z][A-Za-z0-9_.]*(?:Error|Exception|Expired|Connected|Disconnected|Exit)|NoData): /, "");
-  const plain = message.replace(/（[^（）]*）/g, (group) => (TOOL.test(group) || PARAM.test(group) ? "" : group));
-  const sentences = plain.split("。").filter((s) => !TOOL.test(s) && !PARAM.test(s));
-  return (sentences.join("。").trim() || plain.trim()).replace(/。$/, "");
+  if (e instanceof RpcError && typeof e.data?.detail === "string") return e.data.detail;
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** まだ無い（E_NO_DATA）: 読めなかった誤りではない */
@@ -51,7 +46,11 @@ export interface ConnectionOptions {
   optionalTopics?: string[];     // 古いデーモンが知らなければ外す通知（購読を断られたら topics だけで購読し直す）
   WebSocketImpl?: typeof WebSocket;
   retryMaxMs?: number;
+  /** hello で申告する「自動操作か」（画面は navigator.webdriver）。省略で申告しない */
+  automated?: boolean;
 }
+
+export type CallOptions = { quiet?: boolean; source?: string };
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };
 
@@ -80,10 +79,11 @@ export class DaemonConnection {
     this.ws?.close();
   }
 
-  /** quiet: 画面の自動の読み（状態を変えない読みだけ）を操作の記録に残さない */
-  call<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: { quiet?: boolean }): Promise<any> {
+  /** quiet: 画面の自動の読み（状態を変えない読みだけ）を操作の記録に残さない。source: どこから（操作の記録に残す。lib/source.ts） */
+  call<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: CallOptions): Promise<any> {
     if (!this.ready) return Promise.reject(new Error(t("tip.offline")));
-    return this.request(method, params ?? {}, opts?.quiet ? { quiet: true } : {});
+    return this.request(method, params ?? {}, { ...(opts?.quiet ? { quiet: true } : {}),
+                                                 ...(opts?.source ? { source: opts.source } : {}) });
   }
 
   on(topic: string, fn: (data: any) => void): () => void {
@@ -111,9 +111,10 @@ export class DaemonConnection {
   }
 
   private async greet(): Promise<void> {
-    const { name, role, token, topics, optionalTopics = [] } = this.opts;
+    const { name, role, token, topics, optionalTopics = [], automated } = this.opts;
     try {
-      const hello = await this.request("session.hello", { name, role, api_version: API_VERSION, ...(token ? { token } : {}) });
+      const hello = await this.request("session.hello", { name, role, api_version: API_VERSION, ...(token ? { token } : {}),
+                                                          ...(automated === undefined ? {} : { automated }) });
       try {
         await this.request("session.subscribe", { topics: [...topics, ...optionalTopics] });
       } catch (e) {
@@ -145,7 +146,7 @@ export class DaemonConnection {
     if ("id" in message && message.id !== null && this.pending.has(message.id)) {
       const p = this.pending.get(message.id)!;
       this.pending.delete(message.id);
-      if (message.error) p.reject(new RpcError(message.error.code, message.error.message));
+      if (message.error) p.reject(new RpcError(message.error.code, message.error.message, message.error.data));
       else p.resolve(message.result);
     } else if (typeof message.method === "string") {
       this.topicListeners.get(message.method)?.forEach((fn) => fn(message.params));

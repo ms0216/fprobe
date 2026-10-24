@@ -109,7 +109,7 @@ def test_gpio_serial_deep_capture_is_decoded_analyzed_and_recorded(probe, monkey
     monkeypatch.setattr(probe_testpoint, "DeepAnalyzer", FakeDeep)
     FakeDeep.tr = serial_capture(program(5))
     probe.recording_start(name="tp")
-    started = probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5,
+    started = probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5, guard_samples=1,
                                     rate_hz=50e6, after_beats=1000)
     assert started["running"] and started["capture"] == "deep" and started["hz"] == pytest.approx(50e6)
     assert FakeDeep.last.started == {"rate_hz": 50e6, "rise": 1 << 4, "rle": True, "post_beats": 1000}
@@ -319,7 +319,7 @@ def test_deep_capture_that_never_fills_says_what_to_check(probe, monkeypatch, ta
             raise TimeoutError("トリガが成立しない")
     monkeypatch.setattr(probe_testpoint, "DeepAnalyzer", NeverDone)
     FakeDeep.tr = serial_capture(program(1))
-    probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5)
+    probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5, guard_samples=1)
     with pytest.raises(TimeoutError, match="after_beats"):
         probe.testpoint_stop(timeout_s=0.01)
     assert probe._tp_run is None and probe.testpoint_status()["running"] is False
@@ -352,6 +352,8 @@ def test_rtt_hits_from_the_receiver_with_a_host_clock_anchor(probe, table_path):
     p._received(1, data[20:], host_s + 0.01)
     stopped = p.testpoint_stop()
     assert stopped["hits"] == len(records) and stopped["losses"] == 0
+    assert stopped["cyccnt_wraps"] == 0                                  # CYCCNT の回り込みを仮定した回数
+    assert stopped["skipped_before_sync"] >= 1                           # 受け始めの途中で捨てた項目の数（?51）
     tm = p._tp_last.live.time_map
     assert tm.hz == 16e6 and tm.uncertainty >= p.poll_s * HZ
     h, ticks, _ = p._tp_last.host_clock
@@ -371,7 +373,7 @@ def test_start_errors_and_status(probe, monkeypatch, table_path):
     with pytest.raises(ValueError, match="clock_channel"):
         probe.testpoint_start("gpio_serial", map_path=str(table_path))
     with pytest.raises(ValueError, match="capture"):
-        probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5,
+        probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5, guard_samples=1,
                               capture="forever")
     with pytest.raises(RuntimeError, match="testpoint_start"):
         probe.testpoint_report()
@@ -379,9 +381,9 @@ def test_start_errors_and_status(probe, monkeypatch, table_path):
         probe.testpoint_stop()
     monkeypatch.setattr(probe_testpoint, "DeepAnalyzer", FakeDeep)
     FakeDeep.tr = serial_capture(program(1))
-    probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5)
+    probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5, guard_samples=1)
     with pytest.raises(RuntimeError, match="testpoint_stop"):
-        probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5)
+        probe.testpoint_start("gpio_serial", map_path=str(table_path), clock_channel=4, data_channel=5, guard_samples=1)
     status = probe.testpoint_status()
     assert status["running"] and status["settings"]["clock_channel"] == 4 and status["hits"] == 0
     probe.testpoint_stop()
@@ -393,7 +395,7 @@ def test_the_api_accepts_the_usual_calls():
     from fprobe.api.spec import InvalidParams, load_spec
     spec = load_spec()
     spec.validate_params("testpoint.instrument", {"source_dir": "src", "out_dir": "tp", "variables": ["state"]})
-    spec.validate_params("testpoint.start", {"method": "gpio_serial", "clock_channel": 4, "data_channel": 5,
+    spec.validate_params("testpoint.start", {"method": "gpio_serial", "clock_channel": 4, "data_channel": 5, "guard_samples": 1,
                                              "rate_hz": 50e6, "after_beats": 100000})
     spec.validate_params("testpoint.start", {"method": "gpio_parallel", "data_channels": [1, 5, 6],
                                              "strobe_channel": 4, "capture": "stream", "duration_s": 3600})

@@ -158,6 +158,14 @@ def test_tracepoint_definition_actions_condition_and_upload():
         exp.define("QTDP:-9:08000200:R1")                                                 # 定義の無い番号へのアクション
 
 
+def test_only_the_base_register_reads_8_hex_digits_as_a_32_bit_minus_one():
+    """GDB は M の基のレジスタを int の %X で書く（-1 = 番地そのもの → FFFFFFFF）。番地・ずれは 64 ビットの 16 進
+    （phex_nz）なので、8 桁の ffffffff は番地 0xFFFFFFFF のまま（-1 に読み替えない）。"""
+    actions = trace.parse_actions("MFFFFFFFF,ffffffff,1")
+    [(stepping, a)] = actions
+    assert (a.register, a.offset, a.length) == (-1, 0xFFFF_FFFF, 1)
+
+
 # --- 当たったときの収集 -------------------------------------------------------------------------------
 
 def make_running(*packets):

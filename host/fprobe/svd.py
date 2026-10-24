@@ -3,7 +3,7 @@
 読み込み時に平らに展開する: derivedFrom を解決し、dim（配列・リスト）を個々のレジスタにし、クラスタは
 "CLUSTER.REG" の点つなぎの名前に、番地は絶対番地にする。
 
-    dev = load_device("STM32F401RETx")             # 置き場所から探す（find_svd）
+    dev = load_device("STM32F401")                 # 置き場所から名前の同じファイルを探す（find_svd）
     reg = dev.register("RCC.CR")                   # Register（番地・大きさ・フィールド）
     reg.decode(0x83)                               # フィールドごとの値（列挙の名前つき）
     reg.encode(current, {"HSEON": 1})              # 読み・変更・書き込みの「変更」
@@ -201,8 +201,8 @@ class RegisterValue:
     fields: tuple[FieldValue, ...]
 
     def as_dict(self) -> dict:
-        return {"path": self.register.path, "address": self.register.address, "value": self.value,
-                "fields": [f.as_dict() for f in self.fields]}
+        return {"path": self.register.path, "address": self.register.address, "size": self.register.size,
+                "value": self.value, "fields": [f.as_dict() for f in self.fields]}
 
 
 # --- 数・文字 -------------------------------------------------------------------------------
@@ -556,21 +556,11 @@ class SvdSource:
             return z.read(self.member)
 
 
-def _match_length(stem: str, device: str) -> int:
-    """ファイル名（拡張子なし）がデバイス名の先頭に合えばその長さ、合わなければ 0。小文字の x は任意の 1 文字。"""
-    if len(stem) > len(device):
-        return 0
-    for s, d in zip(stem, device):
-        if s != "x" and s.upper() != d.upper():
-            return 0
-    return len(stem)
-
-
-def _best(names: Iterable[str], device: str) -> str | None:
-    scored = [(_match_length(Path(n).stem, device), n) for n in names
-              if Path(n).suffix.lower() in (".svd", ".xml")]
-    scored = [s for s in scored if s[0] > 0]
-    return max(scored, key=lambda s: s[0])[1] if scored else None
+def _named(names: Iterable[str], device: str) -> str | None:
+    """名前（拡張子 .svd / .xml を除く）が device と同じファイル（大文字小文字は区別しない）。部品名の先頭に合う・
+    "x" を任意の 1 文字とみなす等の名前の慣習では選ばない。"""
+    return next((n for n in names
+                 if Path(n).suffix.lower() in (".svd", ".xml") and Path(n).stem.upper() == device.upper()), None)
 
 
 def _pyocd_zip() -> Path | None:
@@ -589,18 +579,18 @@ def _search_dirs(paths: Sequence[str | Path]) -> list[tuple[str, Path]]:
 
 
 def find_svd(device: str, *, paths: Sequence[str | Path] = ()) -> SvdSource | None:
-    """デバイス名（"STM32F401RETx" など）に合う SVD を探す。探す順は data/svd/README.md。"""
+    """名前（拡張子を除く）が device（"STM32F401" など）の SVD のファイルを探す。探す順は data/svd/README.md。"""
     for origin, place in _search_dirs(paths):
         if origin == "explicit" and place.is_file():
             return SvdSource(place.stem, origin, place)
         if place.is_dir():
-            best = _best((p.name for p in place.iterdir() if p.is_file()), device)
+            best = _named((p.name for p in place.iterdir() if p.is_file()), device)
             if best is not None:
                 return SvdSource(Path(best).stem, origin, place / best)
     archive = _pyocd_zip()
     if archive is not None:
         with zipfile.ZipFile(archive) as z:
-            best = _best(z.namelist(), device)
+            best = _named(z.namelist(), device)
         if best is not None:
             return SvdSource(Path(best).stem, "pyocd", archive, best)
     return None

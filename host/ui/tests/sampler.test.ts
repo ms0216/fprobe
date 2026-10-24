@@ -3,21 +3,20 @@ import { describe, expect, it } from "vitest";
 import { blockedBy, holderOf, readSampler } from "../src/lib/sampler";
 import { FakeConn } from "./fake-conn";
 
-const act = (seq: number, method: string, client: string, role = "human", error?: string) =>
-  ({ seq, time: "", client, role, method, params: {}, ...(error ? { error } : {}) });
-
 describe("DAP サンプラの持ち主", () => {
-  it("道具をパネルに、使い始めた利用者を記録から引く", () => {
-    const h = holderOf({ user: "watch", release: "watch.stop", since: 1 },
-                       [act(1, "watch.set", "gui"), act(2, "watch.set", "claude", "ai"), act(3, "watch.set", "x", "ai", "bad")]);
+  it("道具をパネルに、使い始めた利用者はデーモンの事実（probe.sampler.status の client）をそのまま", () => {
+    const h = holderOf({ user: "watch", release: "watch.stop", since: 1, client: { id: 2, name: "claude", role: "ai" } });
     expect(h).toEqual({ user: "watch", panel: "dataSampling", title: "panel.dataSampling", release: "watch.stop",
                         client: "claude", role: "ai" });
-    expect(holderOf({ user: "profile", release: "profile.stop", since: 1 }, [])?.client).toBeNull();
-    expect(holderOf({ user: null, release: null, since: null }, [])).toBeNull();
+    // 分からなければ null（操作の記録から推さない）
+    expect(holderOf({ user: "profile", release: "profile.stop", since: 1, client: null })?.client).toBeNull();
+    expect(holderOf({ user: "profile", release: "profile.stop", since: 1 } as any)?.client).toBeNull();   // 古いデーモン
+    expect(holderOf({ user: null, release: null, since: null, client: null })).toBeNull();
+    expect(holderOf.length).toBe(1);                                    // 操作の記録を受け取らない
   });
 
   it("自分の道具なら取り合いではない", () => {
-    const h = holderOf({ user: "rtos", release: "rtos.timeline.stop", since: 1 }, []);
+    const h = holderOf({ user: "rtos", release: "rtos.timeline.stop", since: 1, client: null });
     expect(blockedBy(h, "rtos")).toBeNull();
     expect(blockedBy(h, "profile")?.panel).toBe("cpuLoad");
   });

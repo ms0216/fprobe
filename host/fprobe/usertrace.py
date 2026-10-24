@@ -287,9 +287,10 @@ class Interval:
 @dataclass
 class Pairing:
     intervals: list[Interval] = field(default_factory=list)
-    unmatched_stops: dict[str, int] = field(default_factory=dict)     # 対の無い stop の数（並びの崩れ）
-    open: dict[str, int] = field(default_factory=dict)                # 終わりの無い start の数（窓の終わりで切れた）
-    started_before: dict[str, int] = field(default_factory=dict)      # 最初の start より前の stop（窓の始めで切れた）
+    # 事実の分け方だけ（窓で切れた・並びが崩れた等の原因は決めない）
+    unmatched_stops: dict[str, int] = field(default_factory=dict)     # 同じ名前の start が前に来た後の、対の無い stop
+    open: dict[str, int] = field(default_factory=dict)                # 対の stop が来ていない start
+    stops_before_first_start: dict[str, int] = field(default_factory=dict)   # 同じ名前の start がまだ来ていない stop
 
 
 def pair_intervals(records: Iterable[UserRecord]) -> Pairing:
@@ -304,7 +305,7 @@ def pair_intervals(records: Iterable[UserRecord]) -> Pairing:
         elif r.kind == "stop":
             stack = stacks.get(r.name)
             if not stack:
-                counts = out.unmatched_stops if r.name in started else out.started_before
+                counts = out.unmatched_stops if r.name in started else out.stops_before_first_start
                 counts[r.name] = counts.get(r.name, 0) + 1
                 continue
             start = stack.pop()

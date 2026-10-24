@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .dwarf.values import scalar
 from .recording import Recording
 from .rules import RANK, RuleError, RuleSet, check, load_yaml, worst
 from .xtrig import InjectStatus
@@ -41,7 +42,7 @@ class InjectHost(Protocol):
     def inject_status(self) -> InjectStatus: ...
     def timebase_hz(self) -> float: ...                               # 割り込み書き込みの時刻の単位
     def state(self) -> str: ...                                       # "running" / "halted" / ...
-    def evaluate(self, expression: str) -> Any: ...
+    def evaluate(self, expression: str) -> dict: ...                  # fprobe.dwarf.values の形
     def reset(self, kind: str) -> None: ...
     def resume(self) -> None: ...
     def recording(self) -> Recording | None: ...                      # 読む記録（書いた分まで反映済み）
@@ -59,8 +60,8 @@ class Trial:
     restore: dict = field(default_factory=dict)
     requirement: tuple[str, ...] = ()
     description: str = ""
-    timeout_s: float = 2.0
-    observe_s: float = 0.2
+    timeout_s: float = 0.0                       # 条件の成立を待つ秒（not_triggered の判定。台本で必ず書く）
+    observe_s: float = 0.0                       # 注入の後に見る秒（pass / fail の判定。台本で必ず書く）
     repeat: int = 1
 
 
@@ -230,8 +231,10 @@ def _parse_trial(raw: Any, where: str) -> Trial:
                 or w.get("size", 4) not in (1, 2, 4):
             raise ScriptError(f"{where}.restore.write[{n}] は {{address, value, size: 1|2|4}}")
         _address(w["address"], f"{where}.restore.write[{n}].address")
-    for key, default in (("timeout_s", 2.0), ("observe_s", 0.2)):
-        v = raw.get(key, default)
+    for key in ("timeout_s", "observe_s"):       # 判定を決める待ちなので暗黙の既定にしない（使う側が書く）
+        if key not in raw:
+            raise ScriptError(f"{where}.{key} が要る（判定を決める待ちの秒。既定は無い）")
+        v = raw[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
             raise ScriptError(f"{where}.{key} は 0 以上の秒")
     repeat = raw.get("repeat", 1)
@@ -240,7 +243,7 @@ def _parse_trial(raw: Any, where: str) -> Trial:
     requirement = raw.get("requirement") or ()
     requirement = (requirement,) if isinstance(requirement, str) else tuple(str(r) for r in requirement)
     return Trial(tid, when, write, expect, restore, requirement, str(raw.get("description", "")),
-                 float(raw.get("timeout_s", 2.0)), float(raw.get("observe_s", 0.2)), repeat)
+                 float(raw["timeout_s"]), float(raw["observe_s"]), repeat)
 
 
 # --- 試行 -------------------------------------------------------------------------------------
@@ -264,8 +267,9 @@ def _judge(host: InjectHost, expect: dict, t_inject: int, observe_s: float, name
             value = host.state()
             return {"check": "state", "ok": value == expect["state"], "value": value, "expected": expect["state"]}
         if "expression" in expect:
-            value = host.evaluate(expect["expression"])
-            return {"check": f"expression {expect['expression']}", "ok": _compare_ok(value, expect), "value": value,
+            value = host.evaluate(expect["expression"])           # fprobe.dwarf.values の形: 数（scalar）で比べる
+            return {"check": f"expression {expect['expression']}", "ok": _compare_ok(scalar(value), expect),
+                    "value": value,
                     "expected": {k: expect[k] for k in COMPARE if k in expect}}
         if "memory" in expect:
             mem = expect["memory"]
@@ -286,7 +290,8 @@ def _judge(host: InjectHost, expect: dict, t_inject: int, observe_s: float, name
 
 def _run_trial(host: InjectHost, script: InjectScript, trial: Trial, repeat: int) -> dict:
     out: dict[str, Any] = {"id": trial.id, "repeat": repeat, "requirement": list(trial.requirement),
-                           "description": trial.description, "when": trial.when, "injected": False, "t": None}
+                           "description": trial.description, "when": trial.when, "injected": False, "t": None,
+                           "timeout_s": trial.timeout_s, "observe_s": trial.observe_s}
     kind, params = next(iter(trial.when.items()))
     try:
         address = host.resolve(trial.write["address"])

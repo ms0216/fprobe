@@ -18,10 +18,10 @@ __all__ = ["PROTOCOLS", "Element", "Etmv4Config", "Etmv4Decoder", "decoder_for"]
 PROTOCOLS = ("etmv4",)
 
 
-def decoder_for(protocol: str, config: Etmv4Config | None = None):
-    """プロトコルの名前から解読器（decode(bytes) -> list[Element] を持つもの）。"""
+def decoder_for(protocol: str, config: Etmv4Config):
+    """プロトコルの名前と構成（TRCIDRn から。既定を持たない）から解読器（decode(bytes) -> list[Element] を持つもの）。"""
     if protocol == "etmv4":
-        return Etmv4Decoder(config or Etmv4Config())
+        return Etmv4Decoder(config)
     if protocol in ("etmv3", "etmv3.5"):
         # 共通の要素（elements）に落とす形で足す（I-sync → Address、P-header → Atoms、分岐アドレスの例外 →
         # ExceptionEntry）。Cortex-M3/M4 の実機（STM32F4 ディスカバリ等）で確かめる段で実装する

@@ -1,4 +1,7 @@
-"""統計の部品: 割合の信頼区間（Wilson）と、値の分布（統計・箱）。
+"""統計の部品: 値の分布（統計・箱）。
+
+割合の信頼区間（Wilson）は「各サンプルが独立な二項の試行」という仮定の上の推定なので本体に置かない
+（plugins.heuristics.wilson_interval。点検 3 回目の H1）。
 
 仕様: docs/superpowers/specs/2026-10-17-f5-profile-design.md の 3 節・5 節。
 """
@@ -7,30 +10,7 @@ import math
 import statistics
 from collections.abc import Sequence
 
-__all__ = ["Distribution", "wilson_interval"]
-
-
-def _z(confidence: float) -> float:
-    if not 0 < confidence < 1:
-        raise ValueError(f"信頼度は 0 と 1 の間: {confidence}")
-    return statistics.NormalDist().inv_cdf(0.5 + confidence / 2)
-
-
-def wilson_interval(hits: int, total: int, confidence: float = 0.95) -> tuple[float, float]:
-    """二項の割合 hits / total の Wilson の区間。サンプルが少なくても、割合が 0 や 1 でも [0, 1] の外へ出ない。
-    total が 0 なら何も分からない: (0, 1)。"""
-    if not 0 <= hits <= total:
-        raise ValueError(f"数が合わない: {hits} / {total}")
-    if total == 0:
-        return 0.0, 1.0
-    z = _z(confidence)
-    p = hits / total
-    z2n = z * z / total
-    center = (p + z2n / 2) / (1 + z2n)
-    half = z / (1 + z2n) * math.sqrt(p * (1 - p) / total + z2n / (4 * total))
-    low = 0.0 if hits == 0 else max(0.0, center - half)                # 端は丸めの誤差を残さない
-    high = 1.0 if hits == total else min(1.0, center + half)
-    return low, high
+__all__ = ["Distribution"]
 
 
 class Distribution:
@@ -88,9 +68,16 @@ class Distribution:
         width = (hi - lo) / bins
         counts = [0] * bins
         for v in self._sorted:
-            counts[min(int((v - lo) / width), bins - 1)] += 1
+            counts[self.bin_of(v, bins)] += 1
         return [{"lo": lo + k * width, "hi": hi if k == bins - 1 else lo + (k + 1) * width, "count": c}
                 for k, c in enumerate(counts)]
+
+    def bin_of(self, value: float, bins: int = 20) -> int:
+        """値が入る histogram(bins) の箱の番号（分布の値を渡す。全部同じ値なら 0）。"""
+        lo, hi = self.min, self.max
+        if lo == hi:
+            return 0
+        return min(int((value - lo) / ((hi - lo) / bins)), bins - 1)
 
     def as_dict(self) -> dict:
         if not self.values:

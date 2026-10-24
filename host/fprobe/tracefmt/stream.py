@@ -33,7 +33,7 @@ SNAPSHOT_FORMATS = ("systemview", "ctf", "tracex", "eventrecorder")
 CHANNELS = {"systemview": SYSVIEW_CHANNEL, "tracealyzer": TZ_CHANNEL}
 TX_HEADER_POINTER = "_tx_trace_header_ptr"
 ZEPHYR_RAM_BUFFER = "ram_tracing"
-SNAPSHOT_LIMIT = 4 << 20
+SNAPSHOT_LIMIT = 4 << 20                  # RAM のバッファを読む上限の既定（snapshot の max_bytes。切ったら truncated）
 
 Read = Callable[[int, int], bytes]
 
@@ -46,11 +46,11 @@ class TraceStream:
 
     @classmethod
     def create(cls, format: str, description: str | None = None, metadata: str | None = None,
-               ctf_header: str = "ts32_id8", strings=None) -> "TraceStream":
+               ctf_header: str | None = None, strings=None) -> "TraceStream":
         if format == "systemview":
             return cls(format, SystemViewDecoder(synced=False, description=description, strings=strings))
         if format == "ctf":
-            return cls(format, CtfDecoder(parse_tsdl(metadata) if metadata else None, ctf_header))
+            return cls(format, CtfDecoder(parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header))
         if format == "tracealyzer":
             return cls(format, TracealyzerDecoder(strings))
         raise ValueError(f"流れで受けられる形式は {' / '.join(STREAM_FORMATS)}")
@@ -64,13 +64,13 @@ class TraceStream:
 
 
 def decode_trace(format: str, data: bytes, description: str | None = None, metadata: str | None = None,
-                 ctf_header: str = "ts32_id8", strings=None, ts_hz: float | None = None,
+                 ctf_header: str | None = None, strings=None, ts_hz: float | None = None,
                  ram_buffer: bool = False) -> Trace:
     """一まとまりのデータ → Trace。"""
     if format == "systemview":
         trace = decode_systemview(data, description, strings)
     elif format == "ctf":
-        trace = decode_ctf(data, parse_tsdl(metadata) if metadata else None, ctf_header, ram_buffer)
+        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer)
     elif format == "tracealyzer":
         trace = decode_tracealyzer(data, strings)
     elif format == "tracex":
@@ -102,10 +102,14 @@ def rtt_ring(memory, address: int, channel: str | int) -> bytes:
 def snapshot(format: str, read: Read, symbol: Callable[[str], tuple[int, int] | None], *,
              rtt_address: int | None = None, memory=None, address: int | None = None, size: int | None = None,
              description: str | None = None, metadata: str | None = None,
-             ctf_header: str = "ts32_id8", strings=None, ts_hz: float | None = None, scvd: Scvd | None = None,
-             scvd_context: ScvdContext | None = None, since: int | None = None) -> tuple[Trace, dict]:
+             ctf_header: str | None = None, strings=None, ts_hz: float | None = None, scvd: Scvd | None = None,
+             scvd_context: ScvdContext | None = None, since: int | None = None,
+             max_bytes: int = SNAPSHOT_LIMIT) -> tuple[Trace, dict]:
     """ターゲットの RAM から吸い出して解読する。(Trace, 吸い出しの情報) を返す（eventrecorder は next を含む）。
-    read(番地, 長さ)・symbol(名前) → (番地, 大きさ)。"""
+    read(番地, 長さ)・symbol(名前) → (番地, 大きさ)。max_bytes = ctf・tracex のバッファを読む上限: ctf は先頭
+    max_bytes だけ読み、情報に size（領域の大きさ）・max_bytes・truncated（切ったか）。tracex は超えれば読まずに誤り。"""
+    if max_bytes < 1:
+        raise ValueError("max_bytes は 1 以上")
     if format == "systemview":
         if rtt_address is None or memory is None:
             raise ValueError("systemview のスナップショットには RTT の制御ブロックの番地が要る")
@@ -118,9 +122,10 @@ def snapshot(format: str, read: Read, symbol: Callable[[str], tuple[int, int] | 
         start, length = found
         if not length:
             raise ValueError("ram_tracing の大きさが分からない（size を渡す）")
-        data = read(start, min(length, SNAPSHOT_LIMIT))
-        trace = decode_ctf(data, parse_tsdl(metadata) if metadata else None, ctf_header, ram_buffer=True)
-        return trace, {"bytes": len(data), "address": start, "source": ZEPHYR_RAM_BUFFER}
+        data = read(start, min(length, max_bytes))
+        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer=True)
+        return trace, {"bytes": len(data), "size": length, "max_bytes": max_bytes, "truncated": length > max_bytes,
+                       "address": start, "source": ZEPHYR_RAM_BUFFER}
     if format == "tracex":
         if address is None:
             found = symbol(TX_HEADER_POINTER)
@@ -131,8 +136,11 @@ def snapshot(format: str, read: Read, symbol: Callable[[str], tuple[int, int] | 
                 raise ValueError("tx_trace_enable がまだ呼ばれていない（_tx_trace_header_ptr が 0）")
         head = read(address, TX_HEADER_SIZE)
         size = header_info(head)["size"]
-        if not 0 < size <= SNAPSHOT_LIMIT:
-            raise ValueError(f"TraceX のバッファの大きさ {size} が合わない")
+        if size <= 0:
+            raise ValueError(f"TraceX の見出しのバッファの大きさが {size}（正でない）")
+        if size > max_bytes:
+            raise ValueError(f"TraceX の見出しのバッファの大きさ {size} が読む上限 max_bytes {max_bytes} を超える"
+                             "（読んでいない。max_bytes を上げて読める）")
         return decode_tracex(read(address, size), ts_hz), {"bytes": size, "address": address,
                                                             "source": "tracex"}
     if format == "eventrecorder":

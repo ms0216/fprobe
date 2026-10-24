@@ -20,8 +20,8 @@ export interface CaptureInfo {
 }
 
 export interface CaptureRequest {
-  rate_hz: number | null;
-  pretrigger: number;
+  rate_hz: number;
+  pretrigger?: number;       // 内蔵のバッファのトリガ前のサンプル（deep でないとき）
   rise?: number;
   fall?: number;
   deep: boolean;
@@ -29,8 +29,40 @@ export interface CaptureRequest {
   afterBeats?: number;
   /** クロストリガ（FPGA の条件など）だけで成立させる: ch0 が 1 かつ立ち下がり = 波形では決して成り立たない条件 */
   crossOnly?: boolean;
-  /** 深いバッファの RLE（既定は API の既定 = 真）。偽なら RAW: 埋まる時間が信号の変化の多さに依らない */
+  /** 深いバッファの RLE（使う人が Timeline で選んだもの）。偽なら RAW: 埋まる時間が信号の変化の多さに依らない */
   rle?: boolean;
+}
+
+/** 捕捉の設定（使う人が Timeline のパネルで入れて覚えた値。入れていない・読めない値は null） */
+export interface CaptureSettings {
+  rate_hz: number | null;
+  pretrigger: number | null;
+  beforeBeats: number | null;
+  afterBeats: number | null;
+  rle: boolean | null;       // 深いバッファの形式（真 = RLE、偽 = RAW）。選んでいなければ null
+}
+
+const count = (text: string): number | null => (/^\d+$/.test(text.trim()) ? Number(text.trim()) : null);
+
+/** 覚えた捕捉の設定を読む（read = prefs の load。キー la.rate・la.pretrigger・la.beforeBeats・la.afterBeats・
+ *  la.rle = "rle" / "raw"） */
+export function readCaptureSettings(read: (key: string) => string): CaptureSettings {
+  const rate = Number(read("la.rate"));
+  const rle = read("la.rle");
+  return { rate_hz: rate > 0 ? rate : null, pretrigger: count(read("la.pretrigger")),
+           beforeBeats: count(read("la.beforeBeats")), afterBeats: count(read("la.afterBeats")),
+           rle: rle === "rle" ? true : rle === "raw" ? false : null };
+}
+
+/** 設定 → 捕捉の要求。速さはボードの選択肢（rates = rateChoices(申告の最高速度)）にあるものだけ、内蔵のバッファは
+ *  プリトリガ・深いバッファは前後の拍と形式（RLE / RAW）が要る。足りなければ null（既定の値・別の速さを仮定して捕捉しない） */
+export function captureRequest(s: CaptureSettings, deep: boolean, rates: number[]): CaptureRequest | null {
+  if (s.rate_hz === null || !rates.includes(s.rate_hz)) return null;
+  if (deep) {
+    return s.beforeBeats === null || s.afterBeats === null || s.rle === null ? null
+      : { rate_hz: s.rate_hz, deep: true, beforeBeats: s.beforeBeats, afterBeats: s.afterBeats, rle: s.rle };
+  }
+  return s.pretrigger === null ? null : { rate_hz: s.rate_hz, pretrigger: s.pretrigger, deep: false };
 }
 
 /** 拡大縮小: factor < 1 で拡大。anchor（0..1）の位置は動かない。範囲 extent の外へは出ない。最小 minSpan */
@@ -68,13 +100,8 @@ export interface LaChannel {
   index: number;
 }
 
-/** 申告の無い古いデバイス（U22 の前）の並び: ch 0〜7 = ピン、8・9 = 内部 */
-function legacyLayout(): LaChannel[] {
-  return Array.from({ length: 10 }, (_, ch) =>
-    ch < 8 ? { channel: ch, kind: "pin", index: ch } : { channel: ch, kind: "internal", index: ch - 8 });
-}
-
-// 今つないでいるデバイスの並び（state が probe.info を受けたら setChannelLayout。無ければ古い並び）
+// 今つないでいるデバイスの並び（state が probe.info を受けたら setChannelLayout）。申告が無ければ並びを仮定しない
+// （ch の番号だけ。古いデバイスの並びはデーモンが申告に入れる）
 let currentLayout: LaChannel[] | null = null;
 
 export function setChannelLayout(layout: LaChannel[] | null | undefined): void {
@@ -82,19 +109,24 @@ export function setChannelLayout(layout: LaChannel[] | null | undefined): void {
 }
 
 /** ch の名前。layout（申告の la_layout）を渡せばそれで（画面はこれで申告に依存させ、届いたら描き直す）、無ければ
- *  最後に setChannelLayout された並び（無ければ古い並び） */
+ *  最後に setChannelLayout された並び（無ければ ch の番号だけ） */
 export function channelName(ch: number, layout?: LaChannel[] | null | unknown): string {
   const given = Array.isArray(layout) && layout.length ? (layout as LaChannel[]) : null;   // map(channelName) の添字は無視
-  const c = (given ?? currentLayout ?? legacyLayout()).find((x) => x.channel === ch);
+  const c = (given ?? currentLayout ?? []).find((x) => x.channel === ch);
   if (c?.kind === "internal") return c.index === 0 ? t("timeline.swdioDrive") : c.index === 1 ? t("timeline.dapBusy") : `ch${ch}`;
   if (c?.kind === "input") return `in${c.index}`;
   return `ch${ch}`;
 }
 
-/** 選べる ch（何かがつながっている ch。申告の la_layout から、無ければ古い並び） */
+/** 選べる ch（何かがつながっている ch。申告の la_layout から、無ければ申告の ch の数だけ。どちらも無ければ無し） */
 export function channelChoices(caps: { la_channels?: number; la_layout?: LaChannel[] }): number[] {
-  const layout = caps.la_layout?.length ? caps.la_layout : legacyLayout();
-  return layout.filter((c) => c.kind !== "none").map((c) => c.channel);
+  if (caps.la_layout?.length) return caps.la_layout.filter((c) => c.kind !== "none").map((c) => c.channel);
+  return Array.from({ length: laChannelCount(caps) ?? 0 }, (_, ch) => ch);
+}
+
+/** ロジアナの ch の数（デバイスの申告 la_channels。無ければ null = 分からない。数を仮定しない） */
+export function laChannelCount(caps: { la_channels?: number } | null | undefined): number | null {
+  return typeof caps?.la_channels === "number" ? caps.la_channels : null;
 }
 
 /** 間引いたフレームから、時刻 at の波形の段 row（段の名前 "wave:<ch>"）の値を引く（'0' / '1' / 'x' / 無しなら

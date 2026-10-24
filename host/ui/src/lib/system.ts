@@ -3,6 +3,10 @@
 // どちらもデーモンの system.status 1 回で読む。表と条件はデーモンの画面の状態（ui.state の system）で別の窓・別の PC・
 // AI と分け合う（SharedSystem）。
 import type { DaemonConnection } from "./api";
+import type { Confirmer } from "./confirm";
+import { allowed } from "./guard";
+import { unitHex } from "./memory";
+import type { AppState } from "./state";
 
 export interface Watch {
   name: string;
@@ -25,25 +29,6 @@ export function sanitizeWatches(raw: unknown): Watch[] {
 }
 
 export const addressKey = (a: number) => `0x${a.toString(16).toUpperCase().padStart(8, "0")}`;
-
-export interface MemoryRead {
-  t_us: number;
-  memory: Record<string, number>;
-}
-
-/** 前の読みからの毎秒の増え方（カウンタの速さ。32 ビットの一周は前へ進んだとみなす） */
-export function rates(prev: MemoryRead | null, cur: MemoryRead): Record<string, number> {
-  const out: Record<string, number> = {};
-  if (!prev) return out;
-  const dt = (cur.t_us - prev.t_us) / 1e6;
-  if (!(dt > 0)) return out;
-  for (const [k, v] of Object.entries(cur.memory)) {
-    if (!(k in prev.memory)) continue;
-    const d = (v - prev.memory[k] + 2 ** 32) % 2 ** 32;
-    out[k] = Math.round(d / dt);
-  }
-  return out;
-}
 
 /** FPGA の値: 信号の名前があれば「名前=値」を並べ、無ければ組の値を 16 進で */
 export function fieldsText(fields: Record<string, number | string> | undefined, value: number): string {
@@ -85,53 +70,42 @@ export function fpgaOnly(expr: string, names: string[]): boolean {
   return terms !== null && terms.some((t) => t.op !== "=") && terms.every((t) => names.includes(t.field));
 }
 
-export interface ObsItem {
-  kind: string;
-  time_us: number | null;
-  fields?: Record<string, number | string>;
+/** 条件の回数（デーモンの fpga_obs.count の条件ごとの結果。数えた範囲の事実を含む。読めない条件は error） */
+export interface ConditionCount {
+  condition: string;
+  count?: number;
+  values?: number;                 // 数えた値の数
+  t0_us?: number | null;           // 最初と最後の値の時刻（fprobe の時刻 µs。値が無ければ null）
+  t1_us?: number | null;
+  span_s?: number | null;
+  gaps?: number;                   // 切れ目の数
+  lost?: number;                   // 失った変化の数
+  error?: string;
 }
 
-/** 1 つの項が、直前の値 prev から今の値 cur で成り立つか（rose / fell は 0 と 0 以外） */
-function holds(t: Term, cur: number | string | undefined, prev: number | string | undefined): boolean {
-  const on = (x: number | string | undefined) => x !== undefined && x !== 0 && x !== "0";
-  switch (t.op) {
-    case "changed": return cur !== prev;
-    case "rose": return !on(prev) && on(cur) && prev !== undefined;
-    case "fell": return on(prev) && !on(cur) && cur !== undefined;
-    default: return String(cur) === t.value;
-  }
+/** 条件の回数をデーモンに数えさせる（最後の last 件。使う人が欄で入れた値。画面では数えない）。条件・件数が無ければ
+ *  問い合わせず null */
+export async function readConditionCounts(conn: Pick<DaemonConnection, "call">, conditions: string[], last: number | null)
+    : Promise<Record<string, ConditionCount> | null> {
+  if (last === null || !conditions.length) return null;
+  const r = await conn.call("fpga_obs.count", { conditions, last }, { quiet: true });
+  return Object.fromEntries((r?.conditions ?? []).map((c: ConditionCount) => [c.condition, c]));
 }
 
-/** 値の並び（fpga_obs.read の items）で条件の成立回数と 1 秒あたりの回数。nowUs（fprobe の今の時刻）を渡すと直近
- *  RATE_WINDOW_US で数える（スナップショット型は変化しか残さないので、値が止まったら 0 になる）。省けば最初から最後の値まで。
- *  「変化」は直前の値の記録と比べる（欠落・グループ切り替えは飛ばす） */
-export const RATE_WINDOW_US = 2_000_000;
-
-export function countCondition(items: ObsItem[], terms: Term[], nowUs?: number | null): { count: number; perSecond: number | null } {
-  const values = items.filter((it) => it.kind === "value" && it.fields && it.time_us !== null);
-  if (values.length < 2) return { count: 0, perSecond: nowUs != null ? 0 : null };   // 観測中で値が無い = 変化なし
-  const first = values[0].time_us!;
-  const last = values[values.length - 1].time_us!;
-  const end = Math.max(nowUs ?? last, last);                 // 値は今の時刻より後に読むので、今より新しいこともある
-  const from = nowUs != null ? Math.max(first, end - RATE_WINDOW_US) : first;
-  let count = 0;
-  const prevOf = new Map<number, Record<string, number | string>>();   // グループ → 直前の値（別のグループと比べない）
-  for (const it of values) {
-    const group = (it as { group?: number }).group ?? 0, cur = it.fields!, prev = prevOf.get(group);
-    if (prev && it.time_us! >= from && terms.every((t) => holds(t, cur[t.field], prev[t.field]))) count++;
-    prevOf.set(group, cur);
-  }
-  const span = (end - from) / 1e6;
-  return { count, perSecond: span > 0 ? count / span : null };
+/** 使う人が入れる正の数（記録のメモリの読みの速さ 回/秒）。空・誤りは null（既定の値を持たない） */
+export function parseRate(text: string): number | null {
+  const s = text.trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  return n > 0 ? n : null;
 }
 
-/** 記録の縮図の波形（recording.overview の waveform: ch ごとに画素の 0 / 1 / x（画素の中で変化）/ -（波形が無い））で、
- *  波形のある所が全体で同じ値の ch（波形の無い ch は入れない） */
-export function flatChannels(waveform: string[]): number[] {
-  return waveform.flatMap((w, ch) => {
-    const levels = new Set(w.replace(/-/g, ""));
-    return levels.size === 1 && !levels.has("x") ? [ch] : [];
-  });
+/** 使う人が入れる正の整数（条件を数える件数 = 最後の N 件）。空・誤りは null（数えない） */
+export function parseCount(text: string): number | null {
+  const s = text.trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
 /** 結果の直前に多い出来事の例（recording.correlate の examples の 1 つ）を見る画面の状態: 時間軸の範囲は候補から結果までに、前後へ
@@ -140,6 +114,17 @@ export function exampleView(ex: { cause_t: number; effect_t: number }, timebaseH
   const margin = Math.max((ex.effect_t - ex.cause_t) / 2, 50e-6 * timebaseHz);
   return { view: { source: "recording" as const, t0: Math.round(ex.cause_t - margin), t1: Math.round(ex.effect_t + margin) },
            cursors: { reference: ex.cause_t, selection: ex.effect_t } };
+}
+
+/** recording.correlate の引数。結果の条件・窓（ms）は使う人が入れたものだけ（空なら null = 送らない。表の並び等から
+ *  暗黙に決めない）。auto なら候補を書かずデーモンが記録の変数から作る（causes = null） */
+export function correlateParams(effect: string, causes: string[], auto: boolean, windowMs: number | null, limit: number | null)
+  : { effect: string; causes: string[] | null; window_s: number; limit?: number } | null {
+  const e = effect.trim();
+  if (!e || windowMs === null || !Number.isFinite(windowMs) || windowMs <= 0) return null;
+  if (!auto) return causes.length ? { effect: e, causes, window_s: windowMs / 1000 } : null;
+  // 自動の候補: 返す数（上位 limit）は使う人が入れたものだけ（API の既定を暗黙に使わない）
+  return limit !== null && Number.isSafeInteger(limit) && limit > 0 ? { effect: e, causes: null, window_s: windowMs / 1000, limit } : null;
 }
 
 /** 条件（recording.correlate）の中の変数の名前: 空白・= ・" を含めば "…" で囲む（"Error count" changed） */
@@ -206,12 +191,40 @@ export function sanitizeConditions(raw: unknown): Condition[] {
     .map((c) => ({ name: typeof c.name === "string" && c.name.trim() ? c.name.trim() : c.expr.trim(), expr: c.expr.trim() }));
 }
 
-/** サンプラを使っている watch（watch.status の watches）が、システム解析の表と同じ名前・番地の組か（前に記録のために
- *  始めて、記録が条件・AI・別の窓で止まって残ったもの。自分のものとして引き継ぎ、記録を止めるときに止める） */
-export function ownWatch(running: { name: string; address: string | null }[], watches: Watch[]): boolean {
-  const key = (name: string, address: string) => `${name}@${address.toUpperCase()}`;
-  const mine = new Set(watches.map((w) => key(w.name, addressKey(w.address))));
-  return mine.size > 0 && running.length === mine.size && running.every((w) => w.address !== null && mine.has(key(w.name, w.address)));
+// --- 記録の欠けと分解能（デーモンの事実をそのまま描く） --------------------------------------------------
+
+/** 記録中に MCU のメモリの読みが止まったか: recording.status の watch_running が false（別の道具・AI が止めた等。
+ *  黙って欠けさせない）。startedWatch = この画面が記録のためにメモリの読みを始めた（始めていなければ知らせない）。
+ *  watch_running を申告しないデーモンでは止まったと言わない */
+export function memoryStopped(rec: { recording: boolean; watch_running?: boolean } | null, startedWatch: boolean): boolean {
+  return Boolean(rec?.recording) && startedWatch && rec?.watch_running === false;
+}
+
+/** recording.correlate の sampling（変数ごとの読みの周期 秒。周期の分からない変数は null）を変数ごとに ms で。
+ *  並びはデーモンの順のまま。最大を取る等でまとめない */
+export function samplingRows(sampling: Record<string, number | null> | undefined): { name: string; ms: number | null }[] {
+  return Object.entries(sampling ?? {}).map(([name, s]) => ({ name, ms: s === null ? null : s * 1000 }));
+}
+
+// --- MCU の番地の語を書く --------------------------------------------------------------------------
+
+/** 書く値の欄: 10 進・0x の 16 進（_ で区切ってよい）の 32 ビットの符号なしの値。崩れていれば null */
+export function parseWord(text: string): number | null {
+  const s = text.trim().replace(/_/g, "");
+  if (!/^(0x[0-9a-f]+|\d+)$/i.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) && n <= 0xFFFF_FFFF ? n : null;
+}
+
+/** 番地の語（32 ビット）に値を書く（target.memory.write。止めずに書ける）。人の操作なので、AI がつながっていて
+ *  一時停止していなければ先に確かめる（断れば書かない）。値が崩れていれば書かずに文言のキーを返す */
+export async function writeWord(app: Pick<AppState, "aiConnectedUnpaused" | "act">, address: number, text: string,
+                                ask?: Confirmer): Promise<"system.badWordValue" | null> {
+  const value = parseWord(text);
+  if (value === null) return "system.badWordValue";
+  if (!(await allowed(app, ask))) return null;
+  await app.act("target.memory.write", { address, data_hex: unitHex(value, 32) });
+  return null;
 }
 
 /** 番地でなく変数名（C の識別子・メンバーの . つき）と見える文字 */
@@ -226,12 +239,4 @@ export function symbolWatch(text: string, name: string, info: { address: number;
   if (info.kind && info.kind !== "object") return "system.notVariable";
   if (info.address % 4 !== 0) return "system.unaligned";
   return { name: name.trim() || text.trim(), address: info.address };
-}
-
-/** 記録の MCU のメモリの読みの速さ（DAP サンプラ、回/秒）。ピンも流す（ロジアナの深いバッファのストリーム）とき、
- *  Ethernet のリンクでは下げる: サンプラの SWD の転送で内部の ch（SWDIO 駆動・DAP 処理中）が細かく変わり、
- *  1000 回/秒ではストリームが 2.3 MB/s になって PYNQ の中継が詰まり、制御の応答が 1 往復 0.4〜1.4 秒になった。
- *  200 回/秒なら 0.7 MB/s・2 ms（2026-10-21 実機）。時刻の分解能は 5 ms になる */
-export function memoryRateHz(withPins: boolean, link: string | undefined): number {
-  return withPins && link === "eth" ? 200 : 1000;
 }

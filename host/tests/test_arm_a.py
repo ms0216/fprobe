@@ -171,6 +171,17 @@ def test_v7_step_masks_interrupts_with_intdis_and_uses_a_mismatch_breakpoint():
     assert t.read_core_register("pc") == 0x8004
 
 
+def test_a_step_that_times_out_and_is_halted_by_request_reports_the_request():
+    # ステップが時間切れ（WFI 等）で停止要求で止めたら、止まった理由は step ではなく要求（測った事実。?2）
+    link, cores, _ = pi2()
+    core = cores[0]
+    core.regs[15], core.asleep = 0x8000, True
+    t = connect(link, "bcm2836").target
+    t.core.timeout_s = 0.05
+    t.step()
+    assert t.get_halt_reason() == Target.HaltReason.USER and t.core.halt_cause() == "halt_request"
+
+
 def test_v7_breakpoints_and_watchpoints_hit():
     link, cores, _ = pi2()
     core = cores[0]

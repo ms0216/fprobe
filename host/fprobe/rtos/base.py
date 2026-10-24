@@ -5,6 +5,8 @@ RTOS ごとの読み手（FreeRTOS・Zephyr・RTX5・ThreadX・µC/OS-III・Nutt
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from ..dwarf.access import TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.inspector import Inspector
@@ -12,24 +14,50 @@ from ..dwarf.location import MemoryPlace
 from .cortexm import ContextAccess, SavedContext
 from .frames import task_inspector
 from .model import HeapInfo, KernelObject, Task
+from .objects import Found, typed_variables
 from .structs import Memory
 
-__all__ = ["KernelAwareness"]
+__all__ = ["NAME_LIMIT", "KernelAwareness", "stopped_note"]
 
 MAX_CHAIN = 4096                  # 辿る列の長さの上限（壊れたリストでも止まる）
+NAME_LIMIT = 64                   # ポインタの先の名前を読む上限の既定（KernelAwareness の name_limit。切ったら warnings）
+
+
+def stopped_note(what: str, n: int, reason: str, limit: int | None = None) -> str:
+    """列を辿るのを止めた理由の事実の文。上限に達しただけでは壊れているとは言わない（正当な長い列もある）。
+    reason: cycle（前に通った項目に戻った）/ null（終わりの印の前に NULL）/ over_count（数 limit より多く続く）/
+    limit（辿る上限 limit に達した）。"""
+    if reason == "cycle":
+        return f"{what}: {n} 個の後、前に通った項目に戻った（輪）。そこで止めた"
+    if reason == "null":
+        return f"{what}: {n} 個の後に NULL（終わりの印に届かない）。そこで止めた"
+    if reason == "over_count":
+        return f"{what}: 数（{limit}）より多くの項目が続く。{n} 個で止めた"
+    return f"{what}: 辿る上限 {limit} 個に達したので止めた（続きは読んでいない）"
 
 
 class KernelAwareness:
     name = "?"
     priority_order = 1            # 優先度の向き: 1 = 大きい方が高い（FreeRTOS）、-1 = 小さい方が高い（Zephyr）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None):
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, name_limit: int = NAME_LIMIT):
+        """name_limit: ポインタの先の名前を読む上限のバイト数（それまでに NUL が無ければ切って warnings に書く）。"""
+        if name_limit < 1:
+            raise ValueError("name_limit は 1 以上")
         self.info = info
         self.access = access
         self.symbols = symbols
-        self.mem = Memory(access.read_memory)
+        self.name_limit = name_limit
+        self._truncated_names: set[int] = set()
+        self.mem = Memory(access.read_memory, self._name_truncated)
         self.warnings: list[str] = []
         self._names: dict[int, str] = {}
+
+    def _name_truncated(self, address: int, limit: int) -> None:
+        if address not in self._truncated_names:
+            self._truncated_names.add(address)
+            self.warnings.append(f"0x{address:08X} の名前は {limit} バイトまでに NUL が無いので、そこで切った"
+                                 "（上限は name_limit）")
 
     # --- RTOS ごとに作る ------------------------------------------------------------------------
 
@@ -43,6 +71,13 @@ class KernelAwareness:
     def objects(self, kinds: list[str] | None = None, tasks: list[Task] | None = None) -> list[KernelObject]:
         """カーネルのオブジェクトの一覧（kinds で絞る。tasks は待ち手の名前に使う。省けば tasks() を読む）。"""
         raise NotImplementedError
+
+    def typed_objects(self, structs: Mapping[str, str], **options) -> list[Found]:
+        """変数の型でオブジェクト・ハンドルを探す（fprobe.rtos.objects.typed_variables。options はその上限・exclude）。
+        上限・読めないことで見ていない所の事実は warnings に足す（黙って捨てない）。"""
+        search = typed_variables(self.info, self.mem, structs, **options)
+        self.warnings.extend(search.notes())
+        return search.found
 
     def heap(self) -> HeapInfo | None:
         """RTOS のヒープの要約（無ければ None）。"""
@@ -111,7 +146,7 @@ class KernelAwareness:
         var = self.info.global_variable(name)
         place = var.place()
         if not isinstance(place, MemoryPlace):
-            raise KeyError(f"{self.name} の変数 {name} の場所が分からない（最適化で消えた?）")
+            raise KeyError(f"{self.name} の変数 {name} の場所が分からない（DWARF に位置が無い）")
         return place.address
 
     def optional_address(self, name: str) -> int | None:
@@ -127,7 +162,7 @@ class KernelAwareness:
         node, seen = head, set()
         while node:
             if node in seen or len(seen) >= MAX_CHAIN:
-                self.warnings.append(f"{what} の列が壊れている（{len(seen)} 個で止めた）")
+                self.warnings.append(stopped_note(f"{what} の列", len(seen), "cycle" if node in seen else "limit", MAX_CHAIN))
                 return out
             seen.add(node)
             out.append(node)

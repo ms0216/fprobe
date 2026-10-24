@@ -97,7 +97,7 @@ class RiscvTarget:
         if cause == "trigger":
             pc = self.dm.read_csr(CSR["dpc"])
             return Target.HaltReason.BREAKPOINT if pc in self.breakpoints else Target.HaltReason.WATCHPOINT
-        return _REASONS.get(cause, Target.HaltReason.USER)
+        return _REASONS.get(cause)                                # dcsr.cause が表に無ければ None（分からない）
 
     def enable_ebreak(self) -> None:
         """M・U モードの ebreak でデバッグモードに入る（Arm の BKPT と同じく、ソフトのブレーク命令で止まる）。"""

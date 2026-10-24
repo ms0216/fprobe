@@ -1,5 +1,5 @@
 // 画面の状態: デーモンの応答と通知から組み立てる。Svelte に依らない（store の約束 subscribe だけを満たす）。
-import { errorText, type DaemonConnection, type LinkState, type Methods } from "./api";
+import { errorText, type CallOptions, type DaemonConnection, type LinkState, type Methods } from "./api";
 import { setChannelLayout } from "./waveform";
 
 export interface ActivityEntry {
@@ -7,6 +7,7 @@ export interface ActivityEntry {
   time: string;
   client: string;
   role: string;
+  via?: string;               // つながり方（api / gdb / hook / tcp 等。デーモンが記録した事実）
   method: string;
   params: unknown;
   result?: unknown;
@@ -70,14 +71,15 @@ export class AppState {
     return () => this.listeners.delete(fn);
   }
 
-  /** 一時停止していなくて、AI の利用者がつながっている */
-  get aiWorking(): boolean {
+  /** AI の利用者がつながっていて、一時停止していない（2 つの事実の組。AI が作業中かは判定しない: つながっているだけで
+   *  何もしていないこともある） */
+  get aiConnectedUnpaused(): boolean {
     return !this.snap.control.paused && this.snap.clients.some((c) => c.role === "ai");
   }
 
   /** 操作する。誤りは error に出し、投げない（画面のボタンから呼ぶ）。誤りの表示は利用者が閉じるか、次の誤りで替わる
    *  （裏の読みの成功で、まだ読んでいない誤りを消さない） */
-  async act<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: { quiet?: boolean }): Promise<any> {
+  async act<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: CallOptions): Promise<any> {
     try {
       return await this.conn.call(method, params, opts);
     } catch (e) {
@@ -104,6 +106,16 @@ export class AppState {
     this.set({ error: null });
   }
 
+  /** いまの状態（画面の外の計算から読む） */
+  get current(): Snapshot {
+    return this.snap;
+  }
+
+  /** 送る前に画面で止めた理由を、操作の誤りと同じ所に出す */
+  report(message: string): void {
+    this.set({ error: message });
+  }
+
   private async reload(): Promise<void> {
     const status = await this.act("session.status");
     const otherBoot = status !== undefined && this.boot !== undefined && status.boot !== this.boot;
@@ -117,9 +129,8 @@ export class AppState {
     if (page) {
       let fresh: ActivityEntry[] = page.entries;
       const known = this.snap.activity;
-      // 別の起動（または番号が手元より戻った）= デーモンが再起動した。古い行と混ぜない
-      const restarted = otherBoot ||
-        (known.length > 0 && (fresh.length === 0 || fresh[fresh.length - 1].seq < known[known.length - 1].seq));
+      // 別の起動（session.status の boot が違う）= デーモンが再起動した。古い行と混ぜない（番号の戻りから推さない）
+      const restarted = otherBoot;
       if (!restarted && known.length > 0) {
         // 切れている間に PAGE 件より多く流れたら、手元の続きまでさかのぼって間を埋める
         const last = known[known.length - 1].seq;

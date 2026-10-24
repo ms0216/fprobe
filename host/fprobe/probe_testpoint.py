@@ -75,6 +75,7 @@ class _Run:
     rtt_listener: object = None
     started_rtt: bool = False
     synced: bool = False                 # rtt: 最初の正しい記録を見た（受け始めの途中の記録は数えない）
+    skipped_before_sync: int = 0         # rtt: 最初の正しい記録より前に捨てた解読の項目の数
     host_clock: tuple[float, int, float] | None = None     # (ホストの時刻, タイムベース, 不確かさ) 記録していないとき
 
     @property
@@ -96,7 +97,7 @@ class TestpointTools:
                              variables: list[str] | None = None, include: list[str] | None = None,
                              exclude: list[str] | None = None, branches: bool = True, only_changed: bool = False,
                              baseline: str | None = None, renumber: bool = False,
-                             line_root: str | None = None) -> dict:
+                             line_root: str | None = None, non_type_words: list[str] | None = None) -> dict:
         """C のソース（source_dir の下の *.c）にテストポイントを入れた写しを out_dir に作り、ID の対応表（map_path、
         既定 out_dir/testpoints.json）を書く。対応表が既にあれば前回として読み、中身の変わらない関数の ID を保つ
         （差分の再挿入。renumber で振り直す）。only_changed は前回（baseline、既定は前回の対応表）から変わった・新しい
@@ -106,7 +107,8 @@ class TestpointTools:
         table_path = Path(map_path) if map_path else out / "testpoints.json"
         previous = ProbeTable.load(table_path) if table_path.exists() else None
         options = Options(branches=branches, variables=tuple(WatchVar.parse(v) for v in variables or ()),
-                          include=tuple(include or ()), exclude=tuple(exclude or ()), only_changed=only_changed)
+                          include=tuple(include or ()), exclude=tuple(exclude or ()), only_changed=only_changed,
+                          non_type_words=tuple(non_type_words or ()))
         result = instrument_tree(Path(source_dir), out, options=options, previous=previous,
                                  baseline=ProbeTable.load(Path(baseline)) if baseline else None, map_path=table_path,
                                  renumber=renumber, line_root=Path(line_root) if line_root else None)
@@ -128,14 +130,18 @@ class TestpointTools:
                         port: int = 1, swo_baud: int | None = None, core_clock_hz: float | None = None,
                         rtt_channel: int = 1, duration_s: float | None = None, bucket_s: float = 1.0,
                         silence_s: float | None = None, open_s: float | None = None,
-                        long_s: float | None = None) -> dict:
+                        long_s: float | None = None, guard_samples: int | None = None,
+                        tree_max_depth: int = 64) -> dict:
         """テストポイントの受け取りを始める（すぐ戻る。結果は testpoint_report / testpoint_stop）。method:
-        gpio_serial（clock_channel・data_channel）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。
+        gpio_serial（clock_channel・data_channel・guard_samples = 開始・終了を認めるまで CLK が 1 のままのサンプル数。
+        CLK と DAT のずれを何サンプルまで許すか。既定は無い）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。
         strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから
         after_beats 拍。stop で読む）か stream（流し続ける。長時間向け）。itm は SWO（port のスティミュラス・ポート。
         swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定する）。rtt は RTT の上りの rtt_channel（core_clock_hz =
         CYCCNT の速さが要る。RTT の受信が無ければ始める）。duration_s を渡すと stop はそこまで待つ（stream は自分で終わる）。
-        bucket_s・silence_s・open_s・long_s は印の設定（どれも明示したときだけ。long_s = これより長い呼び出しに印）。記録中なら stream "testpoint" に書く。"""
+        bucket_s・silence_s・open_s・long_s は印の設定（どれも明示したときだけ。long_s = これより長い呼び出しに印）。
+        tree_max_depth = 呼び出しの木の深さの上限（より深い呼び出しは木に入れず tree_cut に数える）。記録中なら
+        stream "testpoint" に書く。"""
         if method not in METHODS:
             raise ValueError(f"method は {' / '.join(METHODS)}")
         if method.startswith("gpio") and capture not in CAPTURES:
@@ -146,14 +152,19 @@ class TestpointTools:
         if table_path is None:
             raise RuntimeError("対応表が無い（testpoint_instrument の後か、map_path で testpoints.json を指定する）")
         table = ProbeTable.load(table_path)
-        options = {"bucket_s": bucket_s, "silence_s": silence_s, "open_s": open_s, "long_s": long_s}
+        if tree_max_depth < 0:
+            raise ValueError("tree_max_depth は 0 以上")
+        options = {"bucket_s": bucket_s, "silence_s": silence_s, "open_s": open_s, "long_s": long_s,
+                   "max_depth": tree_max_depth}
         with self._lock:
             if self._tp_run is not None:
                 raise RuntimeError("テストポイントを受け取っている（testpoint_stop を先に）")
             if method == "gpio_serial":
                 run = self._tp_start_gpio(table, table_path, method, capture, options, rate_hz, rle, trigger, after_beats,
-                                       SerialDecoder(*self._tp_serial_channels(clock_channel, data_channel)),
-                                       clock_channel, {"clock_channel": clock_channel, "data_channel": data_channel})
+                                       SerialDecoder(*self._tp_serial_channels(clock_channel, data_channel),
+                                                     self._tp_guard(guard_samples)),
+                                       clock_channel, {"clock_channel": clock_channel, "data_channel": data_channel,
+                                                       "guard_samples": guard_samples})
             elif method == "gpio_parallel":
                 if not data_channels or strobe_channel is None:
                     raise ValueError("gpio_parallel には data_channels（2 本以上）と strobe_channel が要る")
@@ -175,6 +186,12 @@ class TestpointTools:
         if clock_channel is None or data_channel is None:
             raise ValueError("gpio_serial には clock_channel と data_channel が要る")
         return clock_channel, data_channel
+
+    @staticmethod
+    def _tp_guard(guard_samples: int | None) -> int:
+        if guard_samples is None or guard_samples < 0:
+            raise ValueError("gpio_serial には guard_samples（0 以上。CLK と DAT のずれを許すサンプル数）が要る")
+        return guard_samples
 
     def _tp_analysis(self, table: ProbeTable, hz: float, options: dict) -> LiveAnalysis:
         return LiveAnalysis(table, hz, recorder=self._recorder, **options)
@@ -323,7 +340,9 @@ class TestpointTools:
         if not run.synced:                                        # 受け始めの途中の記録は取りこぼしではない
             first = next((k for k, i in enumerate(items) if isinstance(i, Hit)), None)
             if first is None:
+                run.skipped_before_sync += len(items)
                 return
+            run.skipped_before_sync += first
             items, run.synced = items[first:], True
         if run.live.time_map is None:
             # かたまりの最後の記録は、前の読みからこの読みまでの間に書かれた: 不確かさに RTT の読みの周期を足す
@@ -338,7 +357,8 @@ class TestpointTools:
         return self.session.device.capabilities().timebase_hz
 
     def _tp_host_ticks(self, run: _Run, host_s: float) -> tuple[int, float]:
-        """ホストの単調時計 → タイムベース（記録中なら記録の時計の対応付け、そうでなければ始めたときの 1 点と公称の速さ）。"""
+        """ホストの単調時計 → タイムベース（記録中なら記録の時計の対応付け、そうでなければ始めたときの 1 点と公称の速さ。
+        1 点では速さが分からないので、不確かさに点からの経過時間をそのまま足す: fprobe.recording.ClockMap と同じ）。"""
         rec = run.live.recorder
         if rec is not None:
             try:
@@ -346,7 +366,8 @@ class TestpointTools:
             except RuntimeError:
                 pass                                              # 記録を始めた直後で対応付けの点が無い
         h, ticks, uncertainty = run.host_clock
-        return ticks + round((host_s - h) * self._tp_timebase_hz()), uncertainty
+        hz = self._tp_timebase_hz()
+        return ticks + round((host_s - h) * hz), uncertainty + abs(host_s - h) * hz
 
     def testpoint_stop(self, timeout_s: float = 10.0, top: int = 10) -> dict:
         """受け取りを止めて解析を終える（開いたままの入口に open_s を超えれば no_exit）。duration_s を渡して始めたなら
@@ -495,6 +516,8 @@ class TestpointTools:
                "settings": dict(run.settings), "hits": run.live.hits, "losses": run.live.losses,
                "elapsed_s": (run.stopped or time.monotonic()) - run.started, "recorded": run.live.recorder is not None,
                "warnings": list(run.warnings)}
+        if run.method == "rtt":
+            out["skipped_before_sync"] = run.skipped_before_sync      # 受け始めの途中で捨てた項目（取りこぼしとは数えない）
         if run.capture is not None:
             out["capture"] = run.capture
         if run.duration_s is not None:
@@ -503,6 +526,8 @@ class TestpointTools:
             out["error"] = run.error
         if isinstance(run.decoder, ParallelDecoder) and run.decoder.unsynced:
             out["unsynced_symbols"] = run.decoder.unsynced
+        if isinstance(run.decoder, RttDecoder):           # 記録の間が 2^32 クロックより短い前提で戻した回数
+            out["cyccnt_wraps"] = run.decoder.wraps
         if run.stream is not None:
             stats = run.stream.stats()
             out["stream"] = {"samples": stats.samples, "duration_s": stats.duration_s, "mb_per_s": stats.mb_per_s,

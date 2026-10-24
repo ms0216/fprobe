@@ -8,10 +8,11 @@ import pytest
 
 from fprobe.callgraph import CallGraph
 from fprobe.disasm import Disassembler
+from fprobe.dwarf.info import DebugInfo
 from fprobe.export.profile_formats import (FileCoverage, callgrind_from_profile, callgrind_from_tree,
                                            coverage_from_profile, coverage_from_testpoint, dot_from_profile,
-                                           dot_from_tree, gmon_bytes, render_gcov, render_lcov, tree_edges,
-                                           write_gcov)
+                                           dot_from_tree, dwarf_declarations, gmon_bytes, render_gcov, render_lcov,
+                                           tree_edges, write_gcov)
 from fprobe.profile import PcSamples, Profiler, coverage
 from fprobe.symbols import Symbols
 from fprobe.testpoint import FunctionInfo, Hit, Probe, ProbeTable, analyze
@@ -104,13 +105,35 @@ def test_callgrind_from_the_call_tree():
 
 def test_lcov_from_pc_samples(sram):
     symbols, dis, prof = sram
-    files = coverage_from_profile(coverage(prof, dis, all_functions=True), prof)
+    info = DebugInfo(SRAM)
+    files, undeclared = coverage_from_profile(coverage(prof, dis, all_functions=True), prof,
+                                              dwarf_declarations(info))
+    tick = info.function_at(symbols.symbol("tick").address)
+    fn = {name: (fc.path, rec.line) for fc in files for name, rec in fc.functions.items()}
+    assert fn["tick"] == (tick.decl_file, tick.decl_line) and undeclared == []      # DW_AT_decl_file・decl_line
     text = render_lcov(files, "pc", source_root="/work")
     assert text.startswith("TN:pc\nSF:/work/") and text.rstrip().endswith("end_of_record")
     assert "FN:" in text and "FNDA:4,tick" in text and "FNDA:0,default_handler" in text
     da = [line for line in text.splitlines() if line.startswith("DA:")]
     assert any(line.endswith(",0") for line in da) and sum(int(x.split(",")[1]) for x in da) == 5
     assert "LF:" in text and "LH:" in text
+
+
+def test_the_function_record_goes_to_the_declared_file_not_the_most_lines():
+    # 関数の行が複数のファイルにまたがる（インライン展開）とき、行の最も多いファイルを所在とみなさない。所在は
+    # DWARF の DW_AT_decl_file・DW_AT_decl_line（仕様の情報）。無ければ FN を書かず undeclared に返す
+    from types import SimpleNamespace
+
+    from fprobe.profile.coverage import FunctionCoverage
+    lines = (("a.c", 10), ("inline.h", 3), ("inline.h", 4), ("inline.h", 5))
+    cov = SimpleNamespace(functions=[FunctionCoverage("f", 0x100, 16, 8, 0, lines, ()),
+                                     FunctionCoverage("g", 0x200, 4, 2, 0, (("b.c", 1),), ())])
+    profile = SimpleNamespace(line_counts={}, function_counts={"f": 3})
+    declared = {0x100: ("a.c", 9)}
+    files, undeclared = coverage_from_profile(cov, profile, lambda address: declared.get(address, (None, None)))
+    by_path = {fc.path: fc for fc in files}
+    assert by_path["a.c"].functions["f"].line == 9 and by_path["a.c"].functions["f"].count == 3
+    assert "f" not in by_path["inline.h"].functions and undeclared == ["g"] and not by_path["b.c"].functions
 
 
 def _table() -> ProbeTable:

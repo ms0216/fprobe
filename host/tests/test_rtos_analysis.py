@@ -64,6 +64,15 @@ def test_load_series_excludes_gaps_and_counts_interrupts():
     assert w0["isr"] == pytest.approx(0.1) and w0["tasks"]["low"] == pytest.approx(0.2)
     assert w0["load"] == pytest.approx(0.3)                             # 割り込みは負荷に入る
     assert w1["covered"] == 80 and w1["load"] == pytest.approx(50 / 80)
+    # その他 = 負荷のうちタスク・割り込みの名前の分からない分（情報のある時間 − アイドル − 割り込み − タスク。整数で数える）
+    assert w0["other"] == 0 and w1["other"] == 0
+
+
+def test_load_series_other_is_the_load_not_in_tasks_or_interrupts():
+    # 50〜60 はどのタスクも動いていない（run が無い）が抜けでもない: 負荷には入り、タスク・割り込みに入らない
+    tl = timeline([(L, 0, 50), (IDLE, 60, 100)])
+    w0 = load_series(tl, 100, idle={IDLE})["windows"][0]
+    assert w0["load"] == pytest.approx(0.6) and w0["other"] == pytest.approx(0.1)
 
 
 def test_load_series_needs_a_positive_window_and_says_nothing_without_runs():
@@ -132,7 +141,9 @@ def test_memory_series_from_saved_stack_pointers_and_heap_free():
     out = memory_series(samples, slots, points=2)
     low = out["stacks"]["low"]
     assert (low["size"], low["max_used"], low["min_used"], low["last_used"]) == (512, 300, 100, 200)
-    assert low["max_at"] == 10 and low["points"] == [[0, 300], [16, 200]]       # 窓ごとの最大
+    # 窓ごとの、その窓のサンプルの最大。サンプルの無い窓に前の値を続けて置かない（値は次のサンプルまで続くと仮定しない）
+    assert low["max_at"] == 10 and low["points"] == [[0, 300]]
+    assert out["heap"]["points"] == [[16, 700]]
     heap = out["heap"]
     assert (heap["min_free"], heap["last_free"], heap["total"]) == (700, 700, 1000) and heap["min_at"] == 30
 
@@ -166,12 +177,12 @@ def test_inversion_episodes_from_sampled_mutex_words():
     samples = [(0, 0x10, L), (1, 0x14, 0x99), (10, 0x14, H), (11, 0x10, L), (36, 0x14, H), (40, 0x10, H),
                (41, 0x14, 0x99)]
     tl = timeline([(L, 0, 20), (M, 20, 35), (L, 35, 40), (H, 40, 50)])
-    out = inversion_episodes(tl, samples, [watch], PRIORITIES, names=NAMES)
+    out = inversion_episodes(tl, samples, [watch], PRIORITIES, 1, names=NAMES)
     assert out["available"] and out["count"] == 1
     (ep,) = out["episodes"]
     assert (ep["mutex"], ep["holder"], ep["waiter"], ep["t0"], ep["t1"]) == ("log_mutex", "low", "high", 10, 40)
     assert ep["duration"] == 30 and ep["holder_time"] == 15 and ep["interference"] == {"mid": 15}
-    assert ep["unbounded"] and out["max"]["duration"] == 30
+    assert ep["interfered"] and out["interfered"] == 1 and "unbounded" not in ep and out["max"]["duration"] == 30
 
 
 def test_a_task_after_the_last_sample_that_saw_the_inversion_is_not_interference():
@@ -180,10 +191,24 @@ def test_a_task_after_the_last_sample_that_saw_the_inversion_is_not_interference
     samples = [(0, 0x10, L), (1, 0x14, 0x99), (10, 0x14, H), (11, 0x10, L), (30, 0x14, H), (40, 0x10, H),
                (41, 0x14, 0x99)]
     tl = timeline([(L, 0, 32), (M, 32, 35), (H, 35, 50)])
-    (ep,) = inversion_episodes(tl, samples, [watch], PRIORITIES, names=NAMES)["episodes"]
-    assert ep["interference"] == {} and not ep["unbounded"] and ep["t1"] == 40
+    (ep,) = inversion_episodes(tl, samples, [watch], PRIORITIES, 1, names=NAMES)["episodes"]
+    assert ep["interference"] == {} and not ep["interfered"] and ep["t1"] == 40
 
 
 def test_inversion_without_mutex_words_is_not_guessed():
-    out = inversion_episodes(timeline([(L, 0, 10)]), [], [], PRIORITIES)
+    out = inversion_episodes(timeline([(L, 0, 10)]), [], [], PRIORITIES, 1)
     assert not out["available"] and out["reason"]
+
+
+@pytest.mark.parametrize("resolution, uncertainty, expected", [(1, 4, 8), (10, 0, 10)])
+def test_interference_uses_each_runs_own_uncertainty_not_the_median_interval(resolution, uncertainty, expected):
+    """逆転を見ていた範囲（10〜36）を、中間のタスクの区間の端の不確かさ（実際の間隔の半分）だけ内側に縮めて数える。
+    間隔の中央値（resolution）で一律に縮めない。"""
+    watch = MutexWatch("log_mutex", holder_word=0x10, head_word=0x14, delta=0, empty=0x99)
+    samples = [(0, 0x10, L), (1, 0x14, 0x99), (10, 0x14, H), (11, 0x10, L), (36, 0x14, H), (40, 0x10, H),
+               (41, 0x14, 0x99)]
+    runs = [Run(L, "low", 0, 12, uncertainty), Run(M, "mid", 12, 22, uncertainty), Run(L, "low", 22, 40, uncertainty),
+            Run(H, "high", 40, 50)]
+    tl = Timeline("sampled", 0, 50, resolution, True, runs)
+    (ep,) = inversion_episodes(tl, samples, [watch], PRIORITIES, 1, names=NAMES)["episodes"]
+    assert ep["interference"] == {"mid": expected}

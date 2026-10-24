@@ -27,7 +27,7 @@ __all__ = ["BuildError", "BuildResult", "GowinBuilder", "git_state", "margin", "
 
 TIMING_REPORT = Path("impl") / "pnr" / "project_tr_content.html"
 INPUTS_STAMP = "inputs.sha256"           # 成功したビルドの入力のハッシュ
-BUILD_TIMEOUT_S = 20 * 60                # 1 回のビルドの上限（通常は 5〜8 分。混んだ回路で配置が終わらないことがある）
+BUILD_TIMEOUT_S = 60 * 60                # 1 回のビルドの上限（通常は 5〜8 分。Primer の fprobe は配線の限界に近く、20 分では配線が終わらないことがある。2026-10-24）
 
 
 class BuildError(RuntimeError):

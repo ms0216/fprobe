@@ -131,6 +131,17 @@ def test_watchpoint_stop_names_the_matched_comparator(probe, core):
     assert probe.gdb_poll()["stop"]["watch"] == {"address": 0x2000_0500, "kind": "access"}
 
 
+def test_watchpoint_stop_without_a_matched_comparator_names_no_watch(probe, core):
+    """DWT の MATCHED が無ければ、ウォッチポイントが 1 つだけでも「それが成立した」と決めない（点検 2 回目 ?:
+    probe_gdb.py:323-337。MATCHED は読むと消え、ほかの DWT の比較器が止めることもある）。"""
+    probe.gdb_breakpoint("gdb1", True, "write", 0x2000_0400, 4)
+    core.write32(probe_gdb.DWT_CTRL, 4 << 28)
+    probe.gdb_resume()
+    core.hit(0x0800_0120, Target.HaltReason.WATCHPOINT)
+    stop = probe.gdb_poll()["stop"]
+    assert stop["reason"] == "watchpoint" and "watch" not in stop
+
+
 def test_halt_by_another_user_is_a_stop(probe, core):
     probe.gdb_resume()
     probe.target_halt()                                          # AI・画面が止めた

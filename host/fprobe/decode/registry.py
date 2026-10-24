@@ -4,7 +4,11 @@
 - 波形を読む解読器: `function(tr: Transitions, **settings) -> Decoding`（lower が空）。
 - 積み重ねる解読器: `function(lower: Decoding, **settings) -> Decoding`（lower = 受け付ける下の解読の名前）。
   名前で呼ぶとき（`decode`）は、設定の中の「下の解読の名前」のキーに下の設定を入れる。例:
-  `decode("spiflash", tr, spi={"sck": 0, "mosi": 1, "miso": 2, "cs": 3}, address_bytes=3)`。何段でも重ねられる。
+  `decode("spiflash", tr, spi={"sck": 0, "mosi": 1, "miso": 2, "cs": 3, "mode": 0, "msb_first": True,
+  "word_bits": 8, "cs_active_low": True}, address_bytes=3)`。何段でも重ねられる。
+
+既定を持たない引数が必須の設定（describe の params の required）。名前で呼ぶとき（decode / decode_on）は、足りない
+設定の名前を挙げた ValueError にする。None を許す引数（`int | None`）は nullable（つながない線等を None で明示する）。
 
 利用者の解読器は `register` / `@decoder` で登録する。`load_file` は Python のファイルを読み込み、その中の登録を
 そのファイルのもの（origin）として持つ（読み直すと前の登録を置き換える。失敗したら登録簿は元のまま）。
@@ -18,11 +22,12 @@ import inspect
 import sys
 import threading
 import types
+import typing
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .core import Decoding
+from .core import CHANNEL, Decoding
 
 __all__ = ["BUILTIN", "Decoder", "decode", "decode_on", "decoder", "decoders", "get_decoder", "load_file",
            "register", "unregister"]
@@ -59,9 +64,17 @@ class Decoder:
             if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 continue
             required = p.default is p.empty
-            out.append({"name": p.name, "required": required,
+            out.append({"name": p.name, "required": required, "nullable": _nullable(p.annotation),
+                        "type": _param_type(p.annotation),
                         **({} if required else {"default": _jsonable(p.default)})})
         return out
+
+    def check(self, params: Mapping[str, object]) -> None:
+        """必須の設定（既定を持たない引数）がそろっているか。足りなければ、その名前を挙げた誤り。"""
+        missing = [p["name"] for p in self.parameters() if p["required"] and p["name"] not in params]
+        if missing:
+            raise ValueError(f"{self.name} の設定 {'・'.join(missing)} を渡す（既定の値は持たない。"
+                             f"つながない線は None を明示）")
 
     def describe(self) -> dict:
         doc = inspect.getdoc(self.function) or ""
@@ -69,6 +82,35 @@ class Decoder:
                 "params": self.parameters(),
                 "default_kinds": list(self.default_kinds) if self.default_kinds is not None else None,
                 "origin": self.origin}
+
+
+def _nullable(annotation) -> bool:
+    """引数の型が None を許すか（`int | None` 等）。型の注釈が無ければ分からないので False。"""
+    return type(None) in typing.get_args(annotation) or annotation is None
+
+
+_TYPES = {bool: "boolean", int: "integer", float: "number", str: "string", dict: "object"}
+
+
+def _param_type(annotation) -> str | None:
+    """引数の型の注釈 → 設定の型（申告の事実）: channel（core.Channel）/ channels（list[Channel]）/ integer / number /
+    boolean / string / object。None を除いて 1 つの型に決まらない・注釈が無い・知らない型は None（分からない）。"""
+    if annotation is inspect.Parameter.empty:
+        return None
+    args = typing.get_args(annotation) if isinstance(annotation, types.UnionType) or         typing.get_origin(annotation) is typing.Union else (annotation,)
+    kinds = [a for a in args if a is not type(None)]
+    if len(kinds) != 1:
+        return None
+    t = kinds[0]
+    if _is_channel(t):
+        return "channel"
+    if typing.get_origin(t) is list and len(typing.get_args(t)) == 1 and _is_channel(typing.get_args(t)[0]):
+        return "channels"
+    return _TYPES.get(typing.get_origin(t) or t)
+
+
+def _is_channel(t) -> bool:
+    return typing.get_origin(t) is typing.Annotated and CHANNEL in t.__metadata__
 
 
 def _jsonable(value):
@@ -141,8 +183,10 @@ def decode(protocol: str, tr, **params) -> Decoding:
     """名前で解読器を選んで解読する（API・MCP からの入口）。積み重ねる解読器は下から順に解読する。"""
     info = get_decoder(protocol)
     if not info.stacked:
+        info.check(params)
         return _checked(info, info.function(tr, **params))
     name, lower_params, own = split_settings(info, params)
+    info.check(own)
     return decode_on(protocol, decode(name, tr, **lower_params), **own)
 
 
@@ -155,6 +199,7 @@ def decode_on(protocol: str, lower: Decoding, **params) -> Decoding:
         raise ValueError(f"{protocol} が受け付ける下の解読は {list(info.lower)}（{lower.protocol!r}）")
     if lower.protocol not in _registry:
         raise ValueError(f"下の解読器 {lower.protocol} が登録されていない")
+    info.check(params)
     result = _checked(info, info.function(lower, **params))
     return dataclasses.replace(result, params={**result.params, lower.protocol: dict(lower.params)})
 

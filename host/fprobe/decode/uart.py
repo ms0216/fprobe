@@ -1,29 +1,29 @@
 """UART の解読。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md
 
-ボーレートは使う側が渡す（波形から推定しない: 雑音とみなす割合・1 ビットとみなす幅・標準値に寄せる等の経験則が要るため。
-CLAUDE.md の「本体にヒューリスティックを入れない」。1 ビットの長さは la.measure 等でパルスの幅を測れる）。"""
+ボーレートと枠の設定（データ・パリティ・ストップのビット、極性、ビットの順）は使う側が渡す（既定を持たない。CLAUDE.md の
+「境界の値は使う側が明示」）。ボーレートは波形から推定しない（雑音とみなす割合・1 ビットとみなす幅・標準値に寄せる等の
+経験則が要るため。CLAUDE.md の「本体にヒューリスティックを入れない」。1 ビットの長さは la.measure 等でパルスの幅を測れる）。"""
 
 import math
 
 from ..la import Transitions
-from .core import Annotation, ChannelLevels, Decoding
+from .core import Annotation, Channel, ChannelLevels, Decoding
 
 __all__ = ["decode_uart"]
 
 PARITIES = ("none", "even", "odd", "mark", "space")
 
 
-def decode_uart(tr: Transitions, channel: int, *, baud: float | None = None, data_bits: int = 8,
-                parity: str = "none", stop_bits: float = 1, invert: bool = False, lsb_first: bool = True) -> Decoding:
-    """1 本の UART の線を、渡したボーレートで解読する。"""
+def decode_uart(tr: Transitions, channel: Channel, *, baud: float, data_bits: int, parity: str, stop_bits: float,
+                invert: bool, lsb_first: bool) -> Decoding:
+    """1 本の UART の線を、渡したボーレートと枠の設定で解読する。枠の設定（data_bits・parity・stop_bits・invert
+    （線の極性）・lsb_first）は既定を持たない（典型の 8N1 で補わない。違えば parity・frame の誤りか化けた値になる）。"""
     if not 5 <= data_bits <= 9:
         raise ValueError(f"データビットは 5〜9（{data_bits}）")
     if parity not in PARITIES:
         raise ValueError(f"パリティは {PARITIES} のどれか（{parity!r}）")
     if stop_bits not in (1, 1.5, 2):
         raise ValueError(f"停止ビットは 1 / 1.5 / 2（{stop_bits}）")
-    if baud is None:
-        raise ValueError("baud（ボーレート）を渡す（波形から推定しない。1 ビットの長さは la.measure でパルスの幅を測れる）")
     if baud <= 0:
         raise ValueError(f"ボーレートが正でない（{baud}）")
     params = {"channel": channel, "baud": baud, "data_bits": data_bits,

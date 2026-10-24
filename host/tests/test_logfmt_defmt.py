@@ -171,3 +171,20 @@ def test_decode_with_the_elf_table(elf_table):
 def test_an_elf_without_defmt_is_refused():
     with pytest.raises(DefmtError):
         DefmtTable.from_elf(Path(__file__).resolve().parents[1] / "firmware" / "rtt_demo" / "rtt_demo.elf")
+
+
+def test_framing_is_not_assumed_when_the_elf_does_not_say():
+    """_defmt_encoding_ の無い表の枠を rzcobs と仮定しない（使う側が framing で明示する）。"""
+    t = DefmtTable({1: DefmtEntry("info", "x")})
+    assert t.encoding is None
+    with pytest.raises(DefmtError, match="framing"):
+        DefmtDecoder(t)
+
+
+def test_rzcobs_stream_reports_bytes_dropped_without_a_delimiter():
+    """区切りの来ない流れを上限（frame_limit）で捨てたら、その行に誤りと使った上限（cut_at）を出す。"""
+    t = table({1: "n={=u8}"}, timestamp=None, encoding="rzcobs")
+    d = DefmtDecoder(t, frame_limit=8)
+    out = d.feed(b"\x11" * 9 + b"\x00" + rzcobs_encode(b"\x01\x00\x05") + b"\x00")
+    assert out[0].error and out[0].cut_at == 8 and "9" in out[0].error and d.errors == 1
+    assert out[-1].text == "n=5"

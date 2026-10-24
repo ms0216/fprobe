@@ -45,22 +45,26 @@ class Ack(StrEnum):
     FAULT = "fault"
     NO_ACK = "no_ack"
     PROTOCOL = "protocol_error"
+    OTHER = "other"                                    # どの ACK か分からない転送の誤り（予期しない ACK・応答の数の食い違い等）
 
 
 _ACK_TEXT = {Ack.WAIT: "WAIT が続いた",                       # 事実だけ（原因の候補は並べない）
              Ack.FAULT: "FAULT（DP の誤りの印が立っている）",
              Ack.NO_ACK: "応答が無い",
-             Ack.PROTOCOL: "パリティ誤り・プロトコル誤り"}
+             Ack.PROTOCOL: "パリティ誤り・プロトコル誤り",
+             Ack.OTHER: "転送の誤り（ACK の種類は分からない）"}
 
 
 def ack_of(error: BaseException) -> Ack:
+    """pyOCD の転送の誤り → ACK。NO_ACK は pyOCD が "No ACK" と書いたものだけ（ほかの TransferError は OTHER: 分からない
+    ものを特定の原因の名前にしない）。"""
     if isinstance(error, DAPAccessIntf.TransferFaultError):
         return Ack.FAULT
     if isinstance(error, DAPAccessIntf.TransferTimeoutError):
         return Ack.WAIT
     if isinstance(error, DAPAccessIntf.TransferProtocolError):
         return Ack.PROTOCOL
-    return Ack.NO_ACK
+    return Ack.NO_ACK if "No ACK" in str(error) else Ack.OTHER
 
 
 class DapError(RuntimeError):

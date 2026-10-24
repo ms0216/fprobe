@@ -114,6 +114,8 @@ class Component:
     devarch: int | None = None
     children: list["Component"] = field(default_factory=list)
     error: str | None = None
+    truncated: str | None = None            # ROM テーブルの入口を最後までたどらなかった: "depth"（深さの上限）/ "limit"（総数の上限）
+    walk: dict | None = None                # 根だけ: たどりに使った上限と、読んだ部品の数・どこかで打ち切ったか
 
     @property
     def name(self) -> str:
@@ -140,6 +142,10 @@ class Component:
             out["devarch"] = self.devarch
         if self.error:
             out["error"] = self.error
+        if self.truncated:
+            out["truncated"] = self.truncated
+        if self.walk is not None:
+            out["walk"] = dict(self.walk)
         if self.children:
             out["children"] = [c.as_dict() for c in self.children]
         return out
@@ -171,18 +177,23 @@ def read_component(read: Read, base: int) -> Component:
 
 
 def walk_rom_table(read: Read, base: int, depth: int = 4, limit: int = 128) -> Component:
-    """base の部品を読み、ROM テーブルなら入口をたどる（深さ depth、全体で limit 個まで）。"""
+    """base の部品を読み、ROM テーブルなら入口をたどる（深さ depth、全体で limit 個まで）。上限で入口を最後まで
+    たどらなかった ROM テーブルには truncated（"depth" / "limit"）を付け、根の walk に使った上限・読んだ部品の数・
+    どこかで打ち切ったかを返す（打ち切った下の部品を「無い」と区別できるように）。"""
     seen: set[int] = set()
+    cut = False
 
     def visit(address: int, level: int) -> Component:
+        nonlocal cut
         seen.add(address)
         comp = read_component(read, address)
-        if comp.error or not comp.is_rom_table or level >= depth:
+        if comp.error or not comp.is_rom_table:
+            return comp
+        if level >= depth:
+            comp.truncated, cut = "depth", True
             return comp
         entries = 960 if comp.cls == CLASS_ROM else 512
         for i in range(entries):
-            if len(seen) >= limit:
-                break
             try:
                 entry = read(address + 4 * i)
             except Exception as e:
@@ -199,10 +210,15 @@ def walk_rom_table(read: Read, base: int, depth: int = 4, limit: int = 128) -> C
             child = (address + offset) & 0xFFFFFFFF
             if child in seen:
                 continue
+            if len(seen) >= limit:                       # まだ読んでいない部品が残っている所で止めた
+                comp.truncated, cut = "limit", True
+                break
             comp.children.append(visit(child, level + 1))
         return comp
 
-    return visit(base & 0xFFFFF000, 0)
+    root = visit(base & 0xFFFFF000, 0)
+    root.walk = {"depth": depth, "limit": limit, "components": len(seen), "truncated": cut}
+    return root
 
 
 # --- 部品の判別 ----------------------------------------------------------------------------------

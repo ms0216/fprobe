@@ -36,10 +36,13 @@ class LogRecord:
     timestamp_text: str | None = None           # 形式の決まりで整形した時刻（defmt の {=u64:us} 等）
     location: dict | None = None                # file・line・module・function（分かるもの）
     channel: str | None = None                  # Trice の "info:" 等のチャンネル
-    addresses: tuple[AddressHit, ...] = ()      # 本文の中のコードの番地
+    addresses: tuple[AddressHit, ...] = ()      # 本文の中の 0x の数のうち実行区画に入る値
     error: str | None = None                    # 解読できなかった理由（このとき raw に生のバイト）
     raw: bytes | None = None
     notes: tuple[str, ...] = field(default=())
+    cut_at: int | None = None                   # text: 改行の来ないままこのバイト数（使った上限）で切った行。
+                                                # defmt・trice: 区切りの来ないまま上限（このバイト数）を超えて捨てた
+    continued: bool = False                     # text: 前に上限で切った行の続き
 
     @property
     def kind(self) -> str:
@@ -61,6 +64,10 @@ class LogRecord:
             out["raw"] = self.raw.hex()
         if self.notes:
             out["notes"] = list(self.notes)
+        if self.cut_at is not None:
+            out["cut_at"] = self.cut_at
+        if self.continued:
+            out["continued"] = True
         return out
 
 

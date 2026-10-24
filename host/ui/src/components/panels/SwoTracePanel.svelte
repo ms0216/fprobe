@@ -2,14 +2,13 @@
   // SWO Trace（IAR の SWO Trace・STM32CubeIDE の SWV Data Trace / Exception Trace）: ターゲットを止めずに ITM・DWT を
   // 設定し（例外トレース・タイムスタンプ・データトレース = 変数へのアクセスを値・PC・時刻つきで）、結果を一覧にする。
   // 時刻はタイムベース: 時刻のリンク・行のダブルクリックで時間軸へ、時間軸の選択で近い行を選ぶ、アクセスを時間軸に印
-  import { errorText } from "../../lib/api";
   import { tick, untrack } from "svelte";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import {
-    MAX_COMPARATORS, configureParams, exceptionRows, tailOffset, valueText, type Access, type TraceSettings,
+    configureParams, exceptionRows, tailOffset, traceError, valueText, type Access, type TraceSettings,
   } from "../../lib/swotrace";
   import { SWO_BAUDS } from "../../lib/terminal";
   import { nearestAtOrBefore, onTimeline } from "../../lib/timeline/events";
@@ -28,7 +27,8 @@
       return null;
     }
   })();
-  let settings = $state<TraceSettings>(loaded ?? { exceptions: true, timestamps: false, swoBaud: 2_000_000,
+  // SWO の速さは使う人が選ぶ（2 MHz を既定にしない。Terminal の SWO と同じ）
+  let settings = $state<TraceSettings>(loaded ?? { exceptions: true, timestamps: false, swoBaud: null,
                                                    coreClockHz: null, variables: [{ expression: "", access: "write" }] });
   let result = $state<any>(null);
   let error = $state<string | null>(null);
@@ -76,8 +76,7 @@
                                               ...(filter ? { name: filter } : {}) }, { quiet: true });
       error = null;
     } catch (e) {
-      const text = errorText(e);
-      if (!/swo_configure/.test(text)) error = text;               // まだ設定していないのは誤りにしない
+      error = traceError(e);                                        // まだ設定していない（E_NO_DATA）は誤りにしない
     } finally {
       reading = false;
     }
@@ -85,8 +84,13 @@
 
   async function startTrace(e: Event) {
     e.preventDefault();
+    const params = configureParams(settings);
+    if ("error" in params) {
+      error = $i18n("swoTrace.needBaud");
+      return;
+    }
     if (!(await allowed(app))) return;
-    const done = await app.act("swo.configure", configureParams(settings) as any);
+    const done = await app.act("swo.configure", params as any);
     if (done !== undefined) await read();
   }
 
@@ -124,12 +128,13 @@
           {/if}
         </span>
       {/each}
-      {#if settings.variables.length < MAX_COMPARATORS}
-        <button type="button" class="small" title={$i18n("swoTrace.addTip")}
-                onclick={() => (settings.variables = [...settings.variables, { expression: "", access: "write" }])}>+</button>
-      {/if}
-      <label>{$i18n("terminal.swoBaud")}
-        <select bind:value={settings.swoBaud}>{#each SWO_BAUDS as b (b)}<option value={b}>{b.toLocaleString()}</option>{/each}</select>
+      <!-- 比較器の数はターゲットの DWT で決まる（画面は決め打ちしない。足りなければ swo.configure の誤りに数が出る） -->
+      <button type="button" class="small" title={$i18n("swoTrace.addTip")}
+              onclick={() => (settings.variables = [...settings.variables, { expression: "", access: "write" }])}>+</button>
+      <label>{$i18n("terminal.swoBaud")}<span class="req" aria-hidden="true">*</span>
+        <select bind:value={settings.swoBaud} aria-required="true">
+          {#if settings.swoBaud === null}<option value={null} disabled></option>{/if}
+          {#each SWO_BAUDS as b (b)}<option value={b}>{b.toLocaleString()}</option>{/each}</select>
       </label>
       <label>{$i18n("terminal.coreClock")}
         <input class="num mono" value={settings.coreClockHz ?? ""} inputmode="numeric"
@@ -146,6 +151,9 @@
     {#if result}
       <div class="summary muted">
         <span>{$i18n("swoTrace.accesses", { n: result.total })}</span>
+        {#if accesses.length < result.total}
+          <span class="warn">{$i18n("swoTrace.shown", { shown: accesses.length, total: result.total, limit: LIMIT })}</span>
+        {/if}
         {#if result.overflows || result.lost}<span class="warn">{$i18n("swoTrace.lost", { overflows: result.overflows, lost: result.lost })}</span>{/if}
         {#each exceptions as x (x.name)}<span class="exc">{x.name} <b>{x.count}</b></span>{/each}
         <span class="spacer"></span>

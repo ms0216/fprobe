@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from ..dwarf.access import AccessError
 from .model import KernelObject, Task, Waiter
-from .objects import typed_variables
 from .structs import StructLayout
 
 __all__ = ["KINDS", "TYPE_IDS", "UCOS3Objects"]
@@ -66,7 +65,7 @@ class UCOS3Objects:
         for kind, (type_name, struct_name) in KINDS.items():
             if kind in layouts:
                 structs[type_name] = structs[struct_name.removeprefix("struct ")] = kind
-        for f in sorted(typed_variables(self.rtos.info, self.mem, structs, exclude=self.rtos.kernel_pointers()),
+        for f in sorted(self.rtos.typed_objects(structs, exclude=self.rtos.kernel_pointers()),
                         key=lambda f: f.pointer):
             if self._typed(f.address, f.family):
                 names.setdefault(f.address, []).append(f.expression)

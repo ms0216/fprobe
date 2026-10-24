@@ -64,7 +64,7 @@ def test_parallel_truncated_record_is_a_loss():
 def test_serial_roundtrip():
     wave = Wave(8, RATE, idle={4: 1, 5: 1})
     synth.gpio_serial(wave, RECORDS, clock_channel=4, data_channel=5)
-    dec = decode_gpio_serial(wave.build(end_s=30e-6), 4, 5)
+    dec = decode_gpio_serial(wave.build(end_s=30e-6), 4, 5, guard=1)
     assert ids(dec.items) == [(i, v) for _, i, v in RECORDS] and not dec.losses
     assert [h.t for h in dec.hits] == [round(t * RATE) for t, _, _ in RECORDS]
 
@@ -74,7 +74,7 @@ def test_serial_tolerates_pin_skew():
     wave = Wave(8, RATE, idle={4: 1, 5: 1}, jitter=4e-9, seed=3)
     records = [(1e-6 + k * 12e-6, (k * 2654435761) & 0xFFFF or 1, k if k % 3 == 0 else None) for k in range(40)]
     synth.gpio_serial(wave, records, 4, 5)
-    dec = decode_gpio_serial(wave.build(end_s=records[-1][0] + 12e-6), 4, 5)
+    dec = decode_gpio_serial(wave.build(end_s=records[-1][0] + 12e-6), 4, 5, guard=1)
     assert ids(dec.items) == [(i, v) for _, i, v in records] and not dec.losses
 
 
@@ -83,7 +83,7 @@ def test_serial_chunks_and_mid_record_start():
     synth.gpio_serial(wave, RECORDS, 4, 5)
     a = wave.build(start_s=1.5e-6, end_s=6.4e-6)            # 最初の記録の途中から、3 つ目の途中まで
     b = wave.build(start_s=6.4e-6, end_s=30e-6)
-    dec = SerialDecoder(4, 5)
+    dec = SerialDecoder(4, 5, guard=1)
     items = dec.feed(a, 150) + dec.feed(b, 150 + a.length) + dec.flush()
     assert ids(items) == [(0x1234, None), (7, 0xDEADBEEF), (0xFFFF, 0), (2, None)]
     assert [h.t for h in items if isinstance(h, Hit)][0] == 300
@@ -92,7 +92,7 @@ def test_serial_chunks_and_mid_record_start():
 def test_serial_record_without_stop_is_a_loss():
     wave = Wave(8, RATE, idle={4: 1, 5: 1})
     synth.gpio_serial(wave, [(1e-6, 5, None)], 4, 5)
-    dec = decode_gpio_serial(wave.build(end_s=2e-6), 4, 5)
+    dec = decode_gpio_serial(wave.build(end_s=2e-6), 4, 5, guard=1)
     assert not dec.hits and len(dec.losses) == 1
 
 
@@ -144,6 +144,9 @@ def test_rtt_roundtrip_with_wraparound_and_split_feeds():
         items += dec.feed(raw[k:k + 5])
     items += dec.flush()
     assert items == [Hit(0xFFFF_FF00, 1, None), Hit((1 << 32) + 0x10, 2, 5), Hit((1 << 32) + 0x2000, 3, None)]
+    # 回り込みは「記録の間が 2^32 クロックより短い」前提で戻した: 仮定した回数を結果に出す（黙ってずらさない）
+    assert dec.wraps == 1
+    assert decode_rtt(raw, hz=1.0).wraps == 1 and decode_rtt(synth.rtt_bytes(records[1:]), hz=1.0).wraps == 0
 
 
 def test_rtt_resync_after_garbage():
@@ -155,3 +158,11 @@ def test_rtt_resync_after_garbage():
 def test_rtt_truncated_tail():
     dec = decode_rtt(synth.rtt_bytes([(100, 1, 9)])[:-2], hz=1.0)
     assert not dec.hits and len(dec.losses) == 1
+
+
+def test_the_guard_is_given_by_the_user():
+    # 総点検 S6: CLK と DAT のずれを何サンプルまで許すか（guard）は暗黙の既定にしない
+    with pytest.raises(TypeError):
+        SerialDecoder(4, 5)
+    with pytest.raises(TypeError):
+        decode_gpio_serial(Wave(channels=8, sample_rate_hz=1e6).build(end_s=1e-6), 4, 5)

@@ -33,6 +33,7 @@ class FakeProbe(UiStateTools):
         self.pc = 0x08000100
         self.counter = 0
         self.breakpoints: dict[int, str] = {}
+        self.bp_disabled = {}                    # 無効にしたブレークポイント（本物の breakpoint_enable）
         self.watchpoints: dict[int, dict] = {}
         self._elf = Probe("unused")              # ELF・ソースは本物（機器は開かない）
 
@@ -47,7 +48,8 @@ class FakeProbe(UiStateTools):
                 "time": 0, "target_connected": self.connected}
 
     def target_voltage(self):
-        return {"volts": 3.3, "over_range": False, "live": True, "samples": 100, "errors": 0}
+        return {"volts": 3.3, "over_range": False, "live": True, "samples": 100, "samples_before": 90, "window_s": 0.01,
+                "errors": 0}
 
     def target_connect(self, target="cortex_m", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None):
         self.connected, self.state = True, "HALTED"
@@ -84,8 +86,17 @@ class FakeProbe(UiStateTools):
     def halt_risk(self):
         return self._elf.halt_risk()
 
+    def halt_risk_set(self, names=None, patterns=None):
+        return self._elf.halt_risk_set(names, patterns)
+
+    def liveness_set(self, functions=None, patterns=None, pc_samples=None, tick_variable=None):
+        return self._elf.liveness_set(functions, patterns, pc_samples, tick_variable)
+
+    def liveness_get(self):
+        return self._elf.liveness_get()
+
     def sampler_status(self):
-        return {"user": None, "release": None, "since": None}
+        return {"user": None, "release": None, "since": None, "client": None}
 
     def symbol_info(self, location):
         return self._elf.symbol_info(location)
@@ -96,31 +107,48 @@ class FakeProbe(UiStateTools):
     def source_read(self, name):
         return self._elf.source_read(name)
 
-    def program_ram(self, path):
+    def program_ram(self, path, vector_table=None):
         self._need()
         self.elf_load(path)
-        self.state, self.pc = "HALTED", self._elf._symbols.entry
-        return {"reason": "user", "pc": self.pc, **self._elf._place_of(self.pc), "elapsed_s": 0.0}
+        entry = self._elf._symbols.entry
+        self.state, self.pc = "HALTED", entry
+        start = {"from": "entry" if vector_table is None else "vector_table", "entry": entry, "vector_table": vector_table}
+        return {"reason": "user", "pc": self.pc, **self._elf._place_of(self.pc), "elapsed_s": 0.0, "start": start}
 
     def _address(self, location):
         return int(location, 16) if location.startswith("0x") else self._elf._symbols.resolve(location)
 
     def breakpoint_set(self, location):
         address = self._address(location)
+        self.bp_disabled.pop(address, None)
         self.breakpoints[address] = location
         return {"address": address, **self._elf._place_of(address)}
 
     def breakpoint_clear(self, location=None):
         if location is None:
             self.breakpoints.clear()
+            self.bp_disabled.clear()
             self.watchpoints.clear()
         else:
             self.breakpoints.pop(self._address(location), None)
+            self.bp_disabled.pop(self._address(location), None)
+        return self.breakpoint_list()
+
+    def breakpoint_enable(self, location, enabled):
+        address = self._address(location)
+        if enabled and address in self.bp_disabled:
+            self.breakpoints[address] = self.bp_disabled.pop(address)
+        elif not enabled and address in self.breakpoints:
+            self.bp_disabled[address] = self.breakpoints.pop(address)
+        elif address not in self.breakpoints and address not in self.bp_disabled:
+            raise KeyError(f"{location!r} にブレークポイントが無い")
         return self.breakpoint_list()
 
     def breakpoint_list(self):
         self._need()                             # 本物と同じく、ターゲット未接続では誤り
-        return {"breakpoints": [{"address": a, "location": n, **self._elf._place_of(a)} for a, n in self.breakpoints.items()],
+        rows = [{"address": a, "location": n, "enabled": True, **self._elf._place_of(a)} for a, n in self.breakpoints.items()]
+        rows += [{"address": a, "location": n, "enabled": False, **self._elf._place_of(a)} for a, n in self.bp_disabled.items()]
+        return {"breakpoints": sorted(rows, key=lambda b: b["address"]),
                 "watchpoints": list(self.watchpoints.values())}
 
     def watchpoint_set(self, location, kind="write", size=None):

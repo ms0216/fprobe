@@ -1,18 +1,19 @@
-"""止めると壊れうるターゲットの手がかり（ELF のシンボルだけで。機器には触らない）。返すのは事実（ELF に、無線・USB・
-ウォッチドッグ・RTOS の決まった名前と合うシンボルがあるか）だけで、「このターゲットは壊れる」とは判定しない（CLAUDE.md）。
+"""止める前の手がかり（ELF のシンボルだけで。機器には触らない）。返すのは事実だけ: 使う側が明示して渡した名前
+（完全一致）・正規表現（re.search）に合うシンボルが ELF にあるか、と、ELF に fprobe のモニタがあるか。
 
-コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の間も、ターゲットの外の相手は待たない:
-無線の相手（BLE の接続は監視時間で切れ、コントローラの時刻がずれて致命的エラーになる）、USB のホスト（応答しない
-機器を切る）、ウォッチドッグ（止まっている間に満了しうる）、RTOS（ティック・タイムアウトがずれ、通信の相手と
-食い違う）。どれも ELF に手がかりが残る: 割り込みの処理の名前（RADIO_IRQHandler 等）、スタックの関数の接頭辞
-（Zephyr の BLE コントローラ ll_ / lll_ 等）、カーネルの大域変数（pxCurrentTCB・_kernel 等）。手がかりは
-RTOS・スタック・ツールチェーンの共通の名前で、特定の機器の名前ではない。
+コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の間も、ターゲットの外の相手（無線・USB の
+ホスト・ウォッチドッグ等）は待たないことがある。どの名前がそれに当たるかは本体では決めない（CLAUDE.md「fprobe 本体に
+ヒューリスティックを入れない」。関数名の接頭辞・部分一致で無線・USB・ウォッチドッグの種類を付けるのは、名前の慣習に
+頼る推定で、別のターゲットでは外れうる）。慣習の表で種類を付けるなら、プラグイン fprobe.plugins.heuristics の
+halt_risk_conventions（結果に heuristic・assumption が付く）。
 
-止めずにデバッグする方式（モニタ方式。target.debug_mode）なら、DebugMon より優先度の高い割り込み（無線・USB）は
-止まっている間も動く。ELF にモニタ（host/firmware/monitor の fprobe_monitor_init）があるかも返す。
+止めずにデバッグする方式（モニタ方式。target.debug_mode）なら、DebugMon より優先度の高い割り込みは止まっている間も
+動く。ELF にモニタ（host/firmware/monitor の fprobe_monitor_init。fprobe 自身のファームの名前）があるかも返す。
 
-    assess(Symbols("app.elf").names())
-    # {"matched": True, "matches": [{"kind": "radio", "count": 12, "symbols": ["RADIO_IRQHandler", ...]}, ...],
+    scan(Symbols("app.elf").names(), names=["RADIO_IRQHandler"], patterns=["^ll_"])
+    # {"names": [...], "patterns": [...], "matched": True,
+    #  "matches": [{"query": "RADIO_IRQHandler", "by": "name", "count": 1,
+    #               "symbols": [{"name": "RADIO_IRQHandler", "kind": "function", "address": 0x...}]}, ...],
     #  "monitor_in_elf": False}
 """
 
@@ -21,56 +22,47 @@ from collections.abc import Iterable
 
 from .symbols import Symbol
 
-__all__ = ["EVIDENCE", "KINDS", "assess"]
+__all__ = ["MONITOR", "compile_patterns", "scan"]
 
-EVIDENCE = 5                                   # 理由ごとに返す手がかりのシンボルの数
-
-# 種類 → 手がかりの名前の形
-_IRQ = r"_IRQHandler$"
-KINDS: dict[str, list[re.Pattern]] = {
-    # 無線: 無線の割り込み、BLE / 802.15.4 / Wi-Fi のスタックの関数
-    "radio": [re.compile(rf"^(RADIO|RF\w*|BLE\w*|BT\w*|WIFI\w*|WLAN\w*|IEEE802154\w*|LORA\w*|SUBGHZ\w*){_IRQ}", re.I),
-              re.compile(r"^(ll|lll|ull|radio|bt_ctlr|hci_driver|sdc|mpsl|btdm|nimble_port|ble_ll|ble_hs|sd_ble|"
-                         r"nrf_802154|esp_wifi|wlan|lora)_\w")],
-    # USB の機器（ホストが応答の無い機器を切る）
-    "usb": [re.compile(rf"^(USB\w*|OTG\w*){_IRQ}", re.I), re.compile(r"^(tud|usbd|USBD|usb_dc|udc)_\w")],
-    # ウォッチドッグ（止まっている間に満了しうる）
-    "watchdog": [re.compile(rf"^(WDT|IWDG|WWDG|WDOG)\w*{_IRQ}", re.I),
-                 re.compile(r"(^|_)(wdt|iwdg|wwdg|wdog|watchdog)(_|$)", re.I)],
-}
-# RTOS のカーネルの大域変数（FreeRTOS・Zephyr・ThreadX・RTX5・µC/OS・embOS・NuttX）
-RTOS_GLOBALS = {"pxCurrentTCB": "FreeRTOS", "_kernel": "Zephyr", "_tx_thread_current_ptr": "ThreadX",
-                "osRtxInfo": "RTX5", "OSTCBCurPtr": "uC/OS", "OS_Global": "embOS", "g_readytorun": "NuttX"}
-ORDER = ("radio", "usb", "watchdog", "rtos")                    # 返す順（決まった順。重さの順ではない）
 MONITOR = "fprobe_monitor_init"
 
 
-def assess(symbols: Iterable[Symbol]) -> dict:
-    """シンボルの並び → {"matched"（どれかの名前が合った）, "matches": [{"kind", "count", "symbols"（合ったシンボルの
-    先頭）, "rtos"?}], "monitor_in_elf"}。matches は決まった順（radio → usb → watchdog → rtos）。"""
-    found: dict[str, list[str]] = {k: [] for k in ORDER}
-    rtos: str | None = None
+def compile_patterns(patterns: Iterable[str]) -> list[re.Pattern]:
+    """正規表現の並びを読む（読めなければ ValueError）。"""
+    out = []
+    for p in patterns:
+        try:
+            out.append(re.compile(p))
+        except re.error as e:
+            raise ValueError(f"正規表現 {p!r} が読めない: {e}") from None
+    return out
+
+
+def scan(symbols: Iterable[Symbol], names: Iterable[str] = (), patterns: Iterable[str] = ()) -> dict:
+    """シンボルの並び → {"names", "patterns"（渡された条件）, "matched"（どれかに合った）, "matches"（合った条件ごと。
+    渡した順で、名前が先: {"query", "by" = name / pattern, "count", "symbols" = [{"name", "kind", "address"}] を名前の順に
+    全部}）, "monitor_in_elf"}。合わなかった条件は matches に入れない（names・patterns との差が「無い」の事実）。"""
+    names, patterns = list(names), list(patterns)
+    compiled = compile_patterns(patterns)
+    wanted = set(names)
+    by_name: dict[str, list[Symbol]] = {n: [] for n in names}
+    by_pattern: list[list[Symbol]] = [[] for _ in patterns]
     monitor = False
     for s in symbols:
-        name = s.name
-        if name == MONITOR:
+        if s.name == MONITOR:
             monitor = True
-        if s.kind == "object" and name in RTOS_GLOBALS:
-            found["rtos"].append(name)
-            rtos = rtos or RTOS_GLOBALS[name]
-            continue
-        if s.kind != "function":
-            continue
-        for kind, patterns in KINDS.items():
-            if any(p.search(name) for p in patterns):
-                found[kind].append(name)
-                break
+        if s.name in wanted:
+            by_name[s.name].append(s)
+        for hits, p in zip(by_pattern, compiled):
+            if p.search(s.name):
+                hits.append(s)
+    queries = [(n, "name", by_name[n]) for n in dict.fromkeys(names)] + \
+              [(p, "pattern", hits) for p, hits in zip(patterns, by_pattern)]
     matches = []
-    for kind in ORDER:
-        names = sorted(set(found[kind]), key=lambda n: (not n.endswith("IRQHandler"), n))
-        if names:
-            match = {"kind": kind, "count": len(names), "symbols": names[:EVIDENCE]}
-            if kind == "rtos":
-                match["rtos"] = rtos
-            matches.append(match)
-    return {"matched": bool(matches), "matches": matches, "monitor_in_elf": monitor}
+    for query, by, hits in queries:
+        if hits:
+            found = sorted({(s.name, s.kind, s.address) for s in hits})
+            matches.append({"query": query, "by": by, "count": len(found),
+                            "symbols": [{"name": n, "kind": k, "address": a} for n, k, a in found]})
+    return {"names": names, "patterns": patterns, "matched": bool(matches), "matches": matches,
+            "monitor_in_elf": monitor}

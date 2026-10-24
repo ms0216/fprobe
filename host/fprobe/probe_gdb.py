@@ -321,7 +321,9 @@ class GdbTools:
         return "sw" if bp.type == Target.BreakpointType.SW else "hw"
 
     def _gdb_hit_watch(self):
-        """どのウォッチポイントが成立したか（DWT の FUNCTION の MATCHED と COMP）。分からなければ、1 つだけならそれ。"""
+        """どのウォッチポイントが成立したか（DWT の FUNCTION の MATCHED と COMP）。MATCHED が無ければ None（ウォッチ
+        ポイントが 1 つだけでも、それと決めない: MATCHED は読むと消え、ほかの DWT の比較器が止めることもある）。
+        GDB には番地の無い停止（T05）で伝わる。"""
         watches = self.dbg.watches
         if not watches:
             return None
@@ -332,9 +334,9 @@ class GdbTools:
                     for w in watches.values():
                         if w.address <= comp < w.address + w.size:
                             return w
-        except Exception:
+        except Exception:                                   # noqa: BLE001  読めなければ分からない（None）
             pass
-        return next(iter(watches.values())) if len(watches) == 1 else None
+        return None
 
     # --- RTOS のタスク（GDB のスレッド） -------------------------------------------------------------
 

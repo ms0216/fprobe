@@ -145,6 +145,7 @@ class RulesTools:
 
     _last_rules: dict | None = None
     _last_inject: dict | None = None
+    _last_runs: dict[str, dict] = {}                 # "rules"・"inject" → {at（UNIX 秒）, caller}（rules_last）
 
     def _inject_host(self) -> _InjectHost:
         return _InjectHost(self)
@@ -156,10 +157,12 @@ class RulesTools:
         return Recording.open(directory)
 
     def rules_check(self, rules: dict | None = None, path: str | None = None, t0: int | None = None,
-                    t1: int | None = None, baseline: str | None = None, mark: bool = True, limit: int = 100) -> dict:
+                    t1: int | None = None, baseline: str | None = None, mark: bool = True, limit: int = 100,
+                    caller: dict | None = None) -> dict:
         """規則集（rules = 辞書、または path = JSON / YAML のファイル）を読む記録の範囲 [t0, t1) に当て、規則ごとの判定・
         期待値と実測・違反（時刻）を返す。mark なら違反を記録の stream "rule" に派生イベントとして書く（同じ規則集の
-        前の印は置き換え）。baseline（recording_list の name）で基準の記録の実測と比べる。"""
+        前の印は置き換え）。baseline（recording_list の name）で基準の記録の実測と比べる。caller: デーモンが渡す
+        呼び出し元（rules_last に残す）。"""
         _one_of(rules, path, "rules")
         try:
             ruleset = RuleSet.parse(rules) if rules is not None else RuleSet.load(path)
@@ -172,6 +175,7 @@ class RulesTools:
             if base is not None:
                 base.close()
         self._last_rules = result
+        self._last_runs = {**self._last_runs, "rules": {"at": time.time(), "caller": caller}}
         return result
 
     def rules_states(self, event: dict, field: str, labels: dict | None = None, t0: int | None = None,
@@ -195,11 +199,11 @@ class RulesTools:
         return {"path": path, "verdict": data["verdict"],
                 "requirements": {k: v["verdict"] for k, v in data["requirements"].items()}}
 
-    def inject_run(self, script: dict | None = None, path: str | None = None) -> dict:
+    def inject_run(self, script: dict | None = None, path: str | None = None, caller: dict | None = None) -> dict:
         """故障注入の台本（script = 辞書、または path = JSON / YAML）を試行する: 試行ごとに、割り込み書き込みの中身を
         設定し、条件（when: pattern / sequence / dap_match / host）を割り込み書き込みへつなぎ、成立を待ち、observe_s 後に
         判定（expect）し、restore する。記録中なら stream "inject" に注入の時刻（ハードウェアの時刻）で入る。
-        最後に割り込み書き込みを既定（ターゲット停止）へ戻す。"""
+        最後に割り込み書き込みを既定（ターゲット停止）へ戻す。caller: デーモンが渡す呼び出し元（rules_last に残す）。"""
         _one_of(script, path, "script")
         try:
             parsed = InjectScript.parse(script) if script is not None else InjectScript.load(path)
@@ -207,4 +211,11 @@ class RulesTools:
             raise ValueError(str(e)) from None
         result = run_script(self._inject_host(), parsed)
         self._last_inject = result
+        self._last_runs = {**self._last_runs, "inject": {"at": time.time(), "caller": caller}}
         return result
+
+    def rules_last(self) -> dict:
+        """最後の rules_check と inject_run（rules_report が証跡に書くもの）: それぞれ {result, at（UNIX 秒）, caller
+        （呼び出し元 {id, name, role}。分からなければ null）}。まだ無ければ null。機器には触れない。"""
+        return {kind: None if result is None else {"result": result, **self._last_runs.get(kind, {"at": None, "caller": None})}
+                for kind, result in (("rules", self._last_rules), ("inject", self._last_inject))}

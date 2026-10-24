@@ -110,9 +110,20 @@ class LongRecordingTools:
         """記録の全体の縮図（ミニマップ）: 画素ごと・stream ごとの件数、波形、分割の状態。長期の記録は事前計算した
         索引から（30 日でも速い。消した分割も粗い件数は残る）。画素の境は edges（タイムベース）。"""
         view = self._reading()
-        if isinstance(view, SegmentedRecording):
-            return {"recording": view.directory.name, **view.overview(width, streams)}
-        return {"recording": view.directory.name, **_plain_overview(view, width, streams)}
+        out = view.overview(width, streams) if isinstance(view, SegmentedRecording) else _plain_overview(view, width, streams)
+        return {"recording": view.directory.name, **out, "unchanged_channels": unchanged_channels(out.get("waveform", []))}
+
+
+def unchanged_channels(waveform: list[str]) -> list[int]:
+    """縮図の波形（ch ごとに画素の '0' / '1' / 'x' = 画素の中で変化 / '?' = 間引いた所でかたまりの中で変化 /
+    '-' = 波形が無い）で、波形のある画素が全部同じ値の
+    ch（記録の中で変化が無い）。波形の無い ch は入れない。"""
+    out = []
+    for ch, w in enumerate(waveform):
+        levels = set(w.replace("-", ""))
+        if len(levels) == 1 and not levels & {"x", "?"}:
+            out.append(ch)
+    return out
 
 
 def _plain_overview(view: Recording, width: int, streams: list[str] | None) -> dict:

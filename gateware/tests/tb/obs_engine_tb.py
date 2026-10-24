@@ -61,7 +61,7 @@ class Engine:
         await self.wait_for(lambda: int(self.dut.scans.value) >= start + n)
 
 
-async def setup(dut, *, enable=True, sync_period=0, words=8, chain=False):
+async def setup(dut, *, enable=True, sync_period=0, words=8, chain=False, id_scans=16):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     cocotb.start_soon(Clock(dut.tgt_clk, 20, unit="ns").start(start_high=False))
     for name in ("enable", "free_pins", "stuck_tdo", "stuck_low", "cmd_push", "cmd_data", "probes", "ir_before", "ir_after",
@@ -73,6 +73,7 @@ async def setup(dut, *, enable=True, sync_period=0, words=8, chain=False):
     dut.user_ir.value = 0x2
     dut.words.value = words
     dut.sync_period.value = sync_period
+    dut.id_scans.value = id_scans                # ID の応答を待つ上限（使う側が渡す）
     if chain:
         dut.ir_before.value, dut.ir_after.value, dut.dr_before.value, dut.dr_after.value = 4, 4, 1, 1
     dut.rst.value = 1
@@ -198,6 +199,7 @@ async def engine_stops_when_the_core_disappears(dut):
     dut.stuck_tdo.value = 1                     # 対象が答えなくなる（TDO = 1）
     await eng.wait_for(lambda: dut.stuck.value == 1)
     assert dut.id_ok.value == 1                 # 答えていた後に止まった（id_ok は残る。初めから答えない場合と区別できる）
+    assert dut.id_timeout.value == 0            # 理由は答えが違った（待つ上限ではない）
     n = len(eng.events)
     await eng.wait_for(lambda: dut.oe.value == 0)
     assert dut.running.value == 0
@@ -360,3 +362,12 @@ async def record_values_fire_the_match(dut):
     await eng.push(START)
     await eng.scans(3)
     await _match_sequence(dut, eng)
+
+
+@cocotb.test()
+async def an_id_wait_limit_of_zero_has_no_bound(dut):
+    # 待つ上限は使う側が渡す。0 = 上限なし（上限で打ち切らないので id_timeout は立たない）
+    eng = await setup(dut, id_scans=0)
+    await eng.push(START)
+    await eng.wait_for(lambda: dut.id_ok.value == 1 or dut.stuck.value == 1)
+    assert dut.id_ok.value == 1 and dut.stuck.value == 0 and dut.id_timeout.value == 0

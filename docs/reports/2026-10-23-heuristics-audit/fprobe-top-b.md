@@ -1,0 +1,1248 @@
+# ヒューリスティックの監査: host/fprobe 直下の後半（probe_hooks.py〜xtrig.py）
+
+2026-10-23。コードは変えていない（読んで分類しただけ）。原則は CLAUDE.md の「fprobe 本体にヒューリスティックを入れない」。
+
+## 1. 実行した検索
+
+各パターンを担当の 65 ファイルに rg -n で当てた。「文書」= コメント行・docstring の中の行（コードではないので除外）。
+「機械除外」= 検索 1・2 で、比べている数が 0・1・-1 だけの行（`> 0`・`>= 1`・`len(x) < 1` 等）と、`<<`・`>>` のシフトや識別子の中の数字に当たっただけで数との比較が無い行。
+
+| # | パターン | ヒット | 文書 | 機械除外 | 分類した | 内訳 |
+|---|---|---|---|---|---|---|
+| 1 | `[<>]=?\s*-?\d*\.?\d+` | 238 | 1 | 202（シフト・数でない一致 108、0/1 との比較 94） | 35 | F32 O1 D1 ?1 |
+| 2 | `-?\d*\.?\d+\s*[<>]=?` | 208 | 1 | 192（シフト・数でない一致 140、0/1 との比較 52） | 15 | F15 |
+| 3 | `\b\d+\.\d+\b` | 110 | 26 | 0（単位換算 1e3/1e6 は 1e 表記なのでこの式に当たらない） | 84 | O46 F20 E14 ?3 H1 |
+| 4 | `\*\s*\d+(\.\d+)?\b` | 16 | 0 | 0 | 16 | F13 O2 D1 |
+| 5 | `:\s*\w+[^,)]*=\s*-?\d` | 190 | 1 | 0 | 189 | O95 E90 F2 ?1 H1 |
+| 6 | `=\s*-?\d+(\.\d+)?\s*[,)]` | 182 | 1 | 0 | 181 | O99 E50 F22 D9 H1 |
+| 7 | `^[A-Z_]+\s*=\s*` | 293 | 0 | 0 | 293 | F220 O62 ?8 H2 E1 |
+| 8 | ` in \(\| in \{\| in \[\|startswith\|endswith\|re\.(match\|search)` | 137 | 0 | 0 | 137 | F134 O3 |
+| 9 | `sorted\(\|\.sort\(\|max\(\|min\(\|\[:\d+\]\|most_common` | 228 | 0 | 0 | 228 | F127 D74 O24 ?3 |
+| 10 | `推定\|経験\|目安\|典型\|typical\|guess\|heuristic\|likely\|probably\|assume\|みなす\|とみなし\|らしい\|疑い\|suspect\|verdict\|healthy\|risk\|warn` | 120 | 10 | 0 | 110 | F60 E34 D5 O2 ?9 |
+| 11 | `timeout\|retry\|retries\|sleep\(` | 117 | 16 | 0 | 101 | O96 F3 E1 ?1 |
+| 12 | （追加）'外れ値\|異常\|anomal\|stall\|stuck\|hang\|怪しい\|おそらく\|たぶん\|多分\|思われ\|だろう\|候補\|推測\|見込み\|見積\|auto\|自動\|guess\|infer\|score' | 97 | 43 | 0 | 54 | F38 E10 D2 O1 ?3 |
+
+- 12 の検索のヒットを行で重ねると 1,531 行。うち文書 97 行、検索 1・2 だけで当たり機械除外された行を除いて **1,187 行を 1 行ずつ分類**した（H 3・? 24・F 643・E 156・O 271・D 90）。内訳の数は検索ごと（1 行が複数の検索に当たるので和は 1,187 を超える）。
+- 加えて、分類の途中で定数の使い道をたどって **検索では拾えなかった 2 行**（rtt.py:163 は `1 <=` が 0/1 の比較として機械除外、rtt.py:179 は数の無い判定）を見つけた。下の表に入れた。
+- 分類は、行ごとに規則（待ち時間の語 → O、整形 → D、レジスタ・ビットの定義 → F 等）で下書きし、H・? の候補と規則に合わない行は前後を読んで個別に決めた（個別に決めた行は 3 節の一言が具体的な行）。
+
+## 2. H（ヒューリスティック）と ?（判断がつかない）の全件
+
+### H
+
+| ファイル:行 | コード | 何をしているか | なぜ H か |
+|---|---|---|---|
+| probe_inspect.py:29（使う所 :303） | `BULK_READ_HAZARDS = ("*.DR", "*.RDR", "*.RXDR", "*.RXDATA", "*.FIFO")` | peripheral_read で周辺を丸ごと読むとき、名前がこの型に合うレジスタを「読むとデータを消費しうる」として読まずに skipped に入れる | SVD の readAction（事実）とは別に、レジスタ名の慣習で副作用を決めている（名前の経験則による判定）。名前が合っても副作用の無いレジスタは読まれず、型に合わない FIFO は読まれる。skipped に理由つきで出るので隠れはしない。直すなら除外の型を引数で明示させる |
+| probe_observe.py:657（呼ぶ所 probe_profile.py:114） | `def _swo_drain(self, quiet_s: float = 0.03, limit_s: float = 0.5)` | profile_start（方法 itm）の前に、SWO の受信が 30 ms 静かになるまで（最長 0.5 秒）来たバイトを捨てる | 「30 ms 何も来なければ前の受信の残りは尽きた」とみなす実機由来の経験の閾値（コメントに 2026-10-18 の実機）。外れると新しい流れの頭を捨てる・古い残りを解読する。捨てたバイト数は drained で返るが、閾値は呼ぶ側が渡していない |
+| rtt.py:36・rtt.py:163（163 は検索で拾えず読んで発見） | `MAX_BUFFERS = 64` / `if not (1 <= num_up <= MAX_BUFFERS and 0 <= num_down <= MAX_BUFFERS): raise RttError(...不正...)` | RTT の制御ブロックの上り・下りの数が 64 を超えると「不正」として捨てる（走査では次の候補へ） | SEGGER RTT の数の上限は規格で決まっていない（ターゲットの設定）。64 は根拠の無い上限で、超える設定の正しい制御ブロックを「不正」と判定する（もっともらしさの判定） |
+
+### ?
+
+| ファイル:行 | コード | 何をしているか | 判断がつかない理由 |
+|---|---|---|---|
+| rtt.py:179（検索で拾えず読んで発見） | `return any(sizes)` | 走査で見つけた ID の候補を、上りのチャンネルの大きさが 1 つでも 0 でなければ本物とみなす | 「初期化済みの RTT は上り 0 番を持つ」は SEGGER の実装の慣習で、規格の事実かどうか確かめていない。偽物（文字列だけ）を捨てるための判定 |
+| probe_safety.py:23 | `PC_SAMPLES = 4` | 致命的エラーで回り続けているかの見張り（target_status から）に、1 回 DWT_PCSR を 4 回読んで fprobe.liveness に渡す | 判定そのものは liveness.py（担当外）。見本の数が暗黙の固定値で、判定の確からしさに効く。liveness 側の判定が H なら、この数も同じ扱い |
+| probe_safety.py:15 | `from .halt_risk import assess` | halt_risk は ELF の名前を halt_risk.assess（担当外）で照合した結果を返すだけ | docstring に「判定はしない」とある。中身（名前の一覧での照合）は halt_risk.py の監査で |
+| probe_lowlevel.py:381・382 | `info = {"verdict": d.verdict(), ... "suggested_connect": d.connect}` | target="auto" と target_diagnose が fprobe.diagnose（担当外）の verdict・提案をそのまま使う | 結論・提案を出すのは diagnose.py。ここは渡すだけ。diagnose 側の監査で決まる |
+| probe_lowlevel.py:139・144 | `... and time.perf_counter() - started < 0.1:` / `out["settle_us"] = settle_us  # 0.1 秒で打ち切り` | pins_write の hold_us の後、線が元に戻るまでの時間を測り、0.1 秒で打ち切る | 打ち切りの 0.1 秒は暗黙の境界。打ち切っても settle_us は数（約 100000）で返り、「戻らなかった」の印が無い（同じ戻り値の pins で今の状態は分かる）。測定の欠けの明示が足りないとも、操作の既定とも読める |
+| probe_rtos_analysis.py:66 | `def rtos_timeline_load(self, window_us: float = 10_000.0, ...)` | 10 ms の窓ごとの CPU 負荷・最大の窓・平均 | 窓の幅は集計の境界で、「最大の窓の負荷」は幅で変わる。幅は返す値に入るので事実ではあるが、境界を暗黙の既定にしないという原則に触れうる（ヒストグラムの bins=20 等も同じ型。そちらは D にした） |
+| recording.py:29 | `CLOCK_WINDOW = 64` | ホストの時刻（ホストの出来事）をタイムベースに写す直線の当てはめに、最近の 64 点を使う | 当てはめは推定。点の数が暗黙の固定値。返す不確かさは往復時間の半分だけで、当てはめの誤差・ずれは含まない |
+| recording.py:71 | `if len(xs) == 1 or max(xs) - min(xs) < 1e-3: slope = self.hz  # 点が足りない: 公称の速さ` | 点の広がりが 1 ms 未満なら傾きを公称の速さにする | 推定の方法を切り替える暗黙の閾値 |
+| recording_stream.py:34 | `TRIGGER_SLACK_SAMPLES = 4  # 符号器がトリガを見るまでの遅れ（数サンプル）` | 流し続けるロジアナの記録で、トリガの時刻の不確かさに 4 サンプル分を足す | RTL の遅れの定数（generated）からでなく「数サンプル」という見込みの値。RTL で決まる値なら F に直せる |
+| timeline_rows.py:418・419、timeline_fpga.py:26・27 | `CARRY_LOOKBACK = 16` / `CARRY_TRIES = 3` | 範囲の始めの状態を描くため、t0 の前を範囲の幅の 16・256・4096 倍まで探し、どれかの段で見つかればそこで止める | 性能の打ち切り。長く変わらない段（ほかの段が近くで見つかったとき）の状態は持ち込まれず、それが欠けとして明示されない（docstring には書いてある）。境界の 16 倍は暗黙 |
+| timeline_rows.py:34 | `TONES = {"normal": 0, "bad": 1, "good": 2, "warn": 3}` | タイル（API の応答）の出来事に色の意味を付ける | 経験則の閾値ではないが、良し悪しの判定を本体（ホスト）が付けている。画面は API の値を描くだけという原則（CLAUDE.md、2026-10-23）とは合うが、判定を本体に入れない原則とどちらを優先するか |
+| timeline_rows.py:149・164・194 | `tone=lambda e: "warn"` | RTOS の gap、SWO の other、注釈の mark を常に warn | 同上（固定の判定の付与） |
+| timeline_rows.py:170 | `tone=lambda e: "bad" if _body(e, "ack", 1) != 1 else "warn" if _dhcsr_action(e) == "halt" else "normal"` | DAP の ACK が OK 以外なら bad、DHCSR への停止の書き込みは warn | ACK の値は規格の事実だが、bad・warn の付与は判定 |
+| timeline_rows.py:210 | `{"RUNNING": "good", "HALTED": "warn", "DISCONNECTED": "bad", "LOCKUP": "bad"}` | コアの状態に良し悪しを付ける | 同上（HALTED を warn とするのは使い方次第） |
+| run.py:340 | `stop = p.run_until_halt(timeout_s=min(o.timeout_s, 10.0))` | fprobe run の --set の場所（既定 main）まで走らせる待ちを 10 秒で切り、着かなければ誤り | 10 秒は利用者が渡さない境界（--timeout より短く暗黙に切る）。着かなかった理由（timeout）は文言に出る |
+| svd.py:570・572・573 | `return max(scored, key=lambda s: s[0])[1] if scored else None` | SVD を、ファイル名（小文字 x は任意の 1 文字）がデバイス名の先頭に合う長さが最も長いもので選ぶ | 命名の慣習（CMSIS-Pack の名前）に頼る選択。選んだ名前と出どころ（origin）は返す。誤った SVD を選ぶと周辺の値の解釈が変わる |
+
+参考（H・? ではないが、境目として書いておく）:
+
+- probe_testpoint.py:524 等の `anomalies`（long_call・silence 等）は件数の上限だけ。異常の印の閾値（long_s・silence_s・open_s）は testpoint_start で利用者が明示したときだけ使う（probe_testpoint.py:130・138）。印を付ける本体は host/fprobe/testpoint（担当外）。
+- stackusage.py:333〜348・probe_stack.py:184 の warning は threshold を明示したときだけ（「経験則の既定の閾値は持たない」と明記）。E。
+- rules.py の verdict（pass/warn/fail）は利用者が書いた規則の閾値と severity による。E。
+- swo_trace.py:345〜367 の帯域の警告は SWO の 10 ビット/バイトと ITM のパケットの大きさからの計算（F）。「閾値で出す・出さないを決めない」と明記。
+- run.py:212 の timeout_s=60（CLI の --timeout の既定）は「60 秒で終わらなかった」という事実を outcome=timeout・終了コード 124 で返す。O にした（境界の値は結果の文言に出る）。
+- probe_profile.py:135 の PC サンプリングのゆらぎ（周期の半分）は測り方の既定で、値（jitter）を返す。O にした。
+
+## 3. F・E・O・D の列挙（1 行ずつ）
+
+### F（事実・仕様で決まる規則） — 643 行
+
+- probe_inspect.py:119 — 種類・選択肢の照合
+- probe_inspect.py:164 — 書式の解析
+- probe_inspect.py:265 — 種類・選択肢の照合
+- probe_inspect.py:297 — 種類・選択肢の照合
+- probe_inspect.py:316 — 種類・選択肢の照合
+- probe_inspect.py:317 — 種類・選択肢の照合
+- probe_inspect.py:337 — 範囲の切り詰め・算術
+- probe_inspect.py:349 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_inspect.py:354 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_inspect.py:355 — 種類・選択肢の照合
+- probe_linux.py:31 — 名前・選択肢・対応の表
+- probe_linux.py:32 — 書式の規則（正規表現）
+- probe_linux.py:33 — 書式の規則（正規表現）
+- probe_linux.py:284 — 範囲の切り詰め・算術
+- probe_linux.py:293 — 種類・選択肢の照合
+- probe_linux.py:399 — 書式の解析
+- probe_linux.py:409 — 書式の解析
+- probe_linux.py:428 — 種類・選択肢の照合
+- probe_linux.py:429 — rlimit の値の検め
+- probe_linux.py:463 — 引数の範囲の検め（受け付ける範囲。判定ではない）
+- probe_linux.py:482 — 引数の範囲の検め（受け付ける範囲。判定ではない）
+- probe_linux.py:510 — 書式の解析
+- probe_linux.py:511 — 書式の解析
+- probe_linux.py:542 — 124 は timeout(1) の終了コード
+- probe_linux.py:556 — ローカルの待ち受け 127.0.0.1
+- probe_linux.py:664 — memap の読みはコアを止めない（0 ms）
+- probe_linux.py:670 — 範囲の切り詰め・算術
+- probe_linux.py:733 — 範囲の切り詰め・算術
+- probe_linux.py:787 — 書式の解析
+- probe_linux.py:795 — 種類・選択肢の照合
+- probe_longrec.py:30 — 種類・選択肢の照合
+- probe_lowlevel.py:31 — CMSIS-DAP の DAP_SWJ_Pins のビットの並び
+- probe_lowlevel.py:32 — 名前・選択肢・対応の表
+- probe_lowlevel.py:40 — dap_cmd_config.vhd と同じ整数の計算（要求を 1% まで超えてよい = RTL の規則）
+- probe_lowlevel.py:41 — 範囲の切り詰め・算術
+- probe_lowlevel.py:122 — 種類・選択肢の照合
+- probe_lowlevel.py:240 — 引数の範囲（0〜7）
+- probe_monitor.py:25 — 名前・選択肢・対応の表
+- probe_monitor.py:26 — 定数（規格・形式）
+- probe_multicore.py:21 — 名前・選択肢・対応の表
+- probe_names.py:19 — 書式の規則（正規表現）
+- probe_names.py:20 — 名前・選択肢・対応の表
+- probe_names.py:97 — 種類・選択肢の照合
+- probe_observe.py:38 — 名前・選択肢・対応の表
+- probe_observe.py:41 — 名前・選択肢・対応の表
+- probe_observe.py:42 — 名前・選択肢・対応の表
+- probe_observe.py:47 — 名前・選択肢・対応の表
+- probe_observe.py:98 — 範囲の切り詰め・算術
+- probe_observe.py:99 — 範囲の切り詰め・算術
+- probe_observe.py:112 — 範囲の切り詰め・算術
+- probe_observe.py:134 — 例外番号 16 以上は IRQ（ARMv7-M）
+- probe_observe.py:259 — 範囲の切り詰め・算術
+- probe_observe.py:398 — 引数の範囲の検め
+- probe_observe.py:399 — 引数の範囲の検め
+- probe_observe.py:434 — 周期 = 1 / 速さ（算術）
+- probe_observe.py:471 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_observe.py:472 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_observe.py:476 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_observe.py:516 — 種類・選択肢の照合
+- probe_observe.py:604 — 範囲の切り詰め・算術
+- probe_observe.py:618 — 種類・選択肢の照合
+- probe_observe.py:712 — 範囲の切り詰め・算術
+- probe_profile.py:34 — ベクタ表の最大（ARMv7-M）
+- probe_profile.py:54 — 範囲の切り詰め・算術
+- probe_profile.py:55 — 範囲の切り詰め・算術
+- probe_profile.py:83 — 種類・選択肢の照合
+- probe_profile.py:214 — 種類・選択肢の照合
+- probe_profile.py:250 — 範囲の切り詰め・算術
+- probe_profile.py:254 — 範囲の切り詰め・算術
+- probe_profile.py:256 — 範囲の切り詰め・算術
+- probe_profile.py:271 — 事実の注意の受け渡し
+- probe_profile.py:276 — 種類・選択肢の照合
+- probe_profile.py:300 — 2 点以上でないと間隔・傾きが決まらない（算術）
+- probe_profile_export.py:26 — 名前・選択肢・対応の表
+- probe_profile_export.py:27 — 名前・選択肢・対応の表
+- probe_profile_export.py:28 — 名前・選択肢・対応の表
+- probe_profile_export.py:72 — 時刻の原点（無ければ 0）
+- probe_profile_export.py:136 — 種類・選択肢の照合
+- probe_profile_export.py:157 — 2 点以上でないと間隔・傾きが決まらない（算術）
+- probe_profile_export.py:171 — 範囲の切り詰め・算術
+- probe_profile_export.py:188 — 範囲の切り詰め・算術
+- probe_profile_export.py:218 — 種類・選択肢の照合
+- probe_profile_export.py:235 — 種類・選択肢の照合
+- probe_profile_export.py:242 — gmon の形式の既定値（rate_hz=1 で時間の欄を使わない）
+- probe_rtos.py:52 — 名前・選択肢・対応の表
+- probe_rtos.py:53 — ITM の 4 バイトのスティミュラスのパケットは 5 バイト（ARMv7-M）
+- probe_rtos.py:55 — 書式の規則（正規表現）
+- probe_rtos.py:56 — 名前・選択肢・対応の表
+- probe_rtos.py:100 — 種類・選択肢の照合
+- probe_rtos.py:212 — 事実の注意の受け渡し
+- probe_rtos.py:257 — 種類・選択肢の照合
+- probe_rtos.py:274 — 事実の注意の文
+- probe_rtos.py:276 — 事実の注意の文
+- probe_rtos.py:283 — 事実の注意の受け渡し
+- probe_rtos.py:293 — 事実の注意の受け渡し
+- probe_rtos.py:332 — 範囲の切り詰め・算術
+- probe_rtos.py:348 — 事実の注意の文
+- probe_rtos.py:372 — 周期 = 1 / 速さ（算術）
+- probe_rtos.py:378 — 事実の注意の受け渡し
+- probe_rtos.py:379 — 事実の注意の受け渡し
+- probe_rtos.py:401 — 事実の注意の受け渡し
+- probe_rtos.py:409 — 事実の注意の文
+- probe_rtos.py:417 — 周期 = 1 / 速さ（算術）
+- probe_rtos.py:423 — 分解能 = 5 バイト × 10 ビット ÷ baud（算術）
+- probe_rtos.py:424 — 事実の注意の受け渡し
+- probe_rtos.py:507 — 事実の注意の受け渡し
+- probe_rtos.py:525 — 種類・選択肢の照合
+- probe_rtos.py:575 — 事実の注意の受け渡し
+- probe_rtos.py:591 — 事実の注意の受け渡し
+- probe_rtos_analysis.py:24 — 名前・選択肢・対応の表
+- probe_rtos_analysis.py:25 — 名前・選択肢・対応の表
+- probe_rtos_analysis.py:28 — 名前・選択肢・対応の表
+- probe_rtos_analysis.py:29 — 名前・選択肢・対応の表
+- probe_rtos_analysis.py:30 — 『推定しない』と明示する注意の文
+- probe_rtos_analysis.py:74 — 範囲の切り詰め・算術
+- probe_rtos_analysis.py:212 — 種類・選択肢の照合
+- probe_rules.py:22 — 名前・選択肢・対応の表
+- probe_rules.py:24 — 名前・選択肢・対応の表
+- probe_rules.py:26 — レジスタ・ビット・形式の定義（規格）
+- probe_rules.py:48 — 書式の解析
+- probe_safety.py:21 — レジスタ・ビット・形式の定義（規格）
+- probe_safety.py:22 — レジスタ・ビット・形式の定義（規格）
+- probe_safety.py:24 — 名前・選択肢・対応の表
+- probe_safety.py:70 — 種類・選択肢の照合
+- probe_snapshot.py:38 — 名前・選択肢・対応の表
+- probe_snapshot.py:39 — 名前・選択肢・対応の表
+- probe_snapshot.py:41 — 名前・選択肢・対応の表
+- probe_snapshot.py:53 — レジスタ・ビット・形式の定義（規格）
+- probe_snapshot.py:224 — 範囲の切り詰め・算術
+- probe_snapshot.py:285 — 範囲の切り詰め・算術
+- probe_snapshot.py:326 — 事実の注意の受け渡し
+- probe_snapshot.py:333 — 事実の注意の受け渡し
+- probe_snapshot.py:335 — 事実の注意の受け渡し
+- probe_snapshot.py:341 — 事実の注意の文
+- probe_snapshot.py:342 — 事実の注意の受け渡し
+- probe_snapshot.py:347 — 事実の注意の受け渡し
+- probe_snapshot.py:353 — 事実の注意の受け渡し
+- probe_snapshot.py:356 — 事実の注意の受け渡し
+- probe_snapshot.py:365 — 事実の注意の文
+- probe_snapshot.py:531 — 種類・選択肢の照合
+- probe_stack.py:29 — 塗りの値 0xCD（IAR と同じ。引数 fill で変えられる）
+- probe_stack.py:175 — 範囲の切り詰め・算術
+- probe_streams.py:22 — 書式の規則（正規表現）
+- probe_streams.py:23 — 名前・選択肢・対応の表
+- probe_swo.py:36 — レジスタ・ビット・形式の定義（規格）
+- probe_swo.py:37 — 名前・選択肢・対応の表
+- probe_swo.py:143 — 事実の注意の受け渡し
+- probe_swo.py:223 — 事実の注意の文
+- probe_swo.py:320 — 範囲の切り詰め・算術
+- probe_swo.py:322 — 範囲の切り詰め・算術
+- probe_swo.py:331 — 種類・選択肢の照合
+- probe_swo.py:368 — 事実の注意の受け渡し
+- probe_terminal.py:24 — 書式の規則（正規表現）
+- probe_terminal.py:25 — 名前・選択肢・対応の表
+- probe_terminal.py:26 — 名前・選択肢・対応の表
+- probe_terminal.py:88 — 書式の解析
+- probe_terminal.py:102 — 書式の解析
+- probe_terminal.py:138 — ITM のポートは 0〜31（ARMv7-M）
+- probe_testpoint.py:39 — 名前・選択肢・対応の表
+- probe_testpoint.py:40 — 名前・選択肢・対応の表
+- probe_testpoint.py:43 — 定数（規格・形式）
+- probe_testpoint.py:109 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_testpoint.py:115 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_testpoint.py:117 — 事実の注意の受け渡し
+- probe_testpoint.py:141 — 種類・選択肢の照合
+- probe_testpoint.py:241 — ITM のポートは 0〜31（ARMv7-M）
+- probe_testpoint.py:252 — 事実の注意の受け渡し
+- probe_testpoint.py:270 — 事実の注意の受け渡し
+- probe_testpoint.py:310 — 事実の注意の文
+- probe_testpoint.py:330 — 範囲の切り詰め・算術
+- probe_testpoint.py:359 — 種類・選択肢の照合
+- probe_testpoint.py:364 — 書式の解析
+- probe_testpoint.py:389 — 事実の注意の文
+- probe_testpoint.py:497 — 事実の注意の受け渡し
+- probe_ui_state.py:41 — 名前・選択肢・対応の表
+- probe_ui_state.py:42 — 名前・選択肢・対応の表
+- probe_ui_state.py:43 — 名前・選択肢・対応の表
+- probe_ui_state.py:44 — 名前・選択肢・対応の表
+- probe_ui_state.py:149 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:151 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:152 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:154 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:157 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:160 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:162 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:189 — 語の誤一致（changed・auto・候補 等。判断なし）
+- probe_ui_state.py:259 — 種類・選択肢の照合
+- probe_ui_state.py:266 — 引数の検め（正の数）
+- probe_ui_state.py:279 — 種類・選択肢の照合
+- probe_user.py:32 — 名前・選択肢・対応の表
+- probe_user.py:75 — 種類・選択肢の照合
+- probe_user.py:95 — 事実の注意の文
+- probe_user.py:109 — 事実の注意の受け渡し
+- probe_user.py:114 — 事実の注意の文
+- probe_user.py:177 — 事実の注意の受け渡し
+- probe_user.py:187 — 事実の注意の受け渡し
+- probe_user.py:215 — 書式の解析
+- probe_user.py:219 — 種類・選択肢の照合
+- probe_watch.py:46 — 書式の規則（正規表現）
+- probe_watch.py:51 — 種類・選択肢の照合
+- probe_watch.py:89 — 語（4 バイト）の番地の算術
+- probe_watch.py:197 — 周期 = 1 / 速さ（算術）
+- probe_watch.py:216 — 周期 = 1 / 速さ（算術）
+- probe_watch.py:255 — 種類・選択肢の照合
+- probe_watch.py:293 — 範囲の切り詰め・算術
+- probe_watch.py:351 — 引数の検め
+- probe_watch.py:360 — 種類・選択肢の照合
+- probe_watch.py:367 — 範囲の切り詰め・算術
+- probe_watch.py:374 — 周期 = 1 / 速さ（算術）
+- probe_watch.py:383 — 範囲の切り詰め・算術
+- probe_watch.py:385 — 範囲の切り詰め・算術
+- probe_watch.py:448 — 種類・選択肢の照合
+- probe_watch.py:507 — 種類・選択肢の照合
+- probe_watch.py:512 — 周期 = 1 / 速さ（算術）
+- probe_watch.py:545 — 範囲の切り詰め・算術
+- probe_window.py:26 — 名前・選択肢・対応の表
+- probe_window.py:27 — 名前・選択肢・対応の表
+- probe_window.py:29 — 名前・選択肢・対応の表
+- probe_window.py:30 — 名前・選択肢・対応の表
+- probe_window.py:31 — 名前・選択肢・対応の表
+- probe_window.py:151 — 範囲の切り詰め・算術
+- probe_window.py:153 — 範囲の切り詰め・算術
+- probe_xtrig_out.py:16 — 名前・選択肢・対応の表
+- probe_xtrig_out.py:17 — 名前・選択肢・対応の表
+- probe_xtrig_out.py:18 — 名前・選択肢・対応の表
+- raw_dap.py:25 — 名前・選択肢・対応の表
+- raw_dap.py:28 — レジスタ・ビット・形式の定義（規格）
+- raw_dap.py:29 — レジスタ・ビット・形式の定義（規格）
+- raw_dap.py:32 — レジスタ・ビット・形式の定義（規格）
+- raw_dap.py:33 — レジスタ・ビット・形式の定義（規格）
+- raw_dap.py:38 — レジスタ・ビット・形式の定義（規格）
+- raw_dap.py:39 — CSW の保つビット（ADI 規格）
+- raw_dap.py:50 — 名前・選択肢・対応の表
+- raw_dap.py:97 — 語の誤一致（changed・auto・候補 等。判断なし）
+- raw_dap.py:196 — DPIDR の版 3 以上は ADIv6（ADI 規格）
+- raw_dap.py:289 — 種類・選択肢の照合
+- recording.py:30 — 名前・選択肢・対応の表
+- recording.py:32 — 名前・選択肢・対応の表
+- recording.py:75 — 最小二乗の傾き（算術）
+- recording.py:77 — 範囲の切り詰め・算術
+- recording.py:197 — 符号化の算術（印字できる文字の範囲）
+- recording.py:273 — 種類・選択肢の照合
+- recording.py:308 — 種類・選択肢の照合
+- recording.py:345 — 書式の解析
+- recording.py:367 — 範囲の切り詰め・算術
+- recording.py:471 — 範囲の切り詰め・算術
+- recording.py:472 — 範囲の切り詰め・算術
+- recording.py:476 — 種類・選択肢の照合
+- recording.py:497 — 種類・選択肢の照合
+- recording.py:498 — 種類・選択肢の照合
+- recording.py:499 — 範囲の切り詰め・算術
+- recording.py:511 — 範囲の切り詰め・算術
+- recording.py:553 — 書式の解析
+- recording.py:554 — 種類・選択肢の照合
+- recording_long.py:44 — 名前・選択肢・対応の表
+- recording_long.py:46 — 名前・選択肢・対応の表
+- recording_long.py:60 — 名前・選択肢・対応の表
+- recording_long.py:81 — 種類・選択肢の照合
+- recording_long.py:225 — 種類・選択肢の照合
+- recording_long.py:237 — 範囲の切り詰め・算術
+- recording_long.py:238 — 範囲の切り詰め・算術
+- recording_long.py:393 — 範囲の切り詰め・算術
+- recording_long.py:394 — 範囲の切り詰め・算術
+- recording_long.py:422 — 範囲の切り詰め・算術
+- recording_long.py:456 — 範囲の切り詰め・算術
+- recording_long.py:597 — 範囲の切り詰め・算術
+- recording_long.py:598 — 範囲の切り詰め・算術
+- recording_long.py:672 — 範囲の切り詰め・算術
+- recording_long.py:673 — 範囲の切り詰め・算術
+- recording_long.py:682 — 範囲の切り詰め・算術
+- recording_long.py:683 — 範囲の切り詰め・算術
+- recording_sql.py:36 — 名前・選択肢・対応の表
+- recording_stream.py:33 — 名前・選択肢・対応の表
+- recording_stream.py:149 — 範囲の切り詰め・算術
+- recording_summary.py:26 — 定数（規格・形式）
+- recording_summary.py:66 — 範囲の切り詰め・算術
+- recording_summary.py:90 — 種類・選択肢の照合
+- riscv_dm.py:32 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:33 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:36 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:39 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:40 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:42 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:47 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:48 — 名前・選択肢・対応の表
+- riscv_dm.py:50 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:53 — 名前・選択肢・対応の表
+- riscv_dm.py:55 — レジスタ・ビット・形式の定義（規格）
+- riscv_dm.py:57 — 名前・選択肢・対応の表
+- riscv_dm.py:58 — sberror の符号（RISC-V Debug）
+- riscv_dm.py:90 — dmstatus.version 2=0.13・3=1.0（RISC-V Debug）
+- riscv_dm.py:114 — 種類・選択肢の照合
+- riscv_dm.py:115 — dmstatus.version 2=0.13・3=1.0（RISC-V Debug）
+- riscv_dm.py:240 — progbuf が 2 語以上（RISC-V Debug 0.13）
+- riscv_target.py:32 — レジスタ・ビット・形式の定義（規格）
+- riscv_target.py:47 — 語（4 バイト）の番地の算術
+- riscv_target.py:50 — 語（4 バイト）の番地の算術
+- riscv_target.py:53 — 名前・選択肢・対応の表
+- riscv_target.py:54 — 名前・選択肢・対応の表
+- riscv_target.py:56 — 名前・選択肢・対応の表
+- riscv_target.py:193 — 範囲の切り詰め・算術
+- riscv_target.py:272 — 種類・選択肢の照合
+- rtt.py:31 — 名前・選択肢・対応の表
+- rtt.py:32 — 定数（規格・形式）
+- rtt.py:33 — 定数（規格・形式）
+- rtt.py:34 — 定数（規格・形式）
+- rtt.py:35 — 定数（規格・形式）
+- rtt.py:77 — 範囲の切り詰め・算術
+- rtt.py:87 — 範囲の切り詰め・算術
+- rtt.py:188 — 範囲の切り詰め・算術
+- rtt.py:282 — 種類・選択肢の照合
+- rtt.py:343 — 範囲の切り詰め・算術
+- rtt.py:345 — 範囲の切り詰め・算術
+- rtt.py:351 — 範囲の切り詰め・算術
+- rtt.py:379 — 範囲の切り詰め・算術
+- rules.py:23 — 名前・選択肢・対応の表
+- rules.py:24 — 名前・選択肢・対応の表
+- rules.py:25 — 名前・選択肢・対応の表
+- rules.py:46 — 範囲の切り詰め・算術
+- rules.py:107 — 語の誤一致（changed・auto・候補 等。判断なし）
+- rules.py:126 — 規則の数値の欄の検め
+- rules.py:148 — 種類・選択肢の照合
+- rules.py:151 — 種類・選択肢の照合
+- rules.py:157 — 種類・選択肢の照合
+- rules.py:159 — 種類・選択肢の照合
+- rules.py:171 — 種類・選択肢の照合
+- rules.py:180 — 種類・選択肢の照合
+- rules.py:181 — severity の選択肢の検め
+- rules.py:192 — 種類・選択肢の照合
+- rules.py:194 — 書式の解析
+- rules.py:217 — 範囲の切り詰め・算術
+- rules.py:219 — 範囲の切り詰め・算術
+- rules.py:236 — 範囲の切り詰め・算術
+- rules.py:288 — 範囲の切り詰め・算術
+- rules.py:313 — 範囲の切り詰め・算術
+- rules.py:359 — 範囲の切り詰め・算術
+- rules.py:360 — 範囲の切り詰め・算術
+- rules.py:387 — 範囲の切り詰め・算術
+- rules.py:419 — 範囲の切り詰め・算術
+- rules.py:423 — 名前・選択肢・対応の表
+- rules.py:476 — 種類・選択肢の照合
+- rules.py:510 — 範囲の切り詰め・算術
+- rules.py:523 — 語の誤一致（changed・auto・候補 等。判断なし）
+- rules.py:546 — 種類・選択肢の照合
+- rules.py:555 — 種類・選択肢の照合
+- run.py:37 — 定数（規格・形式）
+- run.py:38 — 定数（規格・形式）
+- run.py:39 — 定数（規格・形式）
+- run.py:40 — 定数（規格・形式）
+- run.py:41 — 定数（規格・形式）
+- run.py:42 — Cortex-M のメモリマップの SRAM の領域（ARMv7-M。メモリマップが無いときだけ）
+- run.py:43 — レジスタ・ビット・形式の定義（規格）
+- run.py:60 — 書式の規則（正規表現）
+- run.py:61 — 書式の規則（正規表現）
+- run.py:62 — 書式の規則（正規表現）
+- run.py:63 — 書式の規則（正規表現）
+- run.py:64 — 書式の規則（正規表現）
+- run.py:65 — 書式の規則（正規表現）
+- run.py:66 — 書式の規則（正規表現）
+- run.py:67 — 書式の規則（正規表現）
+- run.py:68 — 書式の規則（正規表現）
+- run.py:69 — 名前・選択肢・対応の表
+- run.py:82 — 試験の枠組み（Unity・ztest 等）が出した PASS/FAIL の行を読む（ターゲット側の判定の転記）
+- run.py:107 — 試験の枠組み（Unity・ztest 等）が出した PASS/FAIL の行を読む（ターゲット側の判定の転記）
+- run.py:121 — 種類・選択肢の照合
+- run.py:158 — 種類・選択肢の照合
+- run.py:168 — 書式の規則（正規表現）
+- run.py:177 — 種類・選択肢の照合
+- run.py:243 — 種類・選択肢の照合
+- run.py:245 — 種類・選択肢の照合
+- run.py:265 — 種類・選択肢の照合
+- run.py:280 — 事実の注意の受け渡し
+- run.py:298 — 事実の注意の受け渡し
+- run.py:306 — load=auto: ELF の区画がすべて RAM なら ram（メモリマップ。無ければ ARMv7-M の SRAM 領域）
+- run.py:317 — load=auto: ELF の区画がすべて RAM なら ram（メモリマップ。無ければ ARMv7-M の SRAM 領域）
+- run.py:323 — 事実の注意の文
+- run.py:346 — 事実の注意の文
+- run.py:383 — 種類・選択肢の照合
+- run.py:430 — 試験の枠組み（Unity・ztest 等）が出した PASS/FAIL の行を読む（ターゲット側の判定の転記）
+- run.py:448 — 試験の枠組み（Unity・ztest 等）が出した PASS/FAIL の行を読む（ターゲット側の判定の転記）
+- run.py:450 — ターゲットの終了コード 0 = 正常（セミホスティングの SYS_EXIT）
+- run.py:451 — ターゲットの終了コード 0 = 正常（セミホスティングの SYS_EXIT）
+- run.py:463 — 試験の枠組み（Unity・ztest 等）が出した PASS/FAIL の行を読む（ターゲット側の判定の転記）
+- run.py:489 — 事実の注意の文
+- run.py:514 — 事実の注意の文
+- sampler.py:17 — 定数（規格・形式）
+- sampler.py:26 — 定数（規格・形式）
+- sampler.py:27 — 定数（規格・形式）
+- sampler.py:35 — 定数（規格・形式）
+- sampler.py:41 — dap_cmd_config.vhd と同じ整数の計算（要求を 1% まで超えてよい = RTL の規則）
+- sampler.py:47 — 範囲の切り詰め・算術
+- sampler.py:48 — 範囲の切り詰め・算術
+- sampler.py:68 — 範囲の切り詰め・算術
+- sampler.py:82 — 語（4 バイト）の番地の算術
+- sampler.py:85 — 語（4 バイト）の番地の算術
+- sampler.py:117 — jitter の範囲（RTL の欄の幅）
+- semihosting.py:28 — レジスタ・ビット・形式の定義（規格）
+- semihosting.py:29 — レジスタ・ビット・形式の定義（規格）
+- semihosting.py:30 — 名前・選択肢・対応の表
+- semihosting.py:31 — 定数（規格・形式）
+- semihosting.py:37 — 名前・選択肢・対応の表
+- semihosting.py:41 — 名前・選択肢・対応の表
+- semihosting.py:244 — SYS_OPEN のモード 2 以上は書き込み（Arm セミホスティング）
+- semihosting.py:247 — SYS_OPEN のモード 2 以上は書き込み（Arm セミホスティング）
+- semihosting.py:301 — 種類・選択肢の照合
+- semihosting.py:364 — SYS_CLOCK は 1/100 秒（Arm セミホスティング）
+- serial_link.py:23 — 定数（規格・形式）
+- serial_link.py:26 — COBS の最大の膨らみ（形式）
+- serial_link.py:27 — COBS の最大の膨らみ（形式）
+- serial_link.py:48 — COBS の 254 バイトの区切り・最小の長さ（形式）
+- serial_link.py:82 — COBS の 254 バイトの区切り・最小の長さ（形式）
+- serial_link.py:134 — 範囲の切り詰め・算術
+- session.py:61 — エンドポイントの数（3 つ目が SWO）
+- session.py:124 — 範囲の切り詰め・算術
+- session.py:127 — 範囲の切り詰め・算術
+- session.py:156 — 範囲の切り詰め・算術
+- session.py:162 — 語（4 バイト）の番地の算術
+- session.py:180 — 名前・選択肢・対応の表
+- session.py:277 — 語の誤一致（changed・auto・候補 等。判断なし）
+- sigrok.py:22 — 名前・選択肢・対応の表
+- sigrok.py:56 — sigrok のファイルの形式
+- sigrok.py:70 — 範囲の切り詰め・算術
+- sigrok.py:101 — 16 本以下なら 16 ビットの配列（形式）
+- snapshot.py:37 — 定数（規格・形式）
+- snapshot.py:38 — 名前・選択肢・対応の表
+- snapshot.py:40 — 名前・選択肢・対応の表
+- snapshot.py:41 — 名前・選択肢・対応の表
+- snapshot.py:140 — 種類・選択肢の照合
+- snapshot.py:237 — 範囲の切り詰め・算術
+- snapshot.py:248 — 書式の解析
+- snapshot.py:256 — 定数（規格・形式）
+- snapshot.py:257 — レジスタ・ビット・形式の定義（規格）
+- snapshot.py:258 — 定数（規格・形式）
+- snapshot.py:260 — 定数（規格・形式）
+- snapshot.py:261 — レジスタ・ビット・形式の定義（規格）
+- snapshot.py:262 — レジスタ・ビット・形式の定義（規格）
+- snapshot.py:265 — レジスタ・ビット・形式の定義（規格）
+- snapshot.py:280 — ELF のコアダンプの PRSTATUS・VFP の形式
+- snapshot.py:283 — ELF のコアダンプの PRSTATUS・VFP の形式
+- spi.py:21 — 定数（規格・形式）
+- spi.py:32 — 種類・選択肢の照合
+- spi.py:41 — 種類・選択肢の照合
+- spi.py:53 — 種類・選択肢の照合
+- spi.py:55 — 語長・stretch の範囲（RTL の欄）
+- spi.py:57 — 語長・stretch の範囲（RTL の欄）
+- spi.py:72 — 語の誤一致（changed・auto・候補 等。判断なし）
+- stackusage.py:31 — 定数（規格・形式）
+- stackusage.py:32 — 定数（規格・形式）
+- stackusage.py:33 — 書式の規則（正規表現）
+- stackusage.py:66 — .su の行の書式
+- stackusage.py:111 — 範囲の切り詰め・算術
+- stackusage.py:146 — 範囲の切り詰め・算術
+- stackusage.py:151 — 範囲の切り詰め・算術
+- stackusage.py:173 — 種類・選択肢の照合
+- stackusage.py:201 — 分からない分岐の先を枠に多めに数えたと notes で明示
+- stackusage.py:223 — 最大の深さを選ぶ（同じなら最初の経路。算術）
+- stackusage.py:232 — 事実の注意の文
+- stackusage.py:246 — 種類・選択肢の照合
+- stackusage.py:248 — 範囲の切り詰め・算術
+- stackusage.py:255 — 種類・選択肢の照合
+- stackusage.py:277 — 2 点以上でないと間隔・傾きが決まらない（算術）
+- stackusage.py:307 — 範囲の切り詰め・算術
+- stackusage.py:324 — 範囲の切り詰め・算術
+- stackusage.py:340 — 割合の算術
+- stepping.py:33 — 名前・選択肢・対応の表
+- stepping.py:34 — レジスタ・ビット・形式の定義（規格）
+- stepping.py:36 — 定数（規格・形式）
+- stepping.py:193 — 種類・選択肢の照合
+- stepping.py:194 — Thumb の命令長 2/4 バイト: PC が 0<Δ≦4 なら順に進んだ（アーキテクチャ）
+- stepping.py:238 — Thumb の命令長 2/4 バイト: PC が 0<Δ≦4 なら順に進んだ（アーキテクチャ）
+- stepping.py:246 — Thumb の命令長 2/4 バイト: PC が 0<Δ≦4 なら順に進んだ（アーキテクチャ）
+- stm32_option_bytes.py:31 — レジスタ・ビット・形式の定義（規格）
+- stm32_option_bytes.py:93 — 定数（規格・形式）
+- stm32_option_bytes.py:94 — レジスタ・ビット・形式の定義（規格）
+- stm32_option_bytes.py:95 — 名前・選択肢・対応の表
+- stm32_option_bytes.py:100 — レジスタ・ビット・形式の定義（規格）
+- stm32_option_bytes.py:165 — 語の誤一致（changed・auto・候補 等。判断なし）
+- stm32_option_bytes.py:169 — 語の誤一致（changed・auto・候補 等。判断なし）
+- stm32_option_bytes.py:267 — RDP Level 1 では Flash を読めない（STM32 リファレンスマニュアル）
+- streams.py:22 — 名前・選択肢・対応の表
+- streams.py:25 — レジスタ・ビット・形式の定義（規格）
+- streams.py:255 — 書式の解析
+- svd.py:32 — 定数（規格・形式）
+- svd.py:33 — 名前・選択肢・対応の表
+- svd.py:35 — 名前・選択肢・対応の表
+- svd.py:36 — 名前・選択肢・対応の表
+- svd.py:90 — 種類・選択肢の照合
+- svd.py:214 — 書式の解析
+- svd.py:216 — 種類・選択肢の照合
+- svd.py:220 — 種類・選択肢の照合
+- svd.py:229 — 種類・選択肢の照合
+- svd.py:230 — 書式の解析
+- svd.py:286 — 種類・選択肢の照合
+- svd.py:344 — 種類・選択肢の照合
+- svd.py:345 — 種類・選択肢の照合
+- svd.py:392 — 種類・選択肢の照合
+- svd.py:438 — 種類・選択肢の照合
+- svd.py:443 — 種類・選択肢の照合
+- svd.py:445 — 種類・選択肢の照合
+- svd.py:468 — 範囲の切り詰め・算術
+- svd.py:571 — 種類・選択肢の照合
+- swo_trace.py:30 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:31 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:32 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:48 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:49 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:50 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:51 — 定数（規格・形式）
+- swo_trace.py:52 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:53 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:54 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:57 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:63 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:64 — 名前・選択肢・対応の表
+- swo_trace.py:65 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:66 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:69 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:70 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:72 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:74 — 名前・選択肢・対応の表
+- swo_trace.py:75 — 名前・選択肢・対応の表
+- swo_trace.py:77 — 名前・選択肢・対応の表
+- swo_trace.py:80 — 定数（規格・形式）
+- swo_trace.py:84 — タイムスタンプのパケットの大きさ（ITM）
+- swo_trace.py:86 — レジスタ・ビット・形式の定義（規格）
+- swo_trace.py:201 — 種類・選択肢の照合
+- swo_trace.py:204 — 事実の注意の受け渡し
+- swo_trace.py:220 — ITM のポートは 0〜31（ARMv7-M）
+- swo_trace.py:290 — 種類・選択肢の照合
+- swo_trace.py:322 — 種類・選択肢の照合
+- swo_trace.py:351 — 範囲の切り詰め・算術
+- swo_trace.py:354 — 事実の注意の文
+- swo_trace.py:361 — 事実の注意の文
+- swo_trace.py:391 — 範囲の切り詰め・算術
+- swo_trace.py:415 — 名前・選択肢・対応の表
+- swo_trace.py:478 — 範囲の切り詰め・算術
+- symbols.py:68 — 名前・選択肢・対応の表
+- symbols.py:96 — 書式の解析
+- symbols.py:98 — 書式の解析
+- symbols.py:193 — DWARF 5 はファイル番号が 0 始まり（DWARF 規格）
+- symbols.py:266 — 書式の解析
+- symbols.py:278 — 範囲の切り詰め・算術
+- symbols.py:287 — 範囲の切り詰め・算術
+- symbols.py:305 — 範囲の切り詰め・算術
+- symbols.py:315 — 範囲の切り詰め・算術
+- symbols.py:340 — 範囲の切り詰め・算術
+- thumb_step.py:28 — レジスタ・ビット・形式の定義（規格）
+- thumb_step.py:29 — 定数（規格・形式）
+- thumb_step.py:30 — 名前・選択肢・対応の表
+- thumb_step.py:31 — 名前・選択肢・対応の表
+- thumb_step.py:36 — 名前・選択肢・対応の表
+- thumb_step.py:38 — 名前・選択肢・対応の表
+- thumb_step.py:39 — 名前・選択肢・対応の表
+- thumb_step.py:40 — 名前・選択肢・対応の表
+- thumb_step.py:41 — 1 回の読み書きの最大（LDRD/STRD 8 バイト）
+- thumb_step.py:78 — 種類・選択肢の照合
+- thumb_step.py:105 — 種類・選択肢の照合
+- thumb_step.py:148 — 種類・選択肢の照合
+- thumb_step.py:153 — 種類・選択肢の照合
+- thumb_step.py:171 — 書式の解析
+- thumb_step.py:223 — 書式の解析
+- thumb_step.py:224 — 種類・選択肢の照合
+- thumb_step.py:234 — 範囲の切り詰め・算術
+- thumb_step.py:237 — 範囲の切り詰め・算術
+- timeline.py:33 — 定数（規格・形式）
+- timeline.py:38 — 名前・選択肢・対応の表
+- timeline.py:39 — 名前・選択肢・対応の表
+- timeline.py:40 — 定数（規格・形式）
+- timeline.py:48 — 範囲の切り詰め・算術
+- timeline.py:56 — 範囲の切り詰め・算術
+- timeline.py:83 — 範囲の切り詰め・算術
+- timeline.py:125 — 刻みの秒（1/timebase_hz）
+- timeline.py:166 — 書式の解析
+- timeline.py:222 — 種類・選択肢の照合
+- timeline.py:271 — 範囲の切り詰め・算術
+- timeline.py:272 — 範囲の切り詰め・算術
+- timeline_fpga.py:25 — 名前・選択肢・対応の表
+- timeline_fpga.py:47 — 名前・選択肢・対応の表
+- timeline_fpga.py:69 — 書式の解析
+- timeline_fpga.py:96 — 範囲の切り詰め・算術
+- timeline_fpga.py:101 — 範囲の切り詰め・算術
+- timeline_fpga.py:103 — 範囲の切り詰め・算術
+- timeline_fpga.py:156 — 範囲の切り詰め・算術
+- timeline_fpga.py:184 — 語の誤一致（changed・auto・候補 等。判断なし）
+- timeline_fpga.py:185 — 語の誤一致（changed・auto・候補 等。判断なし）
+- timeline_fpga.py:186 — 語の誤一致（changed・auto・候補 等。判断なし）
+- timeline_fpga.py:229 — 種類・選択肢の照合
+- timeline_rows.py:33 — 名前・選択肢・対応の表
+- timeline_rows.py:35 — レジスタ・ビット・形式の定義（規格）
+- timeline_rows.py:111 — レジスタ・ビット・形式の定義（規格）
+- timeline_rows.py:117 — 種類・選択肢の照合
+- timeline_rows.py:136 — 名前・選択肢・対応の表
+- timeline_rows.py:176 — aux の値は mV（÷1000 で V。単位換算）
+- timeline_rows.py:223 — testpoint の anomaly の出来事を段に出す（印は testpoint 側。印の閾値は testpoint_start で利用者が明示したときだけ）
+- timeline_rows.py:240 — 種類・選択肢の照合
+- timeline_rows.py:245 — 定数（規格・形式）
+- timeline_rows.py:270 — 種類・選択肢の照合
+- timeline_rows.py:352 — 範囲の切り詰め・算術
+- timeline_rows.py:357 — 範囲の切り詰め・算術
+- timeline_rows.py:398 — 範囲の切り詰め・算術
+- timeline_rows.py:399 — 範囲の切り詰め・算術
+- timeline_rows.py:427 — 種類・選択肢の照合
+- timeline_rows.py:433 — 範囲の切り詰め・算術
+- timeline_rows.py:435 — 範囲の切り詰め・算術
+- timesync.py:17 — 定数（規格・形式）
+- timesync.py:34 — 2 点以上でないと間隔・傾きが決まらない（算術）
+- timesync.py:38 — 範囲の切り詰め・算術
+- timesync.py:47 — 範囲の切り詰め・算術
+- timesync.py:67 — 2 点以上でないと間隔・傾きが決まらない（算術）
+- timesync.py:72 — 範囲の切り詰め・算術
+- transport.py:71 — 範囲の切り詰め・算術
+- transport.py:84 — 範囲の切り詰め・算術
+- uart_flow.py:54 — 語の誤一致（changed・auto・候補 等。判断なし）
+- uart_flow.py:56 — 語の誤一致（changed・auto・候補 等。判断なし）
+- uart_flow.py:68 — 語の誤一致（changed・auto・候補 等。判断なし）
+- usertrace.py:30 — 名前・選択肢・対応の表
+- usertrace.py:31 — 定数（規格・形式）
+- usertrace.py:32 — 定数（規格・形式）
+- usertrace.py:33 — 名前・選択肢・対応の表
+- usertrace.py:34 — 名前・選択肢・対応の表
+- usertrace.py:35 — 名前・選択肢・対応の表
+- usertrace.py:38 — 名前・選択肢・対応の表
+- usertrace.py:39 — 書式の規則（正規表現）
+- usertrace.py:68 — 種類・選択肢の照合
+- usertrace.py:104 — ITM のポートは 0〜31（ARMv7-M）
+- usertrace.py:254 — 4 バイトの語の単位で読む（形式）
+- usertrace.py:336 — 範囲の切り詰め・算術
+- watch_buffer.py:70 — 範囲の切り詰め・算術
+- watch_buffer.py:82 — 範囲の切り詰め・算術
+- watch_trigger.py:23 — 名前・選択肢・対応の表
+- watch_trigger.py:25 — 名前・選択肢・対応の表
+- wiring.py:15 — 定数（規格・形式）
+- wiring.py:16 — レジスタ・ビット・形式の定義（規格）
+- wiring.py:17 — レジスタ・ビット・形式の定義（規格）
+- wiring.py:34 — SWD のアイドルの線の値
+- xtrig.py:112 — 段の数 1〜4（RTL）
+- xtrig.py:125 — 範囲の切り詰め・算術
+- xtrig.py:157 — 脈の長さ・単位の欄の最大（CSR の欄の幅）
+- xtrig.py:158 — 脈の長さ・単位の欄の最大（CSR の欄の幅）
+- xtrig.py:199 — 範囲の切り詰め・算術
+- xtrig.py:251 — 語の誤一致（changed・auto・候補 等。判断なし）
+- xtrig.py:288 — 範囲の切り詰め・算術
+- xtrig.py:292 — 範囲の切り詰め・算術
+
+### E（使う側が明示して渡す引数・判断に関わらない既定） — 156 行
+
+- probe_inspect.py:98 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:50 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:53 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:55 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:56 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:68 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:69 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:108 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_linux.py:310 — 組を 1 つ置く（引数の明示）
+- probe_linux.py:322 — 組を 1 つ置く（引数の明示）
+- probe_linux.py:496 — 初期値・信号の値（判断なし）
+- probe_linux.py:724 — 組を 1 つ置く（引数の明示）
+- probe_linux.py:917 — 数え上げの初期値
+- probe_lowlevel.py:118 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_lowlevel.py:289 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_lowlevel.py:376 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:169 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:170 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:171 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:172 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:173 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:537 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_observe.py:596 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile.py:46 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile.py:48 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile.py:49 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile.py:78 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile_export.py:118 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_profile_export.py:204 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:82 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:83 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:84 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:92 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:93 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:269 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:342 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rtos.py:392 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_rules.py:195 — 規則の判定（利用者の規則）を返す
+- probe_rules.py:196 — 規則の判定（利用者の規則）を返す
+- probe_safety.py:34 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_snapshot.py:93 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_snapshot.py:338 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_snapshot.py:359 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_stack.py:114 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_stack.py:131 — assume_address_taken / indirect は利用者が明示（既定 False）
+- probe_streams.py:79 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:90 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:93 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:94 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:95 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:96 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:99 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:111 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_swo.py:139 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:57 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:69 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:70 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:97 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:128 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:245 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_testpoint.py:399 — 深いバッファの読みの引数
+- probe_timeline.py:16 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_user.py:46 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_user.py:49 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_watch.py:122 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_watch.py:133 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_watch.py:141 — 初期値・信号の値（判断なし）
+- probe_watch.py:142 — 初期値・信号の値（判断なし）
+- probe_watch.py:143 — 初期値・信号の値（判断なし）
+- probe_watch.py:176 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_watch.py:340 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_watch.py:424 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_window.py:55 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_window.py:56 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_window.py:63 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_window.py:65 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- probe_xtrig_out.py:87 — 脈の長さ・単位の既定（指定が無いとき 1 刻み）
+- raw_dap.py:109 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording.py:86 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording.py:87 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording.py:134 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording.py:279 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording_long.py:113 — 初期値・信号の値（判断なし）
+- recording_long.py:152 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording_long.py:366 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- recording_stream.py:151 — 初期値・信号の値（判断なし）
+- riscv_dm.py:83 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- riscv_dm.py:296 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- riscv_dm.py:312 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- riscv_target.py:92 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- riscv_target.py:174 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- riscv_target.py:177 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rtt.py:127 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rtt.py:128 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rtt.py:129 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rtt.py:286 — 初期値・信号の値（判断なし）
+- rules.py:38 — 利用者が書いた規則の判定を束ねる順（閾値は規則に利用者が書く）
+- rules.py:45 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rules.py:309 — 初期値・信号の値（判断なし）
+- rules.py:431 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- rules.py:433 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:455 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:463 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:477 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:550 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:554 — 規則（利用者が明示した閾値・severity）の判定
+- rules.py:556 — 規則（利用者が明示した閾値・severity）の判定
+- run.py:105 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:176 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:204 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:207 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:217 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:228 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:236 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- run.py:283 — 初期値・信号の値（判断なし）
+- sampler.py:100 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- sampler.py:114 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- serial_link.py:33 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- session.py:172 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- spi.py:46 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- spi.py:47 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- spi.py:50 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- spi.py:78 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- stackusage.py:165 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- stackusage.py:209 — assume_address_taken / indirect は利用者が明示（既定 False）
+- stackusage.py:252 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- stackusage.py:259 — assume_address_taken / indirect は利用者が明示（既定 False）
+- stackusage.py:261 — assume_address_taken / indirect は利用者が明示（既定 False）
+- stackusage.py:262 — assume_address_taken / indirect は利用者が明示（既定 False）
+- stackusage.py:348 — warning は threshold を明示したときだけ
+- stm32_option_bytes.py:162 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- streams.py:157 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- streams.py:158 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- swo_trace.py:149 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- swo_trace.py:176 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- swo_trace.py:178 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- swo_trace.py:195 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- thumb_step.py:73 — 初期値・信号の値（判断なし）
+- uart_flow.py:49 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- usertrace.py:48 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- watch_buffer.py:34 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- watch_trigger.py:105 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- wiring.py:48 — 初期値・信号の値（判断なし）
+- wiring.py:49 — 初期値・信号の値（判断なし）
+- wiring.py:54 — 初期値・信号の値（判断なし）
+- wiring.py:56 — 初期値・信号の値（判断なし）
+- wiring.py:109 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:49 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:53 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:90 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:91 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:92 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:93 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:99 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:165 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+- xtrig.py:166 — 引数・欄の既定（対象の指定・初期値。判断に関わらない）
+
+### O（操作の既定: 待ち時間・大きさ・周期・上限） — 271 行
+
+- probe_hooks.py:50 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:23 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_inspect.py:24 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_inspect.py:25 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_inspect.py:26 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_inspect.py:55 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:93 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:169 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:170 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:176 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:182 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:191 — 返す量・読む量の既定（判断に関わらない）
+- probe_inspect.py:329 — 返す量・読む量の既定（判断に関わらない）
+- probe_linux.py:29 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_linux.py:30 — gdb.batch の PC 側の待ちの上乗せ（時間切れの安全網）
+- probe_linux.py:99 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:101 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:119 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:122 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:367 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:439 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:468 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:493 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:520 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:535 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:538 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:583 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:590 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_linux.py:728 — 返す量・読む量の既定（判断に関わらない）
+- probe_longrec.py:32 — 長時間記録の分割の既定 1 時間（保存の形。結果の判断に関わらない）
+- probe_longrec.py:44 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_longrec.py:109 — 返す量・読む量の既定（判断に関わらない）
+- probe_lowlevel.py:33 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_lowlevel.py:34 — JTAG/SWD の既定の速さ（操作の既定）
+- probe_lowlevel.py:134 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_lowlevel.py:140 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_lowlevel.py:215 — 返す量・読む量の既定（判断に関わらない）
+- probe_lowlevel.py:314 — 返す量・読む量の既定（判断に関わらない）
+- probe_lowlevel.py:349 — 返す量・読む量の既定（判断に関わらない）
+- probe_multicore.py:92 — リセット後 0.05 秒待ってからつなぐ（操作の待ち）
+- probe_observe.py:39 — RTT の記述子を読み直す周期（安全網。結果は resyncs 等で数える）
+- probe_observe.py:43 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_observe.py:44 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_observe.py:45 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_observe.py:46 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_observe.py:95 — 返す量・読む量の既定（判断に関わらない）
+- probe_observe.py:189 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:285 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:287 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:293 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:332 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:389 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_observe.py:511 — 返す量・読む量の既定（判断に関わらない）
+- probe_observe.py:512 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:518 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:538 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:548 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:556 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:631 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:635 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:661 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:669 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:705 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:709 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:715 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:717 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:793 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:797 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:802 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:812 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_observe.py:832 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile.py:32 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_profile.py:33 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_profile.py:76 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_profile.py:77 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_profile.py:135 — PC サンプリングの周期のゆらぎ（周期の半分まで。エイリアシングを避ける測り方。jitter を返す）
+- probe_profile.py:143 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile.py:185 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile.py:208 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile_export.py:86 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile_export.py:99 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_profile_export.py:100 — 返す量・読む量の既定（判断に関わらない）
+- probe_profile_export.py:175 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos.py:54 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_rtos.py:224 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos.py:233 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos.py:242 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_rtos.py:245 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_rtos.py:309 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_rtos.py:333 — 持ち主と待ちの先頭が 64 バイト以内なら 1 か所で読む（読む回数の工夫。値は同じ）
+- probe_rtos.py:336 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_rtos.py:384 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_rtos.py:482 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:23 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_rtos_analysis.py:27 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_rtos_analysis.py:84 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:114 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:135 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:163 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:204 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:227 — 返す量・読む量の既定（判断に関わらない）
+- probe_rtos_analysis.py:238 — 返す量・読む量の既定（判断に関わらない）
+- probe_rules.py:136 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_rules.py:137 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_rules.py:159 — 返す量・読む量の既定（判断に関わらない）
+- probe_snapshot.py:43 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_snapshot.py:346 — 切り出し
+- probe_stack.py:30 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_stack.py:91 — 返す量・読む量の既定（判断に関わらない）
+- probe_stack.py:115 — 返す量・読む量の既定（判断に関わらない）
+- probe_stack.py:161 — 塗るときに今の SP の下 64 バイトを避ける（使っている所を壊さない操作。塗った範囲は返す）
+- probe_swo.py:34 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_swo.py:35 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_swo.py:146 — 切り出し
+- probe_swo.py:162 — 切り出し
+- probe_swo.py:276 — 返す量・読む量の既定（判断に関わらない）
+- probe_terminal.py:80 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_terminal.py:89 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:41 — 深いバッファでトリガの後に取る拍の既定（引数 after_beats で変えられる）
+- probe_testpoint.py:42 — SWO のバイトを解析へ渡す周期
+- probe_testpoint.py:129 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_testpoint.py:351 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:358 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:360 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:362 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:381 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:394 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:438 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_testpoint.py:524 — 返す量・読む量の既定（判断に関わらない）
+- probe_testpoint.py:537 — 返す量・読む量の既定（判断に関わらない）
+- probe_testpoint.py:546 — 返す量・読む量の既定（判断に関わらない）
+- probe_ui_state.py:45 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_ui_state.py:46 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_ui_state.py:47 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_ui_state.py:48 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_ui_state.py:196 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_user.py:31 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_user.py:102 — 切り出し
+- probe_user.py:190 — 返す量・読む量の既定（判断に関わらない）
+- probe_user.py:201 — 返す量・読む量の既定（判断に関わらない）
+- probe_user.py:202 — 返す量・読む量の既定（判断に関わらない）
+- probe_watch.py:42 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_watch.py:43 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_watch.py:44 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_watch.py:45 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_watch.py:175 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_watch.py:309 — 返す量・読む量の既定（判断に関わらない）
+- probe_watch.py:341 — 返す量・読む量の既定（判断に関わらない）
+- probe_watch.py:372 — 周期 0（毎回）で吸い出す仕事
+- probe_watch.py:433 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- probe_watch.py:488 — 周期・区切りの既定（測り方。結果に値を返す）
+- probe_watch.py:535 — 返す量・読む量の既定（判断に関わらない）
+- probe_window.py:25 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- probe_xtrig_out.py:73 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- raw_dap.py:224 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- raw_dap.py:227 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording.py:203 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- recording.py:313 — 切り出し
+- recording.py:318 — 切り出し
+- recording_long.py:42 — 縮図を索引に置く段（保存の形）
+- recording_long.py:43 — 間引くときに消す流れの既定（間引きは decimate_after_s を明示したときだけ）
+- recording_long.py:72 — 周期・区切りの既定（測り方。結果に値を返す）
+- recording_long.py:100 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_long.py:375 — 切り出し
+- recording_long.py:582 — 切り出し
+- recording_long.py:588 — 返す量・読む量の既定（判断に関わらない）
+- recording_long.py:651 — 切り出し
+- recording_long.py:670 — 切り出し
+- recording_sql.py:29 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- recording_sql.py:30 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- recording_sql.py:31 — SQL の時間の上限の既定（超えたら打ち切りと明示）
+- recording_sql.py:32 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- recording_sql.py:33 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- recording_sql.py:34 — 進みの関数を呼ぶ間隔
+- recording_sql.py:93 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_sql.py:99 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_sql.py:100 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_sql.py:114 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_sql.py:123 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_stream.py:79 — 周期・区切りの既定（測り方。結果に値を返す）
+- recording_stream.py:125 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_stream.py:129 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- recording_summary.py:23 — 縮図の段の幅・段の数（数え方の格子。件数は正確）
+- recording_summary.py:24 — 縮図の段の幅・段の数（数え方の格子。件数は正確）
+- recording_summary.py:25 — 縮図の段の幅・段の数（数え方の格子。件数は正確）
+- riscv_dm.py:98 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- riscv_dm.py:101 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- riscv_dm.py:108 — 返す量・読む量の既定（判断に関わらない）
+- riscv_dm.py:151 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- rtt.py:37 — 読む上限（MAX_BUFFERS は制御ブロックの検めにも使う → 別表の H）
+- rtt.py:38 — 読む上限（MAX_BUFFERS は制御ブロックの検めにも使う → 別表の H）
+- rtt.py:126 — 返す量・読む量の既定（判断に関わらない）
+- rtt.py:182 — 返す量・読む量の既定（判断に関わらない）
+- rtt.py:217 — 推測読み・まとめ読みの長さ（読みの回数の工夫。読んだ値は同じ）
+- rtt.py:218 — 推測読み・まとめ読みの長さ（読みの回数の工夫。読んだ値は同じ）
+- rtt.py:391 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- rtt.py:394 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- rules.py:447 — 返す量・読む量の既定（判断に関わらない）
+- rules.py:592 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:212 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:215 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:223 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:246 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:376 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:389 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:390 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:394 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:404 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:407 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- run.py:409 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- sampler.py:15 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- sampler.py:16 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- semihosting.py:32 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- semihosting.py:33 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- semihosting.py:34 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- semihosting.py:108 — 返す量・読む量の既定（判断に関わらない）
+- serial_link.py:25 — シリアルの既定の速さ
+- serial_link.py:49 — 切り出し
+- serial_link.py:121 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- sigrok.py:21 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- snapshot.py:39 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- stackusage.py:230 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stackusage.py:234 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stackusage.py:319 — 塗るときに今の SP の下 64 バイトを避ける（使っている所を壊さない操作。塗った範囲は返す）
+- stepping.py:83 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:161 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:162 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:187 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:188 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:233 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stepping.py:310 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:190 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:191 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:194 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:195 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:205 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:210 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:223 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- stm32_option_bytes.py:241 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- streams.py:23 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- streams.py:168 — 誤りの文言を最新 10 件残す
+- streams.py:171 — 切り出し
+- streams.py:224 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- svd.py:96 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- svd.py:218 — 切り出し
+- swo_trace.py:83 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- swo_trace.py:166 — 返す量・読む量の既定（判断に関わらない）
+- timeline.py:34 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- timeline.py:35 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- timeline.py:36 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- timeline.py:37 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- timeline_fpga.py:100 — 切り出し
+- timeline_rows.py:217 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:14 — USB の待ち時間
+- transport.py:60 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:65 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:67 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:74 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:81 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:86 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:93 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:130 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:134 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:140 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:142 — 待ち時間・周期・時間切れの操作の既定（判定に使わない）
+- transport.py:151 — 制御の受信の待ち 0.05 秒
+- usertrace.py:36 — 上限・大きさ（欠けは dropped/lost/*_total 等で出す）
+- usertrace.py:316 — 返す量・読む量の既定（判断に関わらない）
+- usertrace.py:317 — 返す量・読む量の既定（判断に関わらない）
+- xtrig.py:170 — 返す量・読む量の既定（判断に関わらない）
+- xtrig.py:171 — 返す量・読む量の既定（判断に関わらない）
+
+### D（見せ方: 整形・並べ方・件数） — 90 行
+
+- probe_hooks.py:38 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_hooks.py:57 — 整形
+- probe_linux.py:140 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_linux.py:347 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_linux.py:355 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_linux.py:501 — 読めなかった行の例を頭から 5 行まで（件数 unparsed は全数）
+- probe_names.py:44 — 整形
+- probe_observe.py:265 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_profile_export.py:233 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_profile_export.py:244 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_rtos.py:548 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_rtos_analysis.py:103 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_rtos_analysis.py:109 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_snapshot.py:394 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_snapshot.py:508 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_stack.py:142 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_swo.py:177 — 誤りの文言の並び
+- probe_swo.py:185 — 誤りの文言の並び
+- probe_terminal.py:68 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_testpoint.py:296 — 誤りの文言の並び
+- probe_testpoint.py:375 — stop の要約に載せる件数（anomalies 20・tree_depth 3。全体は testpoint_report で）
+- probe_testpoint.py:376 — stop の要約に載せる件数（anomalies 20・tree_depth 3。全体は testpoint_report で）
+- probe_testpoint.py:533 — 要約の件数を引数で渡す
+- probe_ui_state.py:94 — 整形
+- probe_user.py:67 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_user.py:68 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_user.py:171 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_watch.py:388 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- probe_watch.py:419 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- recording.py:50 — 整形
+- recording.py:516 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- recording_long.py:418 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- recording_long.py:450 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- recording_long.py:623 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- recording_summary.py:107 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- rtt.py:84 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- rtt.py:338 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- rules.py:74 — 誤りの文言の並び
+- rules.py:119 — 誤りの文言の並び
+- rules.py:139 — 誤りの文言の並び
+- rules.py:143 — 誤りの文言の並び
+- rules.py:146 — 誤りの文言の並び
+- rules.py:575 — 整形
+- rules.py:578 — 証跡の Markdown の整形
+- rules.py:593 — 証跡の Markdown の整形
+- rules.py:597 — 証跡の Markdown の整形
+- rules.py:612 — 証跡の Markdown の整形
+- run.py:518 — 整形
+- sampler.py:77 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- sigrok.py:99 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- snapshot.py:64 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- snapshot.py:119 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- snapshot.py:166 — 整形
+- stackusage.py:77 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:123 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:160 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:239 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:260 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:267 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:276 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- stackusage.py:297 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- svd.py:464 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- svd.py:508 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- swo_trace.py:249 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- swo_trace.py:284 — 誤りの文言の並び
+- swo_trace.py:366 — 整形
+- symbols.py:117 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- symbols.py:120 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- symbols.py:217 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- symbols.py:218 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- symbols.py:241 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline.py:97 — 既定の区間の幅 = 範囲 ÷ 4096（表示の解像度。bin を渡せば変わる）
+- timeline.py:128 — 既定の区間の幅 = 範囲 ÷ 4096（表示の解像度。bin を渡せば変わる）
+- timeline.py:181 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline.py:182 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:111 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:118 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:158 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:161 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:176 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_fpga.py:208 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_rows.py:306 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timeline_rows.py:451 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timesync.py:54 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- timesync.py:66 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- usertrace.py:300 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- usertrace.py:322 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- usertrace.py:339 — 並べ方（名前・番地・時刻・測った値の順。判定ではない）
+- watch_trigger.py:59 — 誤りの文言の並び
+- xtrig.py:205 — 整形
+
+## 4. 担当範囲と検索の対象
+
+- 担当: `ls host/fprobe/*.py` の 66〜130 番目 = **65 ファイル**（約 19,500 行）。下位フォルダ（plugins・testpoint・profile 等）は担当外。
+- 全ファイルを rg の対象にした（ファイルの一覧をそのまま rg に渡した）。対象:
+
+  probe_hooks.py・probe_inspect.py・probe_linux.py・probe_longrec.py・probe_lowlevel.py・probe_monitor.py・probe_multicore.py・probe_names.py・probe_observe.py・probe_profile.py・probe_profile_export.py・probe_rtos.py・probe_rtos_analysis.py・probe_rules.py・probe_safety.py・probe_snapshot.py・probe_stack.py・probe_streams.py・probe_swo.py・probe_terminal.py・probe_testpoint.py・probe_timeline.py・probe_ui_state.py・probe_user.py・probe_watch.py・probe_window.py・probe_xtrig_out.py・pyocd_targets.py・raw_dap.py・recording.py・recording_long.py・recording_sql.py・recording_stream.py・recording_summary.py・riscv_dm.py・riscv_target.py・rtt.py・rules.py・run.py・sampler.py・semihosting.py・serial_link.py・session.py・sigrok.py・snapshot.py・spi.py・stackusage.py・stepping.py・stm32_option_bytes.py・streams.py・svd.py・swo_trace.py・symbols.py・thumb_step.py・timeline.py・timeline_fpga.py・timeline_rows.py・timesync.py・transport.py・uart_flow.py・usertrace.py・watch_buffer.py・watch_trigger.py・wiring.py・xtrig.py

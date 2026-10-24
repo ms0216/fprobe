@@ -48,6 +48,22 @@ def test_measure_statistics_and_the_longest(recording):
     json.dumps(d)
 
 
+def test_each_interval_and_longest_names_its_bin(recording):
+    # 区間・長い順の上位がどの棒に入るかを結果に入れる（画面が棒の範囲から求め直さない。2026-10-23 の b21）
+    d = measure(recording, START, END, bins=8).as_dict()
+    hist = d["histogram"]
+    assert len(d["interval_bins"]) == len(d["intervals"])
+    for (_, duration), k in zip(d["intervals"], d["interval_bins"]):
+        assert hist[k]["lo"] <= duration and (duration < hist[k]["hi"] or k == len(hist) - 1)
+    assert [sum(1 for k in d["interval_bins"] if k == i) for i in range(len(hist))] == [b["count"] for b in hist]
+    assert d["longest"][0]["bin"] == len(hist) - 1                    # 最長は最後の棒（最大を含む）
+    for o in d["longest"]:
+        assert hist[o["bin"]]["lo"] <= o["duration"] <= hist[o["bin"]]["hi"]
+    same = interval_report([(0, 7), (10, 7)]).as_dict()               # 全部同じ値: 棒は 1 つ
+    assert same["interval_bins"] == [0, 0] and [o["bin"] for o in same["longest"]] == [0, 0]
+    assert interval_report([]).as_dict()["interval_bins"] == []
+
+
 def test_pair_times_matches_recording_rule(recording):
     starts = [e.t for e in recording.find(START)]
     ends = [e.t for e in recording.find(END)]
@@ -65,4 +81,5 @@ def test_interval_report_without_timebase_and_the_number_of_longest():
     d = interval_report(pairs, longest=3, bins=5).as_dict()
     assert "seconds" not in d and len(d["histogram"]) == 5
     assert [o["t"] for o in d["longest"]] == [10_000, 400, 900]
-    assert interval_report([]).as_dict() == {"count": 0, "unit": "ticks", "timebase_hz": None, "intervals": []}
+    assert interval_report([]).as_dict() == {"count": 0, "unit": "ticks", "timebase_hz": None, "intervals": [],
+                                              "interval_bins": []}

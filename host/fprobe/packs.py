@@ -19,6 +19,7 @@ from typing import Callable
 __all__ = ["Packs", "glob_matcher"]
 
 INSTALL_LIMIT = 8                  # 1 回で入れる Pack の数の上限（"*" で索引の全部を落とさないように）
+FIND_LIMIT = 200                   # find が返す部品の数の既定の上限（総数と切ったかは結果に）
 
 
 def glob_matcher(pattern: str) -> Callable[[str], bool]:
@@ -59,14 +60,18 @@ class Packs:
         index = self._index(update)
         return [index[name] for name in sorted(index) if match(name)]
 
-    def find(self, pattern: str, update: bool = False, limit: int = 200) -> list[dict]:
-        """部品番号（グロブ。ワイルドカードが無ければ部分一致）で索引を探す。"""
+    def find(self, pattern: str, update: bool = False, limit: int = FIND_LIMIT) -> dict:
+        """部品番号（グロブ。ワイルドカードが無ければ部分一致）で索引を探す。名前の順に limit 個まで: parts と、合った
+        部品の総数 total・切ったか truncated・使った上限 limit。"""
+        if limit < 1:
+            raise ValueError("limit は 1 以上")
+        matches = self._matches(pattern, update)
         out = []
-        for info in self._matches(pattern, update)[:limit]:
+        for info in matches[:limit]:
             ref, = self.cache.packs_for_devices([info])
             out.append({"part": info["name"], "vendor": info["vendor"].split(":")[0], "pack": f"{ref.vendor}.{ref.pack}",
                         "version": ref.version, "installed": os.path.isfile(self._installed_path(ref))})
-        return out
+        return {"parts": out, "total": len(matches), "truncated": len(matches) > limit, "limit": limit}
 
     def install(self, pattern: str, update: bool = False, limit: int = INSTALL_LIMIT) -> dict:
         """部品番号に合う部品の Pack を落として入れる（入れ済みも含めて最新の版を落とし直さない: Cache が判断）。"""

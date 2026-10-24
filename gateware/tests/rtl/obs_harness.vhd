@@ -31,6 +31,7 @@ entity obs_harness is
     user_ir     : in  std_logic_vector(31 downto 0);
     words       : in  unsigned(8 downto 0);
     sync_period : in  unsigned(15 downto 0);
+    id_scans    : in  unsigned(7 downto 0);
     cmd_push    : in  std_logic;
     cmd_data    : in  std_logic_vector(15 downto 0);
     match_mask  : in  std_logic_vector(15 downto 0);
@@ -43,6 +44,7 @@ entity obs_harness is
     driving       : out std_logic;
     id_ok         : out std_logic;
     stuck         : out std_logic;
+    id_timeout    : out std_logic;
     cmd_pending   : out std_logic;
     overflow_seen : out std_logic;
     cmd_dropped   : out std_logic;
@@ -84,10 +86,10 @@ begin
     port map (clk => clk, rst => rst, time_count => time_count, enable => enable, free_pins => free_pins,
               half_period => half_period, sample_delay => 0, ir_len => ir_len, ir_before => ir_before, ir_after => ir_after,
               dr_before => dr_before, dr_after => dr_after, user_ir => user_ir, words => words,
-              sync_period => sync_period, cmd_push => cmd_push, cmd_data => cmd_data,
+              sync_period => sync_period, id_scans => id_scans, cmd_push => cmd_push, cmd_data => cmd_data,
               match_mask => match_mask, match_value => match_value, match_change => match_change,
               match_on => match_on, match => match, match_count => match_count,
-              running => running, target_running => target_running, driving => driving, id_ok => id_ok, stuck => stuck, cmd_pending => cmd_pending,
+              running => running, target_running => target_running, driving => driving, id_ok => id_ok, stuck => stuck, id_timeout => id_timeout, cmd_pending => cmd_pending,
               overflow_seen => overflow_seen, cmd_dropped => cmd_dropped, scans => scans,
               read_value => read_value, id => id, ev_valid => ev_valid, ev_sync => ev_sync, ev_data => ev_data,
               ev_addr => ev_addr, ev_time => ev_time,

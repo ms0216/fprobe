@@ -8,6 +8,7 @@ import pytest
 from probe_fakes import FakeDevice, FakeTarget, use_fake_ring
 from pyocd.core.target import Target
 from rtos_kernel import FreeRTOSBuilder, shared
+from value_kinds import vint
 
 from fprobe import collector, probe_window
 from fprobe import generated as g
@@ -87,6 +88,7 @@ def test_info_without_a_target_tells_the_kind_and_the_trace_hook(probe):
 def test_info_and_tasks_of_a_halted_target(probe, kernel):
     info = probe.rtos_info()
     assert info["halted"] and info["tasks"] == 4 and info["tick"] == 1234 and info["port"] == "armv7m_fp"
+    assert info["port_basis"] == "vPortEnableVFP"
     assert info["current"] == {"handle": kernel.handles["sensor"], "name": "sensor"}
     tasks = {t["name"]: t for t in probe.rtos_tasks()["tasks"]}
     assert tasks["sensor"]["state"] == "running" and tasks["ctrl"]["wait"]["name"] == "cmd_queue"
@@ -111,10 +113,14 @@ def test_backtrace_and_expressions_of_a_task_by_name_or_handle(probe, kernel):
     bt = probe.rtos_backtrace("worker", variables=True)
     assert bt["task"] == "worker" and bt["state"] == "blocked"
     assert functions(bt["frames"]) == ["recurse", "recurse", "worker_task"]
-    assert arguments(bt["frames"][0])["depth"] == 5
+    assert arguments(bt["frames"][0])["depth"] == vint(5)
     assert probe.rtos_backtrace(f"0x{h:08X}")["task"] == "worker"
     read = probe.rtos_read("worker", "depth")
-    assert read["task"] == "worker" and read["value"] == 5
+    assert read["task"] == "worker" and read["value"] == vint(5)
+    # 積み方を明示して渡せる（ELF から決まらないとき）
+    assert probe.rtos_read("worker", "depth", port="armv7m_fp")["value"] == vint(5)
+    with pytest.raises(ValueError, match="port"):
+        probe.rtos_backtrace("worker", port="armv6m")         # FreeRTOS の扱う積み方ではない
     with pytest.raises(KeyError):
         probe.rtos_backtrace("nothing")
 
@@ -282,11 +288,11 @@ def test_sampled_timeline_reads_stacks_heap_and_mutex_words(probe, kernel):
             dev.sample(t + j, address, value)
     mem = probe.rtos_timeline_memory(points=3)
     assert mem["stacks"]["worker"]["max_used"] == 300 and mem["stacks"]["worker"]["last_used"] == 200
-    assert mem["heap"]["min_free"] == 8600 and mem["heap"]["total"] == 20 * 1024 - 8
+    assert mem["heap"]["min_free"] == 8600 and mem["heap"]["total"] == 20 * 1024
     inv = probe.rtos_timeline_inversions()
     (ep,) = inv["episodes"]
     assert (ep["mutex"], ep["holder"], ep["waiter"]) == ("log_mutex", "worker", "ctrl")
-    assert ep["unbounded"] and 9_990 <= ep["interference"]["sensor"] <= 10_000 and inv["duration_us"]["max"] > 0
+    assert ep["interfered"] and 9_990 <= ep["interference"]["sensor"] <= 10_000 and inv["duration_us"]["max"] > 0
     jobs = probe.rtos_timeline_jobs(task="worker")
     # 出来事が無い（sampled）ので、ジョブを優先度から推定しない。区間の事実（回数・時間・次に動いたタスク）だけ
     assert jobs["tasks"] == {} and jobs["jobs"] == [] and any("出来事" in n for n in jobs["notes"])
@@ -297,6 +303,7 @@ def test_sampled_timeline_reads_stacks_heap_and_mutex_words(probe, kernel):
     fine = probe.rtos_timeline_load(window_us=1)          # 窓が分解能より短くても経験則の注記は出さない（分解能は事実で返す）
     assert fine["resolution_us"] > 0 and not any("倍" in n for n in fine["notes"])
     load = probe.rtos_timeline_load(window_us=200)
+    assert load["window_us"] == 200                                     # 使った窓を返す（?46）
     assert load["windows"][0]["tasks"]["worker"] > 0 and load["peak"]["load"] == pytest.approx(1.0)
     assert any("割り込み" in n for n in load["notes"])                  # 方法 sampled: 割り込みは見えない
     profile = probe.rtos_timeline_profile()
@@ -419,6 +426,23 @@ def test_itm_timeline_reads_kernel_events_flow_blocking_queues_and_exact_inversi
     probe.rtos_timeline_stop()
     kinds = {e["kind"] for e in probe.recording_events(streams=["rtos"])["events"]}
     assert {"send", "receive", "block", "ready", "prio_inherit", "blocked", "inversion"} <= kinds
+
+
+def test_isr_hooks_that_do_not_pair_are_counted_in_the_result(probe, kernel):
+    """isr_enter / isr_exit を対にできなかった数（入りの無い出等）を、回に入れず結果に返す。"""
+    dev, h = probe.session.device, kernel.handles
+    S = 1000
+    started = probe.rtos_timeline_start(method="itm", swo_baud=2_000_000, core_clock_hz=16e6)
+    t0 = started["t0"]
+    for dt, data in [(100, itm_word(h["worker"] | 0)), (110, record("isr_enter", ipsr=20)),
+                     (120, record("isr_exit", ipsr=20)), (130, record("isr_exit", ipsr=16)),
+                     (140, itm_word(h["worker"] | 1))]:
+        dev.swo(t0 + S * dt, data)
+    dev.advance(S * 1000)
+    load = probe.rtos_timeline_load()
+    assert load["isr_unpaired"] == {"missing_exit": 0, "missing_enter": 1, "lost_open": 0}
+    assert any("入りの無い出 1" in n for n in load["notes"])
+    probe.rtos_timeline_stop()
 
 
 def test_kernel_tools_need_kernel_events(probe):

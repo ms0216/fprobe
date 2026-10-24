@@ -21,6 +21,18 @@ def test_text_lines_across_chunks_and_long_lines():
     assert len(long) == 1 and len(long[0].text) == 4096
 
 
+def test_text_line_cut_at_the_limit_is_marked():
+    """改行の来ないまま上限で切った行は、切ったこと・使った上限を残し、続きの行は続きと分かる。"""
+    d = TextDecoder(line_limit=8)
+    [cut] = d.feed(b"0123456789")
+    assert cut.text == "01234567" and cut.cut_at == 8
+    assert cut.to_dict()["cut_at"] == 8 and "continued" not in cut.to_dict()
+    [rest] = d.feed(b"ab\nnext\n")[:1]
+    assert rest.text == "89ab" and rest.continued and rest.to_dict()["continued"] is True and rest.cut_at is None
+    plain = TextDecoder().feed(b"short\n")[0]
+    assert plain.cut_at is None and not plain.continued and "cut_at" not in plain.to_dict()
+
+
 def test_text_with_addresses_is_annotated():
     syms = Symbols(FW / "rtt_demo" / "rtt_demo.elf")
     stream = LogStream.create("text", symbols=syms)

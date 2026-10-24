@@ -8,7 +8,8 @@ export const ST_CHANGE = 2;          // 画素の中で変化
 export const ST_NONE = 3;            // 波形が無い（記録の隙間・タイルの外）
 
 export const NO_LABEL = 0xffffffff;
-export const TONE = { normal: 0, bad: 1, good: 2, warn: 3 } as const;
+// 色の意味 = 出来事の事実の種類（fprobe.timeline_rows.TONES。良し悪しの判定ではない。色は画面の見せ方）
+export const TONE = { plain: 0, failure: 1, running: 2, stop: 3, mark: 4, other: 5 } as const;
 
 /** 出来事の段の型（fprobe.timeline_rows の ROW_TYPES） */
 export type EventRowType = "intervals" | "bus" | "state" | "points" | "values";
@@ -45,6 +46,10 @@ export interface LaneHeader {
   start?: number;
   bin?: number;
   bins?: number;
+  // 生の段: 範囲の前の値を探した始め（null = 探すものが無い）と、探すべき所を探し切ったか。false なら carry_from より前に
+  // 変わったきりの段の、範囲の始めの値は探していない（無いのではない）
+  carry_from?: number | null;
+  carry_complete?: boolean;
 }
 
 export interface TileHeader {
@@ -99,6 +104,8 @@ export interface RawLane {
   tone: Uint8Array;
   address: Float64Array;
   byRow: RowEvents[];
+  carryFrom: number | null;          // LaneHeader.carry_from（古いタイルは null）
+  carryComplete: boolean;            // LaneHeader.carry_complete（申告が無ければ false: 探し切ったと仮定しない）
 }
 
 export interface SummaryLane {
@@ -178,7 +185,8 @@ export function fromSections(header: TileHeader, data: Record<string, Section>):
              depth: opt<Uint8Array>(`lane.${i}.depth`) ?? new Uint8Array(n),
              tone: opt<Uint8Array>(`lane.${i}.tone`) ?? new Uint8Array(n),
              address: opt<Float64Array>(`lane.${i}.address`) ?? new Float64Array(n).fill(NaN),
-             byRow: splitRows(rows.length, row, t, tEnd, value) } satisfies RawLane;
+             byRow: splitRows(rows.length, row, t, tEnd, value),
+             carryFrom: l.carry_from ?? null, carryComplete: l.carry_complete ?? false } satisfies RawLane;
   });
   return { header, t0: header.t0, t1: header.t1, wave, lanes, rowAt };
 }

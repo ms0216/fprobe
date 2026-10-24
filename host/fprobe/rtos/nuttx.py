@@ -19,9 +19,9 @@ from __future__ import annotations
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.typesys import ArrayType, EnumType, strip
-from .base import KernelAwareness
-from .cortexm import SavedContext, arm_baseline, arm_has_fpu, unstack_exception_frame
-from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo
+from .base import NAME_LIMIT, KernelAwareness
+from .cortexm import SavedContext, arm_baseline, unstack_exception_frame
+from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .nuttx_objects import MHOLDER_MASK, MRESET, NO_MHOLDER, SEM_TYPE_MUTEX, NuttXObjects
 from .stackcheck import check_stack
 from .structs import StructLayout
@@ -29,7 +29,6 @@ from .structs import StructLayout
 __all__ = ["STACK_COLOR", "NuttX", "read_nuttx_context"]
 
 STACK_COLOR = (0xDEADBEEF).to_bytes(4, "little")     # arch/arm/src/common/arm_internal.h
-NAME_LIMIT = 64
 MAX_PIDHASH = 4096
 # xcp.regs の配列（arch/arm/include/armv7-m/irq.h）
 REG_R13, REG_R4, REG_EXC_RETURN, SW_INT_REGS, SW_FPU_REGS = 0, 2, 11, 12, 16
@@ -79,14 +78,13 @@ class NuttX(KernelAwareness):
     name = "NuttX"
     priority_order = 1            # 大きい方が高い（SCHED_PRIORITY_MIN 1 〜 MAX 255、アイドルは 0）
 
-    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None):
-        super().__init__(info, access, symbols)
+    def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, name_limit: int = NAME_LIMIT):
+        super().__init__(info, access, symbols, name_limit)
         self.tcb = StructLayout.of(info, "struct tcb_s")
         self.states = self._enum(self.tcb.member_type("task_state"))
         self.sem = self._optional_layout("sem_t", "struct sem_s")
         self.mq = self._optional_layout("struct mqueue_inode_s")
         self.port = "armv6m" if arm_baseline(info.elf) else "armv7m"
-        self.fpu_default = SW_FPU_REGS if arm_has_fpu(info.elf) else 0
 
     def _optional_layout(self, *names: str) -> StructLayout | None:
         try:
@@ -144,7 +142,7 @@ class NuttX(KernelAwareness):
     def task_name(self, handle: int) -> str:
         if self.tcb.has("name"):
             try:
-                name = self.mem.cstring(handle + self.tcb.offset("name"), min(self.tcb.member_size("name"), NAME_LIMIT))
+                name = self.mem.cstring(handle + self.tcb.offset("name"), self.tcb.member_size("name"), whole=True)
                 if name:
                     return name
             except AccessError:
@@ -195,7 +193,7 @@ class NuttX(KernelAwareness):
         if n <= 0 or not table:
             return []
         if n > MAX_PIDHASH:
-            self.warnings.append(f"g_npidhash が大きすぎる（{n}。{MAX_PIDHASH} まで読む）")
+            self.warnings.append(f"g_npidhash = {n}。読む上限 {MAX_PIDHASH} 個まで読んだ（続きは読んでいない）")
             n = MAX_PIDHASH
         found: dict[int, int] = {}                                          # TCB → pid
         for i, tcb in enumerate(_words(self.access.read_memory, table, n)):
@@ -241,11 +239,17 @@ class NuttX(KernelAwareness):
         if running and handle != current:
             notes.append("TSTATE_TASK_RUNNING だが g_running_tasks のタスクではない")
         stack = self._stack(handle, running)
+        if running and handle == current and stack.pointer is None and self._handler_mode():
+            notes.append("ハンドラモードで止まった: 中断されたタスクの SP（psp か msp か）はコアの状態から分からない")
         if stack.overflow:
             notes.append("SP がスタックの底（stack_base_ptr）より下")
         base = self._field(handle, "base_priority") if self.tcb.has("base_priority") else None
-        return Task(handle, self.task_name(handle), self._field(handle, "sched_priority"), state, stack, wait, base,
+        task = Task(handle, self.task_name(handle), self._field(handle, "sched_priority"), state, stack, wait, base,
                     self._field(handle, "pid", signed=True), notes=notes)
+        task.locations["priority"] = field_location(self.tcb, handle, "sched_priority")
+        if base is not None:
+            task.locations["base_priority"] = field_location(self.tcb, handle, "base_priority")
+        return task
 
     def _wait(self, handle: int, state_name: str, tick: int | None) -> WaitInfo:
         if state_name == "TSTATE_WAIT_SIG":
@@ -291,23 +295,31 @@ class NuttX(KernelAwareness):
         size = self._field(handle, "adj_stack_size")
         end = base + size if base and size else None
         if running:
-            pointer = self._running_sp(base, end)
+            pointer = self._running_sp()
         else:
             pointer = self._field(handle, "xcp.regs") or None             # 文脈はスタックの上に積まれる
         if not base:
             return StackInfo(0, None, pointer)
         return check_stack(self.access.read_memory, base, end, pointer, STACK_COLOR)
 
-    def _running_sp(self, base: int, end: int | None) -> int | None:
-        """実行中のタスクの SP: psp（割り込みのスタックを使う設定）か sp（MSP で動く設定）のうち、スタックの中のもの。"""
-        for name in ("psp", "sp"):
-            try:
-                value = self.access.read_register(name)
-            except AccessError:
-                continue
-            if end is not None and base <= value <= end:
-                return value
-        return None
+    def _running_sp(self) -> int | None:
+        """実行中のタスクの SP。値の見た目（スタックの範囲に入るか）では選ばず、コアの状態で決める: スレッドモード
+        （xPSR の IPSR = 0）なら CONTROL.SPSEL の示す方（1 = psp、0 = msp）。ハンドラモードでは、中断されたスレッドが
+        どちらを使っていたかはコアのレジスタから分からない（EXC_RETURN は LR から消えうる）ので None。
+        xPSR・CONTROL が読めなければ None。"""
+        try:
+            if self.access.read_register("xpsr") & 0x1FF:
+                return None
+            name = "psp" if self.access.read_register("control") & 0b10 else "msp"
+            return self.access.read_register(name)
+        except AccessError:
+            return None
+
+    def _handler_mode(self) -> bool:
+        try:
+            return bool(self.access.read_register("xpsr") & 0x1FF)
+        except AccessError:
+            return False
 
     # --- 呼び出し履歴 ------------------------------------------------------------------------------
 
@@ -318,10 +330,9 @@ class NuttX(KernelAwareness):
         if self.port != "armv7m":
             raise ValueError(f"{self.port} の NuttX の文脈（xcp.regs の並び）は扱わない（armv7m だけ）")
         regs = self._field(task.handle, "xcp.regs")
-        try:
-            return read_nuttx_context(self.access.read_memory, regs, None)
-        except ValueError:
-            return read_nuttx_context(self.access.read_memory, regs, self.fpu_default)
+        # FPU の枠は文脈の大きさ（REG_R13 − regs）で決める。合わなければ誤り（ELF の FP の属性で決めて読まない:
+        # FPU 向けに作ったことと CONFIG_ARCH_FPU は別）
+        return read_nuttx_context(self.access.read_memory, regs, None)
 
     def idle_handles(self) -> set[int]:
         address = self.optional_address("g_idletcb")

@@ -140,7 +140,7 @@ class RtosDemo:
 
     def rtos_timeline_start(self, method="sampled", rate_hz=20_000.0, ap=0, swo_baud=None, core_clock_hz=None,
                             memory=False, tasks=None, mutexes=None, exceptions=False, memory_rate_hz=1000.0,
-                            kernel=True):
+                            kernel=True, caller=None):
         if method not in ("sampled", "itm"):
             raise ValueError("method は sampled か itm")
         if exceptions and method != "itm":
@@ -204,7 +204,7 @@ class RtosDemo:
         run = _TimelineRun(state["method"], window, dict(names), HZ,
                            address=0x20000004 if state["method"] == "sampled" else None,
                            rate_hz=state["rate_hz"] if state["method"] == "sampled" else None,
-                           resolution=tl.resolution, exceptions=state["exceptions"],
+                           resolution=tl.resolution, exceptions=state["exceptions"], order=1,   # FreeRTOS
                            priorities={t["handle"]: t["priority"] for t in self.rtos_tasks()["tasks"]},
                            idle={h for h, name in names.items() if name == "IDLE"})
         result = _TimelineResult(tl, None, run, [], activations,
@@ -310,7 +310,7 @@ class RtosDemo:
             self._elf._session = saved
 
     def profile_start(self, method="itm", rate_hz=10_000.0, core_clock_hz=None, swo_baud=2_000_000,
-                      exception_trace=True, exception_rate_hz=1000.0, timestamps=None, ap=0):
+                      exception_trace=True, exception_rate_hz=1000.0, timestamps=None, ap=0, caller=None):
         if method not in ("itm", "pcsr"):
             raise ValueError("method は itm か pcsr")
         if method == "itm" and core_clock_hz is None:
@@ -414,16 +414,16 @@ class RtosDemo:
         return self._elf.profile_exceptions()
 
     def profile_aggregate(self, by="function", groups=None, t0_s=None, t1_s=None, t0=None, t1=None, top=20,
-                          function=None):
+                          function=None, separator=None):
         self._profile_result()
         with self._demo_session():
-            return self._elf.profile_aggregate(by, groups, t0_s, t1_s, t0, t1, top, function)
+            return self._elf.profile_aggregate(by, groups, t0_s, t1_s, t0, t1, top, function, separator)
 
     # --- 記録・ELF（本物の Probe にそのまま） -------------------------------------------------------
 
     # 記録の読み（recording_find・recording_query）は fake_demo_search.py（SearchDemo）
 
     def stack_static(self, su_paths=None, indirect=None, assume_address_taken=False, roots=None, entry=None,
-                     exception_frame=None, function=None, top=50):
+                     exception_frame=None, function=None, top=50, vector_table=None, vector_table_size=None):
         return self._elf.stack_static(su_paths, indirect, assume_address_taken, roots, entry, exception_frame,
-                                      function, top)
+                                      function, top, vector_table, vector_table_size)

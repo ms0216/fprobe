@@ -1,13 +1,13 @@
 <!-- 自動生成ファイル。直接編集しないこと（python -m fprobe.api gen で再生成）。生成元: host/api/fprobe_api.json -->
 # fprobe API
 
-JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 1。仕様: docs/superpowers/specs/2026-10-17-host-daemon-design.md
+JSON-RPC 2.0 over WebSocket（`ws://127.0.0.1:7820/api`）。API の版 2。仕様: docs/superpowers/specs/2026-10-17-host-daemon-design.md
 
 Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=…)` → `c.call("メソッド", 引数=値, …)`（引数はキーワードで。戻り値は dict）。
 
 ## session.hello
 
-種類: `read`。名乗る（最初に必ず呼ぶ）。api_version が合わなければ断られる。
+種類: `read`。名乗る（最初に必ず呼ぶ）。api_version が合わなければ断られる。 automated: 自動操作か（画面は navigator.webdriver を申告する。操作の記録に残す。省略で申告しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -15,10 +15,11 @@ Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=�
 | `role` | `"human" | "ai" | "script"` | ○ |
 | `api_version` | `number` | ○ |
 | `token` | `string | null` |  |
+| `automated` | `boolean` |  |
 
 ## session.status
 
-種類: `read`。デーモンの状態（API の版、機器、利用者の一覧、一時停止の状態、保留の数、見張りが最後に見たターゲットの状態、GDB サーバの待ち受けのポート gdb.port（開いていなければ null））。
+種類: `read`。デーモンの状態（API の版、機器、利用者の一覧（WebSocket の利用者は、読まないので捨てた通知の数 notifications_dropped と送り待ちの上限 notify_limit も）、一時停止の状態、保留の数、見張りが最後に見たターゲットの状態、GDB サーバの待ち受けのポート gdb.port（開いていなければ null））。
 
 ## session.subscribe
 
@@ -81,7 +82,7 @@ Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=�
 
 ## probe.sampler.status
 
-種類: `read`。DAP サンプラ（変数を止めずに読む FPGA の回路。1 つだけ）をいま使っている道具（機器には触れない）: user（watch = 変数のライブ観測 / rtos = タスクの時間軸 / profile = PC のサンプリング / rtt = RTT の見張り / clock = CPU クロックの実測。空きなら null）、release（止める API。clock は自分で終わるので null）、since（使い始めた時刻、UNIX 秒）。ほかの道具が使っている間に watch.set・rtos.timeline.start（sampled）・profile.start（pcsr）・rtt.start（sampler）を呼ぶと誤り。
+種類: `read`。DAP サンプラ（変数を止めずに読む FPGA の回路。1 つだけ）をいま使っている道具（機器には触れない）: user（watch = 変数のライブ観測 / rtos = タスクの時間軸 / profile = PC のサンプリング / rtt = RTT の見張り / clock = CPU クロックの実測。空きなら null）、release（止める API。clock は自分で終わるので null）、since（使い始めた時刻、UNIX 秒）、client（使い始めた呼び出し元 {id, name, role}。デーモンが記録した事実。分からなければ null）。ほかの道具が使っている間に watch.set・rtos.timeline.start（sampled）・profile.start（pcsr）・rtt.start（sampler）を呼ぶと誤り。
 
 ## probe.design.get
 
@@ -116,8 +117,16 @@ Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=�
 
 ## probe.voltage
 
-種類: `read`。ターゲットの電源電圧（補助マイコン Pico の ADC、V）。live が False なら Pico が計測値を送っていない。
+種類: `read`。ターゲットの電源電圧（補助マイコン Pico の ADC、V）。live = window_s 秒（既定 10 ms。Pico の計測の間隔 1 ms より長く）待つ間に計測値の数が増えた（samples_before → samples）。
 over_range が True なら測れる上限を超えている（volts は None。配線の分圧を確認）。
+
+## probe.voltage_history
+
+種類: `read`。デーモンが読んだ電圧（だれの probe.voltage でも）の履歴（機器には触れない）: since（UNIX 秒）より後の読み readings = [{time（UNIX 秒）, volts, over_range, live}] と stats = {count, min, max, mean（live で範囲の中の読みだけ、V）, readings, over_range, not_live（それぞれの読みの数）}。残すのは limit 件まで（超えて捨てた古い読みは dropped）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `since` | `number | null` |  |
 
 ## probe.pins.read
 
@@ -125,7 +134,7 @@ over_range が True なら測れる上限を超えている（volts は None。�
 
 ## probe.pins.write
 
-種類: `control`。ピンを個別に High（1）/ Low（0）にする（省いたピンは変えない）。ターゲット未接続のときだけ（接続中は断る）。hold_us を与えるとその時間の後で元に戻す（例 nreset=0, hold_us=1000 で 1 ms のリセットの脈）。書いた後の状態を返す。
+種類: `control`。ピンを個別に High（1）/ Low（0）にする（省いたピンは変えない）。ターゲット未接続のときだけ（接続中は断る）。hold_us を与えるとその時間の後で元に戻す（例 nreset=0, hold_us=1000 で 1 ms のリセットの脈）。書いた後の状態を返す。脈のときは、戻した線が戻るまで最大 settle_timeout_us 待ち、settle_us（戻るまで・打ち切るまでの時間）・settled（戻ったか。false = 上限で打ち切った）・settle_timeout_us（使った上限）も返す。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -133,6 +142,7 @@ over_range が True なら測れる上限を超えている（volts は None。�
 | `swdio` | `0 | 1 | null` |  |
 | `nreset` | `0 | 1 | null` |  |
 | `hold_us` | `number` |  |
+| `settle_timeout_us` | `number` |  |
 
 ## target.connect
 
@@ -158,7 +168,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.status
 
-種類: `read`。コアの状態（RUNNING / HALTED 等）と、停止中なら PC・場所（where、分かれば function・file・line）。つないでいる先（target・frequency_hz・wire = swd / jtag）も。走っているのに致命的エラーの事実（下記）があれば fatal = {kind（lockup = DHCSR.S_LOCKUP / fatal_halt = PC の見本がすべて RTOS・ランタイムの致命的エラーの処理の中 / fault_loop = 故障の処理の中 / tick_stopped = RTOS のティックが前の見張りから変わっていない）, function, since（最初に見た時刻、UNIX 秒）, evidence（手がかり: clue = lockup / pc_in / pc_range / tick_stopped）}。事実だけで、何秒続いたら等の経験則の判定はしない。材料は止めずに読む DHCSR・DWT_PCSR・ティックの変数。複数ドロップの部品（RP2040）なら core（接続中のコア）と cores = [{core, selected, state, pc・where（止まっていれば）} または {core, selected, error}]。接続していないコアは TARGETSEL で DP を一時的に選び直して DHCSR を読む（DAP サンプラが動いている間は error）。RISC-V なら arch = "riscv"・hart・debug_module（版・プログラムバッファ・システムバス・ハート）。Cortex-A・ARM11 なら arch = "armv7-a" / "armv6"・core・cores・breakpoints・watchpoints・jtag_chain・tap（Cortex-A は debug_base・apb_ap・discovery = rom_table / part_table も）。
+種類: `read`。コアの状態（RUNNING / HALTED 等）と、停止中なら PC・場所（where、分かれば function・file・line）。Cortex-M の停止中は halt_reason（1 語: request / breakpoint / bkpt_instruction / watchpoint / vector_catch / external）と halt_bits（DFSR の立っていたビット全部: HALTED / BKPT / DWTTRAP / VCATCH / EXTERNAL。複数立っていても halt_reason は 1 つを選んだ語）。つないでいる先（target・frequency_hz・wire = swd / jtag）も。走っているのに次の事実があれば fatal = {kind（lockup = DHCSR.S_LOCKUP / pc_in = 読めた PC の見本がすべて `target.liveness.set` で使う側が渡した関数の中 / tick_stopped = ティックの変数が前の見張りから変わっていない）, function, since（最初に見た時刻、UNIX 秒）, evidence（手がかり: clue = lockup / pc_in・pc_range（function、valid = 読めた見本の数、pc_samples = 読んだ数）/ tick_stopped）}。事実だけで、何秒続いたら等の経験則の判定や、名前の表による「致命的エラーの関数」の判定はしない。材料は止めずに読む DHCSR・DWT_PCSR・ティックの変数。複数ドロップの部品（RP2040）なら core（接続中のコア）、部品の表に救済の DP があれば rescue_dp（その TARGETSEL。`target_reset` の kind=rescue が使える）、cores = [{core, selected, state, pc・where（止まっていれば）} または {core, selected, error}]。接続していないコアは TARGETSEL で DP を一時的に選び直して DHCSR を読む（DAP サンプラが動いている間は error）。RISC-V なら arch = "riscv"・hart・debug_module（版・プログラムバッファ・システムバス・ハート）。Cortex-A・ARM11 なら arch = "armv7-a" / "armv6"・core・cores・breakpoints・watchpoints・jtag_chain・tap（Cortex-A は debug_base・apb_ap・discovery = rom_table / part_table も）。
 
 ## target.core.select
 
@@ -171,7 +181,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.fault
 
-種類: `control`。止まったコアの故障の解析: 原因（CFSR・HFSR の各ビットの意味と手がかり。例 NOCP = FPU が無効）、故障の番地（MMFAR・BFAR）、故障した命令の場所（関数・ファイル:行）とその時のレジスタ。故障のハンドラで止まると debug.run_until_halt の結果にも要約が付く。
+種類: `control`。止まったコアの故障の解析: 原因（CFSR・HFSR の各ビットの意味と手がかり。例 NOCP = FPU が無効）、故障の番地（MMFAR・BFAR）、故障した命令の場所（関数・ファイル:行）とその時のレジスタ。故障のハンドラで止まると debug.run_until_halt の結果にも要約が付く。locations は読んだ番地と大きさ（故障のレジスタは locations、積まれたレジスタは frame.locations。`target_memory_write` で書ける）、write_one_to_clear は 1 を書いたビットが消えるレジスタ（CFSR・HFSR・DFSR）。
 
 ## target.halt
 
@@ -224,12 +234,27 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.debug_mode.set
 
-種類: `control`。デバッグの方式を切り替える（U37）。mode: halt / monitor。止まっていれば同じ PC で止まったまま切り替わる。monitor ではターゲットのファームに組み込んだモニタ（host/firmware/monitor の DebugMon_Handler と fprobe_monitor_init）を通して、target.halt・resume・step、debug.breakpoint.*、debug.step、レジスタ、呼び出し履歴、debug.call、GDB サーバがそのまま使える。止まっている間も DebugMon より優先度の高い割り込みは動く。モニタ方式でできないこと: ベクタキャッチ、止めてのリセット（target.reset の halt・target.program_ram）、Flash の書き込み・消去、Flash の BKPT のブレークポイント（比較器だけ）、DebugMon 以上の優先度で走る処理の中のブレークポイント（HardFault になる）。クロストリガの停止の書き込みは DEMCR.MON_PEND に替わる。priority: DebugMon の優先度（0〜255、実装のビットに丸める）。結果は target.debug_mode.get と同じ。
+種類: `control`。デバッグの方式を切り替える（U37）。mode: halt / monitor。止まっていれば同じ PC で止まったまま切り替わる。monitor ではターゲットのファームに組み込んだモニタ（host/firmware/monitor の DebugMon_Handler と fprobe_monitor_init）を通して、target.halt・resume・step、debug.breakpoint.*、debug.step、レジスタ、呼び出し履歴、debug.call、GDB サーバがそのまま使える。止まっている間も DebugMon より優先度の高い割り込みは動く。モニタ方式でできないこと: ベクタキャッチ、止めてのリセット（target.reset の halt・target.program_ram）、Flash の書き込み・消去、Flash の BKPT のブレークポイント（比較器だけ）、DebugMon 以上の優先度で走る処理の中のブレークポイント（HardFault になる）。クロストリガの停止の書き込みは DEMCR.MON_PEND に替わる。priority: DebugMon の優先度（0〜255、実装のビットに丸める）。結果は target.debug_mode.get と同じ。 monitor → halt では left = {stop: breakpoint_at_pc（同じ PC で止めた）/ halt_request（PC に置けない・戻らないので停止要求で止めた。PC は近くだが同じとは限らない）/ running, pc_before, pc_after}。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `mode` | `"halt" | "monitor"` | ○ |
 | `priority` | `number | null` |  |
+
+## target.liveness.get
+
+種類: `read`。走らせたままの見張り（`target.status` の fatal）の条件: functions・patterns（PC の見本がその中にあれば fatal.kind = pc_in にする関数の名前・正規表現。既定は空）、pc_samples（見張りの 1 回に読む DWT_PCSR の数。条件が無ければ null = PC を読まない）、tick_variable（ティックの変数の名前。null = ティックを読まない）。
+
+## target.liveness.set
+
+種類: `control`。走らせたままの見張りの条件を置き換える: functions（関数の名前。完全一致）・patterns（正規表現。re.search）= 読めた PC の見本がすべてその関数の中なら `target.status` の fatal を kind = pc_in にする（渡さなければ空。本体は「致命的エラーの関数」「故障の処理」の名前の表を持たない。慣習の表はプラグイン fprobe.plugins.heuristics の liveness_conventions）、tick_variable（ティックの変数の名前。前の見張りから値が変わっていなければ fatal を kind = tick_stopped にする。本体は xTickCount・uwTick 等の名前の慣習で探さない: 渡さなければティックは読まない。ELF に無い名前は誤り）、pc_samples（見張りの 1 回に読む DWT_PCSR の数。1 以上。functions・patterns・tick_variable を渡すときは必須で既定は無い。使った数は fatal の evidence の pc_samples に出る）。結果は `target.liveness.get` と同じ。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `functions` | `Array<string>` |  |
+| `patterns` | `Array<string>` |  |
+| `pc_samples` | `number | null` |  |
+| `tick_variable` | `string | null` |  |
 
 ## target.registers.read
 
@@ -314,17 +339,17 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.diagnose
 
-種類: `control`。ターゲットにつながらない理由を順に調べて言葉で返す（未接続のときだけ）: 電圧 → ピン → SWD（JTAG→SWD・休眠からの起こし・複数ドロップ・速度を下げて。どの ACK か）→ JTAG のチェーン → DP（デバッグ電源）→ AP・ROM テーブル → コア（ロックアップ等）→ 部品の判別（pyOCD のターゲット名）→ 保護（STM32 の RDP・nRF の APPROTECT）。verdict・steps・suggested_connect（target_connect の引数）を返す。
+種類: `control`。ターゲットにつながらない理由を順に調べ、段ごとに読めた事実を返す（未接続のときだけ）: 電圧 → ピン → SWD（複数ドロップ・JTAG→SWD・休眠からの起こし。どの ACK か）→ JTAG のチェーン → DP（デバッグ電源）→ AP・ROM テーブル → コア（止まっている・眠っている・ロックアップ）→ 部品の判別（pyOCD のターゲット名の候補）→ 保護（STM32 の RDP・nRF の APPROTECT）。frequencies_hz = 試す速さ（この順に試し、最初に応答した速さで続ける。暗黙に下げない）。返すもの: reached（DP に届きデバッグ電源の要求に応答があった）・frequencies_hz（試した速さ）・protocol・frequency_hz（応答した速さ）・dp・aps・core・part・jtag・steps（name・status = ok 読めた / fail 読めなかった / skip 測る手段が無い・message・data）。良し悪しの判定（warn）・結論の文・接続の引数のおすすめは本体ではしない（プラグイン fprobe.plugins.heuristics.diagnose_verdict）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
-| `frequency_hz` | `number` |  |
+| `frequencies_hz` | `Array<number>` |  |
 | `max_aps` | `number` |  |
 | `jtag` | `boolean` |  |
 
 ## target.script.check
 
-種類: `read`。接続の手順のスクリプト（pyOCD のユーザスクリプト。"builtin:<名前>" かファイル）を実行せずに調べる: 定義された手順（will_connect / did_init_target / will_reset / unlock_device 等）と行、名前・引数の誤り（似た名前の提案）、構文の誤り。target_connect の script に渡す前に。
+種類: `read`。接続の手順のスクリプト（pyOCD のユーザスクリプト。"builtin:<名前>" かファイル）を実行せずに調べる: 定義された手順（will_connect / did_init_target / will_reset / unlock_device 等）と行、pyOCD の手順の名前でない関数（functions。pyOCD は呼ばない。名前・行）、引数の誤り（pyOCD が渡さない引数の名前。problems）、構文の誤り。似た名前の手順の提案は本体ではしない（プラグイン fprobe.plugins.heuristics.connect_script_name_hints）。target_connect の script に渡す前に。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -396,12 +421,13 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.svd.load
 
-種類: `control`。周辺レジスタの定義（CMSIS-SVD）を読む。path（ファイル）か device（部品名。同梱・~/.fprobe/svd・pyOCD の内蔵から探す）。どちらも無ければ `target_connect` のターゲット名から探す（周辺の道具は読み込んでいなければ自動でこれを行う）。
+種類: `control`。周辺レジスタの定義（CMSIS-SVD）を読む。path（ファイル）か device（SVD のファイル名。拡張子を除いて同じ名前のファイルを同梱・~/.fprobe/svd・FPROBE_SVD_PATH・pyOCD の内蔵から探す。大文字小文字は区別しない）のどちらかが要る。ターゲット名やファイル名の前方一致から推して選ぶことはしない（周辺の道具は読み込んでいなければ誤り）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `device` | `string | null` |  |
 | `path` | `string | null` |  |
+| `from_target` | `boolean` |  |
 
 ## target.svd.peripherals
 
@@ -421,12 +447,13 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.peripheral.read
 
-種類: `control`。周辺レジスタを読んでフィールドに解読する（名前・ビット・値・列挙の名前）。path は RCC.CR（1 つ）か GPIOA（周辺の全部）。読むと状態が変わるもの（SVD の readAction、周辺の一括ではデータ・FIFO の口も）は allow_side_effects が無ければ読まず skipped に入れる。
+種類: `control`。周辺レジスタを読んでフィールドに解読する（レジスタごとに path・address・size = SVD の大きさのビット・value と、フィールドの名前・ビット・値・列挙の名前）。path は RCC.CR（1 つ）か GPIOA（周辺の全部）。読むと状態が変わるもの（SVD の readAction）は allow_side_effects が無ければ読まず skipped に入れる。readAction の無いレジスタ（ST の SVD 等）はレジスタの名前から推さずに読む: 周辺の全部を読むとき、ほかに読まないもの（データ・FIFO の口等）は skip（"周辺.レジスタ" の glob。大文字小文字を区別しない。例 ["*.DR"]）で渡す（skipped の reason は "skip <パターン>"）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `path` | `string` | ○ |
 | `allow_side_effects` | `boolean` |  |
+| `skip` | `Array<string> | null` |  |
 
 ## target.peripheral.write
 
@@ -468,12 +495,16 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## target.program_ram
 
-種類: `control`。ELF を RAM に読み込み、そのベクタ表から起動できる状態で止める（Flash には書かない。RAM で動く試験用の
-プログラム向け）。ターゲットはリセットされる。続けて `debug_run_until_halt` / `target_resume` で走らせる。
+種類: `control`。ELF を RAM に読み込み、起動できる状態で止める（Flash には書かない。RAM で動く試験用のプログラム向け）。
+vector_table（ベクタ表の番地。使う側が明示する）を渡せばその表の初期の MSP・リセットの処理から（VTOR も設定）、
+渡さなければ ELF の入口（e_entry。リンカが書いた事実）から（SP・VTOR は変えない。ベクタ表の場所を推定しない）。
+ターゲットはリセットされる。続けて `debug_run_until_halt` / `target_resume` で走らせる。結果の start = {from:
+vector_table / entry, entry, vector_table}。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `path` | `string` | ○ |
+| `vector_table` | `number | null` |  |
 
 ## debug.elf.load
 
@@ -499,7 +530,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## debug.symbol.info
 
-種類: `read`。場所（関数名・変数名・"ファイル:行"・"0x..."）の番地と、その番地の関数名・ファイル:行。
+種類: `read`。場所（関数名・変数名・"ファイル:行"・"0x..."）の番地と、その番地の関数名・ファイル:行（where の文字と、欄 function・offset・file・line。分からない欄は null）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -507,7 +538,7 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 ## debug.source.list
 
-種類: `read`。読み込んだ ELF の行番号の情報が参照するソース（name・path・この PC にあるか exists）。
+種類: `read`。読み込んだ ELF の行番号の情報が参照するソース（name・path・この PC にあるか exists）。同じ名前の別のファイルは files には最初のものだけで、same_name = {名前: [場所]} に全部（"ファイル:行" は名前だけでは選ばず、ディレクトリを添えて選ぶ。例 "drivers/util.c:10"）。 ビルドした場所に無く ELF の隣の同じ名前のファイルを使ったものは built_path（行表の場所）も（同じ名前なら同じソースとみなす。中身は確かめていない）。
 
 ## debug.source.read
 
@@ -538,13 +569,22 @@ ELF が参照するファイルだけ読める。
 |---|---|---|
 | `location` | `string | null` |  |
 
+## debug.breakpoint.enable
+
+種類: `control`。ブレークポイントを有効・無効にする（location は `debug_breakpoint_set` と同じ）。無効にすると機器から外し（比較器・Flash の BKPT を空ける）、場所と動作（condition・ignore_count・log・message・hits）は覚えておく。有効に戻すと同じ場所に置き直す。置き直し（`debug_breakpoint_set`）でも有効になる。返すのは `debug_breakpoint_list` と同じ。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `location` | `string` | ○ |
+| `enabled` | `boolean` | ○ |
+
 ## debug.breakpoint.list
 
-種類: `read`。置いているブレークポイントとウォッチポイント。各ブレークポイントは address・location・場所（where・function・file・line）・kind（hw / flash / sw。接続中）、動作があれば action（condition・ignore_count・log・message・hits・last_error）、道具が置いたものは tool。
+種類: `read`。置いているブレークポイントとウォッチポイント。各ブレークポイントは address・location・enabled（false = `debug_breakpoint_enable` で無効にしたもの。機器には置いていないので kind は無い）・場所（where・function・file・line）・kind（hw / flash / sw。接続中）、動作があれば action（condition・ignore_count・log・message・hits・last_error）、道具が置いたものは tool。
 
 ## debug.breakpoint.log
 
-種類: `read`。ログ・ブレークポイントの記録（当たった場所・回数・式の値）。seq が since より後のものを古い順に limit 件。next を次の since に渡す。記録中に当たった項は記録のタイムベースの時刻 t を持つ（時間軸のその時刻へ飛べる）。
+種類: `read`。ログ・ブレークポイントの記録（当たった場所・回数・式の値）。seq が since より後のものを古い順に limit 件。next を次の since に渡す。記録中に当たった項は記録のタイムベースの時刻 t を持つ（時間軸のその時刻へ飛べる）。 more = limit で切って続きがある、lost = since より後で、持つ数の上限（kept_limit 件）を超えて捨てた件数。last = いちばん新しい seq（since が last より後なら読み手の位置はこのログに無い: 0 から読み直す）。 values の式の値は `debug_evaluate` と同じ形（kind を持つ object。評価できない式は kind = unavailable と reason）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -567,7 +607,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.watchpoint.set
 
-種類: `control`。ウォッチポイントを置く（変数名か "0x..."）。kind: write / read / access。size は変数名なら自動。
+種類: `control`。ウォッチポイントを置く（変数名か "0x..."）。kind: write / read / access。size は変数名なら省略で変数の大きさ、番地なら必須。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -586,7 +626,7 @@ ELF が参照するファイルだけ読める。
 ## debug.run_until_halt
 
 種類: `control`。実行を再開し、止まるまで（ブレークポイント・ウォッチポイント等）か timeout_s まで待つ。時間切れなら止める。
-返す reason: breakpoint / watchpoint / step / user / timeout 等、where: 止まった関数名 + オフセットとファイル:行。
+返す reason: breakpoint / watchpoint / step / user / timeout / unknown（止まった理由の印が無い・表に無い値。外からの停止とみなさない）等、where: 止まった関数名 + オフセットとファイル:行。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -594,7 +634,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.step
 
-種類: `control`。ソース行単位のステップ（ELF の行表と CFI）。mode: into（呼び出しに入り、前置きの後で止まる。行の情報の無い関数は踏み越える）/ over（呼び出しは踏み越える）/ out（いまの関数から出る。return_value に戻り値）/ until（over と同じだが後ろへ戻るループでは止まらない。location（関数名・"ファイル:行"・"0x..."）を指定するとそこまで、いまの関数から戻ればそこでも止まる）。mask_interrupts: 1 命令ずつ進める間は割り込みを止める（DHCSR.C_MASKINTS。呼び出しを踏み越えて走る間は割り込みも動く）。False なら割り込みに入っても踏み越える。返す reason: step（終えた）か、途中で止まった理由（breakpoint / watchpoint / vector_catch / fault / timeout / exit）と、止まった関数名・ファイル:行。故障なら fault に要約。
+種類: `control`。ソース行単位のステップ（ELF の行表と CFI）。mode: into（呼び出しに入り、前置きの後で止まる。行の情報の無い関数は踏み越える）/ over（呼び出しは踏み越える）/ out（いまの関数から出る。return_value に戻り値。value は `debug_evaluate` と同じ形）/ until（over と同じだが後ろへ戻るループでは止まらない。location（関数名・"ファイル:行"・"0x..."）を指定するとそこまで、いまの関数から戻ればそこでも止まる）。mask_interrupts: 1 命令ずつ進める間は割り込みを止める（DHCSR.C_MASKINTS。呼び出しを踏み越えて走る間は割り込みも動く）。False なら割り込みに入っても踏み越える。返す reason: step（終えた）か、途中で止まった理由（breakpoint / watchpoint / vector_catch / fault / timeout / exit）と、止まった関数名・ファイル:行。halt_bits = 最後の停止の DFSR の立っていたビット全部（reason は 1 語）。故障なら fault に要約。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -605,7 +645,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.call
 
-種類: `control`。止まったコアで関数を引数付きで実行し、戻り値を得る（AAPCS。DWARF の型で引数を置き、戻り値を解読する）。function: 関数名か "0x..."。arguments の各要素: 数、C の式（文字列。いまのフレームで評価。例 "&sensors[1]"・"MODE_RUN"）、{"string": 文字列}・{"bytes": 16 進}（スタックの下に置いてその番地を渡す。呼んだ後の中身を buffers に返す）。戻り先はリセットの入口に置く踏み台のブレークポイント。呼んだ関数の中のブレークポイントでは止まらない。終われば（timeout_s の時間切れ・故障で打ち切っても）レジスタとスタックの下のメモリを元に戻す（故障の例外に入ったままなら restored = false）。disable_interrupts: 呼ぶ間は PRIMASK = 1。単体テスト・AI の試行に使う。
+種類: `control`。止まったコアで関数を引数付きで実行し、戻り値を得る（AAPCS。DWARF の型で引数を置き、戻り値を解読する）。function: 関数名か "0x..."。arguments の各要素: 数、C の式（文字列。いまのフレームで評価。例 "&sensors[1]"・"MODE_RUN"）、{"string": 文字列}・{"bytes": 16 進}（スタックの下に置いてその番地を渡す。呼んだ後の中身を buffers に返す）。戻り先はリセットの入口に置く踏み台のブレークポイント。呼んだ関数の中のブレークポイントでは止まらない。終われば（timeout_s の時間切れ・故障で打ち切っても）レジスタとスタックの下のメモリを元に戻す（故障の例外に入ったままなら restored = false）。戻らなければ reason = 止まった理由（timeout / vector_catch 等）・ipsr = 止まった時の例外の番号・stopped_at、故障の中なら fault に解析。disable_interrupts: 呼ぶ間は PRIMASK = 1。単体テスト・AI の試行に使う。 return は type と value（値は `debug_evaluate` と同じ形（kind を持つ object））。DWARF の型の分からない関数は value でなく r0・r1（レジスタのまま）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -635,17 +675,18 @@ ELF が参照するファイルだけ読める。
 
 ## debug.backtrace
 
-種類: `control`。呼び出し履歴（ELF に CFI があれば CFI で巻き戻し、例外のフレームも越える）。各段は index・pc・where・note（exception = 例外で中断された位置）・cfa・function・offset・file・line。variables なら各段の引数とローカル変数（arguments・locals、型付きの値）も。停止中に呼ぶ。
+種類: `control`。呼び出し履歴（ELF に CFI があれば CFI で巻き戻し、例外のフレームも越える）。各段は index・pc・where・note（exception = 例外で中断された位置、lr_without_cfi = assume_leaf の仮定で出した段）・cfa・function・offset・file・line。CFI で巻き戻したときは最後の段に stop（その先へ巻き戻さなかった理由 reason: max_frames（使った上限 max_frames も）/ no_cfi / not_available / return_address / cfa_below_sp / pc_zero / repeated_frame / stop_pc と、その値）。assume_leaf なら CFI の無い最内の関数を葉（何も積んでいない）と仮定して LR から呼び出し元を出す（関数が LR を積んでいれば偽の呼び出し元になる。既定は仮定せず stop.reason = no_cfi で止める）。variables なら各段の引数とローカル変数（arguments・locals、型付きの値。値は `debug_evaluate` と同じ形（kind を持つ object））も。停止中に呼ぶ。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `variables` | `boolean` |  |
+| `assume_leaf` | `boolean` |  |
 | `max_frames` | `number` |  |
 | `max_elements` | `number` |  |
 
 ## debug.evaluate
 
-種類: `control`。C の式（変数・メンバー・添字・ポインタ・& と *・+ と -）を DWARF の型で評価して読む。frame は `debug_backtrace` の index（0 = いまの関数。その関数の引数・ローカル変数も使える）。live = true なら走らせたまま読む（ライブ ウォッチ。コアを止めず、レジスタを使わずに大域・静的の変数とメモリを読む。ローカル変数は誤り）。結果は expression・type・address（メモリ上なら）・value（構造体・配列は入れ子。配列は max_elements 個まで）。
+種類: `control`。C の式（変数・メンバー・添字・ポインタ・& と *・+ と -）を DWARF の型で評価して読む。名前は関数::名前 で関数の中の static。外部結合が無く同じ名前の static が複数あれば 1 つを選ばずに誤り（候補のファイル:行の一覧）で、"ファイル"::名前・"ファイル"::関数::名前 で選ぶ。frame は `debug_backtrace` の index（0 = いまの関数。その関数の引数・ローカル変数も使える）。live = true なら走らせたまま読む（ライブ ウォッチ。コアを止めず、レジスタを使わずに大域・静的の変数とメモリを読む。ローカル変数は誤り）。結果は expression・type・address（メモリ上なら）・value。value はどれも kind（値の種類。DWARF の型で決まる）を持つ object: int・float・bool → value（float の NaN・無限大は "nan" "inf" "-inf"）、bytes（符号の種類の分からない基本型・void 等）→ hex、enum → name（列挙子に無い値は null）・value、pointer → address・to（+ symbol、char * の先の文字列は string で、NUL の前で読むのをやめたら string_end = limit と使った上限 string_limit（256 バイト）か string_end = unreadable）、struct → members（名前 → 値。無名のメンバーは外側に展開）、array → length（要素数）・items（max_elements 個まで。len(items) < length なら切った。文字の配列は string も）、unavailable → reason。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -664,7 +705,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.frame_variables
 
-種類: `control`。フレームの引数とローカル変数（型付きの値）。frame は `debug_backtrace` の index。
+種類: `control`。フレームの引数とローカル変数（型付きの値）。frame は `debug_backtrace` の index。 値は `debug_evaluate` と同じ形（kind を持つ object）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -673,7 +714,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.write_expression
 
-種類: `control`。C の式の指す値（メモリ上の基本型・列挙（名前でも）・ポインタ・ビットフィールド）に書き、読み直した値を返す。整数は型の範囲を確かめる。
+種類: `control`。C の式の指す値（メモリ上の基本型・列挙（名前でも）・ポインタ・ビットフィールド）に書き、読み直した値を返す。整数は型の範囲を確かめる。 値は `debug_evaluate` と同じ形（kind を持つ object）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -691,7 +732,7 @@ ELF が参照するファイルだけ読める。
 
 ## debug.disasm.range
 
-種類: `control`。番地から length バイト（4096 まで）を逆アセンブルする（Thumb / Thumb-2。関数名・ファイル:行・分岐先とリテラルの名前付き）。接続中はターゲットのメモリ、未接続か from_elf なら ELF。命令は offset 番目から limit 件（total が全体）。
+種類: `control`。番地から length バイト（4096 まで）を逆アセンブルする（Thumb / Thumb-2。関数名・ファイル:行・分岐先とリテラルの名前付き）。接続中はターゲットのメモリ、未接続か from_elf なら ELF。命令は offset 番目から limit 件（total が全体）。branch_tables = [{address: tbb / tbh の命令の番地, entries: 表の項目の数}]（使う側が明示する。表は命令の直後で、そのバイトをデータとして区切る。渡さない表の大きさは推さない）。データの各項目の data_basis は区切った根拠（mapping = ELF の $d / branch_table = branch_tables / given = data_ranges（使う側が渡した区間。$t・$d の無い所だけ）/ undecodable = 解読できない）。ldr [pc] の読む先をデータとみなす推定は本体ではしない（読む先 literal と値 literal_value は返す。区間を作るのはプラグイン fprobe.plugins.heuristics.literal_pool_ranges）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -700,10 +741,12 @@ ELF が参照するファイルだけ読める。
 | `from_elf` | `boolean` |  |
 | `offset` | `number` |  |
 | `limit` | `number` |  |
+| `branch_tables` | `Array<Record<string, unknown>> | null` |  |
+| `data_ranges` | `Array<Record<string, unknown>> | null` |  |
 
 ## debug.disasm.function
 
-種類: `control`。関数の全体（関数名か 0x... の関数の中の番地）を逆アセンブルする。
+種類: `control`。関数の全体（関数名か 0x... の関数の中の番地）を逆アセンブルする。branch_tables = [{address: tbb / tbh の命令の番地, entries: 表の項目の数}]（使う側が明示する。表は命令の直後で、そのバイトをデータとして区切る。渡さない表の大きさは推さない）。データの各項目の data_basis は区切った根拠（mapping = ELF の $d / branch_table = branch_tables / given = data_ranges（使う側が渡した区間。$t・$d の無い所だけ）/ undecodable = 解読できない）。ldr [pc] の読む先をデータとみなす推定は本体ではしない（読む先 literal と値 literal_value は返す。区間を作るのはプラグイン fprobe.plugins.heuristics.literal_pool_ranges）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -711,10 +754,12 @@ ELF が参照するファイルだけ読める。
 | `from_elf` | `boolean` |  |
 | `offset` | `number` |  |
 | `limit` | `number` |  |
+| `branch_tables` | `Array<Record<string, unknown>> | null` |  |
+| `data_ranges` | `Array<Record<string, unknown>> | null` |  |
 
 ## debug.disasm.around
 
-種類: `control`。番地（省略時は PC）の前 before 命令・その命令・後ろ after 命令（前は関数の先頭から揃える）。pc_index がその命令の位置。
+種類: `control`。番地（省略時は PC）の前 before 命令・その命令・後ろ after 命令（前は関数の先頭・$t から揃える。そこから PC まで sync_limit バイトより遠い・PC に着地しない・読めない・PC がデータの区間なら揃えずに PC から読み、sync = start と sync_skipped = {from, kind, reason（too_far / not_aligned / unreadable / pc_in_data）, distance, limit}）。pc_index がその命令の位置。branch_tables = [{address: tbb / tbh の命令の番地, entries: 表の項目の数}]（使う側が明示する。表は命令の直後で、そのバイトをデータとして区切る。渡さない表の大きさは推さない）。データの各項目の data_basis は区切った根拠（mapping = ELF の $d / branch_table = branch_tables / given = data_ranges（使う側が渡した区間。$t・$d の無い所だけ）/ undecodable = 解読できない）。ldr [pc] の読む先をデータとみなす推定は本体ではしない（読む先 literal と値 literal_value は返す。区間を作るのはプラグイン fprobe.plugins.heuristics.literal_pool_ranges）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -722,10 +767,13 @@ ELF が参照するファイルだけ読める。
 | `before` | `number` |  |
 | `after` | `number` |  |
 | `from_elf` | `boolean` |  |
+| `branch_tables` | `Array<Record<string, unknown>> | null` |  |
+| `data_ranges` | `Array<Record<string, unknown>> | null` |  |
+| `sync_limit` | `number` |  |
 
 ## debug.disasm.text
 
-種類: `control`。ソースの行を挟んだ逆アセンブルの文字列（AI 向け。PC の命令には => の印）。location なら関数、address と length なら範囲、どちらも無ければ address（省略時は PC）の前後。
+種類: `control`。ソースの行を挟んだ逆アセンブルの文字列（AI 向け。PC の命令には => の印）。location なら関数、address と length なら範囲、どちらも無ければ address（省略時は PC）の前後（sync・sync_skipped・sync_limit は debug.disasm.around と同じ）。branch_tables = [{address: tbb / tbh の命令の番地, entries: 表の項目の数}]（使う側が明示する。表は命令の直後で、そのバイトをデータとして区切る。渡さない表の大きさは推さない）。データの各項目の data_basis は区切った根拠（mapping = ELF の $d / branch_table = branch_tables / given = data_ranges（使う側が渡した区間。$t・$d の無い所だけ）/ undecodable = 解読できない）。ldr [pc] の読む先をデータとみなす推定は本体ではしない（読む先 literal と値 literal_value は返す。区間を作るのはプラグイン fprobe.plugins.heuristics.literal_pool_ranges）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -736,6 +784,9 @@ ELF が参照するファイルだけ読める。
 | `after` | `number` |  |
 | `source` | `boolean` |  |
 | `from_elf` | `boolean` |  |
+| `branch_tables` | `Array<Record<string, unknown>> | null` |  |
+| `data_ranges` | `Array<Record<string, unknown>> | null` |  |
+| `sync_limit` | `number` |  |
 
 ## debug.semihosting.configure
 
@@ -793,7 +844,7 @@ filter_channels（外の信号の ch = 拡張ヘッダのピンと専用の入�
 
 ## la.collect
 
-種類: `control`。完了を待って読み出し、チャンネルごとの要約（トリガ = 0 ns）を返す。vcd_path があれば VCD も書く。
+種類: `control`。完了を待って読み出し、チャンネルごとの要約 channels = {ch: {initial, edges, first_edges_ns（トリガ = 0 ns からの先頭 first_edges_limit 個）, first_edges_truncated}} と、常に 0 で省いたチャンネル constant_low を返す。vcd_path があれば VCD も書く。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -876,9 +927,13 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `end` | `number | null` |  |
 | `width` | `number` |  |
 
+## la.trigger_status
+
+種類: `read`。ロジアナのトリガの条件と状態（la のレジスタの読み戻し。la.arm・la.deep.arm が書いたもの）: mask・value・rise・fall、external_only（パターンが決して成り立たない形 = クロストリガでだけ捕捉。la.arm の external_only が書く形そのもの）、rate_hz・pretrigger、filter（ケイパビリティ la_filter）・pulse（la_pulse）、internal（内蔵バッファの捕捉: capturing・triggered・done・trigger_time）・deep（深いバッファの同じもの。外部メモリがあれば）。trigger_time はトリガした後だけ（それまで null）。トリガの回数を数えるレジスタは無い。
+
 ## timeline.tiles
 
-種類: `read`。応答はバイナリのフレーム（WebSocket の利用者だけ。MCP の道具には無い）。共通タイムラインのタイル（画面の時間軸が毎フレームの間引きに使う材料。応答は WebSocket のバイナリのフレーム）。source = capture（最後の捕捉、時刻はサンプル番号）/ recording（読む記録、時刻はタイムベース）の範囲 [t0, t1) の、波形の生の変化点（かたまりごとに頭の値と変化点）と出来事の段（stream ごとに t・t_end・種類と、段の規則（fprobe.timeline_rows）で分けた段・ラベル・値・入れ子の深さ・色の意味・飛び先の番地。状態・値の段は t0 の前の最後の出来事も）。生データが max_edges（全チャンネルの和）・max_events（stream ごと）を超える部分は、幅 bin 程度（そろえた区間）の要約（波形の状態、段 × 区間の件数、値の段の最小・最大）。AI は la.view / recording.waveform / recording.density を使う。
+種類: `read`。応答はバイナリのフレーム（WebSocket の利用者だけ。MCP の道具には無い）。共通タイムラインのタイル（画面の時間軸が毎フレームの間引きに使う材料。応答は WebSocket のバイナリのフレーム）。source = capture（最後の捕捉、時刻はサンプル番号）/ recording（読む記録、時刻はタイムベース）の範囲 [t0, t1) の、波形の生の変化点（かたまりごとに頭の値と変化点）と出来事の段（stream ごとに t・t_end・種類と、段の規則（fprobe.timeline_rows）で分けた段・ラベル・値・入れ子の深さ・色の意味・飛び先の番地。状態・値の段は t0 の前の最後の出来事も。前を探すのは範囲の幅の 16 倍・256 倍・4096 倍・記録の始めと広げ、何か見つかった所で止める: 探した始めを段の carry_from、探すべき所を探し切ったかを carry_complete に。false なら carry_from より前に変わったきりの段の始めの値は探していない）。生データが max_edges（全チャンネルの和）・max_events（stream ごと）を超える部分は、幅 bin 程度（そろえた区間）の要約（波形の状態、段 × 区間の件数、値の段の最小・最大）。AI は la.view / recording.waveform / recording.density を使う。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -893,7 +948,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## la.decode
 
-種類: `read`。最後の捕捉の通信を解読する。protocol は解読器の名前（la.decoders で一覧。組み込み: uart / spi / i2c / swd / can（CAN FD 含む）/ onewire / jtag / i2s / parallel / manchester と、積み重ねる jtag_arm（jtag の上）/ spiflash（spi）/ eeprom24（i2c）/ modbus（uart）、la.decoder_load で読み込んだ利用者の解読器）。settings はその設定（uart: channel・baud（必須。波形から推定しない）・data_bits・parity・stop_bits・invert、spi: sck・mosi・miso・cs・mode・word_bits、i2c: scl・sda、swd: swclk・swdio・drive、can: channel・bitrate・data_bitrate・sample_point、onewire: channel、jtag: tck・tms・tdi・tdo・trst・initial_state・ir_names、i2s: sck・ws・sd・format・word_bits、parallel: data（列）・clock・edge・enable、manchester: channel・bitrate・tolerance（必須。1 ビットに対する許容のずれ 0〜0.25。既定の値は持たない）・convention）。積み重ねる解読器は下の解読の設定を下の名前のキーに入れる（例 modbus: {"uart": {"channel": 5, "baud": 9600, "parity": "even"}}、何段でも）。start / end（サンプル）・kinds・errors_only で絞り、offset から limit 件。counts は種類ごとの件数、errors は誤りの数。kinds を省くと解読器の既定の種類（swd は transfer、jtag は ir・dr・reset 等）。記録中なら注釈を共通の時間軸にも入れる。結果の kinds は絞った種類（null = 全部）、total・counts は絞る前の件数。
+種類: `read`。最後の捕捉の通信を解読する。protocol は解読器の名前（la.decoders で一覧。組み込み: uart / spi / i2c / swd / can（CAN FD 含む。sample_point は必須）/ onewire / jtag / i2s / parallel / manchester と、積み重ねる jtag_arm（jtag の上）/ spiflash（spi）/ eeprom24（i2c）/ modbus（uart）、la.decoder_load で読み込んだ利用者の解読器）。settings はその設定。通信の設定（プロトコルの枠の値・線の割り当て）は既定を持たない（必須。つながない線は null を明示。足りなければ要る設定の名前を挙げた誤り）: uart: channel・baud（波形から推定しない）・data_bits・parity・stop_bits・invert・lsb_first、spi: sck・mosi・miso・cs・mode・msb_first・word_bits・cs_active_low、i2c: scl・sda、swd: swclk・swdio・drive・turnaround・orundetect（捕捉の先頭の値）、can: channel・bitrate・sample_point・invert（CAN FD は data_bitrate と data_sample_point を一緒に）、onewire: channel・overdrive（timing の既定は規格の値）、jtag: tck・tms・tdi・tdo・trst（initial_state・ir_names は省ける）、i2s: sck・ws・sd・format・word_bits（null = スロットの全ビット）・signed、parallel: data（列）・clock・enable（edge は clock を、enable_level は enable を与えたとき必須）、manchester: channel・bitrate・tolerance（1 ビットに対する許容のずれ 0〜0.25）・convention・word_bits・msb_first、jtag_arm: ir_offset・dr_offset、spiflash: address_bytes、eeprom24: device・address_bytes・block_bits、modbus: なし（区切りの既定は規格の t3.5。要求か応答か決まらないフレームは kind frame・direction null）。積み重ねる解読器は下の解読の設定を下の名前のキーに入れる（例 modbus: {"uart": {uart の設定}}、何段でも）。start / end（サンプル）・kinds・errors_only で絞り、offset から limit 件。counts は種類ごとの件数、errors は誤りの数。kinds を省くと解読器の既定の種類（swd は transfer、jtag は ir・dr・reset 等）。記録中なら注釈を共通の時間軸にも入れる。結果の kinds は絞った種類（null = 全部）、total・counts は絞る前の件数。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -909,7 +964,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## la.decoders
 
-種類: `read`。la.decode に使える解読器の一覧。各要素: name・lower（積み重ねる解読器が受け付ける下の解読。空なら波形を読む）・summary・params（name・required・default）・default_kinds・origin（builtin / 利用者のファイルの絶対パス）。
+種類: `read`。la.decode に使える解読器の一覧。各要素: name・lower（積み重ねる解読器が受け付ける下の解読。空なら波形を読む）・summary・params（name・required（既定を持たない設定）・nullable（null を渡せる。つながない線等）・type（解読器の引数の型の申告: channel = ロジアナのチャンネルの番号 / channels = その並び / integer / number / boolean / string / object。注釈が無い・1 つの型に決まらなければ null）・default）・default_kinds・origin（builtin / 利用者のファイルの絶対パス）。
 
 ## la.decoder_load
 
@@ -970,7 +1025,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## fpga_obs.open
 
-種類: `control`。対象の FPGA の JTAG で観測の回路 v2（target_ip/fprobe_obs）を読み始め、申告（id・mode = stream（記録型）/ snapshot（標本型）・version・width・groups・fifo_depth・clock_hz・sync_delay・sample_delay・lost_bits）を返す。値を記録に残すには events.start も要る。auto_reopen = 観測の回路が答えなくなって止まったら（対象の FPGA を書き直した等）1 秒ごとに同じ設定で開き直す（記録中なら印。回数は status の reopened。利用者が選んだときだけ）。
+種類: `control`。対象の FPGA の JTAG で観測の回路 v2（target_ip/fprobe_obs）を読み始め、申告（id・mode = stream（記録型）/ snapshot（標本型）・version・width・groups・fifo_depth・clock_hz・sync_delay・sample_delay・lost_bits）を返す。値を記録に残すには events.start も要る。auto_reopen = 観測の回路が答えなくなって止まったら（対象の FPGA を書き直した等）1 秒ごとに同じ設定で開き直す（記録中なら印。回数は status の reopened。利用者が選んだときだけ）。 id_scans = 始めに ID の応答を待つスキャンの上限（使う側が渡す。0 = 上限なし）。上限まで来なければ止まり、`fpga_obs_status` の stuck・id_timeout。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -980,6 +1035,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `words` | `number` |  |
 | `sync_period` | `number` |  |
 | `auto_reopen` | `boolean` |  |
+| `id_scans` | `number` |  |
 
 ## fpga_obs.close
 
@@ -1018,7 +1074,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## fpga_obs.register_write
 
-種類: `control`。観測の回路のレジスタに書く（0x10 CONTROL の bit0 = 記録する、0x11 SELECT = 観測する組）。
+種類: `control`。観測の回路のレジスタに書く（14 CONTROL の bit0 = 記録する、15 SELECT = 観測する組）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1043,12 +1099,21 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## fpga_obs.read
 
-種類: `control`。イベントの記録から観測した値を fprobe の時刻（time_us）で返す。窓は events.read と同じ（続けて読むなら since）。value = null は溢れの切れ目。
+種類: `control`。イベントの記録から観測した値を fprobe の時刻（time_us）で返す。窓は events.read と同じ（続けて読むなら since）。value = null は溢れの切れ目。 各項目の time_basis = 時刻の決め方（pairs = 印の組 2 つ以上の直線 / previous_ratio = 印 1 つと前の鎖の傾き / nominal_ratio = 印 1 つと申告の CLOCK_HZ の比 / null = 時刻なし）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `last` | `number` |  |
 | `since` | `number | null` |  |
+
+## fpga_obs.count
+
+種類: `control`。観測した値の最後の last 件（fpga_obs.read の窓。使う側が明示する。既定の値は無い）で、FPGA の信号の条件（restart changed and state=BUSY の形。瞬間の項 changed / rose / fell が要る）ごとに成り立った回数を数える。条件ごとに count と、数えた範囲の事実: values（数えた値の数）・t0_us / t1_us（最初と最後の値の fprobe の時刻。値が無ければ null）・span_s（その間の秒）・gaps（切れ目の数）・lost（失った変化の数）。「変化」は同じ組の直前の値と比べる。読めない条件は error に理由。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `conditions` | `Array<string>` | ○ |
+| `last` | `number` | ○ |
 
 ## fpga_obs.signals_get
 
@@ -1064,7 +1129,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## system.status
 
-種類: `read`。MCU と FPGA の両方の今を 1 回で返す（mcu: コアの状態と addresses の 32 ビットの語を止めずに読んだ値・connect（最後に成功した target.connect の引数。対象のリセットで SWD がはずれたら同じ引数でつなぎ直す）、fpga: 観測の状態と各組の最新の値・信号）。システム解析の画面・AI の見回り用。
+種類: `read`。MCU と FPGA の両方の今を 1 回で返す（mcu: コアの状態と addresses の 32 ビットの語を止めずに読んだ値・connect（最後に成功した target.connect の引数。対象のリセットで SWD がはずれたら同じ引数でつなぎ直す）、fpga: 観測の状態と各組の最新の値・信号。値はイベントの記録の最後の fpga_last 件の窓から（窓から消えた組は最後に分かった値。time_us で古さが分かる）。見た窓は window = {last, items}）。システム解析の画面・AI の見回り用。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1090,28 +1155,50 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## watch.status
 
-種類: `control`。観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）も。
+種類: `control`。観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）、最後に watch.set した呼び出し元（client: {id, name, role}。デーモンが記録した事実。分からなければ null）も。 loss_ratio = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、measured_hz = 巡回 ÷ since_start_s（数が無い・0 なら null）。stats = 変数ごとの watch.set から読んだ値すべての統計 {count, min, max, mean, not_numeric}（サンプラの値はイベント記録を続きから読んで数える。読めずに一周された・上限を超えたイベントの数は stats_lost_events）。
 
 ## watch.values
 
-種類: `control`。観測している変数の最新の値（型で解釈）と、その時刻（タイムベースの µs）。
+種類: `control`。観測している変数の最新の値（型で解釈）と、その時刻（タイムベースの µs）。 値は `debug_evaluate` と同じ形（kind を持つ object）。番地の式（"0x20000000:4"）の値は kind = int（符号なし整数）。
 
 ## watch.series
 
-種類: `control`。変数 1 つの値の列（古い順。時刻はタイムベースの µs）。last はイベント記録から読む件数（最大 4096）。長い時間は recording_find({"stream": "sample", "a": 番地}) で。
+種類: `control`。変数 1 つの値の列（古い順。時刻はタイムベースの µs）。last はイベント記録から読む件数（最大 4096）。長い時間は recording_find({"stream": "sample", "a": 番地}) で。 値は `debug_evaluate` と同じ形（kind を持つ object）。番地の式（"0x20000000:4"）の値は kind = int（符号なし整数）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `name` | `string` | ○ |
 | `last` | `number` |  |
 
+## watch.xy
+
+種類: `control`。2 つの変数の XY の組（古い順）。x の各値に、その時刻以前で最新の y の値を組む。2 つは同時に測っていないので、点ごとに x_time_us・y_time_us を出し、差の最大 dt_max_us を返す。unpaired = それ以前に y が無い x の数。max_dt_us を渡したときだけ、差がそれを超える組を外して excluded に数える（既定では外さない）。last・from_us（変数ごと）は watch_series と同じ。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `x` | `string` | ○ |
+| `y` | `string` | ○ |
+| `last` | `number` |  |
+| `max_dt_us` | `number` |  |
+
+## watch.measure
+
+種類: `control`。カーソル A・B の測定（時刻はタイムベースの µs）。変数ごとに a・b = その時刻以前で最後の値 {time_us（その値の時刻。測った時刻とは別）, value}（無ければ null）、delta = b − a（どちらも数のとき）、stats = A〜B（両端を含む）の値の {count, min, max, mean, not_numeric}、first_us = デーモンが持っている最初の値の時刻（それより前は数えていない）。dt_us = b_us − a_us。source: live（イベント記録の最新の分。watch_series と同じ）か capture（watch_capture の結果）。names を省くと観測しているすべて。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `a_us` | `number` | ○ |
+| `b_us` | `number` | ○ |
+| `names` | `Array<string>` |  |
+| `source` | `"live" | "capture"` |  |
+
 ## rtos.info
 
-種類: `control`。ELF の RTOS の種類（freertos / zephyr / rtx5 / threadx / ucos3 / nuttx / null）と、接続していればスケジューラの状態・ティック・実行中のタスク（止まっていればタスクの数）。trace_hook はトレースフック（方法 itm の時間軸）の有無、timeline は取っている時間軸。
+種類: `control`。ELF の RTOS の種類（freertos / zephyr / rtx5 / threadx / ucos3 / nuttx / null）と、接続していればスケジューラの状態・ティック・実行中のタスク（止まっていればタスクの数）。trace_hook はトレースフック（方法 itm の時間軸）の有無、timeline は取っている時間軸。FreeRTOS・ThreadX は port（保存された文脈の積み方）と port_basis（決めた根拠: vPortEnableVFP / explicit。決まらなければ port・port_basis は null）。
 
 ## rtos.tasks
 
-種類: `control`。タスクの一覧（名前・優先度・状態・待っているもの（キュー名・種類・ミューテックスの持ち主・残りのティック）・スタックの大きさ・いま／最大の使用量・あふれの印）。止まっているときだけ（`target_halt`）。live=true なら走行中にも読む（止めずに読むので一貫しない: consistent=false。実行中のタスクの SP は分からない）。構造体の位置は DWARF から。
+種類: `control`。タスクの一覧（名前・優先度・状態・待っているもの（キュー名・種類・ミューテックスの持ち主・残りのティック）・スタックの大きさ・いま／最大の使用量・あふれの印）。止まっているときだけ（`target_halt`）。live=true なら走行中にも読む（止めずに読むので一貫しない: consistent=false。実行中のタスクの SP は分からない）。構造体の位置は DWARF から。locations は値を読んだメモリの場所（priority・base_priority → {address, size, member}。`target_memory_write` で書ける）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1119,7 +1206,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.objects
 
-種類: `control`。カーネルのオブジェクトの一覧: FreeRTOS はキュー・セマフォ（数・最大）・ミューテックス（持ち主・継承中か）・タイマ（周期・動いているか・残りのティック・呼ぶ関数）・イベントグループ（ビット・待つビット）・ストリーム / メッセージバッファ（使用量・メッセージの数）、Zephyr は k_sem・k_mutex・k_msgq・k_event・k_timer・k_fifo 等、RTX5 は mutex・semaphore・event_flags・memory_pool・message_queue・timer、ThreadX は mutex・semaphore・queue・event_flags・block_pool・byte_pool・timer、µC/OS-III は semaphore・mutex・queue・event_flags・memory_pool・timer・cond、NuttX は semaphore・mutex・message_queue。それぞれ待っているタスク付き。登録簿に無い・名前の無いものも、変数の型（ハンドル）・待っているタスクから番地で出す（source: registry / kernel / variable / waiter）。ヒープの残量・最小残量（heap）と、止めた瞬間の優先度の逆転（継承の有無・間に動けるタスク）とデッドロック（contention）。kinds で種類を絞る（"semaphore" は binary・counting とも）。止まっているときだけ（live=true で走行中にも。一貫しない: consistent=false）。
+種類: `control`。カーネルのオブジェクトの一覧: FreeRTOS はキュー・セマフォ（数・最大）・ミューテックス（持ち主・継承中か）・タイマ（周期・動いているか・残りのティック・呼ぶ関数）・イベントグループ（ビット・待つビット）・ストリーム / メッセージバッファ（使用量・メッセージの数）、Zephyr は k_sem・k_mutex・k_msgq・k_event・k_timer・k_fifo 等、RTX5 は mutex・semaphore・event_flags・memory_pool・message_queue・timer、ThreadX は mutex・semaphore・queue・event_flags・block_pool・byte_pool・timer、µC/OS-III は semaphore・mutex・queue・event_flags・memory_pool・timer・cond、NuttX は semaphore・mutex・message_queue。それぞれ待っているタスク付き。登録簿に無い・名前の無いものも、変数の型（ハンドル）・待っているタスクから番地で出す（source: registry / kernel / variable / waiter）。ヒープの残量・最小残量（heap）と、止めた瞬間の優先度の逆転（継承の有無・間に動けるタスク）とデッドロック（contention）。kinds で種類を絞る（"semaphore" は binary・counting とも）。数えるのを辿る上限で止めたときは fields の *_truncated（items_truncated・messages_truncated・remaining_truncated）と、オブジェクトの notes に上限の値。変数の型で探すときに上限（入れ子の深さ・配列の要素・読むハンドルの数）・読めないことで見ていない所は warnings。止まっているときだけ（live=true で走行中にも。一貫しない: consistent=false）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1128,17 +1215,18 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.backtrace
 
-種類: `control`。タスク（名前か TCB の番地。"0x..." も可）の呼び出し履歴。止まっているタスクは保存された文脈から、実行中のタスクは実レジスタから巻き戻す。variables で各段の引数とローカル変数も。止まっているときだけ。
+種類: `control`。タスク（名前か TCB の番地。"0x..." も可）の呼び出し履歴。止まっているタスクは保存された文脈から、実行中のタスクは実レジスタから巻き戻す。variables で各段の引数とローカル変数も（値は `debug_evaluate` と同じ形（kind を持つ object））。止まっているときだけ。port は保存された文脈の積み方（FreeRTOS: armv7m = ARM_CM3 等 / armv7m_fp = ARM_CM4F・ARM_CM7、ThreadX: armv6m / armv7m）。FreeRTOS は省けば ELF の事実（ARM_CM4F・ARM_CM7 の port の関数 vPortEnableVFP がある → armv7m_fp）だけで決め、決まらなければ止まっているタスクの文脈は誤りで port を渡すよう言う（`rtos_info` の port・port_basis が決めた積み方と根拠）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `task` | `string | number` | ○ |
 | `variables` | `boolean` |  |
 | `max_elements` | `number` |  |
+| `port` | `"armv6m" | "armv7m" | "armv7m_fp"` |  |
 
 ## rtos.read
 
-種類: `control`。タスクの文脈で C の式を読む（frame は `rtos_backtrace` の index。そのフレームの引数・ローカル変数も使える）。止まっているときだけ。
+種類: `control`。タスクの文脈で C の式を読む（frame は `rtos_backtrace` の index。そのフレームの引数・ローカル変数も使える）。止まっているときだけ。port は保存された文脈の積み方（FreeRTOS: armv7m = ARM_CM3 等 / armv7m_fp = ARM_CM4F・ARM_CM7、ThreadX: armv6m / armv7m）。FreeRTOS は省けば ELF の事実（ARM_CM4F・ARM_CM7 の port の関数 vPortEnableVFP がある → armv7m_fp）だけで決め、決まらなければ止まっているタスクの文脈は誤りで port を渡すよう言う（`rtos_info` の port・port_basis が決めた積み方と根拠）。 値は `debug_evaluate` と同じ形（kind を持つ object）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1146,10 +1234,11 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `expression` | `string` | ○ |
 | `frame` | `number` |  |
 | `max_elements` | `number` |  |
+| `port` | `"armv6m" | "armv7m" | "armv7m_fp"` |  |
 
 ## rtos.timeline.start
 
-種類: `control`。タスクの時間軸を取り始める（止めずに見る）。method: sampled（組み込み無し。DAP サンプラが rate_hz で実行中のタスクの変数を読む。周期より短い実行は見えないことがあり、回数は下限。`watch_set` とサンプラを取り合う）/ itm（ファームのトレースフック fprobe_trace.h が ITM のポート 31 に書く語から。正確）。itm は swo_baud で SWO の受信も始め、core_clock_hz も渡すと TPIU の速度も設定する（SWO のピンはチップ固有: ファームか `target_peripheral_write`）。一緒に読むもの: memory=true（タスクの保存された SP とヒープの残量 → `rtos_timeline_memory`。tasks で絞る）、mutexes（true か名前の列: 持ち主と待ちの先頭 → `rtos_timeline_inversions`）、exceptions=true（itm だけ: 例外トレースも SWO に流す → 割り込みとタスクの合成 `rtos_timeline_profile`）。memory・mutexes は DAP サンプラの 8 か所に収める（sampled は同じサンプラ、itm は memory_rate_hz で）。記録中（`recording_start`）なら止めたときに記録の stream "rtos" に書く。 kernel=false（itm だけ）でカーネルの出来事（ポート 30・29）を止め、SWO の帯域をタスクの切り替えと例外に回す（overflows が出るとき）。
+種類: `control`。タスクの時間軸を取り始める（止めずに見る）。method: sampled（組み込み無し。DAP サンプラが rate_hz で実行中のタスクの変数を読む。周期より短い実行は見えないことがあり、回数は下限。`watch_set` とサンプラを取り合う）/ itm（ファームのトレースフック fprobe_trace.h が ITM のポート 31 に書く語から。正確）。itm は swo_baud で SWO の受信も始め、core_clock_hz も渡すと TPIU の速度も設定する（SWO のピンはチップ固有: ファームか `target_peripheral_write`）。一緒に読むもの: memory=true（タスクの保存された SP とヒープの残量 → `rtos_timeline_memory`。tasks で絞る）、mutexes（true か名前の列: 持ち主と待ちの先頭 → `rtos_timeline_inversions`）、exceptions=true（itm だけ: 例外トレースも SWO に流す → 割り込みとタスクの合成 `rtos_timeline_profile`）。memory・mutexes は DAP サンプラの 8 か所に収める（sampled は同じサンプラ、itm は memory_rate_hz で）。記録中（`recording_start`）なら止めたときに記録の stream "rtos" に書く。 kernel=false（itm だけ）でカーネルの出来事（ポート 30・29）を止め、SWO の帯域をタスクの切り替えと例外に回す（overflows が出るとき）。 vector_table: ベクタ表の番地（使う側が明示する。大きさは vector_table_size か ELF のその番地の変数）。渡せば割り込みの区間に処理の関数の名前を付ける。渡さなければ番号の名前だけ（表の場所を推定しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1164,6 +1253,8 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `exceptions` | `boolean` |  |
 | `memory_rate_hz` | `number` |  |
 | `kernel` | `boolean` |  |
+| `vector_table` | `number | null` |  |
+| `vector_table_size` | `number | null` |  |
 
 ## rtos.timeline.stop
 
@@ -1180,7 +1271,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.load
 
-種類: `control`。窓（window_us）ごとの CPU 負荷（1 − アイドルの割合。割り込みは負荷に入る）・タスクごとの割合・割り込みの割合の推移と、最大の窓（いつ）・平均。情報の無い時間（抜け）は除く。取っている最中ならいままでの分、止めた後なら最後の結果。
+種類: `control`。窓（window_us）ごとの CPU 負荷（1 − アイドルの割合。割り込みは負荷に入る）・タスクごとの割合・割り込みの割合・その他（other = 負荷のうちタスクにも割り込みにも入らない分）の推移と、最大の窓（いつ）・平均。窓が limit を超えたら先頭の limit 個（windows_total = 全体の数、limit = 使った上限）。情報の無い時間（抜け）は除く。割り込みをトレースフックの isr_enter / isr_exit から取ったときは、対にできなかった数を isr_unpaired（missing_exit・missing_enter・lost_open）に。取っている最中ならいままでの分、止めた後なら最後の結果。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1198,7 +1289,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.interval
 
-種類: `control`。記録の 2 点（start / end は `recording_find` と同じ条件。`timing_measure` と同じ組の規則）の各組で、タスク（省けば開始の時刻に動いていたタスク）が実際に CPU を使った時間（横取り・割り込みを除く）と経過時間の分布。記録（`recording_start` か `recording_open`）が要る。
+種類: `control`。記録の 2 点（start / end は `recording_find` と同じ条件。`timing_measure` と同じ組の規則）の各組で、タスク（省けば開始の時刻に動いていたタスク。task は名前か TCB の番地 "0x..."。同じ名前のタスクが複数なら誤りで番地を挙げる）が実際に CPU を使った時間（横取り・割り込みを除く）と経過時間の分布。記録（`recording_start` か `recording_open`）が要る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1209,7 +1300,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.memory
 
-種類: `control`。タスクごとのスタックの使用量（保存された SP から: 切り替えのたびの深さ。最大・最小・最後・あふれの印）とヒープの残量（最小・最後）の推移。points 個の窓ごとに最悪の値。`rtos_timeline_start` の memory=true が要る。
+種類: `control`。タスクごとのスタックの使用量（保存された SP から: 切り替えのたびの深さ。最大・最小・最後・あふれの印）とヒープの残量（最小・最後）の推移。points 個の窓ごとに、その窓のサンプルの最悪の値（サンプルの無い窓には点が無い。前の値を続けない）。`rtos_timeline_start` の memory=true が要る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1221,7 +1312,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.inversions
 
-種類: `control`。優先度の逆転の区間: 持ち主の元の優先度より高いタスクがミューテックスを待っていた区間ごとに、持ち主・待ち手・長さ・持ち主が動いた時間・その間に動いた中間の優先度のタスクの時間（interference。正なら際限の無い逆転 = unbounded）。方法 itm でカーネルの出来事があれば、それで正確に（source = trace。継承の時刻 inherited も）。無ければ `rtos_timeline_start` の mutexes で読んだ語から（source = sampled。サンプラの周期より短い逆転は見えないことがある。読んでいなければ available=false。推測しない）。
+種類: `control`。優先度の逆転の区間: 持ち主の元の優先度より高いタスクがミューテックスを待っていた区間ごとに、持ち主・待ち手・長さ・持ち主が動いた時間・その間に動いた中間の優先度のタスクの時間（interference。interfered はそれが正か、要約の interfered はその回数。継承が効いたか・際限が無いかの判定は付けない）。方法 itm でカーネルの出来事があれば、それで正確に（source = trace。継承の時刻 inherited も）。無ければ `rtos_timeline_start` の mutexes で読んだ語から（source = sampled。サンプラの周期より短い逆転は見えないことがある。読んでいなければ available=false。推測しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1245,7 +1336,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## rtos.timeline.blocking
 
-種類: `control`。ブロック時間（カーネルの出来事から）: 待ちの区間（block = オブジェクト・通知を待った / delay / suspend から ready まで）と outcome（起きた後の同じオブジェクトへの操作が成功 = ok、失敗 = failed。失敗の理由は推定しない）。タスクごと・オブジェクトごとの回数・合計・平均・最長（いつ）・失敗の回数。task で区間の一覧を絞る。
+種類: `control`。ブロック時間（カーネルの出来事から）: 待ちの区間（block = オブジェクト・通知を待った / delay / suspend から ready まで）と outcome（起きたタスクの次の操作が同じオブジェクトへの成功 = ok、失敗 = failed。次の操作が別のもの・無ければ null。失敗の理由は推定しない）。タスクごと・オブジェクトごとの回数・合計・平均・最長（いつ）・失敗の回数。task で区間の一覧を絞る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1266,7 +1357,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## profile.start
 
-種類: `control`。PC サンプリングのプロファイルを始める。method: itm（DWT の PC サンプリング → SWO。core_clock_hz が要る。exception_trace で割り込みの時間も。DWT・ITM・TPIU を設定して SWO の受信も始める。SWO のピンはチップ固有: ファームか `target_peripheral_write`）/ pcsr（DAP サンプラで DWT_PCSR を読む。SWO 不要・Cortex-M0+ も可・遅い。`watch_set` とサンプラを取り合う）。timestamps は省略で exception_trace と同じ。計画（実際のサンプル率・SWO の使用率・警告・書いたレジスタ）を返す。pcsr の速さは SWD の速さで決まる（4 MHz で 1 巡回 約 110〜120 µs = 約 8〜9 kHz）: 計画の swd に 1 巡回の見積もり（swd_hz・swclk_hz・round_us・max_rate_hz）と、求めた rate_hz に要る SWD の速さ（swd_hz_for_rate。target_connect の frequency_hz に渡す。null は最も速い SWD でも届かない）。rate_hz は出せる見込み、requested_rate_hz は求めた値。
+種類: `control`。PC サンプリングのプロファイルを始める。method: itm（DWT の PC サンプリング → SWO。core_clock_hz が要る。exception_trace で割り込みの時間も。DWT・ITM・TPIU を設定して SWO の受信も始める。SWO のピンはチップ固有: ファームか `target_peripheral_write`）/ pcsr（DAP サンプラで DWT_PCSR を読む。SWO 不要・Cortex-M0+ も可・遅い。`watch_set` とサンプラを取り合う）。timestamps は省略で exception_trace と同じ。計画（実際のサンプル率・SWO の使用率・警告・書いたレジスタ）を返す。pcsr の速さは SWD の速さで決まる（4 MHz で 1 巡回 約 110〜120 µs = 約 8〜9 kHz）: 計画の swd に 1 巡回の見積もり（swd_hz・swclk_hz・round_us・max_rate_hz）と、求めた rate_hz に要る SWD の速さ（swd_hz_for_rate。target_connect の frequency_hz に渡す。null は最も速い SWD でも届かない）。rate_hz は出せる見込み、requested_rate_hz は求めた値。 vector_table: ベクタ表の番地（使う側が明示する。大きさは vector_table_size か ELF のその番地の変数）。渡せば割り込みに処理の関数の名前を付ける（"IRQ1 (usart_irq)"）。渡さなければ番号の名前だけ（表の場所を推定しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1278,10 +1369,12 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `exception_rate_hz` | `number` |  |
 | `timestamps` | `boolean | null` |  |
 | `ap` | `number` |  |
+| `vector_table` | `number | null` |  |
+| `vector_table_size` | `number | null` |  |
 
 ## profile.stop
 
-種類: `control`。PC サンプリングを止めてプロファイルにする（DWT_CTRL を元に戻す）。要約（分類: code / sleep / unknown、上位 top の関数の割合と信頼区間、割り込みごとの回数）を返す。詳しくは `profile_result` / `profile_coverage` / `profile_exceptions`。pcsr なら sampling（requested_hz・expected_hz・achieved_hz = 読みの時刻からの実際の速さ・SWD の速さ・swd_hz_for_rate）が付き、追いつかなければ notes に要る SWD の速さ。
+種類: `control`。PC サンプリングを止めてプロファイルにする（DWT_CTRL を元に戻す）。要約（分類: code / sleep / unknown、上位 top の関数のサンプル数と割合、割り込みごとの回数）を返す。詳しくは `profile_result` / `profile_coverage` / `profile_exceptions`。pcsr なら sampling（requested_hz・expected_hz・achieved_hz = 読みの時刻からの実際の速さ・SWD の速さ・swd_hz_for_rate）が付き、追いつかなければ notes に要る SWD の速さ。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1289,7 +1382,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## profile.result
 
-種類: `control`。プロファイルの上位 top（取っている最中ならいままでの分）。by: function / line / instruction / exception。line・instruction は function で絞れる。割合（自分の時間）には信頼区間 ci が付く（サンプル数による誤差だけ。周期と同期した処理の偏りは含まない）。
+種類: `control`。プロファイルの上位 top（取っている最中ならいままでの分）。by: function / line / instruction / exception。line・instruction は function で絞れる。行はサンプル数 samples と割合 fraction（自分の時間）。信頼区間は付けない（独立な二項の試行という仮定の上の推定で、周期の抽出では成り立たない。仮定を承知で付けるならプラグイン plugins.heuristics.sampling_intervals）。 itm の例外は先頭 top 件（exceptions_total = 切る前の数）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1316,7 +1409,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## cycles.measure
 
-種類: `control`。start から end（関数名・"ファイル:行"・"0x..."）までのサイクルを count 回測る（ブレークポイントを置いて走らせ、止まるたびに CYCCNT を読む。止まっている間は数えない。置いたものは外す）。counters ならCPI・EXC・SLEEP・LSU・FOLD の増分と命令数・IPC も（`swo.configure` の counters で溢れを数えていれば正確、そうでなければ 256 未満とみなす）。core_clock_hz で µs も。終わるとターゲットは end で止まっている。
+種類: `control`。start から end（関数名・"ファイル:行"・"0x..."）までのサイクルを count 回測る（ブレークポイントを置いて走らせ、止まるたびに CYCCNT を読む。止まっている間は数えない。置いたものは外す）。counters ならCPI・EXC・SLEEP・LSU・FOLD の増分と命令数・IPC も（`swo.configure` の counters で溢れを数えていれば正確、そうでなければ増分は 256 で割った余り = counters_exact false。本当の増分は 256 の倍数だけ多いこともある。数えた溢れと値が合わなかったカウンタは notes に）。core_clock_hz で µs も。終わるとターゲットは end で止まっている。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1329,7 +1422,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## cycles.clock
 
-種類: `control`。CPU クロックを実測する（コアが走っている間に CYCCNT の進みをデバイスのタイムベースと比べる。DAP サンプラが使えれば rate_hz で duration_s の間読んだ直線の傾き、ほかの道具が使っていれば前後 2 回の読み）。CYCCNT を有効にする。clock_hz・標準誤差（ppm）・止まった区間の警告を返す。
+種類: `control`。CPU クロックを実測する（コアが走っている間に CYCCNT の進みをデバイスのタイムベースと比べる。DAP サンプラが使えれば rate_hz で duration_s の間読んだ直線の傾き、ほかの道具が使っていれば前後 2 回の読み）。CYCCNT を有効にする。clock_hz（直線の傾き、または 2 回の読みの中点どうし）・直線からの残差の最大と二乗平均（max_residual_cycles・residual_rms_cycles）・2 回の読みなら前後の時刻で挟んだ範囲（clock_min_hz〜clock_max_hz）・止まった区間の警告を返す（標準誤差は残差が独立という仮定の上の推定なので出さない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1339,7 +1432,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## timing.measure
 
-種類: `read`。記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・中央値・p90・p99）・分布・長い順の上位（iqr: 四分位範囲の柵 / zscore）。start / end は `recording_find` と同じ条件。長い順の上位と min_at・max_at の時刻は `recording_events` で開ける。生の組と長い順の上位は limit 件まで。
+種類: `read`。記録（記録中のもの、または開いたもの）の 2 点間の時間の統計（最小・最大・平均・σ・中央値・p90・p99）・分布（histogram: bins 個の等しい幅の箱）・長い順の上位 longest 件（外れ値の経験則は使わない。各 bin = 入る箱の番号）。start / end は `recording_find` と同じ条件。長い順の上位と min_at・max_at の時刻は `recording_events` で開ける。生の組 intervals（[開始の時刻, 時間]）と同じ並びの箱の番号 interval_bins は limit 件まで（切る前の数は intervals_total）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1351,7 +1444,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## testpoint.instrument
 
-種類: `read`。テストポイント（DT+ 方式）の挿入: C のソース（source_dir の下の *.c）に出力のコードを入れた写しを out_dir に作り、ID の対応表（map_path、既定 out_dir/testpoints.json）を書く。写しの行番号は元と同じ（#line）。対応表が既にあれば中身の変わらない関数の ID を保つ（差分の再挿入。renumber で振り直す）。only_changed は前回（baseline）から変わった・新しい関数にだけ入れる。variables は書き込みを記録する変数（"name" か "name:novalue"）、include / exclude は関数名の glob、branches=false で関数の入口・出口と変数だけ。写しは -DFPROBE_TP_BACKEND=（GPIO_SERIAL / GPIO_PARALLEL / ITM / RTT。fprobe_tp.h）でビルドする。機器に触らない。以後の `testpoint_start` の既定の対応表。
+種類: `read`。テストポイント（DT+ 方式）の挿入: C のソース（source_dir の下の *.c）に出力のコードを入れた写しを out_dir に作り、ID の対応表（map_path、既定 out_dir/testpoints.json）を書く。写しの行番号は元と同じ（#line）。対応表が既にあれば中身の変わらない関数の ID を保つ（差分の再挿入。renumber で振り直す）。only_changed は前回（baseline）から変わった・新しい関数にだけ入れる。variables は書き込みを記録する変数（"name" か "name:novalue"）、include / exclude は関数名の glob、branches=false で関数の入口・出口と変数だけ。写しは -DFPROBE_TP_BACKEND=（GPIO_SERIAL / GPIO_PARALLEL / ITM / RTT。fprobe_tp.h）でビルドする。機器に触らない。以後の `testpoint_start` の既定の対応表。戻り値は出口の前に宣言どおりの型の一時変数に置く（型が宣言から取れない複雑な宣言子だけ __auto_type）。non_type_words は戻り値の型の中の型でない語（記憶域・属性のマクロ等。例 STATIC_INLINE）で、一時変数の型から除く（語がマクロかは名前の形で決めない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1366,10 +1459,11 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `baseline` | `string | null` |  |
 | `renumber` | `boolean` |  |
 | `line_root` | `string | null` |  |
+| `non_type_words` | `Array<string>` |  |
 
 ## testpoint.start
 
-種類: `control`。テストポイントの受け取りを始める（すぐ戻る）。method: gpio_serial（2 線。clock_channel・data_channel）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから after_beats 拍。止めたときに読む）か stream（流し続ける捕捉を背景で解読・解析する。長時間向け。メモリは一定）。itm は SWO（port のスティミュラス・ポート。swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定。受信を始めてからポートを有効にし、止めると元に戻す。時刻は FPGA が SWO のバイトに付けた時刻）。rtt は RTT の上りの rtt_channel（core_clock_hz = CYCCNT の速さが要る。時刻はホストの時計で写すので不確かさ付き）。map_path を省くと最後の `testpoint_instrument` の対応表。duration_s を渡すと `testpoint_stop` はそこまで待つ（stream は自分で終わる）。silence_s（これより長く何も来ない）・open_s（これより長く出口が無い）・long_s（これより長い呼び出し）は、明示したときだけ付ける印（経験則の「いつもより長い」は付けない。いちばん長い呼び出しは統計の max_s・max_at）。記録中（`recording_start`）なら stream "testpoint"（call / hit / anomaly）に書く。
+種類: `control`。テストポイントの受け取りを始める（すぐ戻る）。method: gpio_serial（2 線。clock_channel・data_channel・guard_samples = 開始・終了を認めるまで CLK が 1 のままのサンプル数 = CLK と DAT のずれを許す数。必須で既定は無い）/ gpio_parallel（data_channels = D0..D(W-1)、最後が先頭の印。strobe_channel）はロジアナで、capture deep（深いバッファ。trigger なら CLK / ストローブの最初の立ち上がりから after_beats 拍。止めたときに読む）か stream（流し続ける捕捉を背景で解読・解析する。長時間向け。メモリは一定）。itm は SWO（port のスティミュラス・ポート。swo_baud で受信を始め、core_clock_hz も渡すと TPIU も設定。受信を始めてからポートを有効にし、止めると元に戻す。時刻は FPGA が SWO のバイトに付けた時刻）。rtt は RTT の上りの rtt_channel（core_clock_hz = CYCCNT の速さが要る。時刻はホストの時計で写すので不確かさ付き）。map_path を省くと最後の `testpoint_instrument` の対応表。duration_s を渡すと `testpoint_stop` はそこまで待つ（stream は自分で終わる）。silence_s（これより長く何も来ない）・open_s（これより長く出口が無い）・long_s（これより長い呼び出し）は、明示したときだけ付ける印（経験則の「いつもより長い」は付けない。いちばん長い呼び出しは統計の max_s・max_at）。記録中（`recording_start`）なら stream "testpoint"（call / hit / anomaly）に書く。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1393,6 +1487,8 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `silence_s` | `number | null` |  |
 | `open_s` | `number | null` |  |
 | `long_s` | `number | null` |  |
+| `guard_samples` | `number` |  |
+| `tree_max_depth` | `number` |  |
 
 ## testpoint.stop
 
@@ -1405,11 +1501,11 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## testpoint.status
 
-種類: `control`。テストポイントの受け取りの様子（方式・設定・受けた印の数・取りこぼし・経過・流し続ける捕捉の速さと overrun・時刻の写し・警告）。
+種類: `control`。テストポイントの受け取りの様子（方式・設定・受けた印の数・取りこぼし・経過・流し続ける捕捉の速さと overrun・時刻の写し・警告。方式 rtt は cyccnt_wraps = CYCCNT の回り込みを「記録の間が 2^32 クロックより短い」前提で戻した回数）。
 
 ## testpoint.report
 
-種類: `control`。テストポイントの解析の要約（受け取っている最中ならいままでの分）: 関数ごとの回数・子を含む／自分だけの時間（合計・最小・最大・平均・σ）を多い順に top、カバレッジの割合（関数・C0・C1）、異常（long_call / missing_exit / exit_without_entry / unknown_id / silence / no_exit / loss）の種類ごとの数と先頭 anomalies 件、時間の区切りごとの件数の最後の buckets 個、変数（最新・最小・最大）、開いたままの呼び出し、呼び出しの木（深さ tree_depth まで）。t_s は最初の印からの秒、t はタイムベース（`recording_events` 等の時刻）。
+種類: `control`。テストポイントの解析の要約（受け取っている最中ならいままでの分）: 関数ごとの回数・子を含む／自分だけの時間（合計・最小・最大・平均・σ）を多い順に top、カバレッジの割合（関数・C0・C1）、異常（long_call / missing_exit / exit_without_entry / unknown_id / silence / no_exit / loss）の種類ごとの数と先頭 anomalies 件、時間の区切りごとの件数の最後の buckets 個、変数（最新・最小・最大）、開いたままの呼び出し、呼び出しの木（深さ tree_depth まで。それより下は節の children_omitted）。切る前の数は functions_total・anomalies_total・buckets_total、使った件数は limits。解析の木の深さの上限 tree_max_depth より深くて木に入れなかった呼び出しの数は tree_cut（節ごとは cut。その時間は節の inclusive に入る）。t_s は最初の印からの秒、t はタイムベース（`recording_events` 等の時刻）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1420,7 +1516,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## testpoint.calls
 
-種類: `control`。テストポイントの関数の遷移の時間軸: 呼び出しを始まりの順に（関数・始まり t_s / t・時間・自分だけの時間・深さ・出口を見たか）と、深さで字下げした文字列 text。t0_s ≤ 始まり < t1_s（最初の印からの秒）・function で絞り、先頭 limit 件。持っているのは最近の 65536 件（dropped はそれより前に捨てた数。全部は記録の stream "testpoint" の call）。
+種類: `control`。テストポイントの関数の遷移の時間軸: 呼び出しを始まりの順に（関数・始まり t_s / t・時間・自分だけの時間・深さ・出口を見たか）と、深さで字下げした文字列 text。t0_s ≤ 始まり < t1_s（最初の印からの秒）・function で絞り、先頭 limit 件（total・truncated と使った limit を返す）。持っているのは最近の 65536 件（dropped はそれより前に捨てた数。全部は記録の stream "testpoint" の call）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1431,7 +1527,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## testpoint.coverage
 
-種類: `control`。テストポイントのカバレッジ（実行の記録に基づく正確なもの）: 関数（入った / 入れた）・C0（ソースにある塊の印）・C1（分岐の組の結果。足した else・default を含む）の割合と、通らなかった印（ファイル・行・関数・種類。試験を足す手がかり）、分岐の組ごとの結果の回数。file（対応表の相対パス）・function で絞り、先頭 limit 件。
+種類: `control`。テストポイントのカバレッジ（実行の記録に基づく正確なもの）: 関数（入った / 入れた）・C0（ソースにある塊の印）・C1（分岐の組の結果。足した else・default を含む）の割合と、通らなかった印（ファイル・行・関数・種類。試験を足す手がかり）、分岐の組ごとの結果の回数。file（対応表の相対パス）・function で絞り、先頭 limit 件（uncovered_total・decisions_total と使った limit を返す）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1491,7 +1587,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## xtrig.sequence_status
 
-種類: `read`。多段トリガの状態（今の段、発火したか、発火した時刻 = タイムベースのカウント）。
+種類: `read`。多段トリガの状態（レジスタの事実）: 今の段 stage、発火したか fired、発火した時刻 time（タイムベースのカウント）、仕掛けているか armed、設定した段の数 stages、段ごとの状態 stage_states（done = 済んだ / current = 待っている段 / waiting = まだ / idle = 仕掛けていない。発火したら全部 done）。config は段とピンの条件のレジスタの読み戻し（xtrig.set_sequence の stages・pattern_a・pattern_b と同じ形。within_us は刻みに丸めた値、制限なしは null）。
 
 ## xtrig.fire
 
@@ -1499,11 +1595,11 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## xtrig.status
 
-種類: `read`。割り込み書き込みの状態（結果・回数・時刻）と番地一致の回数・時刻（タイムベースのカウント）。
+種類: `read`。割り込み書き込みの状態 inject（結果 result・busy・ack・成功した回数 count・最後の時刻 time）と中身（ap・address・value。レジスタの読み戻し）、番地一致 match の回数 count・最後の時刻 time（タイムベースのカウント）と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route（レジスタから読んだ to_la・to_inject の源の名前。xtrig.route 以外の道具が書いたビットも含む）。
 
 ## xtrig.output_set
 
-種類: `control`。クロストリガの動作「出力の端子を動かす」の設定（U41）。channel = 出力に使う端子のロジアナの ch（使える端子は xtrig.output_status。Primer: 4 予備・5 UART RX・6 SWO・7 UART TX）。条件 = pattern（端子の並び。ロジアナの ch 0〜7 のビット {"mask", "value", "any"}。any = true は見る ch のどれかが一致で成立。毎周期その場で照合）or sources（源 "la_trigger" / "dap_match" / "host" / "sequence" / "obs_match"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈。刻みに丸めた実際の範囲を返す）/ "hold"（立ち上がりから無効にするまで）/ "while"（条件の間だけ。遅れ 40 ns 程度）。level: 動いている間に出す値（high / low）。動いていない間は駆動しない（高インピーダンス。プルアップのある端子は弱く Highなので notes を返す）。設定するとその端子の普段の機能（UART・SWO）を止めて出力に使う（戻すのは xtrig.output_release）。同時に動かせる数は xtrig.output_status の actions。enable = true で続けて有効にする（既定は無効のまま。xtrig.output_enable）。
+種類: `control`。クロストリガの動作「出力の端子を動かす」の設定（U41）。channel = 出力に使う端子のロジアナの ch（使える端子は xtrig.output_status。Primer: 4 予備・5 UART RX・6 SWO・7 UART TX）。条件 = pattern（端子の並び。ロジアナの ch 0〜7 のビット {"mask", "value", "any"}。any = true は見る ch のどれかが一致で成立。毎周期その場で照合）or sources（源 "la_trigger" / "dap_match" / "host" / "sequence" / "obs_match" / "sampler_match"）。mode: "pulse"（条件の立ち上がりで pulse_us の脈。刻みに丸めた実際の範囲を返す）/ "hold"（立ち上がりから無効にするまで）/ "while"（条件の間だけ。遅れ 40 ns 程度）。level: 動いている間に出す値（high / low）。動いていない間は駆動しない（高インピーダンス。プルアップのある端子は弱く Highなので notes を返す）。設定するとその端子の普段の機能（UART・SWO）を止めて出力に使う（戻すのは xtrig.output_release）。同時に動かせる数は xtrig.output_status の actions。enable = true で続けて有効にする（既定は無効のまま。xtrig.output_enable）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1511,7 +1607,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 | `mode` | `"pulse" | "hold" | "while"` |  |
 | `level` | `"high" | "low"` |  |
 | `pattern` | `Record<string, unknown> | null` |  |
-| `sources` | `Array<"la_trigger" | "dap_match" | "host" | "sequence"> | null` |  |
+| `sources` | `Array<"la_trigger" | "dap_match" | "host" | "sequence" | "obs_match" | "sampler_match"> | null` |  |
 | `pulse_us` | `number | null` |  |
 | `enable` | `boolean` |  |
 
@@ -1634,7 +1730,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## swo.configure
 
-種類: `control`。ITM・DWT の SWO への出力を、ターゲットを止めずに設定する（前の設定は戻してから）。ports: ITM のスティミュラス・ポート。timestamps: ローカルのタイムスタンプ（timestamp_prescale 1/4/16/64）。exception_trace: 例外の入る・出る・戻る。counters: DWT のイベントカウンタ（cpi・exc・sleep・lsu・fold）の溢れ。data_trace: DWT の比較器で変数へのアクセスを値・PC・時刻付きで記録（expression は変数名・C の式・"0x番地:大きさ"、access read/write/rw、pc・value・offset のどれを出すか。ARMv7-M）。value_watch: 値一致（変数に value が読み書きされたら action halt = 止める / trace = 止めずに記録。expression を省くと番地を問わない）。swo_baud で SWO の受信も始め、core_clock_hz も渡すと TPIU（分周）も設定する。受信を始めてから出力を有効にする。trace_pin: SVD に DBGMCU_CR.TRACE_IOEN があれば SWO のピンを有効に。pyOCD のウォッチポイントと比較器を取り合わない。計画（比較器・書いたレジスタ・帯域の見積もり・警告）を返す。結果は `swo.trace`。
+種類: `control`。ITM・DWT の SWO への出力を、ターゲットを止めずに設定する（前の設定は戻してから）。ports: ITM のスティミュラス・ポート。timestamps: ローカルのタイムスタンプ（timestamp_prescale 1/4/16/64）。exception_trace: 例外の入る・出る・戻る。counters: DWT のイベントカウンタ（cpi・exc・sleep・lsu・fold）の溢れ。data_trace: DWT の比較器で変数へのアクセスを値・PC・時刻付きで記録（expression は変数名・C の式・"0x番地:大きさ"、access read/write/rw、pc・value・offset のどれを出すか。ARMv7-M）。value_watch: 値一致（変数に value が読み書きされたら action halt = 止める / trace = 止めずに記録。expression を省くと番地を問わない）。swo_baud で SWO の受信も始め、core_clock_hz も渡すと TPIU（分周）も設定する。受信を始めてから出力を有効にする。trace_pin: SWO のピンを有効にするチップ固有のレジスタの欄（{register: SVD の "周辺.レジスタ", fields: {欄: 値}}。SVD が要る。レジスタ名の慣習で探さないので、渡さなければ書かない）。pyOCD のウォッチポイントと比較器を取り合わない。計画（比較器・書いたレジスタ・帯域の見積もり・警告）を返す。結果は `swo.trace`。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1647,11 +1743,11 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 | `value_watch` | `Array<Record<string, unknown>> | null` |  |
 | `swo_baud` | `number | null` |  |
 | `core_clock_hz` | `number | null` |  |
-| `trace_pin` | `boolean` |  |
+| `trace_pin` | `Record<string, unknown> | null` |  |
 
 ## swo.trace
 
-種類: `control`。`swo.configure` の結果（設定中ならいままでの分、戻した後は最後の結果）。accesses: データトレース・値一致（trace）のアクセス（t = タイムベースの時刻・変数・値（型で解釈）・読み書き・番地・PC とその関数と行）の offset から limit 件（name で変数を絞る）、counters: イベントカウンタの合計（溢れ × 256）、exceptions: 例外ごとの回数。記録中なら記録の stream "swo"（kind data_access・counter_overflow）にも入る。
+種類: `control`。`swo.configure` の結果（設定中ならいままでの分、戻した後は最後の結果）。accesses: データトレース・値一致（trace）のアクセス（t = タイムベースの時刻・変数・値（`debug_evaluate` と同じ形。変数の型で解釈できなければ kind = int の符号なし整数。生の値は raw）・読み書き・番地・PC とその関数と行）の offset から limit 件（name で変数を絞る）、counters: イベントカウンタの合計（溢れ × 256）、exceptions: 例外ごとの回数。記録中なら記録の stream "swo"（kind data_access・counter_overflow）にも入る。 exceptions.events_dropped = ためる上限（events_limit 件）を超えてためなかった例外の出来事の数。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1764,7 +1860,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## uart.write
 
-種類: `control`。ターゲットの UART に送る（latin-1）。baud を指定するとボーレートも変える。
+種類: `control`。ターゲットの UART に送る（latin-1）。baud を指定するとボーレートも変える。written（送ったバイト数）と、使ったボーレート baud（頼まれず、まだ開いていなければ 115200）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1773,7 +1869,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 
 ## uart.read
 
-種類: `control`。timeout_s の間に届いたものを返す（latin-1 で文字列化）。
+種類: `control`。timeout_s の間に届いたもの data（latin-1 で文字列化）と、受けたボーレート baud（頼まれず、まだ開いていなければ 115200）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1841,7 +1937,7 @@ pattern_a / pattern_b は {"mask", "value", "rise", "fall"}（ロジアナのチ
 ## recording.events
 
 種類: `read`。時刻（タイムベース、t1 は含まない）の範囲の出来事を時刻順に。streams: dap / uart / swo / rtt / aux / host / target /
-annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号ごとの値）/ clock。fpga の value_untimed・gap_untimed・group_untimed は、時刻合わせの印が来ないまま鎖が終わって時刻の決まらない記録（t は受けた時 = 起きた時刻の上限）。 dap のクロストリガの割り込み書き込みは kind inject（本体に転送数 transfers。2026-10-23 より前の記録・旧い回路では ap_write）。
+annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号ごとの値）/ clock。fpga の value_untimed・gap_untimed・group_untimed は、時刻合わせの印が来ないまま鎖が終わって時刻の決まらない記録（t は受けた時 = 起きた時刻の上限）。 dap のクロストリガの割り込み書き込みは kind inject（本体に転送数 transfers。2026-10-23 より前の記録・旧い回路では ap_write）。 先頭 limit 件（total = 範囲の総数・truncated = 切ったか・limit = 使った上限）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1853,7 +1949,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.correlate
 
-種類: `read`。結果の直前に多い出来事（原因の判定はしない）: 結果の条件 effect（例 "誤り changed"）の各時刻の直前（window_s 秒の中）に、causes の各条件（例 "restart changed and state=BUSY"・"in0 rose"）が来ていた割合 preceded・記録のうち候補の後 window_s 以内に当たる時間の割合 coverage・後に結果が来た候補の割合 followed・遅れ（秒）・例の時刻（タイムベース）。測った事実だけを返す（判定・経験則の順位づけをしない）。並びは preceded の大きい順、同じなら条件の文字の順。変数: MCU のメモリの名前（watch.set の names）か番地、FPGA の信号の名前、ピンの名前か ch<N>（同じ名前は mcu. / fpga. / pin. で区別）。項: <変数> changed / rose / fell、<変数>=<値>（列挙の名前も）を and でつなぐ（瞬間の項が 1 つ以上）。sampling = 変数の読みの間隔（秒。遅れの分解能）、fpga_hidden = 標本型の標本の間で見えなかった変化の数。causes を省くと記録の変数から候補を作って調べ（auto: 信号の変化・列挙の値に入った瞬間・変化 かつ 列挙 = 値の組・ピンの rose / fell・ほかのメモリの変化）、上位 limit 個。max_coverage を渡せば coverage がそれを超える自動の候補を除く。reads = MCU のメモリの読みの事実（回数・間隔の分位・いちばん長い空白）。gaps = 使った変数のデータの欠け（reason: reads_missing（gap_s を渡したときだけ）/ read_failed / pins_missing / fpga_lost / events_error / recording_dropped、t0・t1。その間の結果・候補は数えられていない）。judged = 先行率の分母（窓が候補の変数の欠けにかかる結果と、結果の変数の欠けの直後に見えた結果は除く）。fpga_hidden = 標本型の FPGA の観測で標本の間に見えなかった変化の数（信号を問わない合計）。sampling の null = 決まった読みの間隔が無い変数。effect.delta = 結果の MCU のメモリの範囲の最初と最後の値の差（count と違えば 1 回の読みで何回分も動いている）。
+種類: `read`。結果の直前に多い出来事（原因の判定はしない）: 結果の条件 effect（例 "誤り changed"）の各時刻の直前（window_s 秒の中）に、causes の各条件（例 "restart changed and state=BUSY"・"in0 rose"）が来ていた割合 preceded・記録のうち候補の後 window_s 以内に当たる時間の割合 coverage・後に結果が来た候補の割合 followed・遅れ（秒）・例の時刻（タイムベース）。測った事実だけを返す（判定・経験則の順位づけをしない）。並びは preceded の大きい順、同じなら条件の文字の順。変数: MCU のメモリの名前（watch.set の names）か番地、FPGA の信号の名前、ピンの名前か ch<N>（同じ名前は mcu. / fpga. / pin. で区別）。項: <変数> changed / rose / fell、<変数>=<値>（列挙の名前も）を and でつなぐ（瞬間の項が 1 つ以上）。sampling = 変数の読みの間隔（秒。遅れの分解能）、fpga_hidden = 標本型の標本の間で見えなかった変化の数。causes を省くと記録の変数から候補を作って調べ（auto: 信号の変化・列挙の値に入った瞬間・変化 かつ 列挙 = 値の組・ピンの rose / fell・ほかのメモリの変化）、上位 limit 個（切る前の数 causes_total・切ったか truncated・使った limit。明示の causes は切らず limit = null）。max_coverage を渡せば coverage がそれを超える自動の候補を除く。reads = MCU のメモリの読みの事実（回数・間隔の分位・いちばん長い空白）。gaps = 使った変数のデータの欠け（reason: reads_missing（gap_s を渡したときだけ）/ read_failed / pins_missing / fpga_lost / events_error / recording_dropped、t0・t1。その間の結果・候補は数えられていない）。judged = 先行率の分母（窓が候補の変数の欠けにかかる結果と、結果の変数の欠けの直後に見えた結果は除く）。fpga_hidden = 標本型の FPGA の観測で標本の間に見えなかった変化の数（信号を問わない合計）。sampling の null = 決まった読みの間隔が無い変数。effect.delta = 結果の MCU のメモリの範囲の最初と最後の値の差（count と違えば 1 回の読みで何回分も動いている）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1869,7 +1965,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.durations
 
-種類: `read`。変数（recording.correlate と同じ指し方: MCU のメモリの名前・番地、FPGA の信号、ピン）の値ごとの回数・続いた時間（両端の見えている区間だけ。秒の最小・中央値・90 % 点・最大）・範囲の中でその値だった時間の割合 share。続いた時間の合計の大きい順に limit 個。例: FPGA の state が BUSY のまま続く時間と、ファームウェアの待ち時間を比べる。データの欠けにかかる回は数えず excluded（欠けは gaps）。
+種類: `read`。変数（recording.correlate と同じ指し方: MCU のメモリの名前・番地、FPGA の信号、ピン）の値ごとの回数・続いた時間（両端の見えている区間だけ。秒の最小・中央値・90 % 点・最大）・範囲の中でその値だった時間の割合 share。続いた時間の合計の大きい順に limit 個（値の総数 values_total・切ったか truncated・使った limit）。例: FPGA の state が BUSY のまま続く時間と、ファームウェアの待ち時間を比べる。データの欠けにかかる回は数えず excluded（欠けは gaps）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1881,7 +1977,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.transactions
 
-種類: `read`。記録を区間（リクエスト等の 1 回の取引）に切って数える: 区間 = start（瞬間の項のある条件）が成り立ってから次に成り立つまで。区間ごとに by（変数）の開始時の値・counts の各条件の回数・effect が起きたか。groups = by の値ごとの区間の数・effect の割合・counts の平均、rows = 最初の rows 区間。条件・変数は recording.correlate と同じ書き方。by_at = end なら by は区間の終わり（次の始めの直前）の値。データの欠けにかかる区間は groups・rows に入れず excluded（変数ごとの内訳 excluded_by、欠けは gaps）。length_s = 区間の長さ・effect_offset_s = 区間の始めから結果までの時間（秒の分位。始めの直後に集まるなら前の区間の結果かもしれない: effect_lag_s で前の区間に割り当てる）。warnings = 欠けで除いた区間の数と内訳。effect があれば by_effect = 結果が起きた区間（with）と起きなかった区間（without）の数・counts の平均。
+種類: `read`。記録を区間（リクエスト等の 1 回の取引）に切って数える: 区間 = start（瞬間の項のある条件）が成り立ってから次に成り立つまで。区間ごとに by（変数）の開始時の値・counts の各条件の回数・effect が起きたか。groups = by の値ごとの区間の数・effect の割合・counts の平均、rows = 最初の rows 区間（入れうる区間の数 rows_total・切ったか rows_truncated・使った rows は rows_limit）。条件・変数は recording.correlate と同じ書き方。by_at = end なら by は区間の終わり（次の始めの直前）の値。データの欠けにかかる区間は groups・rows に入れず excluded（変数ごとの内訳 excluded_by、欠けは gaps）。length_s = 区間の長さ・effect_offset_s = 区間の始めから結果までの時間（秒の分位。始めの直後に集まるなら前の区間の結果かもしれない: effect_lag_s で前の区間に割り当てる）。warnings = 欠けで除いた区間の数と内訳。effect があれば by_effect = 結果が起きた区間（with）と起きなかった区間（without）の数・counts の平均。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1898,17 +1994,18 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.trigger_set
 
-種類: `control`。記録中に、条件（recording.correlate と同じ書き方。MCU のメモリ・FPGA の信号・ピンをまたげる。例 "誤り changed"・"restart changed and state=BUSY"）が成り立つたびに記録に印（stream annotation の mark）を付ける。action = stop なら、最初に成り立った時刻から post_s 秒が記録に入ったら記録を止める（めったに起きない不具合を前後つきで残す）。判定は PC で数秒遅れる（ハードのクロストリガとは別）。記録の始めから調べる。
+種類: `control`。記録中に、条件（recording.correlate と同じ書き方。MCU のメモリ・FPGA の信号・ピンをまたげる。例 "誤り changed"・"restart changed and state=BUSY"）が成り立つたびに記録に印（stream annotation の mark）を付ける。action = stop なら、最初に成り立った時刻から post_s 秒が記録に入ったら記録を止める（めったに起きない不具合を前後つきで残す）。判定は PC で、今から lag_s 秒前までを調べる（ハードのクロストリガとは別。調べ終えた時刻より前に後から届いた出来事は調べず、その数を trigger_status の late に出す）。記録の始めから調べる。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `condition` | `string` | ○ |
 | `action` | `"mark" | "stop"` |  |
 | `post_s` | `number` |  |
+| `lag_s` | `number` |  |
 
 ## recording.trigger_status
 
-種類: `read`。条件の見張り（recording.trigger_set）の様子: 条件・action・回数 hits・最初と最後に成り立った時刻 first_t / last_t（タイムベース）・調べ終えた時刻 checked・状態 state（off / armed / fired / stopped / error）。
+種類: `read`。条件の見張り（recording.trigger_set）の様子: 条件・action・回数 hits・最初と最後に成り立った時刻 first_t / last_t（タイムベース）・調べ終えた時刻 checked・lag_s・調べ終えた後に届いて調べなかった出来事の数 late・状態 state（off / armed / fired / stopped / error）。
 
 ## recording.trigger_clear
 
@@ -1916,24 +2013,74 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.find
 
-種類: `read`。条件に一致する出来事の一覧。query: stream / kind / t0 / t1 / a / b（値か {"eq"|"lt"|"ge"…: 値}）/ body（{欄: 値か {"regex": …}}）。
+種類: `read`。条件に一致する出来事の一覧。query: stream / kind / t0 / t1 / a / b（値か {"eq"|"lt"|"ge"…: 値}）/ body（{欄: 値か {"regex": …}}）。 events は時刻の順に先頭 limit 件（count = 総数、truncated = 切ったか、limit = 使った上限）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `query` | `Record<string, unknown>` | ○ |
+| `limit` | `number` |  |
+
+## recording.code_at
+
+種類: `read`。時刻からコードの位置へ: 記録（記録中のもの、または開いたもの）の時刻 t（タイムベース）の前後に記録に残っている事実。pc_before / pc_after = サンプラが読んだ DWT_PCSR（stream sample、a = 0xE000101C。profile.start の method pcsr か、その番地の watch.set）の直前（時刻 ≦ t）と直後（時刻 > t）の 1 つずつ: t（時刻）・dt_s（t との差、秒）・value（読んだ値）・pc・function・offset・file・line・where（elf（省くと読み込んである ELF）で引く。引けない欄は null）。値 0xFFFFFFFF は pc null・reason pcsr_invalid（コアが止まっている・サンプルできない）、読めなかった語は reason read_failed と ack。pc_gap_s = 直前と直後のサンプルの間の秒（行を推定しない: この間に何を実行したかは記録に無い）。state = t 以前に最後に記録されたターゲットの状態（stream target の kind state。デーモンが変化を見た時刻 = 変わった時刻の上限、uncertainty_s 付き。本文は target.status のまま: state・pc・function・file・line・halt_reason 等）。halt_before / halt_after = t の直前・直後の止まった出来事（HALTED。止まった PC は正確。呼び出し履歴・変数は記録に無い）。task = t を含む RTOS の実行の区間（stream rtos の run: t0・t1・handle・task・method・resolution 等）。missing = 材料の無いものの理由: pc no_samples（記録に DWT_PCSR のサンプルが無い）/ elf no_elf / state no_state（記録に状態の出来事が無い）/ task no_rtos（RTOS の時間軸が無い）・gap（時間軸の欠け。t0・t1・detail）・no_run（t を含む区間が無い）。elf = 行を引いた ELF、recorded_elf = 記録を始めたときに読み込まれていた ELF（違えば行が合わないことがある）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `t` | `number` | ○ |
+| `elf` | `string | null` |  |
 
 ## recording.intervals
 
-種類: `read`。開始の条件から次の終了の条件までの時間（タイムベース）の一覧と統計（最小・最大・平均・標準偏差）。条件は `recording_find` と同じ。
+種類: `read`。開始の条件から次の終了の条件までの時間（タイムベース）の一覧と統計（最小・最大・平均・標準偏差）。条件は `recording_find` と同じ。 intervals は先頭 limit 組（count = 総数、intervals_truncated = 切ったか、limit = 使った上限。統計は全部の組から）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `start` | `Record<string, unknown>` | ○ |
 | `end` | `Record<string, unknown>` | ○ |
+| `limit` | `number` |  |
+
+## recording.cpu_load
+
+種類: `read`。記録の stream rtos（run・gap・isr）から、タスクの表（stats: `rtos_timeline_get` の stats と同じ形。cpu の分母 covered = 情報のある時間）と、window_us を渡せば窓ごとの CPU 負荷の推移（load: `rtos_timeline_load` と同じ形。窓が limit を超えたら先頭の limit 個、windows_total = 全体の数）。情報のある時間 = run のある時間 − 抜け（run の無い時間は止まっていた・記録していない間として抜け not_recorded に数える。gaps_not_recorded = その数）。記録の行を全部読む（行の上限で欠けない）。run が無ければ stats = null。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `window_us` | `number | null` |  |
+| `limit` | `number` |  |
+
+## recording.interrupts
+
+種類: `read`。記録の stream rtos の割り込みの区間（isr）から、割り込みごとの回数・時間（含む／自分 = 中に入れ子になった回を引く）・負荷（自分の時間 ÷ stream rtos の最初から最後まで）・最長の回の時刻（`profile_exceptions` と同じ形。clock_hz = タイムベース。並びは自分の時間の合計の多い順）。number・bins・longest を渡すと、その割り込みの含む時間の分布（distribution.histogram: bins 個の等しい幅の箱。箱ごとにいちばん長い回 longest）と長い順の上位 longest 回（t・t_end・inclusive・bin）。at（タイムベース）を渡すと、その時刻に処理していた割り込みの番号（at_numbers。外から内の順で、最後が実行中）。記録の行を全部読む。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `number` | `number | null` |  |
+| `bins` | `number | null` |  |
+| `longest` | `number | null` |  |
+| `at` | `number | null` |  |
+
+## recording.kinds
+
+種類: `read`。記録の範囲 [t0, t1)（省くと全体）の stream・kind ごとの件数・最初と最後の時刻（first・last）・全体に対する割合（share）・1 秒あたり（per_second = 件数 ÷ 範囲の長さ seconds。全体なら記録の最初から最後まで）。件数の多い順（同じなら stream・kind の順）。total = 全部の件数、span = 数えた範囲。長期の記録はすべての分割を数える（行・分割の上限で欠けない）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `t0` | `number | null` |  |
+| `t1` | `number | null` |  |
+
+## recording.voltage
+
+種類: `read`。記録の電圧（stream aux・kind mv）の範囲 [t0, t1)（省くと全体）の stats = {count, min, max, mean}（V）、lowest = いちばん低い点 {t, volts}（同じ値なら早い方）、dips = below_v（使う人が渡す V）以下の連続する点の区間 [{t（下がった最初の点）, t_end（戻った最初の点。戻らなければ最後の点）, at, min, under = below_v − min}]（時刻の順。below_v を渡さなければ null。基準の水準は推定しない）。すべての出来事を数える。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `below_v` | `number | null` |  |
+| `t0` | `number | null` |  |
+| `t1` | `number | null` |  |
 
 ## recording.density
 
-種類: `read`。画素ごとの出来事の件数（縮図・タイムラインの要約）。長期の記録は事前計算した縮図の和で正確に出す。間引いた・消した分割にかかれば coverage（欠けの一覧。その部分は近似）。
+種類: `read`。画素ごとの出来事の件数（縮図・タイムラインの要約）。長期の記録は事前計算した縮図の和で正確に出す。間引いた・消した分割にかかれば coverage（欠けの一覧）と、端がそこにかかって数えられない画素の inexact（[{pixel, max}]。その画素の counts は残っている出来事だけの下限、max は上限。消した分割なら null。按分で推定しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1944,7 +2091,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.waveform
 
-種類: `read`。記録の波形を画素ごとに '0' / '1' / 'x'（変化）/ '-'（波形が無い）。
+種類: `read`。記録の波形を画素ごとに '0' / '1' / 'x'（変化）/ '-'（波形が無い）。 長期の記録で波形のファイルを間引いた所は '?' = そのかたまりの中で変化したチャンネル（この画素の中で変わったかは分からない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1965,7 +2112,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.mark
 
-種類: `control`。印とメモを残す（調査の経緯。人と AI の両方が使う）。t（タイムベース）を省くと記録中の記録のいまの時刻、指定するとその時刻（記録中の記録か、開いた記録。時間軸で選んだ時刻に後から印を置く。長期の記録は記録中だけ）。
+種類: `control`。印とメモを残す（調査の経緯。人と AI の両方が使う）。t（タイムベース）を省くと記録中の記録のいまの時刻、指定するとその時刻（記録中の記録か、開いた記録。時間軸で選んだ時刻に後から印を置く。長期の記録は記録中だけ）。置いた呼び出し元は印の本文の client（{id, name, role}）にデーモンが事実として残す。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2063,6 +2210,18 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 |---|---|---|
 | `name` | `string` | ○ |
 
+## flash.algorithm_guard.set
+
+種類: `control`。書き込みアルゴリズムを動かす間だけチップのレジスタを決めた状態にし、抜けるときに戻す手順（Flash の書き込み・消去・Flash のブレークポイントのどれにも使う）。guard = {enter: [手順], exit: [手順]}、手順は write {address, mask, value}（読んで mask のビットを value に）/ wait {address, mask, value}（(値 & mask) == value まで読む）/ restore {address, mask}（enter の前の値に戻す）/ wait_restored {address, mask}。null で外す。機器固有の守り（例: STM32F2 / F4 / F7 で走っていたプログラムの PLL のままアルゴリズムを動かさない）は本体に持たず、使う側が渡す（プラグイン fprobe.plugins.stm32_flash_clock）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `guard` | `Record<string, unknown> | null` |  |
+
+## flash.algorithm_guard.get
+
+種類: `read`。`flash_algorithm_guard_set` で渡した書き込みアルゴリズムの間の守り（無ければ guard = null）。
+
 ## target.flash.benchmark
 
 種類: `control`。書き込み・読み出しの速度を計る。ram_length: 既定の RAM へ書いて読む（中身と走る状態を戻す。0 で省く）。read_length: 起動する Flash を読む（0 で省く）。program_address（と program_length、省略時は 1 セクタ）: そのセクタを消して書いて読み比べ、元の中身・RAM・レジスタ・走る状態に戻す（使っていないセクタを選ぶ）。SWD の周波数と各段のバイト数・秒・bytes_per_s。
@@ -2076,12 +2235,13 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## target.pack.find
 
-種類: `read`。CMSIS-Pack の索引を部品番号で探す（グロブ。ワイルドカードが無ければ部分一致）。索引が無いか update なら取ってくる（ネットに出る）。部品・メーカー・Pack・版・入れてあるか。
+種類: `read`。CMSIS-Pack の索引を部品番号で探す（グロブ。ワイルドカードが無ければ部分一致）。索引が無いか update なら取ってくる（ネットに出る）。部品・メーカー・Pack・版・入れてあるか（parts。名前の順に limit 個まで。合った部品の総数 total・切ったか truncated・使った上限 limit）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `pattern` | `string` | ○ |
 | `update` | `boolean` |  |
+| `limit` | `number` |  |
 
 ## target.pack.install
 
@@ -2106,7 +2266,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## snapshot.save
 
-種類: `control`。止まったターゲットの状態を 1 つのファイル（.fsnap、既定は ~/.fprobe/snapshots）に保存する: コアレジスタ（浮動小数点も）・RAM・システム制御空間（SCB・NVIC・SysTick 等。読むと変わるデバッグのレジスタは読まない）・SVD の周辺レジスタ（readAction とデータ・FIFO の口は読まない）・停止の理由と場所・RTOS のタスクの一覧・故障の解析・記録の参照（記録中なら stream "snapshot" にも）・ELF の指紋（embed_elf で ELF も）。halt なら動いていても止める。ranges（[[番地, 長さ], …]）を省くとメモリマップの RAM すべて、flash で Flash も。peripherals は周辺の名前（省略で SVD のすべて、[] で読まない）。
+種類: `control`。止まったターゲットの状態を 1 つのファイル（.fsnap、既定は ~/.fprobe/snapshots）に保存する: コアレジスタ（浮動小数点も）・RAM・システム制御空間（SCB・NVIC・SysTick 等。読むと変わるデバッグのレジスタは読まない）・SVD の周辺レジスタ（SVD の readAction のあるものと、skip_registers（"周辺.レジスタ" の glob）に合うものは読まない。readAction の無いレジスタは名前から推さずに読む）・停止の理由と場所・RTOS のタスクの一覧・故障の解析・記録の参照（記録中なら stream "snapshot" にも）・ELF の指紋（embed_elf で ELF も）。halt なら動いていても止める。ranges（[[番地, 長さ], …]）を省くとメモリマップの RAM すべて、flash で Flash も。peripherals は周辺の名前（省略で SVD のすべて、[] で読まない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2118,6 +2278,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `peripherals` | `Array<unknown> | null` |  |
 | `embed_elf` | `boolean` |  |
 | `note` | `string` |  |
+| `skip_registers` | `Array<string> | null` |  |
 
 ## snapshot.open
 
@@ -2166,7 +2327,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## rules.check
 
-種類: `read`。規則の検査（宣言的な規則集を記録に当てる）。rules（辞書）か path（JSON / YAML のファイル）のどちらか: {name, requirements: {要件 ID: 文}, rules: [{id, kind, requirement, severity, allow_empty, ...}]}。kind: interval（start・end・min_us・max_us）/ period（event・period_us と tolerance_us、または min_us・max_us）/ sequence（trigger・steps・within_us・forbid）/ count（event・min・max・window_us）/ never（event）/ value（event・field・min・max・equals）/ states（event・field・allowed = [from, to] の列・labels・initial）。条件は `recording_find` と同じ、field は a / b / kind / body.<名前>。結果は規則ごとの verdict（pass / fail / warn / no_data）・expected・measured・violations（t・at_us・kind・message）と全体の verdict。mark（既定 true）で違反を記録の stream "rule"（kind violation）に派生イベントとして書く（同じ規則集の前の印は置き換え）。baseline（`recording_list` の name）で基準の記録の実測と比べる（baseline.delta）。範囲は t0 / t1（タイムベース）。
+種類: `read`。規則の検査（宣言的な規則集を記録に当てる）。rules（辞書）か path（JSON / YAML のファイル）のどちらか: {name, requirements: {要件 ID: 文}, rules: [{id, kind, requirement, severity, allow_empty, ...}]}。kind: interval（start・end・min_us・max_us）/ period（event・period_us と tolerance_us、または min_us・max_us）/ sequence（trigger・steps・within_us・forbid）/ count（event・min・max・window_us）/ never（event）/ value（event・field・min・max・equals）/ states（event・field・allowed = [from, to] の列・labels・initial）。条件は `recording_find` と同じ、field は a / b / kind / body.<名前>。結果は規則ごとの verdict（pass / fail / warn / no_data）・expected・measured・violations（t・at_us・kind・message。規則ごとに limit 件まで: violations_total = 全数、violations_limit = 使った上限）と全体の verdict。mark（既定 true）で違反を記録の stream "rule"（kind violation）に派生イベントとして書く（同じ規則集の前の印は置き換え）。baseline（`recording_list` の name）で基準の記録の実測と比べる（baseline.delta）。範囲は t0 / t1（タイムベース）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2200,9 +2361,13 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `path` | `string` | ○ |
 | `format` | `"markdown" | "json"` |  |
 
+## rules.last
+
+種類: `read`。最後の `rules_check` と `inject_run` の結果（`rules_report` が証跡に書くもの。機器には触れない）: rules・inject がそれぞれ {result（その呼び出しの応答のまま）, at（UNIX 秒）, caller（呼び出し元 {id, name, role}。分からなければ null）}。まだ無ければ null。
+
 ## inject.run
 
-種類: `control`。故障注入の台本を試行する（クロストリガの割り込み書き込み: 条件の成立から数 µs で、ハードウェアが任意の番地へ 1 語書く）。script（辞書）か path（JSON / YAML）: {name, requirements, trials: [{id, requirement, when, write, expect, restore, timeout_s, observe_s, repeat}]}。when は 1 つ: pattern {mask, value, rise, fall}（ピン）/ sequence（`xtrig_set_sequence` と同じ stages・pattern_a・pattern_b）/ dap_match（`xtrig_set_match` と同じ）/ host {delay_s}。write: {address（数か ELF の変数名。4 の倍数）, value か flip（仕掛けた時点の値とのビット反転）, ap}。expect: {state: running|halted} / {expression: C の式, equals|not_equals|min|max} / {memory: {address, size}, 同じ比較} / {rules: [規則]}（注入から observe_s の間の記録。記録が要る）。restore: {write: [{address, value, size}], reset: 種類, resume}。試行ごとの verdict: pass / fail / not_triggered / inject_error / error と、注入の時刻 t（タイムベース）。記録中なら stream "inject"（kind trial）に入る。最後に割り込み書き込みを既定（停止）へ戻す。
+種類: `control`。故障注入の台本を試行する（クロストリガの割り込み書き込み: 条件の成立から数 µs で、ハードウェアが任意の番地へ 1 語書く）。script（辞書）か path（JSON / YAML）: {name, requirements, trials: [{id, requirement, when, write, expect, restore, timeout_s, observe_s, repeat}]}。timeout_s（条件の成立を待つ秒 = not_triggered の判定）と observe_s（注入の後に見る秒 = pass / fail の判定）は必須（既定は無い）で、試行の結果にも入る。when は 1 つ: pattern {mask, value, rise, fall}（ピン）/ sequence（`xtrig_set_sequence` と同じ stages・pattern_a・pattern_b）/ dap_match（`xtrig_set_match` と同じ）/ host {delay_s}。write: {address（数か ELF の変数名。4 の倍数）, value か flip（仕掛けた時点の値とのビット反転）, ap}。expect: {state: running|halted} / {expression: C の式, equals|not_equals|min|max} / {memory: {address, size}, 同じ比較} / {rules: [規則]}（注入から observe_s の間の記録。記録が要る）。restore: {write: [{address, value, size}], reset: 種類, resume}。試行ごとの verdict: pass / fail / not_triggered / inject_error / error と、注入の時刻 t（タイムベース）。記録中なら stream "inject"（kind trial）に入る。最後に割り込み書き込みを既定（停止）へ戻す。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2262,7 +2427,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## heap.scan
 
-種類: `control`。ヒープを辿る（ELF のシンボルから。DWARF 不要）: allocator = freertos（heap_4 / heap_5）/ newlib_nano / newlib（dlmalloc）。省略で ELF にあるもの全部。使用量・空き・最大の空き・断片化（1 − 最大の空き / 空きの合計）・大きさの分布・アロケータのカウンタと、壊れ（issues: bad_size = 大きさが不正。previous_used は直前の使用中のブロック（事実。壊した者は推定しない） / bad_link / bad_end / free_list_loop・unsorted・outside / free_not_listed / listed_not_free / unmerged_free / bad_padding / bad_links・bad_footer（dlmalloc）/ counter_mismatch）。heap_5 の領域は xHeapRegions か regions（[[先頭, 大きさ]]）、newlib-nano のヒープの終わりは sbrk の変数か end。blocks でブロックの一覧（先頭から）、compare で前回の走査からの増減（増えた使用中のブロック）。`heap_trace_start` 中なら使用中のブロックを呼び出し元ごとに（callers）。止まっているときだけ（live=true で走行中にも: 一貫しない）。
+種類: `control`。ヒープを辿る（ELF のシンボルから。DWARF 不要）: allocator = freertos（heap_4 / heap_5）/ newlib_nano / newlib（dlmalloc）。省略で ELF にあるもの全部。使用量・空き・最大の空き・断片化（1 − 最大の空き / 空きの合計）・大きさの分布・アロケータのカウンタと、壊れ（issues: bad_size = 大きさが不正。previous_used は直前の使用中のブロック（事実。壊した者は推定しない） / bad_link / bad_end / free_list_loop・unsorted・outside / free_not_listed / listed_not_free / unmerged_free / bad_padding / bad_links・bad_footer（dlmalloc）/ counter_mismatch）。heap_5 の領域は xHeapRegions か regions（[[先頭, 大きさ]]）、newlib-nano のヒープの終わりは sbrk の変数か end。blocks でブロックの一覧（先頭から）、compare で前回の走査からの増減（changes: 増えた new・消えた gone 使用中のブロックを番地の順に changes_limit 個まで。総数 new_count・gone_count、切ったか new_truncated・gone_truncated、使った上限 limit）。`heap_trace_start` 中なら使用中のブロックを呼び出し元ごとに（callers）。止まっているときだけ（live=true で走行中にも: 一貫しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2272,14 +2437,19 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `live` | `boolean` |  |
 | `blocks` | `number` |  |
 | `compare` | `boolean` |  |
+| `changes_limit` | `number` |  |
+| `regions_symbol` | `string | null` |  |
+| `break_symbol` | `string | null` |  |
 
 ## heap.trace.start
 
-種類: `control`。malloc / free の記録を始める（止めずに）: 確保の関数（FreeRTOS pvPortMalloc・newlib _malloc_r）の入口で大きさと呼び出し元、戻ったところで返した番地を、解放の関数（vPortFree・_free_r）の入口で番地を読む（ブレークポイント。当たるたびにコアを数 ms 止める）。calloc / realloc は中の確保・解放として残る。allocators で絞る（省略で ELF にあるもの）。記録中なら stream "heap"（kind alloc / free、a = 番地、b = 大きさ）にも入る。→ `heap_trace_report`・`heap_trace_events`・`heap_trace_stop`。
+種類: `control`。malloc / free の記録を始める（止めずに）: 確保の関数（FreeRTOS pvPortMalloc・newlib _malloc_r）の入口で大きさと呼び出し元、戻ったところで返した番地を、解放の関数（vPortFree・_free_r）の入口で番地を読む（ブレークポイント。当たるたびにコアを数 ms 止める）。calloc / realloc は中の確保・解放として残る。allocators で絞る（省略で ELF にあるもの）。呼び出し元は戻り先の関数。skip_functions（関数の名前）を渡すと、戻り先がその関数なら呼び出し履歴で外へ辿り、最初の skip_functions に無い関数を呼び出し元にする（飛ばしたフレームは出来事の skipped、巻き戻せない・すべて飛ばす関数なら unwind_error。名前の表は本体に持たない。標準の包みの名前はプラグイン fprobe.plugins.heuristics.ALLOCATOR_WRAPPERS）。結果の skip_functions = 使う名前。記録中なら stream "heap"（kind alloc / free、a = 番地、b = 大きさ）にも入る。→ `heap_trace_report`・`heap_trace_events`・`heap_trace_stop`。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `allocators` | `Array<"freertos" | "newlib_nano" | "newlib"> | null` |  |
+| `skip_functions` | `Array<unknown> | null` |  |
+| `issues_limit` | `number` |  |
 
 ## heap.trace.stop
 
@@ -2287,16 +2457,18 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## heap.trace.report
 
-種類: `read`。malloc / free の記録の要約: 確保・解放の回数、生きている確保（数・バイト）、最大の使用量、誤り（double_free・failed_allocation・reused_live_pointer）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s 秒より古いもの。バイトの多い順。live_counts = 記録の最初と最後の間を 4 つに分けた 5 つの時点での生きている数。リークかは判定しない）、使用量の推移（series: 記録を始めてからの秒, バイト）。
+種類: `read`。malloc / free の記録の要約: 確保・解放の回数、生きている確保（数・バイト）、最大の使用量、誤り（double_free・failed_allocation・reused_live_pointer）、呼び出し元ごとの生きている確保（live_by_caller: min_age_s 秒より古いもの。バイトの多い順に top 個。callers_total = 切る前の呼び出し元の数・truncated = 切ったか・top = 使った値。各呼び出し元の pointers は先頭の 8 個で pointers_truncated = 切ったか。live_counts = 記録の最初と最後の間を 4 つに分けた 5 つの時点での生きている数。リークかは判定しない）、使用量の推移（series: 記録を始めてからの秒, バイト）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `min_age_s` | `number` |  |
 | `top` | `number` |  |
+| `series_points` | `number` |  |
+| `live_points` | `number` |  |
 
 ## heap.trace.events
 
-種類: `read`。記録した確保・解放の出来事（op・pointer・size・caller・t = 記録を始めてからの秒）を古い順に。seq が since より後を limit 件、next を次の since に。
+種類: `read`。記録した確保・解放の出来事（op・pointer・size・caller・skipped = 呼び出し元を探すとき飛ばしたフレームの関数・t = 記録を始めてからの秒）を古い順に。seq が since より後を limit 件、next を次の since に。出来事は新しい kept_limit 件だけ持つ: dropped = since より後で持つ数を超えて捨てた出来事の数。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2309,7 +2481,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## recording.overview
 
-種類: `read`。記録の全体の縮図（ミニマップ。Tracealyzer の Trace Preview の相当）: 画素ごと・stream ごとの出来事の件数（streams）と合計（total）、波形（waveform: チャンネルごとに '0' / '1' / 'x' / '-'）、分割の状態（segments）。画素の境は edges（タイムベース）。長期の記録は事前計算した索引から出すので 30 日でも速く、消した分割の件数も残る。streams で種類を絞る。
+種類: `read`。記録の全体の縮図（ミニマップ。Tracealyzer の Trace Preview の相当）: 画素ごと・stream ごとの出来事の件数（streams）と合計（total）、波形（waveform: チャンネルごとに '0' / '1' / 'x' / '-'）と、波形のある所が全部同じ値の ch（unchanged_channels = 記録の中で変化が無い）、分割の状態（segments）。画素の境は edges（タイムベース）。長期の記録は事前計算した索引から出すので 30 日でも速く、消した分割の件数も残る。streams で種類を絞る。 長期の記録で波形のファイルを間引いた所は '?' = そのかたまりの中で変化したチャンネル（この画素の中で変わったかは分からない。unchanged_channels には入れない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2346,7 +2518,20 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## debug.halt_risk
 
-種類: `read`。コアを止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の手がかり（ELF のシンボルだけ。機器には触れない。事実だけで判定はしない）: matched（どれかの名前が合った）、matches（決まった順。kind = radio（無線の割り込み・BLE 等のスタック）/ usb（USB の機器）/ watchdog / rtos、count、symbols = 合ったシンボルの先頭、rtos = RTOS の名前）、monitor_in_elf（止めずにデバッグするモニタがファームにあるか。あれば target.debug_mode.set の mode="monitor"）。matched なら止める前に人に知らせ、止めずに調べる道具（watch.set・rtos.tasks の live・profile.start）かモニタ方式を先に考える。
+種類: `read`。止める操作（中断・ブレークポイント・ステップ・関数の呼び出し）の前の手がかり（ELF のシンボルだけ。機器には触れない。事実だけで判定はしない）: names・patterns（`debug.halt_risk.set` で使う側が渡した名前・正規表現。既定は空で、本体は名前の表を持たない）、matched（どれかに合った）、matches（合った条件ごと: query、by = name / pattern、count、symbols = [{name, kind = function / object 等, address}] を全部）、monitor_in_elf（止めずにデバッグするモニタがファームにあるか。あれば target.debug_mode.set の mode="monitor"）。合わなかった条件は matches に入らない。名前の慣習（関数名の接頭辞等）で無線・USB・ウォッチドッグ・RTOS に分けるのはプラグイン fprobe.plugins.heuristics の halt_risk_conventions（経験則。結果に heuristic・assumption が付く）。
+
+## debug.halt_risk.get
+
+種類: `read`。止める前の手がかり（`debug.halt_risk`）で探す今の条件: names・patterns（`debug.halt_risk.set` で渡されたもの。既定は空）。ELF に依らない。
+
+## debug.halt_risk.set
+
+種類: `control`。`debug.halt_risk` で ELF から探す条件を置き換える: names（シンボルの名前。完全一致）、patterns（正規表現。Python の re.search。大文字小文字を区別しないなら (?i)）。渡さなければ空（何も探さない）。読めない正規表現は誤り。条件はデーモンが覚え、画面の止める前の確かめもこの条件で出る。結果は渡した条件 {names, patterns}。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `names` | `Array<string>` |  |
+| `patterns` | `Array<string>` |  |
 
 ## watch.trigger
 
@@ -2362,7 +2547,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## watch.capture
 
-種類: `read`。条件つきの取得（`watch_trigger`）の状態と結果（機器には触れない）。終わるまで wait_s 待つ。state: armed / capturing / done（reason: stop / post / max_samples / cancelled）、t_start_us・t_end_us、samples（変数ごとの値の列。時刻は `watch_series` と同じ軸の µs）。
+種類: `read`。条件つきの取得（`watch_trigger`）の状態と結果（機器には触れない）。終わるまで wait_s 待つ。state: armed / capturing / done（reason: stop / post / max_samples / cancelled）、t_start_us・t_end_us、samples（変数ごとの値の列。時刻は `watch_series` と同じ軸の µs）。 値は `debug_evaluate` と同じ形（kind を持つ object）。番地の式（"0x20000000:4"）の値は kind = int（符号なし整数）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2370,7 +2555,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## watch.write
 
-種類: `control`。走行中の変数に書く（止めない）。expression: 大域・静的の C の式（ポインタをたどってもよい）か番地（"0x20000000:4" は整数）。value: 数・列挙の名前・真偽。書いた後に読み直した値を返す。ビットフィールドは読み・変え・書き（atomic = false: ターゲットが同じ語を同時に書くと失われうる）。
+種類: `control`。走行中の変数に書く（止めない）。expression: 大域・静的の C の式（ポインタをたどってもよい）か番地（"0x20000000:4" は整数）。value: 数・列挙の名前・真偽。書いた後に読み直した値を返す。ビットフィールドは読み・変え・書き（atomic = false: ターゲットが同じ語を同時に書くと失われうる）。 読み直した value は `debug_evaluate` と同じ形（番地の式は kind = int）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2390,7 +2575,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## watch.buffer_read
 
-種類: `read`。吸い出した要素（機器には触れない）: samples = [{seq（通し番号）, time_us（PC が読んだ時刻）, value}]。since を省くと前回の続きから（読むと進む）、渡すとそこから（画面用）。lost は一周されて読めなかった要素の数、next は次の since。
+種類: `read`。吸い出した要素（機器には触れない）: samples = [{seq（通し番号）, time_us（PC が読んだ時刻）, value}]。since を省くと前回の続きから（読むと進む）、渡すとそこから（画面用）。lost は一周されて読めなかった要素の数、next は次の since。 evicted = ホストで持つ数の上限（kept_limit 件）を超えて捨てた、since より後の要素の数。 値は `debug_evaluate` と同じ形（kind を持つ object）。番地の式（"0x20000000:4"）の値は kind = int（符号なし整数）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2453,7 +2638,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## log.start
 
-種類: `control`。ログの流れの解読を始める（止めずに。すぐ戻る）。format: defmt（ELF の .defmt の表。RTT は既定で名前 "defmt" のチャンネル）/ trice（til・li = til.json・li.json、framing tcobs / cobs / none）/ compact（書式の文字列の番地 + 引数の語。ELF から引く）/ memfault（ELF の log_fmt。transport cbor / text = ML:…: の行）/ text（行）。source: rtt（channel は番号か名前）/ swo（ITM の port。swo_baud・core_clock_hz で受信と TPIU も設定）/ uart（プローブの UART の受信。時刻は FPGA が受けた時刻）。ELF は elf か読み込み済みのもの。annotate なら本文の中のコードの番地を関数・ファイル:行に。読むのは `log_read`。記録中なら stream "log"（kind = 重要度、解読できないものは undecoded）。
+種類: `control`。ログの流れの解読を始める（止めずに。すぐ戻る）。format: defmt（ELF の .defmt の表。枠は ELF の _defmt_encoding_（rzcobs / raw）、無ければ framing で明示（仮定しない）。RTT は既定で名前 "defmt" のチャンネル）/ trice（til・li = til.json・li.json、framing tcobs / cobs / none。行頭のタグ（err: 等）をチャンネル（channel）とするのは channel_levels（タグ → trace / debug / info / warn / error、重要度なしは null）で明示したタグだけ（名前の形では決めない。本文は書き換えずタグも残る）。回の番号の飛びは数えて notes に待った番号と来た番号（原因は解釈しない））/ compact（書式の文字列の番地 + 引数の語。ELF から引く）/ memfault（ELF の log_fmt。transport cbor / text = ML:…: の行）/ text（行）。source: rtt（channel は番号か名前。省けば defmt は "defmt"（無ければ誤り）、ほかは SEGGER RTT の端末のチャンネル 0）/ swo（ITM の port。swo_baud・core_clock_hz で受信と TPIU も設定）/ uart（プローブの UART の受信。時刻は FPGA が受けた時刻）。ELF は elf か読み込み済みのもの。annotate なら本文の中のコードの番地を関数・ファイル:行に。読むのは `log_read`。記録中なら stream "log"（kind = 重要度、解読できないものは undecoded）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2470,6 +2655,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `annotate` | `boolean` |  |
 | `swo_baud` | `number | null` |  |
 | `core_clock_hz` | `number | null` |  |
+| `channel_levels` | `Record<string, unknown> | null` |  |
 
 ## log.stop
 
@@ -2481,7 +2667,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## log.read
 
-種類: `read`。解読したログの行（since の番号より後を limit 件）: 本文・重要度・書式・引数・ターゲットの時刻・ソースの場所・本文の中の番地の解読・受けた時刻 t（タイムベース）。level 以上の重要度だけ（重要度の無い行は常に）、contains を含むものだけ。next を次の since に。最近の 10000 行だけ持つ（全部は記録の stream "log"）。
+種類: `read`。解読したログの行（since の番号より後を limit 件）: 本文・重要度・書式・引数・ターゲットの時刻・ソースの場所・本文の中の 0x の数のうち実行区画に入る値の場所（`log_annotate` と同じ）・受けた時刻 t（タイムベース）。level 以上の重要度だけ（重要度の無い行は常に）、contains を含むものだけ。next を次の since に。最近の 10000 行だけ持つ（全部は記録の stream "log"）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2506,10 +2692,11 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `big_endian` | `boolean` |  |
 | `transport` | `"cbor" | "text" | null` |  |
 | `limit` | `number` |  |
+| `channel_levels` | `Record<string, unknown> | null` |  |
 
 ## log.annotate
 
-種類: `read`。文字（UART のパニックの出力・Backtrace の行等）の中のコードの番地を、ELF で関数・ファイル:行にする（機器に触らない。elf か読み込み済みの ELF）。
+種類: `read`。文字（UART のパニックの出力・Backtrace の行等）の中の 0x の 16 進の数（桁数によらない）のうち、値が ELF の実行できる区画に入るものを、その番地の関数・ファイル:行にする（機器に触らない。elf か読み込み済みの ELF）。番地として書かれた数かどうかは決めない。addresses の各項目に value（書かれた値）と address（引いた番地。ARM の ELF では Thumb の bit 0 を落とす）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2518,7 +2705,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## trace.start
 
-種類: `control`。トレースの流れの取り込みを始める（すぐ戻る）。format: systemview（RTT の "SysView"。send_start なら開始のコマンドを下りに書く。description = SYSVIEW_<OS>.txt で OS の API の名前と引数）/ ctf（Zephyr。metadata = ビルドの TSDL、無ければ組み込みの表と ctf_header）/ tracealyzer（RTT の "TzData"。開始は "TzCtrl"）/ eventrecorder（source memory: Event Recorder の RAM を period_s ごとに止めずに読む。EventRecorderInfo か address。書式は `scvd_load`）。source: rtt / swo（ITM の port）/ uart / memory。記録中なら出来事を stream "trace" に。`trace_stop` で時間軸にも。
+種類: `control`。トレースの流れの取り込みを始める（すぐ戻る）。format: systemview（RTT の "SysView"。send_start なら開始のコマンドを下りに書く。description = SYSVIEW_<OS>.txt で OS の API の名前と引数）/ ctf（Zephyr。metadata = ビルドの TSDL、無ければ組み込みの表と ctf_header。見出しの形は版で違うので既定なし: metadata に event_header が無ければ ctf_header が要る）/ tracealyzer（RTT の "TzData"。開始は "TzCtrl"）/ eventrecorder（source memory: Event Recorder の RAM を period_s ごとに止めずに読む。EventRecorderInfo か address。書式は `scvd_load`）。source: rtt（channel を省けば形式の名前 "SysView"・"TzData" のチャンネル。無ければ誤りでほかのチャンネルで代えない。ctf は SEGGER RTT の端末のチャンネル 0）/ swo（ITM の port）/ uart / memory。記録中なら出来事を stream "trace" に。`trace_stop` で時間軸にも。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2528,24 +2715,26 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `port` | `number` |  |
 | `description` | `string | null` |  |
 | `metadata` | `string | null` |  |
-| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16"` |  |
+| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16" | null` |  |
 | `send_start` | `boolean` |  |
 | `period_s` | `number` |  |
 | `address` | `number | null` |  |
 | `swo_baud` | `number | null` |  |
 | `core_clock_hz` | `number | null` |  |
+| `string_limit` | `number` |  |
 
 ## trace.stop
 
-種類: `control`。トレースの取り込みを止め、要約（出来事の種類ごとの数・タスク・失った数・時刻の速さ・時刻の対応）を返す。timeline ならタスクの出入りを時間軸にし、`rtos_timeline_get`・`rtos_timeline_load` 等の解析がそのまま使える（記録中なら stream "rtos" にも）。
+種類: `control`。トレースの取り込みを止め、要約（出来事の種類ごとの数・タスク・失った数・時刻の速さ・時刻の対応・ts_wraps = 32 ビット等の時刻の桁あふれを「前の出来事から 1 周未満」の前提で戻した回数）を返す。timeline ならタスクの出入りを時間軸にし、`rtos_timeline_get`・`rtos_timeline_load` 等の解析がそのまま使える（記録中なら stream "rtos" にも）。idle_tasks: アイドルとして扱うタスクの名前（完全一致。fprobe は名前でアイドルを決めない。結果の timeline.idle_tasks に合った名前 → タスクの ID と合わなかった名前。無ければアイドルは不明）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `timeline` | `boolean` |  |
+| `idle_tasks` | `Array<string> | null` |  |
 
 ## trace.status
 
-種類: `read`。トレースの取り込みの様子（形式・出来事の数・タスク・失った数・時刻の対応・誤り）。
+種類: `read`。トレースの取り込みの様子（形式・出来事の数・タスク・失った数・時刻の対応・誤り・時刻の桁あふれを前提で戻した回数 ts_wraps）。
 
 ## trace.events
 
@@ -2560,7 +2749,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## trace.snapshot
 
-種類: `control`。ターゲットの RAM のトレースのバッファを吸い出して解読する（ポストモーテム・スナップショット。止めなくてよいが、止めた方が書きかけが無い。`snapshot_open` 中ならその RAM から）。format: systemview（RTT の "SysView" のリングを消費せずに）/ ctf（Zephyr の ram_tracing。address なら size も）/ tracex（ThreadX の _tx_trace_header_ptr か address。ts_hz = 時刻の速さ）/ eventrecorder（EventRecorderInfo か address）。最後の出来事を読んだ時刻に合わせて記録・時間軸にする（近似）。
+種類: `control`。ターゲットの RAM のトレースのバッファを吸い出して解読する（ポストモーテム・スナップショット。止めなくてよいが、止めた方が書きかけが無い。`snapshot_open` 中ならその RAM から）。format: systemview（RTT の "SysView" のリングを消費せずに）/ ctf（Zephyr の ram_tracing。address なら size も）/ tracex（ThreadX の _tx_trace_header_ptr か address。ts_hz = 時刻の速さ。切り替えの出来事が無いので実行中のスレッドの区間は出さず、各出来事の文脈を args.context に）/ eventrecorder（EventRecorderInfo か address）。最後の出来事を読んだ時刻に合わせて記録・時間軸にする（近似）。read = 吸い出しの情報（bytes = 読んだバイト数。ctf は size = 領域の大きさ・max_bytes = 読む上限・truncated = 上限で切ったか）。idle_tasks は `trace_stop` と同じ。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2569,14 +2758,17 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `size` | `number | null` |  |
 | `description` | `string | null` |  |
 | `metadata` | `string | null` |  |
-| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16"` |  |
+| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16" | null` |  |
 | `ts_hz` | `number | null` |  |
 | `timeline` | `boolean` |  |
 | `rtt_address` | `number | null` |  |
+| `max_bytes` | `number` |  |
+| `idle_tasks` | `Array<string> | null` |  |
+| `string_limit` | `number` |  |
 
 ## trace.import
 
-種類: `control`。トレースのファイル（SystemView の .SVDat・Zephyr の CTF のストリーム・Tracealyzer の PSF・TraceX のバッファのダンプ）を解読する（機器に触らない）。時刻はターゲットの時刻のまま（記録には書かない）。timeline なら時間軸の解析にも。ram_buffer は CTF の RAM の backend のダンプ（0 埋めで終わる）。
+種類: `control`。トレースのファイル（SystemView の .SVDat・Zephyr の CTF のストリーム・Tracealyzer の PSF・TraceX のバッファのダンプ）を解読する（機器に触らない）。時刻はターゲットの時刻のまま（記録には書かない）。timeline なら時間軸の解析にも。ram_buffer は CTF の RAM の backend のダンプ（0 埋めで終わる）。idle_tasks は `trace_stop` と同じ。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2584,10 +2776,11 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `path` | `string` | ○ |
 | `description` | `string | null` |  |
 | `metadata` | `string | null` |  |
-| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16"` |  |
+| `ctf_header` | `"ts32_id8" | "ts32_id16" | "ts64_id16" | "id16" | null` |  |
 | `ts_hz` | `number | null` |  |
 | `ram_buffer` | `boolean` |  |
 | `timeline` | `boolean` |  |
+| `idle_tasks` | `Array<string> | null` |  |
 
 ## trace.etm.start
 
@@ -2619,7 +2812,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## trace.etm.decode
 
-種類: `control`。命令トレースのバイト列を解読し、ELF（無ければ実機のメモリ。from_elf で選ぶ）と合わせて実行した命令の流れを再構成する。バイト列は data_hex・path（ファイル）・address + length（ターゲットのメモリのリング。oldest = 最も古いバイトの位置）のどれか 1 つ。formatted: TPIU のフォーマッタの枠付き（align = auto / fsync / start でフレームを揃え、trace_id の流れを取り出す。省略時は `trace_etm_start` の ID、無ければ最も多い ID）か、ETM のバイト列そのものか。結果は要約（命令の数・例外の数・解けなかったアトム・誤り・最初と最後の命令・次に実行する番地 next_address・ID ごとのバイト数）。続けて `trace_etm_history`（止まる直前の命令）/ `trace_etm_instructions` / `trace_etm_packets`。protocol は etmv4（ETMv3.5 は未対応）。
+種類: `control`。命令トレースのバイト列を解読し、ELF（無ければ実機のメモリ。from_elf で選ぶ）と合わせて実行した命令の流れを再構成する。バイト列は data_hex・path（ファイル）・address + length（ターゲットのメモリのリング。oldest = 最も古いバイトの位置）のどれか 1 つ。formatted: TPIU のフォーマッタの枠付き（align = auto / fsync / start でフレームを揃え、trace_id の流れを取り出す。省略時は `trace_etm_start` の ID、それも無ければ流れが 1 つだけならその ID。複数なら量の多さで選ばずに ID ごとのバイト数を添えて断る）か、ETM のバイト列そのものか。結果は要約（命令の数・例外の数・解けなかったアトム・誤り・最初と最後の命令・次に実行する番地 next_address・ID ごとのバイト数）。誤りは先頭 errors_limit 件（errors_total = 総数・errors_truncated = 切ったか・errors_limit = 使った値）。続けて `trace_etm_history`（止まる直前の命令）/ `trace_etm_instructions` / `trace_etm_packets`。protocol は etmv4（ETMv3.5 は未対応）。 etm_config = {commit_opt1, vmid_bytes, cid_bytes}: ETM の構成（TRCIDR0.COMMOPT・TRCIDR2 の VMID / Context ID の大きさ）。省略時は `trace_etm_start` で読んだ ID レジスタの値。どちらも無ければ断る（暗黙の値で解読しない）。使った値と出どころは結果の etm_config。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2633,6 +2826,8 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `trace_id` | `number | null` |  |
 | `protocol` | `"etmv4"` |  |
 | `from_elf` | `boolean | null` |  |
+| `errors_limit` | `number` |  |
+| `etm_config` | `Record<string, unknown> | null` |  |
 
 ## trace.etm.packets
 
@@ -2656,11 +2851,12 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## trace.etm.history
 
-種類: `read`。事後の命令履歴: 解読したトレースの最後（止まった所・故障の直前）の count 命令（古い順）と、その間の例外・途切れ、次に実行する番地 next_address。実行した命令は確実だが、M-profile の ETM にデータの値は無いので、レジスタ・メモリの過去の値は含まない（note）。
+種類: `read`。事後の命令履歴: 解読したトレースの最後（止まった所・故障の直前）の count 命令（古い順）と、その間の例外・途切れ、次に実行する番地 next_address。実行した命令は確実だが、M-profile の ETM にデータの値は無いので、レジスタ・メモリの過去の値は含まない（note）。解読の誤りは先頭 errors_limit 件（errors_total = 総数・errors_truncated = 切ったか・errors_limit = 使った値）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `count` | `number` |  |
+| `errors_limit` | `number` |  |
 
 ## scvd.load
 
@@ -2672,7 +2868,12 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## scvd.view
 
-種類: `control`。SCVD の objects（Component Viewer）を評価して、ターゲットのメモリから表示の木（property・value・children）を作る（RTOS のオブジェクト・ミドルウェアの状態等。止めずに読める。一貫させたいなら止めて）。読めない・式の誤りは notes。
+種類: `control`。SCVD の objects（Component Viewer）を評価して、ターゲットのメモリから表示の木（property・value・children）を作る（RTOS のオブジェクト・ミドルウェアの状態等。止めずに読める。一貫させたいなら止めて）。読めない・式の誤りは notes。readlist・list を回す数の上限 list_limit（結果にも使った値）に達して止めた・リストが輪になって止めたことも notes に事実として出す。%N・%t で番地から読む文字列が上限 string_limit バイト（結果にも使った値）の中で終わらなければ切って、値の中に「<上限 N バイトで切った>」の印・notes に番地と上限を出す。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `list_limit` | `number` |  |
+| `string_limit` | `number` |  |
 
 ## debug.elf.size
 
@@ -2692,7 +2893,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## debug.stack.static
 
-種類: `read`。静的な最大のスタック（Static Stack Analyzer）: 関数ごとの枠（frame。コンパイラの .su（-fstack-usage）があればそれ、無ければ逆アセンブルの SP の動き = frame_source）と、呼び先を含む最大（max）・最深の経路（path）・関数の番地（address）・直接の呼び先（calls。呼び出しの木）。再帰（cycles）・関数ポインタの呼び出し・可変長の確保（alloca）・ELF に無い呼び先は bounded=false と理由（reasons。max は分かる分の下限、unknown_from は上限不明の元の関数）。根（roots: reset / exception = ベクタ表の処理、total は例外の枠を足したもの / uncalled / address_taken = 関数ポインタの呼び先の候補 / user）と MSP の見積もり（msp: スレッド + 例外 1 段 = one_level、全部が入れ子 = all_nested）。su_paths を省くと ELF のディレクトリの下の .su。indirect = {関数: [呼び先の候補]} で関数ポインタを解決、assume_address_taken で番地を取られた関数のどれかとみなす。exception_frame を省くと FPU の命令があれば 108、無ければ 36 バイト。機器に触らない。
+種類: `read`。静的な最大のスタック（Static Stack Analyzer）: 関数ごとの枠（frame。コンパイラの .su（-fstack-usage）があればそれ、無ければ逆アセンブルの SP の動き = frame_source）と、呼び先を含む最大（max）・最深の経路（path）・関数の番地（address）・直接の呼び先（calls。呼び出しの木）。再帰（cycles）・関数ポインタの呼び出し・可変長の確保（alloca）・ELF に無い呼び先は bounded=false と理由（reasons。max は分かる分の下限、unknown_from は上限不明の元の関数）。根（roots: reset / exception = vector_table で渡したベクタ表の処理、total は例外の枠を足したもの / uncalled / address_taken = 関数ポインタの呼び先の候補 / user）と MSP の見積もり（msp: スレッド + 例外 1 段 = one_level、全部が入れ子 = all_nested）。su_paths を省くと ELF のディレクトリの下の .su。indirect = {関数: [呼び先の候補]} で関数ポインタを解決、assume_address_taken で番地を取られた関数のどれかとみなす。vector_table = ベクタ表の番地（使う側が渡す。fprobe は g_pfnVectors 等の名前でベクタ表を探さない。実機なら VTOR = 0xE000ED08 の値）、大きさは vector_table_size か ELF のその番地から始まる変数の大きさ。渡さなければ reset（entry で渡せる）・exception の根は無く、msp は null（結果の vector_table に使った表）。exception_frame を省くと FPU の命令があれば 108、無ければ 36 バイト。機器に触らない。 branch_tables = tbb / tbh の表の大きさ（無い表の分かれ先はたどらず、たどれない命令の SP を下げる量の和を unreached_frame として frame に足す）。解析を同じ所の訪ねなおしの上限で打ち切った関数は truncated（max は下限）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2704,10 +2905,13 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `exception_frame` | `number | null` |  |
 | `function` | `string | null` |  |
 | `top` | `number` |  |
+| `vector_table` | `number | null` |  |
+| `vector_table_size` | `number | null` |  |
+| `branch_tables` | `Array<Record<string, unknown>> | null` |  |
 
 ## target.stack.paint
 
-種類: `control`。ベアメタルの MSP のスタックを fill（既定 0xCD）で塗る（止めて。リセット直後が最適。走らせた後に `target_stack_usage`）。範囲は ELF のリンカのシンボル（_estack・_Min_Stack_Size・__StackLimit 等、無ければベクタ表の初期 SP と最後の RAM の区画の終わり）から。nominal=false なら名目の大きさでなく上端の下の RAM の空き全部。bottom・top で直接。いまの MSP − margin より上は塗らない。RTOS のタスクのスタックは `rtos_tasks`。
+種類: `control`。ベアメタルの MSP のスタックを fill（既定 0xCD）で塗る（止めて。リセット直後が最適。走らせた後に `target_stack_usage`）。範囲は bottom・top（番地）か、使う側が名前・番地を渡す ELF の情報（fprobe は _estack 等の名前の慣習でシンボルを選ばない）: 上端は top・top_symbol（リンカのシンボル名。例 _estack）・vector_table（ベクタ表の番地。最初の語 = 初期の MSP を ELF から読む）のどれか 1 つ、下端は bottom・limit_symbol（下端のシンボル名）・size_symbol（上端 − その値）のどれか、無ければ上端の下の最後の RAM の区画の終わり（空き全部）。結果の bounds に top_source・bottom_source。いまの MSP − margin より上は塗らない。RTOS のタスクのスタックは `rtos_tasks`。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2715,11 +2919,14 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `bottom` | `number | null` |  |
 | `top` | `number | null` |  |
 | `margin` | `number` |  |
-| `nominal` | `boolean` |  |
+| `top_symbol` | `string | null` |  |
+| `vector_table` | `number | null` |  |
+| `limit_symbol` | `string | null` |  |
+| `size_symbol` | `string | null` |  |
 
 ## target.stack.usage
 
-種類: `control`。MSP のスタックの使用量の実測（`target_stack_paint` の後）: 底から塗りが残るバイト数（untouched）から使った最大の深さ（used）・割合（fraction）、塗りが 1 バイトも残っていなければ reached_bottom、SP が下端より下なら overflow（事実だけ。warning は threshold を明示したときだけ）、止まっていれば いまの深さ（current = 上端 − MSP）。走行中でも読める（止めない）。範囲・塗りの値は塗ったときのもの（bottom・top・fill で上書き）。
+種類: `control`。MSP のスタックの使用量の実測（`target_stack_paint` の後）: 底から塗りが残るバイト数（untouched）から使った最大の深さ（used）・割合（fraction）、塗りが 1 バイトも残っていなければ reached_bottom、SP が下端より下なら overflow（事実だけ。warning は threshold を明示したときだけ）、止まっていれば いまの深さ（current = 上端 − MSP）。走行中でも読める（止めない）。範囲・塗りの値は塗ったときのもの（bottom・top・top_symbol・vector_table・limit_symbol・size_symbol・fill で上書き。範囲の引数は `target_stack_paint` と同じ）。`target_stack_paint` で塗った記録が無ければ fill（ファームが塗った値）が要る（慣習の値を仮定しない）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2727,10 +2934,14 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `fill` | `number | null` |  |
 | `bottom` | `number | null` |  |
 | `top` | `number | null` |  |
+| `top_symbol` | `string | null` |  |
+| `vector_table` | `number | null` |  |
+| `limit_symbol` | `string | null` |  |
+| `size_symbol` | `string | null` |  |
 
 ## profile.aggregate
 
-種類: `control`。プロファイル（取っている最中ならいままでの分）を時間の区間に限って集計する（IAR の Timeline で選んだ区間の Function Profiler）。t0_s / t1_s は最初のサンプルからの秒、方法 pcsr はタイムベース（記録の時間軸）の t0 / t1 も（itm はローカルのタイムスタンプが要る = profile_start の timestamps）。by: function / line / instruction / exception は `profile_result` と同じ表、file / directory / prefix（名前の型: HAL_GPIO_Init → HAL、ns::Cls::f → ns::Cls）/ groups はグループ（groups = {名前: [関数名の glob か "file:" + ファイルの glob]}、上から順に最初に合ったもの、残りは "(other)"）ごとのサンプル・割合（信頼区間）と多く使った関数。window に区間とサンプル数。
+種類: `control`。プロファイル（取っている最中ならいままでの分）を時間の区間に限って集計する（IAR の Timeline で選んだ区間の Function Profiler）。t0_s / t1_s は最初のサンプルからの秒、方法 pcsr はタイムベース（記録の時間軸）の t0 / t1 も（itm はローカルのタイムスタンプが要る = profile_start の timestamps）。by: function / line / instruction / exception は `profile_result` と同じ表、file / directory / prefix（関数名の、使う側が明示した区切り separator の最初の出現より前: separator "_" なら HAL_GPIO_Init → HAL、"::" なら ns::Cls::f → ns。区切りの無い名前はそのまま。by prefix には separator が要る）/ groups はグループ（groups = {名前: [関数名の glob か "file:" + ファイルの glob]}、上から順に最初に合ったもの、残りは "(other)"）ごとのサンプル・割合と多く使った関数（グループは top 個・関数は 5 個まで。切る前の数 groups_total・functions_total と使った top・members を返す）。window に区間とサンプル数。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2742,10 +2953,11 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `t1` | `number | null` |  |
 | `top` | `number` |  |
 | `function` | `string | null` |  |
+| `separator` | `string | null` |  |
 
 ## profile.timeline
 
-種類: `control`。CPU 使用率とグループの割合の推移（Core Benchmark）: bucket_s 秒ごとの load（眠り = WFI / WFE 以外の割合）・sleep と、全体で多い top 個のグループ（by・groups は `profile_aggregate` と同じ）の割合（残りは "(other)"）。t0_s / t1_s で範囲。サンプルの時刻が要る（pcsr、または itm の timestamps）。
+種類: `control`。CPU 使用率とグループの割合の推移（Core Benchmark）: bucket_s 秒ごとの load（眠り = WFI / WFE 以外の割合）・sleep と、全体で多い top 個のグループ（by・groups・separator は `profile_aggregate` と同じ）の割合（残りは "(other)"。グループの総数 groups_total と使った top を返す）。t0_s / t1_s で範囲。サンプルの時刻が要る（pcsr、または itm の timestamps）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2755,10 +2967,11 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `top` | `number` |  |
 | `t0_s` | `number | null` |  |
 | `t1_s` | `number | null` |  |
+| `separator` | `string | null` |  |
 
 ## profile.export
 
-種類: `control`。プロファイルをほかのツールの形式で書き出す（t0_s / t1_s・t0 / t1 で区間）。gmon = gprof の gmon.out（OpenOCD の profile と同じ番地の度数。low / high で範囲、率は時刻からの実測。16 ビットを超える数は全体を割って率も割る）/ callgrind = KCacheGrind（関数・行ごとの自分のサンプル。呼び出しの関係は PC サンプリングでは分からない）/ lcov = 近似のカバレッジの .info（SF は source_root を前に付ける。回数 0 の行が実行されなかったとは限らない）/ gcov = .gcov のテキスト（path はディレクトリ。source_root の下にソースがあれば行の中身も）/ dot = Graphviz（関数の割合。static_calls なら逆アセンブルの静的な呼び出しを破線で、min_fraction 未満は省く）。
+種類: `control`。プロファイルをほかのツールの形式で書き出す（t0_s / t1_s・t0 / t1 で区間）。gmon = gprof の gmon.out（OpenOCD の profile と同じ番地の度数。low / high で範囲、率は時刻からの実測。16 ビットを超える数は全体を割って率も割る）/ callgrind = KCacheGrind（関数・行ごとの自分のサンプル。呼び出しの関係は PC サンプリングでは分からない）/ lcov = 近似のカバレッジの .info（SF は source_root を前に付ける。回数 0 の行が実行されなかったとは限らない）/ gcov = .gcov のテキスト（path はディレクトリ。source_root の下にソースがあれば行の中身も）/ dot = Graphviz（関数の割合。static_calls なら逆アセンブルの静的な呼び出しを破線で、min_fraction 未満は省く）。lcov / gcov の関数の記録（FN）は DWARF の宣言の場所（DW_AT_decl_file・DW_AT_decl_line）に置く（行の多いファイルを所在とみなさない。宣言の場所の無い関数は FN を書かず、結果の undeclared_functions に）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2777,7 +2990,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 
 ## testpoint.aggregate
 
-種類: `control`。テストポイントの関数の時間を区間（最初の印からの t0_s〜t1_s 秒。`testpoint_calls` と同じ）に限って集計: inclusive_s（子を含む。区間で切る。再帰は外側だけ）・exclusive_s（自分だけ）・started（区間で始まった回数）・active（区間に掛かった回数）。by が function 以外なら file / directory / prefix / groups のグループごとの exclusive_s と started。持っている最近の呼び出し（65536 件）だけ（dropped・kept_from_s）。
+種類: `control`。テストポイントの関数の時間を区間（最初の印からの t0_s〜t1_s 秒。`testpoint_calls` と同じ）に限って集計: inclusive_s（子を含む。区間で切る。再帰は外側だけ）・exclusive_s（自分だけ）・started（区間で始まった回数）・active（区間に掛かった回数）。by が function 以外なら file / directory / prefix（separator は `profile_aggregate` と同じ）/ groups のグループごとの exclusive_s と started。持っている最近の呼び出し（65536 件）だけ（dropped・kept_from_s）。 rows は先頭 top 件（rows_total・rows_truncated・top）。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -2786,6 +2999,7 @@ annotation / sample（name = 記録の変数の名前）/ fpga（fields = 信号
 | `by` | `"function" | "file" | "directory" | "prefix" | "groups"` |  |
 | `groups` | `Record<string, unknown> | null` |  |
 | `top` | `number` |  |
+| `separator` | `string | null` |  |
 
 ## testpoint.export
 

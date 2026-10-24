@@ -1,5 +1,5 @@
 """ELF のメモリ使用量（Build Analyzer 相当、U26）: 区画・メモリ領域ごとの使用量と使用率・シンボルの大きさ、
-ベアメタルの MSP のスタックの範囲（リンカのシンボル・ベクタ表から）。
+ベアメタルの MSP のスタックの範囲（使う側が名前を渡すリンカのシンボル・番地を渡すベクタ表から）。
 
 ELF には領域（リンカスクリプトの MEMORY）が残らないので、領域は別に渡す: リンカスクリプト（parse_linker_regions）、
 GNU ld のマップファイル（parse_map_regions）、接続中のターゲットのメモリマップ、または直接。
@@ -7,7 +7,7 @@ GNU ld のマップファイル（parse_map_regions）、接続中のターゲ�
     layout = ElfLayout.from_elf("app.elf")
     regions = parse_linker_regions(Path("STM32F401RETX_FLASH.ld").read_text())
     size_report(layout, regions, top=20)          # 領域ごとの使用量・使用率、区画、大きいシンボル
-    stack_bounds(layout, regions)                 # MSP のスタックの上端・下端・名目の大きさ
+    stack_bounds(layout, regions, top_symbol="_estack", size_symbol="_Min_Stack_Size")   # MSP のスタックの範囲
 
 領域の使用量: 読み込む区画（SHF_ALLOC）は実行時の番地（VMA）の領域を使い、中身のある区画で読み込み番地（LMA）が
 違うもの（.data の初期値）は LMA の領域も使う（Flash の .data の写し）。
@@ -27,15 +27,6 @@ from .symbols import is_network_path
 __all__ = ["ElfLayout", "ElfSection", "ElfSymbol", "MemoryRegion", "StackBounds", "parse_linker_regions",
            "parse_map_regions", "size_report", "stack_bounds"]
 
-# スタックの上端・下端・大きさのリンカのシンボル（CMSIS・STM32CubeIDE・MCUXpresso・nRF・Zephyr 以外のよくある名前）
-TOP_SYMBOLS = ("_estack", "__StackTop", "__stack_top", "__stack", "_stack_top", "__initial_sp", "_vStackTop",
-               "__stack_end__", "_stack_end", "__stack_end")
-LIMIT_SYMBOLS = ("__StackLimit", "__stack_limit", "_sstack", "__stack_start__", "_stack_start", "_vStackBase",
-                 "__StackBottom")
-SIZE_SYMBOLS = ("_Min_Stack_Size", "__stack_size__", "__STACK_SIZE", "_StackSize", "_stack_size", "__stack_size",
-                "STACK_SIZE")
-VECTOR_SYMBOLS = ("g_pfnVectors", "__isr_vector", "__Vectors", "__vectors", "_vectors", "vectors", "vector_table",
-                  "__vector_table", "isr_vector", "_vector_table")
 STACK_ALIGN = 8
 
 
@@ -90,8 +81,6 @@ class ElfLayout:
     symbols: list[ElfSymbol]
     values: dict[str, int]           # 名前のあるシンボル（ラベル・リンカの定義を含む）→ 値（最初のもの）
     absolute: dict[str, int]         # そのうち絶対（SHN_ABS）のもの
-    vector_words: tuple[int, ...] = ()   # ベクタ表の先頭の語（初期の MSP, リセット, ...）。分かるとき
-    vector_address: int | None = None
 
     @classmethod
     def from_elf(cls, path: str | Path) -> "ElfLayout":
@@ -100,7 +89,7 @@ class ElfLayout:
         with open(path, "rb") as f:
             elf = ELFFile(f)
             segments = [s for s in elf.iter_segments() if s["p_type"] == "PT_LOAD"]
-            sections, names, data = [], {}, {}
+            sections, names = [], {}
             for index, s in enumerate(elf.iter_sections()):
                 names[index] = s.name
                 if not s["sh_flags"] & SH_FLAGS.SHF_ALLOC or s["sh_size"] == 0:
@@ -112,10 +101,7 @@ class ElfLayout:
                 sections.append(ElfSection(s.name, address, _load_address(segments, address) if content else address,
                                            s["sh_size"], content, bool(s["sh_flags"] & SH_FLAGS.SHF_WRITE),
                                            bool(s["sh_flags"] & SH_FLAGS.SHF_EXECINSTR)))
-                if content:
-                    data[s.name] = (address, s)
             symbols, values, absolute = [], {}, {}
-            vector_at = None
             for section in elf.iter_sections():
                 if not isinstance(section, SymbolTableSection):
                     continue
@@ -128,16 +114,13 @@ class ElfLayout:
                     values.setdefault(s.name, value)
                     if shndx == "SHN_ABS":
                         absolute.setdefault(s.name, value)
-                    if s.name in VECTOR_SYMBOLS and vector_at is None and isinstance(shndx, int):
-                        vector_at = value
                     if kind is not None and s["st_size"] > 0:
                         where = shndx if isinstance(shndx, str) else names.get(shndx, "?")
                         symbols.append(ElfSymbol(s.name, value, s["st_size"], kind,
                                                  {"SHN_ABS": "ABS", "SHN_COMMON": "COMMON"}.get(where, where),
                                                  s["st_info"]["bind"] == "STB_LOCAL"))
-            words, vector_at = _vector_words(data, vector_at)
             return cls(Path(path), elf["e_entry"] & ~1, sorted(sections, key=lambda s: s.address), symbols, values,
-                       absolute, words, vector_at)
+                       absolute)
 
     def symbol(self, name: str) -> ElfSymbol:
         for s in self.symbols:
@@ -153,16 +136,16 @@ def _load_address(segments, address: int) -> int:
     return address
 
 
-def _vector_words(data: dict, vector_at: int | None) -> tuple[tuple[int, ...], int | None]:
-    """ベクタ表の先頭 2 語（初期の SP・リセット）。表の名前のシンボルが無ければ、番地の最も低い中身のある区画の先頭。"""
-    candidates = sorted(data.values(), key=lambda item: item[0])
-    if vector_at is None and candidates:
-        vector_at = candidates[0][0]
-    for address, section in candidates:
-        if address <= vector_at and vector_at + 8 <= address + section["sh_size"]:
-            raw = section.data()[vector_at - address:vector_at - address + 8]
-            return (int.from_bytes(raw[:4], "little"), int.from_bytes(raw[4:], "little")), vector_at
-    return (), None
+def _read_word(path: Path, address: int) -> int | None:
+    """ELF の中身のある区画（SHF_ALLOC）の address の 32 ビットの語（リトルエンディアン）。無ければ None。"""
+    with open(path, "rb") as f:
+        for s in ELFFile(f).iter_sections():
+            if not s["sh_flags"] & SH_FLAGS.SHF_ALLOC or s["sh_type"] == "SHT_NOBITS":
+                continue
+            if s["sh_addr"] <= address and address + 4 <= s["sh_addr"] + s["sh_size"]:
+                offset = address - s["sh_addr"]
+                return int.from_bytes(s.data()[offset:offset + 4], "little")
+    return None
 
 
 # --- 領域 ---------------------------------------------------------------------------------------
@@ -311,46 +294,60 @@ class StackBounds:
                 "top_source": self.top_source, "bottom_source": self.bottom_source, "notes": list(self.notes)}
 
 
-def _first(values: dict[str, int], names: tuple[str, ...]) -> tuple[str, int] | None:
-    for n in names:
-        if n in values:
-            return n, values[n]
-    return None
+def _symbol_value(layout: ElfLayout, name: str) -> int:
+    try:
+        return layout.values[name]
+    except KeyError:
+        raise ValueError(f"シンボル {name!r} が ELF に無い") from None
 
 
-def stack_bounds(layout: ElfLayout, regions: list[MemoryRegion], *, nominal: bool = True) -> StackBounds:
-    """MSP のスタックの範囲。上端: リンカのシンボル（_estack 等）か、ベクタ表の最初の語。下端: nominal なら
-    リンカの下端のシンボル（__StackLimit 等）か「上端 − 名目の大きさ（_Min_Stack_Size 等）」、無ければ（または
-    nominal=False なら）上端の下にある最後の RAM の区画の終わり（ヒープが伸びてくる所も含む。使い得る全部）。"""
+def stack_bounds(layout: ElfLayout, regions: list[MemoryRegion], *, top: int | None = None,
+                 top_symbol: str | None = None, vector_table: int | None = None, limit_symbol: str | None = None,
+                 size_symbol: str | None = None) -> StackBounds:
+    """MSP のスタックの範囲。シンボルの名前・ベクタ表の番地は使う側が渡す（名前の慣習の表で選ばない）。
+    上端: top（番地）・top_symbol（リンカのシンボルの値）・vector_table（ベクタ表の番地。その最初の語 = 初期の MSP を
+    ELF から読む）のどれか 1 つ。下端: limit_symbol（下端のシンボルの値）か「上端 − size_symbol の値」のどちらか、どちらも
+    無ければ上端の下にある最後の RAM の区画の終わり（ヒープが伸びてくる所も含む。使い得る全部）。"""
+    if sum(x is not None for x in (top, top_symbol, vector_table)) != 1:
+        raise ValueError("スタックの上端は top（番地）・top_symbol（リンカのシンボル名）・vector_table（ベクタ表の"
+                         "番地）のどれか 1 つを渡す")
+    if limit_symbol is not None and size_symbol is not None:
+        raise ValueError("下端は limit_symbol か size_symbol のどちらか 1 つ")
     notes = []
-    found = _first(layout.values, TOP_SYMBOLS)
-    if found is not None:
-        top_source, top = found
-    elif layout.vector_words and layout.vector_words[0] and layout.vector_words[0] % 4 == 0:
-        top_source, top = "vector_table", layout.vector_words[0]
+    if top is not None:
+        top_source = "argument"
+    elif top_symbol is not None:
+        top_source, top = top_symbol, _symbol_value(layout, top_symbol)
     else:
-        raise ValueError("スタックの上端が分からない（_estack 等のシンボルもベクタ表も無い）: top を指定する")
-    size_sym = _first(layout.values, SIZE_SYMBOLS)
-    limit_sym = _first(layout.values, LIMIT_SYMBOLS)
+        top = _read_word(layout.path, vector_table)
+        if top is None:
+            raise ValueError(f"ベクタ表の番地 0x{vector_table:08X} が ELF の中身のある区画に無い")
+        top_source = f"vector_table 0x{vector_table:08X}"
     nominal_size = None
-    if limit_sym is not None and limit_sym[1] < top:
-        nominal_size = top - limit_sym[1]
-    elif size_sym is not None and 0 < size_sym[1] < top:
-        nominal_size = size_sym[1]
+    if limit_symbol is not None:
+        limit = _symbol_value(layout, limit_symbol)
+        if limit >= top:
+            raise ValueError(f"{limit_symbol}（0x{limit:08X}）が上端（0x{top:08X}）より下でない")
+        nominal_size = top - limit
+    elif size_symbol is not None:
+        size = _symbol_value(layout, size_symbol)
+        if not 0 < size <= top:
+            raise ValueError(f"{size_symbol}（0x{size:X}）がスタックの大きさにならない（上端 0x{top:08X}）")
+        nominal_size = size
     region = next((r for r in regions if r.contains(top - 1)), None)
     below = [s.end for s in layout.sections
              if s.end <= top and (region.contains(s.address) if region is not None else s.writable)]
     free_bottom = -(-max(below) // STACK_ALIGN) * STACK_ALIGN if below else (region.origin if region else None)
-    if nominal and nominal_size is not None:
+    if nominal_size is not None:
         bottom = top - nominal_size
-        source = limit_sym[0] if limit_sym is not None and limit_sym[1] == bottom else f"{top_source} - {size_sym[0]}"
+        source = limit_symbol if limit_symbol is not None else f"{top_source} - {size_symbol}"
         if free_bottom is not None and bottom < free_bottom:
             notes.append(f"名目のスタック（0x{bottom:08X}〜）が RAM の区画（〜0x{free_bottom:08X}）に重なる")
     elif free_bottom is not None:
         bottom, source = free_bottom, "end_of_ram_sections"
         notes.append("下端は上端の下の最後の区画の終わり（ヒープが伸びてくると、その分も使用量に数える）")
     else:
-        raise ValueError("スタックの下端が分からない: bottom を指定する")
+        raise ValueError("スタックの下端が分からない: bottom・limit_symbol・size_symbol のどれかを渡す")
     if region is None and regions:
         notes.append(f"上端 0x{top:08X} がどの領域にも入らない")
     return StackBounds(top, bottom, nominal_size, top_source, source, notes)

@@ -4,6 +4,7 @@ import struct
 from pathlib import Path
 
 import pytest
+from value_kinds import vfloat, vint, vstruct
 
 from cpu_fake import DEMCR, VC_HARDERR, VTOR, FakeCpu
 from fprobe.calling import CallError, allocate, hard_float, read_return_value, signature_of
@@ -91,15 +92,15 @@ def test_the_demo_elf_is_hard_float(info):
 def test_return_values_are_read_from_the_aapcs_places(info):
     cpu = FakeCpu({}, 0)
     cpu.regs.update(r0=0xFFFFFFFB, r1=0, s0=f32(2.5))
-    assert read_return_value(cpu, info, INT, True) == {"type": "int", "value": -5, "raw": 0xFFFFFFFB}
-    assert read_return_value(cpu, info, FLOAT, True)["value"] == 2.5     # ハード浮動小数: s0
-    assert read_return_value(cpu, info, FLOAT, False)["value"] != 2.5    # ソフト: r0
+    assert read_return_value(cpu, info, INT, True) == {"type": "int", "value": vint(-5), "raw": 0xFFFFFFFB}
+    assert read_return_value(cpu, info, FLOAT, True)["value"] == vfloat(2.5)     # ハード浮動小数: s0
+    assert read_return_value(cpu, info, FLOAT, False)["value"] != vfloat(2.5)    # ソフト: r0
     cpu.regs.update(r0=0xFFEC000A)
     point = read_return_value(cpu, info, info.type_named("struct Point"), True)["value"]
-    assert point == {"x": 10, "y": -20}
+    assert point == vstruct(x=vint(10), y=vint(-20))
     assert read_return_value(cpu, info, VoidType(), True) == {"type": "void", "value": None}
     sensor = info.type_named("Sensor")
-    assert "unavailable" in read_return_value(cpu, info, sensor, True)["value"]   # メモリで返る: 番地が要る
+    assert read_return_value(cpu, info, sensor, True)["value"]["kind"] == "unavailable"   # メモリで返る: 番地が要る
 
 
 def test_signatures_come_from_dwarf(info, syms):
@@ -138,7 +139,7 @@ def test_call_square_returns_its_value_and_restores_everything(syms):
     before, memory = dict(cpu.regs), dict(cpu.memory)
     out = Debugger(cpu, syms).call("square", [7])
     assert out["returned"] and out["reason"] == "returned"
-    assert out["return"] == {"type": "int", "value": 49, "raw": 49}
+    assert out["return"] == {"type": "int", "value": vint(49), "raw": 49}
     assert out["arguments"] == [{"name": "v", "type": "int", "value": 7}]
     assert out["restored"] and cpu.regs == before and cpu.memory == memory and not cpu.breakpoints
     assert cpu.state.name == "HALTED"
@@ -155,7 +156,7 @@ def test_call_arguments_can_be_expressions_and_strings(syms):
     cpu = demo_cpu(syms, program_at(leaf, ("do", body), ("ret",)))
     out = Debugger(cpu, syms).call("leaf_sum", ["&sensors[1]", "MODE_RUN + 1"])
     assert seen["r0"] == syms.variable("sensors").address + 80 and seen["r1"] == 2
-    assert out["return"]["value"] == 3
+    assert out["return"]["value"] == vint(3)
     cpu = demo_cpu(syms, program_at(leaf, ("do", body), ("ret",)))
     out = Debugger(cpu, syms).call("leaf_sum", [{"string": "hello"}, 0])
     assert seen["text"] == b"hello\0" and seen["r0"] < 0x2000_7F00 and seen["r0"] % 8 == 0
@@ -181,13 +182,21 @@ def test_a_fault_in_the_called_function_is_reported(syms):
     assert not out["restored"] and "target_reset" in out["note"]
 
 
+def test_a_timeout_inside_a_fault_handler_stays_a_timeout_with_the_exception_number(syms):
+    # 時間切れのとき IPSR が故障の番号だった事実をそのまま返す（理由を fault に書き換えない。?9）
+    square = syms.resolve("square")
+    cpu = demo_cpu(syms, program_at(square, ("fault",)))
+    out = Debugger(cpu, syms).call("square", [3], timeout_s=0.05)
+    assert out["reason"] == "timeout" and out["ipsr"] == 3 and out["fault"]["exception"]["name"] == "HardFault"
+
+
 def test_breakpoints_inside_the_called_function_do_not_stop_it(syms):
     square = syms.resolve("square")
     cpu = demo_cpu(syms, program_at(square, ("op",), ("do", lambda c: c.regs.update(r0=11)), ("ret",)))
     dbg = Debugger(cpu, syms)
     dbg.breakpoint(square + 2)
     out = dbg.call("square", [1])
-    assert out["return"]["value"] == 11 and cpu.breakpoints == {square + 2}
+    assert out["return"]["value"] == vint(11) and cpu.breakpoints == {square + 2}
 
 
 def test_calls_check_their_arguments(syms):
@@ -209,7 +218,7 @@ def test_calls_by_address_without_dwarf_pass_integers(syms):
     cpu = demo_cpu(syms, program_at(square, ("do", lambda c: c.regs.update(r0=c.regs["r0"] + c.regs["r1"])),
                                     ("ret",)))
     out = Debugger(cpu).call(square, [2, 40])
-    assert out["return"] == {"type": None, "value": 42, "r1": 40}
+    assert out["return"] == {"type": None, "r0": 42, "r1": 40}                # 型が分からない: 値にしない
     with pytest.raises(CallError):
         Debugger(cpu).call(square, [1.5])
 

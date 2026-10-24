@@ -78,7 +78,7 @@ class SnapshotTarget:
 
     def get_halt_reason(self):
         name = (self.snapshot.info.get("halt") or {}).get("reason")
-        return {v: k for k, v in _REASONS.items()}.get(name, Target.HaltReason.USER)
+        return {v: k for k, v in _REASONS.items()}.get(name)      # 保存した理由が "unknown" 等なら None
 
     # メモリ（読めない番地は pyOCD と同じくバスエラー）
     def read_memory_block8(self, address, length):
@@ -154,10 +154,13 @@ class SnapshotTools:
 
     def snapshot_save(self, name: str = "", path: str | None = None, halt: bool = False,
                       ranges: list[list[int]] | None = None, flash: bool = False,
-                      peripherals: list[str] | None = None, embed_elf: bool = True, note: str = "") -> dict:
+                      peripherals: list[str] | None = None, embed_elf: bool = True, note: str = "",
+                      skip_registers: list[str] | None = None) -> dict:
         """止まったターゲットの状態を 1 つのファイル（.fsnap）に保存する。halt なら動いていても止めてから。
         ranges（[[番地, 長さ], …]）を省くとメモリマップの RAM すべて。flash で Flash も。peripherals は SVD の
-        周辺の名前（省略で SVD が分かればすべて、[] で読まない）。読むと状態が変わる周辺レジスタは読まない。"""
+        周辺の名前（省略で SVD が分かればすべて、[] で読まない）。読むと状態が変わる周辺レジスタ（SVD の
+        readAction）は読まない。readAction の無いレジスタは名前から推さずに読む: ほかに読まないものは skip_registers
+        （"周辺.レジスタ" の glob。target_peripheral_read の skip と同じ）で渡す。"""
         with self._lock:
             target = self._live()
             if target.get_state() != Target.State.HALTED:
@@ -170,7 +173,7 @@ class SnapshotTools:
             skipped: list[dict] = []
             regions = self._capture_memory(target, ranges, flash, skipped)
             regions += self._capture_system(target, "fpscr" in registers, regions, skipped)
-            regions += self._capture_peripherals(target, peripherals, regions, skipped)
+            regions += self._capture_peripherals(target, peripherals, regions, skipped, tuple(skip_registers or ()))
             info = {"target": self._target_type, "halt": self._halt_info(target, registers["pc"]),
                     "elf_path": str(self._symbols.path) if self._symbols else None,
                     "svd": self._svd_info, "rtos": self._capture_rtos(), "fault": self._capture_fault(),
@@ -268,7 +271,7 @@ class SnapshotTools:
         return regions
 
     def _capture_peripherals(self, target, names: list[str] | None, taken: list[Region],
-                             skipped: list) -> list[Region]:
+                             skipped: list, skip: tuple[str, ...] = ()) -> list[Region]:
         if names is not None and not names:
             return []
         try:
@@ -281,7 +284,7 @@ class SnapshotTools:
         regions: list[Region] = []
         for p in peripherals:
             for r in p.registers:
-                reason = self._bulk_skip_reason(r, False)
+                reason = self._bulk_skip_reason(r, False, skip)
                 size = max(1, r.size // 8)
                 if reason is None and _overlaps(r.address, size, taken + regions):
                     continue                                      # SVD の SCB・NVIC 等（システムとして取った）

@@ -19,7 +19,10 @@ describe("format", () => {
     expect(outcome({ error: "broken" } as any)).toBe("Error: broken");          // 既定は英語の表
     expect(outcome({ result: { state: "HALTED" } } as any)).toBe('{"state":"HALTED"}');
     expect(outcome({ result: null } as any)).toBe("Done");
-    expect(outcome({ result: "x".repeat(200) } as any).length).toBe(80);
+    const long = outcome({ result: "x".repeat(200) } as any);            // 切ったら印（…）を付ける（黙って切らない）
+    expect(long.length).toBe(81);
+    expect(long.endsWith("…")).toBe(true);
+    expect(outcome({ result: "x".repeat(10) } as any)).toBe(`"${"x".repeat(10)}"`);
   });
 
   it("周波数は有効数字 6 桁まで（浮動小数の誤差の桁を出さない）", () => {

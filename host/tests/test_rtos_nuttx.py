@@ -109,17 +109,25 @@ def test_stacks(image):
     assert (s.base, s.end, s.size, s.pointer) == (base, base + STACK, STACK, base + STACK - CONTEXT)
     assert s.fill == "intact" and s.untouched == STACK - 256 and s.peak_used == 256 and not s.overflow
     stopped = tasks["stopped"]
-    assert not stopped.stack.overflow and stopped.stack.fill == "none" and stopped.stack.fill_above and stopped.notes
+    assert not stopped.stack.overflow and stopped.stack.fill == "none" and stopped.stack.fill_run_above is not None \
+        and stopped.notes
     assert tasks["main"].stack.pointer is None                # 実行中: レジスタが読めない
 
 
 def test_running_task_stack_pointer(image):
-    """実行中のタスクの SP: psp がスタックの中ならそれ（割り込みのスタックを使う設定）、無ければ sp（MSP で動く設定）。"""
+    """実行中のタスクの SP は値の見た目（スタックの範囲に入るか）でなく、コアの状態で選ぶ: スレッドモード（IPSR = 0）
+    なら CONTROL.SPSEL の示す方（1 = psp、0 = msp）。ハンドラモードでは中断されたスレッドの SP は分からない。"""
     top = address(image, "main_stack") + STACK - 40
-    rtos, _ = nx(image, {"psp": 0x2000_7F00, "sp": top})
+    rtos, _ = nx(image, {"psp": top, "msp": top - 8, "sp": top, "xpsr": 0x0100_0000, "control": 0b10})
     assert by_name(rtos.tasks())["main"].stack.used == 40
-    rtos, _ = nx(image, {"psp": top - 8, "sp": 0x2000_7F00})
+    rtos, _ = nx(image, {"psp": top, "msp": top - 8, "sp": top - 8, "xpsr": 0x0100_0000, "control": 0})
     assert by_name(rtos.tasks())["main"].stack.used == 48
+    # どちらもスタックの中: 範囲に入るかでは選べない。ハンドラモードなら分からないと返す
+    rtos, _ = nx(image, {"psp": top, "msp": top - 8, "sp": top - 8, "xpsr": 0x0100_000F, "control": 0})
+    main = by_name(rtos.tasks())["main"]
+    assert main.stack.pointer is None and any("ハンドラモード" in n for n in main.notes)
+    rtos, _ = nx(image, {"psp": top, "sp": top})                            # CONTROL・xPSR が読めない
+    assert by_name(rtos.tasks())["main"].stack.pointer is None
 
 
 def test_initial_context(image):
@@ -146,6 +154,17 @@ def test_context_without_fpu_slots(image):
     ctx = rtos.saved_context("consumer")
     assert not ctx.fp and ctx.registers["r11"] == 0x407 and ctx.registers["pc"] == 0x0800_0200
     assert ctx.sp == regs + 80
+
+
+def test_context_whose_size_does_not_match_is_not_read_by_the_elf_guess(image):
+    """REG_R13 − regs が文脈の大きさ（80 / 144）のどれとも合わなければ、ELF の FP の属性で枠を決めて読まない（誤り）。"""
+    rtos, access = nx(image)
+    regs = address(image, "consumer_stack") + 64
+    access.write_u32(regs + 4 * REG_R13, regs + 100)
+    access.write_u32(regs + 4 * REG_EXC_RETURN, 0xFFFF_FFF9)
+    access.write_u32(address(image, "th_consumer") + rtos.tcb.offset("xcp.regs"), regs)
+    with pytest.raises(ValueError, match="REG_R13"):
+        rtos.saved_context("consumer")
 
 
 def test_backtrace_of_waiting_task(image):
@@ -176,7 +195,7 @@ def test_backtrace_of_waiting_task(image):
     assert ctx.registers["pc"] == pc and ctx.sp == b.regs["sp"] and not ctx.fp
     frames = rtos.backtrace("sensor", variables=True)
     assert [f["function"] for f in frames] == ["nxsem_wait", "sensor_main", "nxtask_start"]
-    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["sem"]["pointer"] == sem
+    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["sem"]["address"] == sem
 
 
 def test_snapshot_and_sampler_words(image):
@@ -206,7 +225,8 @@ def test_objects(image):
         "sem_data": "semaphore", "bus_lock": "mutex", "idle_lock": "mutex", "cmd_mq": "message_queue",
         "full_mq": "message_queue"}
     assert all(o.source == "variable" for o in objects.values())
-    assert objects["sem_data"].fields == {"count": 0}
+    # semcount は負なら待ち手の数（-1 = 1 個が待つ）。0 にまとめず、そのまま semcount に残す（count は取れる数）
+    assert objects["sem_data"].fields == {"count": 0, "semcount": -1}
     assert [(w.task, w.reason, w.priority) for w in objects["sem_data"].waiters] == [("sensor", "receive", 150)]
     assert objects["idle_lock"].fields == {"available": True, "holder": None, "priority_inherit": True}
     assert objects["cmd_mq"].fields == {"count": 0, "max_msgs": 8, "msg_size": 16}

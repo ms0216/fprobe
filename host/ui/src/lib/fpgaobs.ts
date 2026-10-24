@@ -1,10 +1,9 @@
 // FPGA 観測（パネル FpgaObsPanel）の計算。Svelte に依らない。
-// 信号の定義はデーモンの fprobe.fpga_signals と同じ形・同じ規則（保存の前に画面で知らせる。最後はデーモンが確かめる）。
+// 信号の定義はデーモンの fprobe.fpga_signals と同じ形。規則（検査）はデーモンだけが持つ（fpga_obs.signals_set が断る）。
 // 仕様: docs/superpowers/specs/2026-10-20-fpga-observation-ui-design.md §4
 import type { Key } from "./i18n";
+import { parseInteger, type Built } from "./valuewrite";
 
-export const NAME_MAX = 64;                       // 信号の名前の長さの上限（fpga_signals.py の NAME_MAX と同じ）
-export const WIDTH = 16;                          // 観測の回路の組の幅
 export const HALF_MIN = 2, HALF_MAX = 65535;      // TCK の半周期（sys の周期数）
 export const FORMATS = ["hex", "dec", "bin", "enum"] as const;
 
@@ -17,11 +16,6 @@ export interface SignalDef {
 }
 
 export type Groups = Record<string, SignalDef[]>;
-
-export interface SignalError {
-  key: Key;
-  params: Record<string, string>;
-}
 
 /** 「0=IDLE, 1=RUN, 0x5=ERR」→ {"0": "IDLE", "1": "RUN", "5": "ERR"}。形が崩れていれば null */
 export function parseEnum(text: string): Record<string, string> | null {
@@ -50,42 +44,6 @@ export function formatBits(lsb: number, width: number): string {
   return width === 1 ? String(lsb) : `${lsb + width - 1}:${lsb}`;
 }
 
-/** 定義の誤り（重なり・16 ビットの外・名前の重複・空の名前・列挙の値が幅の外） */
-export function validateSignals(groups: Groups): SignalError[] {
-  const errors: SignalError[] = [];
-  for (const [group, signals] of Object.entries(groups)) {
-    let used = 0;
-    const names = new Set<string>();
-    for (const s of signals) {
-      const name = s.name.trim();
-      if (!name) {
-        errors.push({ key: "fpgaObs.err.emptyName", params: { group } });
-        continue;
-      }
-      if (name.length > NAME_MAX) errors.push({ key: "fpgaObs.err.longName", params: { group, name: name.slice(0, 16) } });
-      if (names.has(name)) errors.push({ key: "fpgaObs.err.duplicate", params: { group, name } });
-      names.add(name);
-      if (s.lsb < 0 || s.width < 1 || s.lsb + s.width > WIDTH) {
-        errors.push({ key: "fpgaObs.err.range", params: { group, name } });
-        continue;
-      }
-      const bits = ((1 << s.width) - 1) << s.lsb;
-      if (used & bits) errors.push({ key: "fpgaObs.err.overlap", params: { group, name } });
-      used |= bits;
-      if (s.format === "enum") {
-        const keys = Object.keys(s.enum);
-        for (const k of keys) {                     // デーモン（fpga_signals.py）と同じ: 0 以上の整数・名前は空でない
-          if (!/^\d+$/.test(k.trim())) errors.push({ key: "fpgaObs.err.enumValue", params: { group, name } });
-          else if (!s.enum[k].trim()) errors.push({ key: "fpgaObs.err.enumName", params: { group, name } });
-        }
-        if (keys.some(k => Number(k) >= 1 << s.width))
-          errors.push({ key: "fpgaObs.err.enumRange", params: { group, name } });
-      }
-    }
-  }
-  return errors;
-}
-
 /** 求めた TCK（MHz）を超えない最も速い半周期と、その実際の速さ（TCK = sys / (2 × 半周期)） */
 export function tckToHalfPeriod(mhz: number, sysHz: number): { half: number; mhz: number } | null {
   if (!(Number(mhz) > 0)) return null;                                   // 欄が空・0 以下: 決まらない
@@ -100,14 +58,51 @@ export interface OpenConfig {
   half_period: number;
   words: number;
   sync_period: number;
+  id_scans?: number;                 // ID の応答を待つスキャンの上限（0 = 上限なし）
 }
 
-/** 開いた設定を接続の欄の値に（別の窓・開き直した画面が、いま動いている設定を見せる） */
-export function configToFields(c: OpenConfig, sysHz: number) {
+/** 接続の欄の値。チェーンの欄の null = 入れていない（送らない）。tckMhz はプローブがシステムのクロックを申告したときの
+ *  欄、halfPeriod は申告が無いときの欄（半周期を sys の周期数で直接） */
+export interface ConnectionFields {
+  irLen: number | null;
+  irBefore: number | null;
+  irAfter: number | null;
+  drBefore: number | null;
+  drAfter: number | null;
+  userIr: string;
+  tckMhz: number | null;
+  halfPeriod: number | null;
+  words: number | null;              // null = 入れていない（開かない。画面の既定を持たない）
+  syncPeriod: number | null;
+  idScans: number | null;            // null = 入れていない（送らない = 上限なし）
+}
+
+const given = (v: number | null | undefined): number | null => (v === null || v === undefined || Number.isNaN(v) ? null : v);
+
+/** 開いた設定を接続の欄の値に（別の窓・開き直した画面が、いま動いている設定を見せる）。開いた設定に無い欄は空
+ *  （値を仮定して見せない）。sysHz が分からなければ TCK も分からない（null） */
+export function configToFields(c: OpenConfig, sysHz: number | null): ConnectionFields {
   const chain = c.chain ?? {};
-  return { irLen: chain.ir_len ?? 4, irBefore: chain.ir_before ?? 0, irAfter: chain.ir_after ?? 0,
-           drBefore: chain.dr_before ?? 0, drAfter: chain.dr_after ?? 0, userIr: `0x${c.user_ir.toString(16).toUpperCase()}`,
-           tckMhz: sysHz / (2 * c.half_period) / 1e6, words: c.words, syncPeriod: c.sync_period };
+  return { irLen: given(chain.ir_len), irBefore: given(chain.ir_before), irAfter: given(chain.ir_after),
+           drBefore: given(chain.dr_before), drAfter: given(chain.dr_after),
+           userIr: `0x${c.user_ir.toString(16).toUpperCase()}`,
+           tckMhz: sysHz ? sysHz / (2 * c.half_period) / 1e6 : null, halfPeriod: c.half_period,
+           words: c.words, syncPeriod: c.sync_period, idScans: given(c.id_scans) };
+}
+
+/** 欄 → fpga_obs.open の引数。半周期は、プローブがシステムのクロック（sysHz）を申告していれば TCK（MHz）から、無ければ
+ *  半周期の欄から（クロックを仮定しない）。決まらない・読めない欄があれば null。チェーンは入れた欄だけ（全部空なら null） */
+export function openParams(f: ConnectionFields & { autoReopen: boolean }, sysHz: number | null) {
+  const half = sysHz ? tckToHalfPeriod(f.tckMhz ?? NaN, sysHz)?.half ?? null
+    : Number.isInteger(f.halfPeriod) && f.halfPeriod! >= HALF_MIN && f.halfPeriod! <= HALF_MAX ? f.halfPeriod : null;
+  const ir = Number(f.userIr);
+  if (half === null || !f.userIr.trim() || !Number.isInteger(ir) || ir < 0) return null;
+  const words = given(f.words), syncPeriod = given(f.syncPeriod);
+  if (words === null || syncPeriod === null) return null;
+  const entries = ([["ir_len", f.irLen], ["ir_before", f.irBefore], ["ir_after", f.irAfter], ["dr_before", f.drBefore],
+                    ["dr_after", f.drAfter]] as const).filter(([, v]) => given(v) !== null);
+  return { chain: entries.length ? Object.fromEntries(entries) : null, user_ir: ir, half_period: half, words,
+           sync_period: syncPeriod, ...(given(f.idScans) !== null ? { id_scans: f.idScans! } : {}), auto_reopen: f.autoReopen };
 }
 
 export interface ObsStatus {
@@ -116,15 +111,19 @@ export interface ObsStatus {
   id_ok: boolean;
   overflow_seen: boolean;
   driving: boolean;
+  id_timeout?: boolean;              // stuck の理由: id_scans スキャン待って ID の応答が来なかった
 }
 
-/** 状態の文言のキー（答えない → 溢れ → 動いている → 止まっている） */
-export function statusKey(s: ObsStatus): Key {
-  if (s.stuck) return "fpgaObs.state.stuck";
-  if (s.running && s.overflow_seen) return "fpgaObs.state.overflow";
-  if (s.running) return "fpgaObs.state.running";
-  if (s.driving) return "fpgaObs.state.starting";
-  return "fpgaObs.state.off";
+/** 状態の文言のキー: 立っている事実を決まった並び（答えない・溢れ・動いている / 始めている / 止まっている）で全部。
+ *  優先順で 1 つに畳まない（答えなくなっても、それまでの溢れを落とさない） */
+export function statusKeys(s: ObsStatus): Key[] {
+  const out: Key[] = [];
+  if (s.stuck) out.push("fpgaObs.state.stuck");
+  if (s.overflow_seen) out.push("fpgaObs.state.overflow");
+  if (s.running) out.push("fpgaObs.state.running");
+  else if (s.driving) out.push("fpgaObs.state.starting");
+  else if (!s.stuck) out.push("fpgaObs.state.off");
+  return out;
 }
 
 /** 信号の表で編集できる組: 定義のある組・観測の回路の申告の組の数（つないでいれば）・いま選んでいる組の和
@@ -148,3 +147,15 @@ export const PRESETS = {
   snapshot: { tckMhz: 2.5, words: 1, syncPeriod: 0 },
 } as const;
 export type PresetName = keyof typeof PRESETS;
+
+/** 観測の回路（記録型）のレジスタのうち、窓から書くもの（番地は fpga_obs.register_read / register_write の説明: 14 CONTROL の
+ *  bit0 = 記録する、15 SELECT = 観測する組）。標本型にはレジスタが無い */
+export const OBS_REGISTERS = [{ name: "CONTROL", addr: 14 }, { name: "SELECT", addr: 15 }] as const;
+
+/** レジスタ（16 ビット）に書く fpga_obs.register_write */
+export function registerWriteCall(addr: number, text: string): Built {
+  const v = parseInteger(text);
+  if (v === null) return { error: "value" };
+  if (v < 0n || v > 0xFFFFn) return { error: "range" };
+  return { method: "fpga_obs.register_write", params: { addr, value: Number(v) } };
+}

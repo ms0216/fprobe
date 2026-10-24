@@ -136,6 +136,21 @@ def test_scan_reports_usage_and_changes(setup):
     heap_4(k, [(64, True), (96, True), (128, True)])
     again = p.heap_scan(compare=True)["heaps"][0]["changes"]
     assert again["new_count"] == 1 and again["new"][0]["pointer"] == pointers[0] + 64 and again["gone_count"] == 0
+    assert again["limit"] == 50 and again["new_truncated"] is False and again["gone_truncated"] is False
+
+
+def test_scan_changes_say_when_the_lists_are_cut(setup):
+    # 黙って切らない（総点検）: new・gone を上限 changes_limit で切ったこと・使った上限を返す（上限は引数で渡せる）
+    p, k, _, connect = setup
+    heap_4(k, [(64, False), (96, False), (128, False)])
+    connect()
+    p.heap_scan(compare=True)
+    heap_4(k, [(64, True), (96, True), (128, True)])
+    cut = p.heap_scan(compare=True, changes_limit=2)["heaps"][0]["changes"]
+    assert cut["new_count"] == 3 and len(cut["new"]) == 2 and cut["new_truncated"] is True and cut["limit"] == 2
+    heap_4(k, [(64, False), (96, False), (128, False)])
+    gone = p.heap_scan(compare=True, changes_limit=2)["heaps"][0]["changes"]
+    assert gone["gone_count"] == 3 and len(gone["gone"]) == 2 and gone["gone_truncated"] is True
 
 
 def test_scan_needs_a_halted_target_unless_live(setup):
@@ -179,6 +194,72 @@ def test_trace_records_allocations_returns_and_frees_and_finds_leaks(setup):
     assert stopped["live"]["count"] == 6 and cpu.breakpoints == set()
 
 
+def test_the_caller_is_the_return_address_unless_the_user_names_functions_to_skip(setup, monkeypatch):
+    # 名前の表（標準の確保関数の名前）で黙って呼び出し元を飛ばさない（総点検 Q3 の WRAPPERS）: 既定は戻り先の関数。
+    # 飛ばす関数は使う側が skip_functions で明示し、飛ばしたフレームを出来事に出す
+    from fprobe.debug import Debugger
+    p, k, symbols, connect = setup
+    malloc = symbols.symbol("pvPortMalloc").address
+    wrapper, outer = call_site(symbols, "worker_task"), call_site(symbols, "sensor_task")
+    frames = [SimpleNamespace(pc=malloc), SimpleNamespace(pc=wrapper), SimpleNamespace(pc=outer)]
+    monkeypatch.setattr(Debugger, "backtrace", lambda self, max_frames=64, inspector=None: frames[:max_frames])
+    script = [{"pc": malloc, "r0": 16, "lr": wrapper | 1}, {"pc": wrapper, "r0": 0x2000_1000}]
+    connect(list(script))
+    started = p.heap_trace_start()
+    assert started["skip_functions"] == []
+    p.run_until_halt(timeout_s=0.3)
+    event = p.heap_trace_events()["events"][0]
+    assert event["caller"].startswith("worker_task") and event["skipped"] == []
+    p.heap_trace_stop()
+    connect(list(script))
+    started = p.heap_trace_start(skip_functions=["worker_task"])
+    assert started["skip_functions"] == ["worker_task"]
+    p.run_until_halt(timeout_s=0.3)
+    event = p.heap_trace_events()["events"][0]
+    assert event["caller"].startswith("sensor_task") and event["skipped"] == ["worker_task"]
+    assert p.heap_trace_report()["skip_functions"] == ["worker_task"]
+
+
+def test_the_report_tells_how_many_callers_there_were_when_cut_to_top(setup):
+    # 黙って切らない（総点検 Q3）: live_by_caller を top 個に切ったら、呼び出し元の総数・切った印・使った top を返す
+    p, k, symbols, connect = setup
+    malloc = symbols.symbol("pvPortMalloc").address
+    sites = [call_site(symbols, f) for f in ("sensor_task", "worker_task", "ctrl_task")]
+    stops = []
+    for i, site in enumerate(sites):
+        stops += [{"pc": malloc, "r0": 16, "lr": site | 1}, {"pc": site, "r0": 0x2000_1000 + 0x40 * i}]
+    connect(stops)
+    p.heap_trace_start()
+    p.run_until_halt(timeout_s=0.3)
+    full = p.heap_trace_report()
+    assert full["callers_total"] == 3 and full["truncated"] is False and full["top"] == 20
+    cut = p.heap_trace_report(top=1)
+    assert len(cut["live_by_caller"]) == 1 and cut["callers_total"] == 3 and cut["truncated"] is True
+    assert cut["top"] == 1
+    # 誤りと推移も切ったことを黙らない（点検 2 回目）: 上限は引数で渡せる
+    assert full["issues_limit"] == 200 and full["issues_total"] == 0 and full["series_points"] == 512
+    thin = p.heap_trace_report(series_points=2)
+    assert len(thin["series"]) == 2 and thin["series_total"] == 3 and thin["series_downsampled"] is True
+
+
+def test_scan_passes_the_names_the_user_gave_for_the_regions_and_the_break(setup, monkeypatch):
+    # heap_5 の領域の表・newlib-nano の break の変数の名前は慣習で探さない（点検 2 回目 H4・H5）: 使う側が渡す
+    import fprobe.probe_heap as probe_heap
+    p, k, symbols, connect = setup
+    heap_4(k, [(64, True)])
+    connect()
+    seen = []
+    real = probe_heap.scan
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(probe_heap, "scan", spy)
+    p.heap_scan(regions_symbol="appRegions", break_symbol="my_break")
+    assert seen[-1]["regions_symbol"] == "appRegions" and seen[-1]["break_symbol"] == "my_break"
+
+
 def test_scan_attributes_blocks_to_callers_while_tracing(setup):
     p, k, symbols, connect = setup
     pointers = heap_4(k, [(24, True), (24, True)])
@@ -188,7 +269,7 @@ def test_scan_attributes_blocks_to_callers_while_tracing(setup):
     p.heap_trace_start(allocators=["freertos"])
     p.run_until_halt(timeout_s=0.3)
     callers = p.heap_scan()["heaps"][0]["callers"]
-    assert {c["caller"].split("+")[0] for c in callers} == {"ctrl_task", "(記録の前の確保)"}
+    assert {c["caller"].split("+")[0] for c in callers} == {"ctrl_task", "(記録に無い確保)"}
 
 
 def test_trace_refuses_a_users_breakpoint_on_the_allocator_and_clear_detaches(setup):

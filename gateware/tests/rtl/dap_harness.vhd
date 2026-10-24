@@ -80,6 +80,7 @@ end entity;
 
 architecture rtl of dap_harness is
   signal enable, data_phase, cmd_valid, cmd_ready, rsp_valid, rsp_parity, busy : std_logic;
+  signal wait_retry : unsigned(15 downto 0);
   signal p_valid, p_ready, d_rsp_valid : std_logic;
   signal i_valid, i_ready, i_rsp_valid, inj_busy_i, up_busy : std_logic;
   signal i_op : std_logic_vector(1 downto 0);
@@ -122,6 +123,7 @@ begin
               swd_cmd_count => cmd_count, swd_cmd_request => cmd_request, swd_cmd_data => cmd_data,
               swd_rsp_valid => d_rsp_valid, swd_rsp_ack => rsp_ack, swd_rsp_data => rsp_data,
               swd_rsp_parity => rsp_parity, nreset_low => nreset_low, nreset_in => rst_in,
+              wait_retry_out => wait_retry,
               jtag => jtag, jtag_dr_before => dr_before, jtag_dr_after => dr_after,
               jtag_ir_before => ir_before, jtag_ir_after => ir_after, jtag_ir_len => ir_len,
               swo_run => swo_run, swo_divisor => swo_divisor, swo_manchester => swo_manchester,
@@ -134,7 +136,7 @@ begin
               error => swo_error, overrun => swo_overrun);
 
   inj_i : entity work.swd_injector
-    port map (clk => clk, rst => rst, request => inj_request, enable => enable, dap_busy => busy,
+    port map (clk => clk, rst => rst, wait_retry => wait_retry, request => inj_request, enable => enable, dap_busy => busy,
               select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
               shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy_i, written => inj_written, result => inj_result, last_ack => open,
@@ -150,7 +152,7 @@ begin
 
   up_busy <= busy or inj_busy_i;
   smp_i : entity work.dap_sampler
-    port map (clk => clk, rst => rst, run => smp_run, period => smp_period, jitter => smp_jitter, ap => smp_ap,
+    port map (clk => clk, rst => rst, wait_retry => wait_retry, run => smp_run, period => smp_period, jitter => smp_jitter, ap => smp_ap,
               tbl_write => smp_write, tbl_index => smp_index, tbl_addr => smp_addr, tbl_enable => smp_enable,
               tbl_words => smp_words,
               enable => enable, up_busy => up_busy,

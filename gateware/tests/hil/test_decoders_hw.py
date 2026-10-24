@@ -23,7 +23,9 @@ pytestmark = pytest.mark.hil
 RCC_AHB1ENR, RCC_APB2ENR = 0x40023830, 0x40023844
 GPIOA_MODER, GPIOA_AFRH = 0x40020000, 0x40020024
 USART1_SR, USART1_DR, USART1_BRR, USART1_CR1 = 0x40011000, 0x40011004, 0x40011008, 0x4001100C
-JTAG = {"tck": 0, "tms": 3, "tdi": 1, "tdo": 6}
+JTAG = {"tck": 0, "tms": 3, "tdi": 1, "tdo": 6, "trst": None}
+UART_8E1 = {"channel": 5, "baud": 19_200, "data_bits": 8, "parity": "even", "stop_bits": 1, "invert": False,
+            "lsb_first": True}                                   # USART1 の設定（9 ビット = 8 + 偶数パリティ）
 STM32_CHAIN = [4, 5]
 
 
@@ -44,7 +46,8 @@ def test_jtag_scans_and_arm_dp_accesses_are_decoded(probe):
     probe.la_collect(timeout_s=3)
     jtag = probe.la_decode("jtag", {**JTAG, "initial_state": "run_test_idle"}, limit=1000)
     assert jtag["counts"].get("dr", 0) >= 4 and jtag["errors"] == 0, jtag["counts"]
-    arm = probe.la_decode("jtag_arm", {"jtag": {**JTAG, "initial_state": "run_test_idle"}}, limit=1000)
+    arm = probe.la_decode("jtag_arm", {"jtag": {**JTAG, "initial_state": "run_test_idle"},
+                                         "ir_offset": 0, "dr_offset": 0}, limit=1000)
     texts = [a["text"] for a in arm["annotations"] if a["error"] is None]
     assert any(t.startswith("AP W 0x4 = 0x20000000") for t in texts), texts     # TAR
     assert sum("AP R 0xC" in t for t in texts) >= 4, texts                        # DRW を 4 回
@@ -73,17 +76,17 @@ def test_modbus_request_over_usart1_is_decoded(probe):
         t.write32(USART1_DR, b)
     t.flush()
     probe.la_collect(timeout_s=3)
-    out = probe.la_decode("modbus", {"uart": {"channel": 5, "baud": 19_200, "parity": "even"}, "gap_chars": 60})
+    out = probe.la_decode("modbus", {"uart": UART_8E1, "gap_chars": 60})
     (req,) = out["annotations"]
     assert req["kind"] == "request" and req["fields"]["crc_ok"], req
     assert (req["fields"]["slave"], req["fields"]["start"], req["fields"]["count"]) == (0x11, 0x6B, 3)
 
 
 def test_real_capture_round_trips_through_sigrok(probe, tmp_path):
-    first = probe.la_decode("uart", {"channel": 5, "baud": 19_200, "parity": "even"})
+    first = probe.la_decode("uart", UART_8E1)
     info = probe.la_export(str(tmp_path / "modbus.sr"), names={"5": "usart1_tx"})
     assert info["samples"] == first["capture"]["length"]
     loaded = probe.la_load(str(tmp_path / "modbus.sr"))
     assert loaded["names"]["5"] == "usart1_tx"
-    again = probe.la_decode("uart", {"channel": 5, "baud": 19_200, "parity": "even"})
+    again = probe.la_decode("uart", UART_8E1)
     assert [a["value"] for a in again["annotations"]] == [a["value"] for a in first["annotations"]]

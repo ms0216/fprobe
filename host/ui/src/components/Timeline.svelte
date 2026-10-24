@@ -12,6 +12,7 @@
   import { announceOpen } from "../lib/timeline/events";
   import { colorsOf, cssHeight, layoutOf, rowAtY, type Colors } from "../lib/timeline/layout";
   import { drawOverlay } from "../lib/timeline/overlay";
+  import { unknownAt, type UnknownSpan } from "../lib/timeline/compose";
   import type { PickedItem } from "../lib/timeline/query";
   import { createRenderer, type TimelineRenderer } from "../lib/timeline/renderer";
   import { originOf, type TimelineSnapshot, type TimelineState } from "../lib/timeline/state";
@@ -30,6 +31,8 @@
   let drag: { x: number; moved: number } | null = null;
   let queued = 0;
   let hover = $state<{ x: number; y: number; item: PickedItem; row: string } | null>(null);
+  // 始めの値を探していない所（frame.unknown）の上のホバー
+  let unknownHover = $state<{ x: number; y: number; span: UnknownSpan; row: string } | null>(null);
   let asking = false;
   let pending: { x: number; y: number } | null = null;
 
@@ -94,6 +97,7 @@
     draw.draw(t.frame, layout, colors);
     drawOverlay(overlay, layout, colors, {
       view: t.view, tickS: t.tickS, origin, resolution, frame: t.frame, units, marks, pointers,
+      unknownLabel: $i18n("timeline.unknown"),
       cursors: { selection: t.selection, mouse: cursor, reference: t.reference },
       selected: t.selected ? { row: t.selected.row, t: t.selected.t, tEnd: t.selected.tEnd } : null,
       trigger: t.source === "capture" ? (t.capture?.trigger_index ?? null) : null,
@@ -135,9 +139,20 @@
       tl.panBy((drag.x - e.clientX) / cssWidth);
       drag.x = e.clientX;
       hover = null;
+      unknownHover = null;
       return;
     }
+    unknownHover = unknownUnder(e.offsetX, e.offsetY);
     ask(e.offsetX, e.offsetY);
+  }
+
+  /** (x, y) が段の始めの値を探していない所（フレームの unknown）なら、その区間 */
+  function unknownUnder(x: number, y: number): { x: number; y: number; span: UnknownSpan; row: string } | null {
+    const r = rowAtY(t.rows, y), f = t.frame;
+    if (r < 0 || !f || !cssWidth) return null;
+    const row = t.rows[r].def.id;
+    const span = unknownAt(f, row, (x / cssWidth) * f.width);
+    return span ? { x, y, span, row } : null;
   }
 
   /** ホバーの説明: 問い合わせは同時に 1 つ（動き続けても最後の位置で） */
@@ -204,6 +219,7 @@
   }
 
   const hoverRow = $derived(hover ? t.rows.find((r) => r.def.id === hover!.row)?.def : undefined);
+  const unknownRow = $derived(unknownHover ? t.rows.find((r) => r.def.id === unknownHover!.row)?.def : undefined);
   const value = (item: PickedItem) =>
     item.value === null ? "" : `${plainNumber(item.value)}${item.unit ? ` ${item.unit}` : ""}`;
   const { app } = shared();
@@ -215,7 +231,7 @@
      aria-valuemin={t.extent?.[0] ?? 0} aria-valuemax={t.extent?.[1] ?? 0}
      aria-valuetext="{t.view.start}〜{t.view.end}"
      onwheel={onWheel} onpointerdown={onDown} onpointermove={onMove} onpointerup={onUp}
-     onpointerleave={() => { cursor = null; drag = null; hover = null; }}
+     onpointerleave={() => { cursor = null; drag = null; hover = null; unknownHover = null; }}
      ondblclick={onDouble} onkeydown={onKey}>
   <canvas class="plot" bind:this={plot} style:height="{height}px"></canvas>
   <canvas class="overlay" bind:this={overlay} style:height="{height}px"></canvas>
@@ -233,6 +249,15 @@
       {#if item.jump && item.address !== null}
         <div class="hint">{$i18n("timeline.openHint", { where: item.jump === "source" ? $i18n("timeline.goToSource") : $i18n("timeline.showMemory") })}
           <span class="mono">0x{item.address.toString(16).toUpperCase().padStart(8, "0")}</span></div>
+      {/if}
+    </div>
+  {:else if unknownHover && unknownRow}
+    {@const u = unknownHover}
+    <div class="tip" style:left="{Math.min(u.x + 14, cssWidth - 260)}px" style:top="{u.y + 16}px">
+      <div class="title">{rowTitle(unknownRow, $i18n, laLayout)} · {$i18n("timeline.unknown")}</div>
+      <div>{$i18n("timeline.unknownTip")}</div>
+      {#if u.span.carryFrom !== null}
+        <div class="grid"><span>{$i18n("timeline.searchedFrom")}</span><span>{formatSeconds(seconds(u.span.carryFrom), resolution)}</span></div>
       {/if}
     </div>
   {/if}

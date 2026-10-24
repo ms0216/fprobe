@@ -12,6 +12,7 @@
     extentOf, nearestIndex, nearestPoint, niceDomain, niceTicks, seriesColor, shortNumber, stackTops, type Bar,
     type ChartType, type Series,
   } from "../../lib/chart";
+  import { i18n } from "../../lib/i18n";
 
   let {
     type = "line", series = [], bars = [], xDomain, yDomain, includeZero = false, height = 160, cursor = null,
@@ -39,6 +40,8 @@
     ? series.map((s) => (s.x.length > maxPoints ? { ...s, x: Array.from(s.x).slice(-maxPoints),
                                                      y: Array.from(s.y).slice(-maxPoints) } : s))
     : series);
+  // 散布図で捨てた点（黙って捨てない: 描いた数・全部の数・上限を出す）
+  const scatterTotal = $derived(type === "scatter" ? Math.max(0, ...series.map((s) => s.x.length)) : 0);
   const tops = $derived(type === "stacked" ? stackTops(shown) : null);
   const left = $derived(shown.some((s) => s.axis !== "right") || bars.length ? 52 : 8);
   const right = $derived(shown.some((s) => s.axis === "right") ? 52 : 10);
@@ -204,7 +207,6 @@
         pen = true;
         lastY = py;
       }
-      if (pen && s.step) g.lineTo(left + plotW(), lastY);
       g.stroke();
     });
     g.globalAlpha = 1;
@@ -277,8 +279,8 @@
     g.globalAlpha = 1;
   }
 
-  /** ホバーの位置の値: 線・積み上げは各系列（階段は直前の点、線はいちばん近い点。積み上げは上から）、棒はその棒、
-   *  散布図はいちばん近い点 */
+  /** ホバーの位置の値: 線・積み上げは各系列（階段は直前の点、線はいちばん近い点。積み上げは上から。値は使った点の
+   *  時刻とともに出す = ホバーの時刻に測った値ではない）、棒はその棒、散布図はいちばん近い点 */
   const readout = $derived.by(() => {
     if (!hover) return null;
     const x = hover.x;
@@ -300,7 +302,8 @@
       let k = nearestIndex(s.x, x);
       if (s.step) while (k > 0 && s.x[k] > x) k--;
       const v = k >= 0 ? s.y[k] : NaN;
-      return { name: s.name, value: Number.isFinite(v) ? `${yFormat(v)}${s.unit ? ` ${s.unit}` : ""}` : "—", color: seriesColor(s, i) };
+      return { name: s.name, value: Number.isFinite(v) ? `${yFormat(v)}${s.unit ? ` ${s.unit}` : ""} @ ${xFormat(s.x[k], pixel)}` : "—",
+               color: seriesColor(s, i) };
     });
     return { head: xFormat(x, pixel), rows: type === "stacked" ? rows.reverse() : rows };
   });
@@ -333,6 +336,9 @@
       {#each legendItems as { s, i } (s.name)}<span class:dim={s.dim}><i style:background={seriesColor(s, i)}></i>{s.name}</span>{/each}
     </div>
   {/if}
+  {#if scatterTotal > maxPoints}
+    <div class="cut">{$i18n("chart.scatterTruncated", { shown: maxPoints, total: scatterTotal, limit: maxPoints })}</div>
+  {/if}
   {#if hover && readout}
     <div class="tip mono" style:left="{Math.min(hover.px + 12, width - 180)}px">
       <div class="head">{readout.head}</div>
@@ -355,4 +361,5 @@
          border-radius: 4px; padding: 4px 6px; font-size: 11.5px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); z-index: 2;
          max-width: 220px; }
   .head { color: var(--muted); margin-bottom: 2px; }
+  .cut { font-size: 11px; color: var(--muted); padding: 2px 4px; }
 </style>

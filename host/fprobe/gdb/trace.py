@@ -117,15 +117,19 @@ def _hex_end(text: str, start: int) -> int:
 
 
 def _signed_hex(text: str) -> int:
-    """GDB の 16 進（"-1"、64 / 32 ビットの 2 の補数の負も）→ 符号付き。"""
+    """GDB の 16 進（"-1"、64 ビットの 2 の補数の負も。phex_nz の書き方）→ 符号付き。"""
     if text.startswith("-"):
         return -int(text[1:], 16)
     value = int(text, 16)
     if len(text) > 8 and value >> 63:
         return value - (1 << 64)
-    if value == 0xFFFF_FFFF and len(text) == 8:
-        return -1
     return value
+
+
+def _base_register(text: str) -> int:
+    """M の基のレジスタ。GDB は int の %X で書く（-1 = 基なし・番地そのもの → "FFFFFFFF"。remote.c の encode_actions）。"""
+    value = _signed_hex(text)
+    return value - (1 << 32) if len(text) == 8 and value >> 31 else value
 
 
 def parse_actions(text: str) -> list[tuple[bool, Action]]:
@@ -149,7 +153,7 @@ def parse_actions(text: str) -> list[tuple[bool, Action]]:
             j = _hex_end(rest, 0)
             length = int(rest[:j], 16)
             raw = f"M{base},{offset},{rest[:j]}"
-            register = _signed_hex(base)
+            register = _base_register(base)
             out.append((stepping, Action("M", raw, register=-1 if register < 0 else register,
                                          offset=_signed_hex(offset), length=length)))
             i += len(raw)

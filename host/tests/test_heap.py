@@ -66,6 +66,20 @@ def test_heap_4_free_list_loop_is_stopped():
     assert {"free_list_unsorted"} <= set(kinds(r)) or {"free_list_loop"} <= set(kinds(r))
 
 
+def test_reaching_the_free_list_limit_is_not_reported_as_corruption(monkeypatch):
+    # 辿る数の上限に着いたのを「輪」「外を指す」（壊れ）と言わない（点検 2 回目）: complete = false と上限の事実
+    import fprobe.heap as heap
+    monkeypatch.setattr(heap, "MAX_FREE_BLOCKS", 1)
+    h = FreeRTOSHeap([(64, False), (64, True), (64, False), (64, True)])
+    r = scan(h.mem.read, h.syms, "freertos")
+    assert not {"free_list_loop", "free_list_outside"} & set(kinds(r)) and not r.complete
+    assert any("1 個" in n for n in r.notes)
+    n = NanoHeap([(24, True, 4), (40, False, 0), (16, True, 4), (64, False, 0)])
+    rn = scan(n.mem.read, n.syms, "newlib_nano", end=n.top)
+    assert not {"free_list_loop", "free_list_outside"} & set(kinds(rn)) and not rn.complete
+    assert any("1 個" in note for note in rn.notes)
+
+
 def test_heap_4_before_the_first_allocation():
     h = FreeRTOSHeap([])
     h.mem.u32(h.end_var, 0)
@@ -103,9 +117,14 @@ def test_heap_5_regions_are_walked_from_the_application_table():
     mem.u32(h.free_var, free)
     mem.u32(h.allocs_var, 2)
     mem.u32(h.frees_var, 0)
-    r = scan(mem.read, s, "freertos")
+    # アプリの表の変数の名前（xHeapRegions 等）は慣習なので探さない（点検 2 回目 H5）: 使う側が regions_symbol で渡す
+    unnamed = scan(mem.read, s, "freertos")
+    assert unnamed.regions == [] and not unnamed.complete and any("regions_symbol" in n for n in unnamed.notes)
+    r = scan(mem.read, s, "freertos", regions_symbol="xHeapRegions")
     assert r.scheme == "heap_5" and r.regions == [(starts[0], ends[0]), (starts[1], ends[1])]
     assert not r.issues and r.to_dict()["used_blocks"] == 2 and r.to_dict()["free"] == free
+    with pytest.raises(ValueError, match="xHeapRegion"):
+        scan(mem.read, s, "freertos", regions_symbol="xHeapRegion")
 
 
 def test_heap_5_without_a_region_table_reads_only_the_free_list():
@@ -136,12 +155,19 @@ def test_nano_unmerged_neighbours_and_bad_padding():
     assert {"unmerged_free", "bad_padding"} <= set(kinds(r))
 
 
-def test_nano_without_the_break_symbol_stops_at_the_last_plausible_chunk():
-    h = NanoHeap([(24, True, 4), (40, False, 0)], end_symbol=None)
+def test_nano_without_the_end_walks_until_the_shape_breaks_and_says_it_is_incomplete():
+    # sbrk の実装の変数の名前（__sbrk_heap_end・heap_end）は慣習なので探さない（点検 2 回目 H4）。終わりを渡されなければ
+    # 形が崩れた所で止まり、そこが終わりか壊れかは決めない: complete = false と止まった所の事実
+    h = NanoHeap([(24, True, 4), (40, False, 0)])
     r = scan(h.mem.read, h.syms, "newlib_nano")
-    assert len(r.blocks) == 2 and any("終わり" in n for n in r.notes)
+    assert len(r.blocks) == 2 and not r.complete and "break" not in r.counters
+    assert any("break_symbol" in n and f"0x{h.top:08X}" in n for n in r.notes)
+    named = scan(h.mem.read, h.syms, "newlib_nano", break_symbol="__sbrk_heap_end")
+    assert named.complete and named.counters["break"] == h.top and len(named.blocks) == 2
     r2 = scan(h.mem.read, h.syms, "newlib_nano", end=h.top)
-    assert not r2.notes or not any("終わり" in n for n in r2.notes)
+    assert r2.complete and not any("break_symbol" in n for n in r2.notes)
+    with pytest.raises(ValueError, match="heap_end"):
+        scan(h.mem.read, h.syms, "newlib_nano", break_symbol="heap_end")
 
 
 # --- newlib dlmalloc ----------------------------------------------------------------------------
@@ -214,6 +240,24 @@ def test_tracker_live_by_caller_is_facts_without_a_growing_verdict():
     assert all(c["caller"] != "steady" for c in leaks)
     assert all(c["caller"] != "once" for c in leaks)
     assert r["series"][-1][1] == r["live"]["bytes"]
+    assert r["live_points"] == 5                                            # 点の数を結果に出す（?24）
+    finer = t.report(now=now + 1, min_age_s=5, live_points=9)["live_by_caller"][0]["live_counts"]
+    assert len(finer) == 9
+
+
+def test_tracker_says_when_it_cut_the_issues_and_the_series():
+    # 黙って切らない（点検 2 回目）: 誤りは issues_limit 件まで持ち、総数・切ったか・上限を返す。推移は series_points
+    # 点まで間引き、元の点の数・間引いたか・使った点の数を返す
+    t = AllocationTracker(issues_limit=3)
+    for i in range(5):
+        t.alloc(float(i), 0, 16, caller="c")                    # 失敗 5 回
+    for i in range(10):
+        t.alloc(10.0 + i, 0x100 + 16 * i, 16, caller="c")
+    r = t.report(now=30.0, series_points=4)
+    assert len(r["issues"]) == 3 and r["issues_total"] == 5 and r["issues_truncated"] and r["issues_limit"] == 3
+    assert len(r["series"]) == 4 and r["series_total"] == 10 and r["series_downsampled"] and r["series_points"] == 4
+    full = t.report(now=30.0, series_points=100)
+    assert len(full["series"]) == 10 and not full["series_downsampled"]
 
 
 # --- 実際の ELF（freertos_demo、heap_4）: static の変数を ELF のシンボルで引き、U08 の要約と一致する ----------------

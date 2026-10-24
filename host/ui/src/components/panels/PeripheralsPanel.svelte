@@ -114,7 +114,9 @@
     if (!editingReg) return;
     const { path, text } = editingReg;
     editingReg = null;
-    const size = defs[path]?.size ?? 32;
+    // 大きさは読んだ値に API が添えた SVD の大きさ（無ければ書かない。32 ビットとみなさない）
+    const size = sizeOf(path);
+    if (size === null) return;
     const v = parseRegister(text, size);
     if (v === null) {
       error = $i18n("peripherals.badRegister", { path, bits: size });
@@ -140,6 +142,13 @@
     });
   };
   const hex = (n: number, digits = 8) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(digits, "0")}`;
+  /** レジスタの大きさ（ビット）: 読んだ値に API が添えたもの（target.peripheral.read の size）。無ければ null */
+  function sizeOf(path: string): number | null {
+    const r = (regs?.registers ?? []).find((x: any) => x.path === path);
+    return typeof r?.size === "number" && r.size > 0 ? r.size : null;
+  }
+  /** 値の 16 進（大きさが分かれば桁をそろえる。分からなければ桁を足さない） */
+  const regHex = (value: number, size: number | null) => (size === null ? hex(value, 1) : hex(value, Math.ceil(size / 4)));
 </script>
 
 <div class="pane">
@@ -166,10 +175,12 @@
                     <input class="mono regedit" aria-label={$i18n("peripherals.editRegister")} bind:value={editingReg.text}
                            use:focus onkeydown={onRegKey} onblur={() => (editingReg = null)} />
                   {:else}
+                    {@const size = sizeOf(r.path)}
+                    {@const editable = connected && def?.access !== "read-only" && size !== null}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <span class="v" class:can-edit={connected && def?.access !== "read-only"} title={$i18n("peripherals.editRegisterTip")}
-                          ondblclick={() => connected && def?.access !== "read-only" && (editingReg = { path: r.path, text: hex(r.value, (def?.size ?? 32) / 4) })}>
-                      {hex(r.value, (def?.size ?? 32) / 4)}</span>
+                    <span class="v" class:can-edit={editable} title={$i18n("peripherals.editRegisterTip")}
+                          ondblclick={() => editable && (editingReg = { path: r.path, text: regHex(r.value, size) })}>
+                      {regHex(r.value, size)}</span>
                   {/if}
                   <span class="muted">{hex(r.address)}</span>
                   <ul class="fields">

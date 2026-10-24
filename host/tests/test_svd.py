@@ -17,7 +17,7 @@ def mini():
 
 @pytest.fixture(scope="module")
 def f401():
-    return load_device("STM32F401RETx")
+    return load_device("STM32F401")
 
 
 # --- 読み込み（手書きの SVD） ---------------------------------------------------------------
@@ -130,6 +130,8 @@ def test_read_and_write_through_register_access(mini):
         mini.read_register(bus, "UART.DR")                                       # フィールドの readAction
     assert mini.read_register(bus, "UART.DR", allow_side_effects=True).value == 0x41
     assert bus.log[-1] == ("read", 0x40003000, 16)                               # レジスタの幅で読む
+    # 読んだ値は SVD のレジスタの大きさ（ビット）を添えて返す（画面が 32 ビットとみなさない）
+    assert mini.read_register(bus, "UART.DR", allow_side_effects=True).as_dict()["size"] == 16
     assert mini.register("TIMER0.DATA").has_read_side_effects
 
 
@@ -165,18 +167,22 @@ def test_stm32f401_known_registers(f401):
 
 # --- SVD を探す ---------------------------------------------------------------------------
 
-def test_find_svd_prefers_the_longest_match(tmp_path, monkeypatch):
+def test_find_svd_takes_the_file_of_the_given_name(tmp_path, monkeypatch):
+    # ファイル名の前方一致の長さ・"x" を任意の 1 文字とみなす慣習で選ばない。名前（拡張子を除く）が渡した名前と
+    # 同じファイルだけ（大文字小文字は区別しない）
     monkeypatch.delenv("FPROBE_SVD_PATH", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
-    found = find_svd("STM32F401RETx")
+    monkeypatch.setattr("fprobe.svd._pyocd_zip", lambda: None)
+    found = find_svd("STM32F401")
     assert found.name == "STM32F401" and found.origin == "bundled" and found.path == BUNDLED_DIR / "STM32F401.svd"
+    assert find_svd("STM32F401RETx") is None                                    # 部品名の先頭に合うだけでは選ばない
     user = tmp_path / "svd"
     user.mkdir()
     (user / "STM32F40x.svd").write_text(MINI.read_text(encoding="utf-8"), encoding="utf-8")
-    (user / "STM32F401RE.svd").write_text(MINI.read_text(encoding="utf-8"), encoding="utf-8")
+    (user / "STM32F401.svd").write_text(MINI.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setenv("FPROBE_SVD_PATH", str(user))
-    assert find_svd("stm32f401retx").path == user / "STM32F401RE.svd"           # 利用者の場所が先・最も長く合う
-    assert find_svd("STM32F407VG").path == user / "STM32F40x.svd"               # x は任意の 1 文字
+    assert find_svd("stm32f401").path == user / "STM32F401.svd"                 # 利用者の場所が先
+    assert find_svd("STM32F407VG") is None and find_svd("STM32F40x").path == user / "STM32F40x.svd"
     assert find_svd("anything", paths=[MINI]).path == MINI                      # 明示のファイルは名前に依らず使う
     assert find_svd("NO_SUCH_PART_12345") is None
     with pytest.raises(FileNotFoundError):

@@ -64,18 +64,25 @@ class ClockMap:
         del self._points[:-CLOCK_WINDOW]
 
     def to_ticks(self, host_s: float) -> tuple[int, float]:
-        """(タイムベース, 不確かさ（タイムベースの単位）)。"""
+        """(タイムベース, 不確かさ（タイムベースの単位）)。点の誤りの上限 u = 往復の半分（ホストの時刻の中点の誤り）。
+        - 2 点以上（ホストの時刻に幅がある）: 最小二乗の直線。不確かさ = u + 傾きの誤りの上限 × |host_s − 点の平均|。
+          傾きの誤りの上限 = u Σ|x − x̄| / Σ(x − x̄)²（各点の誤りが u 以下のときの最小二乗の傾きの最大のずれ）。
+          点の幅が狭いほど、遠い時刻ほど大きい（幅の境界の値で公称の速さに切り替えない）。
+        - 1 点（幅が 0）: 速さが分からないので公称の速さで写し、不確かさに点からの経過時間をそのまま入れる
+          （速さの誤りの上限を仮定しない）。"""
         if not self._points:
             raise RuntimeError("時計の対応付けの点が無い（記録を始める前のホストの出来事は置けない）")
         xs, ys = [p[0] for p in self._points], [p[1] for p in self._points]
-        if len(xs) == 1 or max(xs) - min(xs) < 1e-3:
-            slope, x0, y0 = self.hz, xs[-1], ys[-1]                  # 点が足りない: 公称の速さ
-        else:
-            mx, my = statistics.fmean(xs), statistics.fmean(ys)
-            slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
-            x0, y0 = mx, my
-        uncertainty = max(p[2] for p in self._points) / 2 * self.hz
-        return round(y0 + (host_s - x0) * slope), uncertainty
+        u = max(p[2] for p in self._points) / 2 * self.hz
+        mx = statistics.fmean(xs)
+        spread = sum((x - mx) ** 2 for x in xs)
+        if spread <= 0:                                              # 1 点: 速さが分からない
+            x0, y0 = xs[-1], ys[-1]
+            return round(y0 + (host_s - x0) * self.hz), u + abs(host_s - x0) * self.hz
+        my = statistics.fmean(ys)
+        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / spread
+        slope_bound = u * sum(abs(x - mx) for x in xs) / spread
+        return round(my + (host_s - mx) * slope), u + slope_bound * abs(host_s - mx)
 
 
 @dataclass(frozen=True)
@@ -276,6 +283,30 @@ class Recording:
                 args.extend(values)
         return ("WHERE " + " AND ".join(clauses)) if clauses else "", args
 
+    def nearest(self, t: int, before: bool, stream: str, kind: str | None = None, a: int | None = None,
+                body: dict[str, Any] | None = None) -> Event | None:
+        """t の直前（before: 時刻 ≦ t のいちばん後）か直後（時刻 > t のいちばん前）の出来事 1 つ（無ければ None）。
+        stream・kind・a と body の欄の値（{欄: 値}。一致）で絞る。同じ時刻のものは時刻順の並び（入れた順）で t に近い側。"""
+        clauses, args = ["stream = ?", "t <= ?" if before else "t > ?"], [stream, t]
+        if kind is not None:
+            clauses.append("kind = ?")
+            args.append(kind)
+        if a is not None:
+            clauses.append("a = ?")
+            args.append(a)
+        for key, value in (body or {}).items():
+            if not re.fullmatch(r"\w+", key):
+                raise ValueError(f"body の欄 {key!r} は英数字と _ だけ")
+            clauses.append(f"json_extract(body, '$.{key}') = ?")
+            args.append(value)
+        order = "DESC" if before else "ASC"
+        row = self._db.execute(f"SELECT t, stream, kind, a, b, body, t_end, unc FROM events WHERE {' AND '.join(clauses)} "
+                               f"ORDER BY t {order}, rowid {order} LIMIT 1", args).fetchone()
+        if row is None:
+            return None
+        t0, s, k, a0, b0, raw, te, unc = row
+        return Event(t0, s, k, a0, b0, None if raw is None else json.loads(raw), te, unc)
+
     def add(self, stream: str, kind: str, t: int, a: int = 0, b: int = 0, body: Any = None,
             t_end: int | None = None) -> None:
         """閉じた記録に出来事を 1 つ足す（後から置く調査の印。recording_mark の t）。"""
@@ -302,6 +333,12 @@ class Recording:
 
     def count(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    def count_events(self, t0: int | None = None, t1: int | None = None, streams: list[str] | None = None,
+                     kinds: list[str] | None = None) -> int:
+        """events（limit なし）が返す出来事の数。"""
+        sql, args = self._where(t0, t1, streams, kinds)
+        return self._db.execute(f"SELECT COUNT(*) FROM events {sql}", args).fetchone()[0]
 
     def distinct(self, column: str, streams: list[str] | None = None) -> list:
         """欄（stream / kind / a / b）の異なる値の一覧（例: サンプラが読んだ番地 = distinct("a", ["sample"])）。"""
@@ -367,6 +404,16 @@ class Recording:
             stats.update(min=min(durations), max=max(durations), mean=statistics.fmean(durations),
                          stdev=statistics.pstdev(durations))
         return stats
+
+    def kind_counts(self, t0: int | None = None, t1: int | None = None) -> list[tuple[str, str, int, int, int]]:
+        """範囲 [t0, t1) の stream・kind ごとの (stream, kind, 件数, 最初の時刻, 最後の時刻)。stream・kind の順。"""
+        where, args = self._where(t0, t1, None, None)
+        sql = f"SELECT stream, kind, COUNT(*), MIN(t), MAX(t) FROM events {where} GROUP BY stream, kind ORDER BY stream, kind"
+        return [tuple(row) for row in self._db.execute(sql, args)]
+
+    def density_bounds(self, t0: int, t1: int, width: int, streams: list[str] | None = None) -> dict:
+        """density と同じ件数と、数えられない画素（普通の記録は全部数えられるので inexact は空。長期の記録と同じ形）。"""
+        return {"counts": self.density(t0, t1, width, streams), "inexact": []}
 
     def density(self, t0: int, t1: int, width: int, streams: list[str] | None = None) -> list[int]:
         """画素ごとの出来事の件数（縮図・タイムラインの要約）。"""

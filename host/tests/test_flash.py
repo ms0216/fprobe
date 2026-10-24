@@ -10,8 +10,9 @@ from pyocd.core.target import Target
 
 from flm_builder import write_flm
 
-from fprobe.flash import (Block, FlashMemory, Image, Progress, Rate, Segment, add_flm_region, compare, remove_region,
-                          save_image)
+from fprobe.flash import (Block, FlashMemory, Image, Progress, Rate, RegisterGuard, Segment, add_flm_region, compare,
+                          remove_region, save_image)
+from fprobe.plugins import stm32_flash_clock
 from fprobe.symbols import Symbols
 
 RTT_DEMO = Path(__file__).resolve().parents[1] / "firmware" / "rtt_demo" / "rtt_demo.elf"
@@ -45,6 +46,15 @@ def test_image_from_hex_and_bin(tmp_path):
     assert Image.load(tmp_path / "a.bin", address=0x08001000).segments == (Segment(0x08001000, b"\xAA\xBB"),)
     with pytest.raises(ValueError, match="address"):
         Image.load(tmp_path / "a.bin")
+
+
+def test_the_format_is_read_from_the_contents_not_the_file_name(tmp_path):
+    # 拡張子（名前の慣習）で決めない: 中身の先頭（ELF の印・Intel HEX の ':'）で決め、どちらでもなければ生のバイト列（?19）
+    import shutil
+    shutil.copy(RTT_DEMO, tmp_path / "firmware.hex")                    # 名前は .hex でも中身は ELF
+    assert Image.load(tmp_path / "firmware.hex").format == "elf"
+    (tmp_path / "raw.elf").write_bytes(b"\xAA\xBB")
+    assert Image.load(tmp_path / "raw.elf", address=0x100).format == "bin"
 
 
 def test_saved_files_load_back(tmp_path):
@@ -309,11 +319,34 @@ class Stm32F4Chip(FakeChip):
         self.periph[self.FLASH_ACR] = 0                                  # Init が待ちを 0 にする
 
 
+def f4_guarded(chip) -> FlashMemory:
+    """STM32F4 の守り（プラグイン stm32_flash_clock が作るレジスタの手順）を渡した FlashMemory。"""
+    return FlashMemory(chip, guards=[RegisterGuard.from_dict(stm32_flash_clock.guard("f4"))])
+
+
+def test_the_body_touches_no_chip_registers_without_a_guard():
+    # 機器固有の守り（STM32F2/F4/F7 のクロック）は本体に入れない（3 回目の点検 ?18）。使う側が渡したときだけ
+    chip = Stm32F4Chip()
+    before = dict(chip.periph)
+    with FlashMemory(chip).preserving([FLASH]):
+        chip.run_algorithm()
+    assert chip.clock_during_algorithm == [2] and chip.acr_writes == []            # PLL のまま（何もしない）
+    assert {k: v for k, v in chip.periph.items() if k != chip.FLASH_ACR} == \
+        {k: v for k, v in before.items() if k != chip.FLASH_ACR}
+
+
+def test_a_register_guard_is_checked():
+    with pytest.raises(ValueError):
+        RegisterGuard.from_dict({"enter": [{"op": "poke", "address": 0}], "exit": []})
+    with pytest.raises(ValueError):
+        RegisterGuard.from_dict({"enter": [{"op": "write", "address": 0, "mask": 1}], "exit": []})   # value が無い
+
+
 def test_stm32f4_runs_the_algorithm_on_hsi_and_restores_the_clock_and_wait_states():
     """Flash のファームが PLL で走っているまま書くと、待ち 0 のまま 84 MHz で走り、書き込みが失敗して LOCKUP した
     （2026-10-18 に実機で）。アルゴリズムの間は HSI にし、抜けるときに待ち → クロックの順に戻す。"""
     chip = Stm32F4Chip()
-    with FlashMemory(chip).preserving([FLASH]):
+    with f4_guarded(chip).preserving([FLASH]):
         chip.run_algorithm()
     assert chip.clock_during_algorithm == [0]                            # HSI で動いた
     assert chip.periph[chip.FLASH_ACR] == 0x702 and chip.periph[chip.RCC_CFGR] == 0x100A
@@ -330,6 +363,7 @@ def test_preserving_makes_the_core_fetch_another_flash_line_before_going_back():
         chip.regs["pc"] = 0x20000001                                    # アルゴリズムが壊す
     fetches = [op[1] for op in chip.ops if op[0] == "fetch"]
     assert len(fetches) == 1 and fetches[0] >> 4 != pc >> 4 and FLASH <= fetches[0] < FLASH + 0x3000
+    assert abs(fetches[0] - pc) >= FLASH_SIZE // 2 - 4              # 行の大きさ（16 バイト等）を仮定しない（?20）
     assert chip.regs["pc"] == pc and bytes(chip.ram) == ram_before
 
 
@@ -337,7 +371,7 @@ def test_stm32f4_resets_the_flash_caches_after_the_algorithm():
     """書いた後に ART の命令・データのキャッシュを捨てる（止めて ICRST・DCRST、戻して元の ACR）。捨てないと、戻した
     Flash の BKPT の古い命令をキャッシュから実行し続けた（2026-10-18 に実機で、休眠の BKPT を戻した後も止まった）。"""
     chip = Stm32F4Chip()
-    with FlashMemory(chip).preserving([FLASH]):
+    with f4_guarded(chip).preserving([FLASH]):
         chip.run_algorithm()
     resets = [v for v in chip.acr_writes if v & (1 << 11)]
     assert resets and all(v & (1 << 12) and not v & (3 << 9) for v in resets)   # 止めたまま両方を捨てる
@@ -347,7 +381,7 @@ def test_stm32f4_resets_the_flash_caches_after_the_algorithm():
 def test_every_algorithm_operation_is_clock_guarded_once():
     """書く・消すのどの口でも（保つ・保たないに関わらず）アルゴリズムの間は HSI。入れ子でも切り替えは 1 回。"""
     chip = Stm32F4Chip()
-    fm = FlashMemory(chip)
+    fm = f4_guarded(chip)
     algorithm = fm.region_at(FLASH).flash
     original = algorithm.erase_sector
     seen = []

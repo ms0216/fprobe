@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from . import generated as g
 from .device import Device
 
-__all__ = ["Access", "DapEvent", "EventCursor", "EventLog", "KIND_AUX", "KIND_HOST", "KIND_INJECT", "KIND_INJECT_TRANSFERS", "KIND_OBS_RECORD", "KIND_OBS_SYNC", "KIND_SAMPLE", "KIND_SWO", "KIND_SYNC", "KIND_UART_RX", "KIND_UART_TX",
+__all__ = ["Access", "DapEvent", "EventCursor", "EventLog", "KIND_AUX", "KIND_HOST", "KIND_HOST_UNTRACKED", "KIND_INJECT", "KIND_INJECT_TRANSFERS", "KIND_OBS_RECORD", "KIND_OBS_SYNC", "KIND_SAMPLE", "KIND_SWO", "KIND_SYNC", "KIND_UART_RX", "KIND_UART_TX",
            "decode_events", "resolve"]
 
 EVENT_BYTES = 16
@@ -28,6 +28,8 @@ KIND_OBS_RECORD = 8      # 対象の FPGA の観測の記録（data = 記録の�
 KIND_OBS_SYNC = 9        # 同、時刻合わせ（data = 対象の時刻の下位 32 ビット、address = 上位 16 ビット）
 KIND_SYNC = 10           # ボードの間の時刻の同期の組（時刻 = 子の時刻、address = 親の時刻の下位 32、data = 上位 32。fprobe.timesync）
 KIND_INJECT_TRANSFERS = 11   # 同（R20）: 書き込みまでの SWD の転送数つき（bit 112〜119。WAIT の繰り返しも数える）
+KIND_HOST_UNTRACKED = 12     # ホストの転送のうち DRW で、メモリの番地を追えなかったもの（address = レジスタの番地。
+                             # CSW・TAR を同じ AP に書く前・別の AP・packed の増加・1 KB の境界の先。dap_monitor）
 INJECT_KINDS = (KIND_INJECT, KIND_INJECT_TRANSFERS)
 BYTE_KINDS = {KIND_UART_RX: "uart_rx", KIND_UART_TX: "uart_tx", KIND_SWO: "swo"}
 ACK_OK = 0b001
@@ -44,7 +46,7 @@ class DapEvent:
     register: int            # A[3:2] << 2（0x0 / 0x4 / 0x8 / 0xC）
     ack: int
     parity_error: bool
-    address: int             # DRW ならメモリの番地（TAR から）、それ以外はレジスタの番地
+    address: int             # DRW ならメモリの番地（TAR から。種類 12 は追えなかったのでレジスタの番地）、それ以外はレジスタの番地
     data: int
     transfers: int | None = None   # 割り込み書き込み（種類 11）の転送数。それ以外・旧い種類 2 は None
 
@@ -58,6 +60,7 @@ class Access:
     """意味づけした 1 アクセス（ポストされた読みを対応付けた後）。time は値が確定した転送の時刻。"""
     time: int
     kind: str                # "ap_read" / "ap_write" / "dp_read" / "dp_write" / "fail" / "uart_rx" / "uart_tx" / "swo"
+                             # / "drw_read" / "drw_write"（メモリの番地を追えなかった DRW。address = レジスタの番地 0xC）
                              # / "inject"（クロストリガの割り込み書き込み）/ "aux"（address = チャンネル、value = mV）/ "sample"（サンプラが読んだ番地と値）
                              # / "obs_record"（address = スキャンの番号、value = 記録の語）
                              # / "obs_sync"（address = 対象の時刻の上位 16 ビット、value = 下位 32 ビット）
@@ -118,19 +121,25 @@ def resolve(events: list[DapEvent]) -> list[Access]:
             continue
         if e.ap and e.read:
             if pending is not None:
-                out.append(Access(e.time, "ap_read", pending.address, e.data, e.ack))
+                out.append(Access(e.time, _read_kind(pending), pending.address, e.data, e.ack))
             pending = e
         elif not e.ap and e.read and e.register == DP_RDBUFF:
             if pending is not None:
-                out.append(Access(e.time, "ap_read", pending.address, e.data, e.ack))
+                out.append(Access(e.time, _read_kind(pending), pending.address, e.data, e.ack))
                 pending = None
             else:
                 out.append(Access(e.time, "dp_read", e.register, e.data, e.ack))
         elif e.read:
             out.append(Access(e.time, "dp_read", e.register, e.data, e.ack))
         else:
-            out.append(Access(e.time, "ap_write" if e.ap else "dp_write", e.address, e.data, e.ack))
+            out.append(Access(e.time, "drw_write" if e.kind == KIND_HOST_UNTRACKED else "ap_write" if e.ap else "dp_write",
+                              e.address, e.data, e.ack))
     return out
+
+
+def _read_kind(e: DapEvent) -> str:
+    """値が返った AP の読みの種類: メモリの番地を追えなかった DRW は drw_read。"""
+    return "drw_read" if e.kind == KIND_HOST_UNTRACKED else "ap_read"
 
 
 class EventLog:

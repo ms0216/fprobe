@@ -5,7 +5,7 @@
 
     from fprobe.testpoint import instrument_tree, Options, WatchVar, ProbeTable, SerialDecoder, Analyzer
     result = instrument_tree(Path("src"), Path("build/tp"), options=Options(variables=(WatchVar("state"),)))
-    dec = SerialDecoder(clock_channel=4, data_channel=5)
+    dec = SerialDecoder(clock_channel=4, data_channel=5, guard=1)
     an = Analyzer(result.table, hz=100e6)
     an.feed(dec.feed(transitions) + dec.flush())
     report = an.finish()

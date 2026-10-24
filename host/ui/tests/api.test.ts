@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DaemonConnection, RpcError, TOOL_NAMESPACES, errorText, type LinkState } from "../src/lib/api";
+import { DaemonConnection, RpcError, errorText, type LinkState } from "../src/lib/api";
+import { API_VERSION } from "../../api/generated/fprobe_api";
 import { FakeWebSocket } from "./fake-ws";
 
 function connect(token?: string) {
@@ -34,7 +35,7 @@ describe("DaemonConnection", () => {
     const ws = openAndGreet();
     expect(ws.sent[0]).toMatchObject({
       method: "session.hello",
-      params: { name: "gui", role: "human", api_version: 1, token: "s3cret" },
+      params: { name: "gui", role: "human", api_version: API_VERSION, token: "s3cret" },
     });
     await vi.waitFor(() => expect(ws.sent[1]?.method).toBe("session.subscribe"));
     expect(ws.sent[1].params).toEqual({ topics: ["activity", "control"] });
@@ -68,11 +69,13 @@ describe("DaemonConnection", () => {
     const b = conn.call("target.status");
     const [ra, rb] = ws.sent.slice(2);
     ws.receive({ jsonrpc: "2.0", id: rb.id, result: { state: "HALTED" } });
-    ws.receive({ jsonrpc: "2.0", id: ra.id, error: { code: -32020, message: "壊れた" } });
+    ws.receive({ jsonrpc: "2.0", id: ra.id, error: { code: -32020, message: "OSError: 壊れた",
+                                                       data: { exception: "OSError", detail: "壊れた" } } });
     await expect(b).resolves.toEqual({ state: "HALTED" });
     const err = await a.catch((e) => e);
     expect(err).toBeInstanceOf(RpcError);
     expect(err.code).toBe(-32020);
+    expect(err.data).toEqual({ exception: "OSError", detail: "壊れた" });   // 誤りの構造の欄（デーモンの事実）もそのまま
   });
 
   it("通知は購読した関数へ届く", async () => {
@@ -153,28 +156,20 @@ describe("DaemonConnection の名乗りの誤り", () => {
 });
 
 describe("errorText", () => {
-  it("デーモンが付ける例外の名前を外し、本文だけにする", () => {
-    expect(errorText(new RpcError(-32020, "RuntimeError: DAP サンプラは watch が使っている"))).toBe("DAP サンプラは watch が使っている");
-    expect(errorText(new RpcError(-32020, "KeyError: \"シンボル 'x' が無い\""))).toBe("\"シンボル 'x' が無い\"");
-    expect(errorText(new RpcError(-32020, "ExpressionError: void は構造体ではない"))).toBe("void は構造体ではない");
-    expect(errorText(new RpcError(-32021, "NotConnected: ターゲット未接続"))).toBe("ターゲット未接続");
-    expect(errorText(new RpcError(-32021, "NotDisconnected: 接続中は使えない"))).toBe("接続中は使えない");
+  it("デーモンの構造の欄 data.detail（例外の文そのまま）を出す。文の形を推して頭を外さない", () => {
+    expect(errorText(new RpcError(-32020, "RuntimeError: DAP サンプラは watch が使っている",
+                                  { exception: "RuntimeError", detail: "DAP サンプラは watch が使っている" })))
+      .toBe("DAP サンプラは watch が使っている");
+    // data の無い誤り（JSON-RPC の検証・名乗り等）は文のまま。「Foo: 」の形でも外さない
+    expect(errorText(new RpcError(-32602, "MemoryError: 引数が違う"))).toBe("MemoryError: 引数が違う");
     expect(errorText(new Error("ふつうの誤り: 本文"))).toBe("ふつうの誤り: 本文");
     expect(errorText("文字列")).toBe("文字列");
   });
 
-  it("AI 向けの道具の名前・引数の案内（target_halt・live=true 等）は利用者に見せない", () => {
-    expect(errorText(new RpcError(-32020, "RuntimeError: ターゲットが動いている: 止めてから（target_halt）。一覧は live=true で走行中にも読める")))
-      .toBe("ターゲットが動いている: 止めてから");
-    expect(errorText(new RpcError(-32020, "RuntimeError: DAP サンプラは watch が使っている（watch_stop を先に）")))
-      .toBe("DAP サンプラは watch が使っている");
-    expect(errorText(new RpcError(-32023, "NoData: プロファイルが無い（profile_start）"))).toBe("プロファイルが無い");
-    expect(errorText(new RpcError(-32020, "KeyError: 変数が無い（my_var）"))).toBe("変数が無い（my_var）");   // 利用者の名前は残す
-  });
-
-  it("道具の名前の頭は API のすべての名前空間を含む", () => {
-    const spec = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../api/fprobe_api.json"), "utf8"));
-    const spaces = new Set(Object.keys(spec.methods).map((m: string) => m.split(".")[0]));
-    for (const ns of spaces) expect(TOOL_NAMESPACES, ns).toContain(ns);
+  it("道具の名前・引数の形（target_halt・addr=0x…）を含む文も消さない（どれが案内かを名前の形で推さない）", () => {
+    const detail = "ターゲットが動いている: 止めてから（target_halt）。一覧は live=true で走行中にも読める";
+    expect(errorText(new RpcError(-32020, `RuntimeError: ${detail}`, { exception: "RuntimeError", detail }))).toBe(detail);
+    const fact = "addr=0x20000000 で読めない。関数 debug_print の中";
+    expect(errorText(new RpcError(-32020, `OSError: ${fact}`, { exception: "OSError", detail: fact }))).toBe(fact);
   });
 });

@@ -36,7 +36,7 @@ describe("画面とデーモン", () => {
 
   it("利用者の一覧が届き、AI の操作が記録として流れる", async () => {
     await vi.waitFor(() => expect(snap.clients.map((c) => c.name).sort()).toEqual(["claude", "gui"]));
-    expect(state.aiWorking).toBe(true);
+    expect(state.aiConnectedUnpaused).toBe(true);
     await ai.call("target.connect", { target: "stm32f401xe" });
     await ai.call("target.halt");
     await vi.waitFor(() => expect(snap.activity.map((e) => e.method)).toContain("target.halt"));

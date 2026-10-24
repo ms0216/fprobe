@@ -9,11 +9,12 @@
   import SamplerNotice from "./SamplerNotice.svelte";
   import { onCalls } from "../../lib/notify";
   import { allowed } from "../../lib/guard";
+  import { topCut } from "../../lib/cut";
   import { i18n } from "../../lib/i18n";
   import { Poller } from "../../lib/poll";
   import { load, save } from "../../lib/prefs";
   import {
-    SymbolAddresses, halfWidth, heatOf, selectedRange, sourceHeat, type FunctionCoverage, type ProfileRow,
+    SymbolAddresses, heatOf, selectedRange, sourceHeat, type FunctionCoverage, type ProfileRow,
   } from "../../lib/profile";
   import { percent } from "../../lib/rtos";
   import { coreClock } from "../../lib/target";
@@ -21,15 +22,20 @@
 
   const { app, conn, tl, showAddress } = shared();
   const quiet = { quiet: true };
-  const TOP = 500;
+  // 読む行の上限（API の top）。切れたら切る前の数（rows_total）と上限を出す
+  const TOP = 500;                 // 関数の表
+  const LINES_TOP = 1000;          // 開いた関数の行
+  const HEAT_TOP = 100000;         // ソースの濃淡に使う行
   const symbols = new SymbolAddresses(conn);
 
   let method = $state(load("profile.method", "itm"));
-  let rate = $state(Number(load("profile.rate", "10000")));
+  // 周期は使う人が選ぶ（画面の既定を持たない。選ぶまで始められない）
+  const savedRate = Number(load("profile.rate", ""));
+  let rate = $state<number | null>(savedRate > 0 ? savedRate : null);
   let scope = $state<"whole" | "selected">(load("profile.scope", "whole") === "selected" ? "selected" : "whole");
   let heat = $state(load("profile.heat", "1") === "1");
   $effect(() => save("profile.method", method));
-  $effect(() => save("profile.rate", String(rate)));
+  $effect(() => save("profile.rate", rate === null ? "" : String(rate)));
   $effect(() => save("profile.scope", scope));
   $effect(() => save("profile.heat", heat ? "1" : "0"));
 
@@ -38,6 +44,8 @@
   let coverage = $state<Map<string, FunctionCoverage>>(new Map());
   let open = $state<string | null>(null);
   let lines = $state<ProfileRow[]>([]);
+  let linesCut = $state<ReturnType<typeof topCut>>(null);
+  let heatCut = $state<ReturnType<typeof topCut>>(null);
   let stopping = $state(false);
   let taken: string | null = null;           // 方法の欄を合わせた結果の方法（新しい結果のときだけ欄を合わせる）
 
@@ -49,7 +57,7 @@
   const span = $derived(scope === "selected" && "t0" in range ? range : null);
 
   // コア クロック（ITM の間隔・SWO の分周）: 利用者が入れた値はターゲットごとに覚え、無ければつないでいる
-  // ターゲットから（ELF の SystemCoreClock、無ければターゲット名のいつもの値）
+  // ターゲットの ELF の SystemCoreClock を読んだ値のまま欄に示す（使うかは利用者が確かめる。無ければ空）
   const targetName = $derived(($app.target?.target as string | undefined) ?? null);
   const clockKey = (name: string | null) => `profile.clock.${name ?? "?"}`;
   let clockMhz = $state<number | null>(null);
@@ -105,24 +113,29 @@
     coverage = new Map((cov.functions as FunctionCoverage[]).map((f) => [f.function, f]));
     if (open) await loadLines(open);
     if (heat) {
-      const all = w ? await conn.call("profile.aggregate", { by: "line", t0: w.t0, t1: w.t1, top: 100000 }, quiet)
-                    : await conn.call("profile.result", { by: "line", top: 10000 }, quiet);
+      const all = w ? await conn.call("profile.aggregate", { by: "line", t0: w.t0, t1: w.t1, top: HEAT_TOP }, quiet)
+                    : await conn.call("profile.result", { by: "line", top: HEAT_TOP }, quiet);
       sourceHeat.set(heatOf(all.rows, [...coverage.values()]));
+      heatCut = topCut(all.rows.length, all.rows_total, HEAT_TOP);
     } else {
       sourceHeat.clear();
+      heatCut = null;
     }
   }
 
   async function loadLines(fn: string) {
     const w = span;
-    const r = w ? await conn.call("profile.aggregate", { by: "line", function: fn, t0: w.t0, t1: w.t1, top: 1000 }, quiet)
-                : await conn.call("profile.result", { by: "line", function: fn, top: 1000 }, quiet);
-    if (open === fn) lines = [...r.rows].sort((a: ProfileRow, b: ProfileRow) => (a.line ?? 0) - (b.line ?? 0));
+    const r = w ? await conn.call("profile.aggregate", { by: "line", function: fn, t0: w.t0, t1: w.t1, top: LINES_TOP }, quiet)
+                : await conn.call("profile.result", { by: "line", function: fn, top: LINES_TOP }, quiet);
+    if (open !== fn) return;
+    lines = [...r.rows].sort((a: ProfileRow, b: ProfileRow) => (a.line ?? 0) - (b.line ?? 0));
+    linesCut = topCut(r.rows.length, r.rows_total, LINES_TOP);
   }
 
   async function toggle(fn: string) {
     open = open === fn ? null : fn;
     lines = [];
+    linesCut = null;
     if (open) await loadLines(open).catch(() => {});
   }
 
@@ -132,8 +145,9 @@
   }
 
   async function start() {
-    if (!(await allowed(app))) return;
-    const done = await app.act("profile.start", { method: method as "itm" | "pcsr", rate_hz: rate,
+    const r = rate;
+    if (r === null || !(await allowed(app))) return;
+    const done = await app.act("profile.start", { method: method as "itm" | "pcsr", rate_hz: r,
                                                   ...(method === "itm" ? { core_clock_hz: (clockMhz ?? 0) * 1e6 } : {}) });
     if (done !== undefined) await poller.refresh();
   }
@@ -151,6 +165,7 @@
   }
 
   const rows = $derived<ProfileRow[]>(result?.rows ?? []);
+  const rowsCut = $derived(topCut(rows.length, result?.rows_total, TOP));
   const maxFraction = $derived(Math.max(1e-9, ...rows.map((r) => r.fraction)));
   const cat = (k: string) => percent(summary?.categories?.[k]?.fraction);
   const rangeReason = $derived("reason" in range ? (range.reason === "itm" ? $i18n("profile.itmNoRange")
@@ -170,16 +185,18 @@
           <option value="itm">{$i18n("profile.itm")}</option>
           <option value="pcsr">{$i18n("profile.pcsr")}</option>
         </select></label>
-      <label>{$i18n("profile.rate")}
-        <select bind:value={rate}>
+      <label>{$i18n("profile.rate")}<span class="req" aria-hidden="true">*</span>
+        <select bind:value={rate} aria-required="true">
+          {#if rate === null}<option value={null} disabled></option>{/if}
           {#each [1000, 2000, 5000, 10000, 20000, 50000] as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
         </select></label>
       {#if method === "itm"}
         <label title={clockAuto === "SystemCoreClock" ? $i18n("profile.clockFromElf") : ""}>
-          {$i18n("profile.coreClock")}<input class="num" type="number" min="1" value={clockMhz ?? ""}
-                                             onchange={(e) => setClock(Number(e.currentTarget.value))} /></label>
+          {$i18n("profile.coreClock")}<span class="req" aria-hidden="true">*</span><input class="num" type="number" min="1"
+            aria-required="true" value={clockMhz ?? ""} onchange={(e) => setClock(Number(e.currentTarget.value))} /></label>
       {/if}
-      <button class="primary" disabled={!connected || !$poller.loaded || (method === "itm" && !clockMhz)} title={connected ? $i18n("profile.startTip") : $i18n("hint.connectFirst")}
+      <button class="primary" disabled={!connected || !$poller.loaded || rate === null || (method === "itm" && !clockMhz)}
+              title={connected ? $i18n("profile.startTip") : $i18n("hint.connectFirst")}
               onclick={start}>{$i18n("profile.start")}</button>
     {/if}
     {#if summary}
@@ -202,7 +219,7 @@
     {/if}
     <table class="grid">
       <thead><tr><th>{$i18n("profile.function")}</th><th title={$i18n("profile.loadTip")}>{$i18n("profile.load")}</th>
-        <th title={$i18n("profile.ciTip")}>{$i18n("profile.ci")}</th><th>{$i18n("profile.samples")}</th>
+        <th>{$i18n("profile.samples")}</th>
         <th title={$i18n("profile.coverageTip")}>{$i18n("profile.coverage")}</th></tr></thead>
       <tbody>
         {#each rows as r (r.function)}
@@ -217,7 +234,6 @@
             </td>
             <td class="mono load"><span class="bar"><span style:width="{(100 * r.fraction) / maxFraction}%"></span></span>
               {percent(r.fraction)}</td>
-            <td class="mono muted">± {percent(halfWidth(r))}</td>
             <td class="mono">{r.samples}</td>
             <td class="mono">{cov ? `${percent(cov.line_fraction)} (${cov.lines_hit}/${cov.lines})` : "—"}</td>
           </tr>
@@ -228,20 +244,24 @@
                   {l.file}:{l.line}</button></td>
                 <td class="mono load"><span class="bar"><span style:width="{(100 * l.fraction) / maxFraction}%"></span></span>
                   {percent(l.fraction)}</td>
-                <td class="mono muted">± {percent(halfWidth(l))}</td>
                 <td class="mono">{l.samples}</td>
                 <td></td>
               </tr>
             {/each}
+            {#if linesCut}
+              <tr class="line"><td class="muted" colspan="4">{$i18n("common.truncated", linesCut)}</td></tr>
+            {/if}
             {#each cov?.missed_lines ?? [] as m (m.join(":"))}
               <tr class="line missed">
-                <td class="mono">{m[0]}:{m[1]}</td><td class="muted" colspan="4">{$i18n("profile.missedLine")}</td>
+                <td class="mono">{m[0]}:{m[1]}</td><td class="muted" colspan="3">{$i18n("profile.missedLine")}</td>
               </tr>
             {/each}
           {/if}
         {/each}
       </tbody>
     </table>
+    {#if rowsCut}<div class="banner muted">{$i18n("common.truncated", rowsCut)}</div>{/if}
+    {#if heat && heatCut}<div class="banner muted">{$i18n("profile.heatTruncated", heatCut)}</div>{/if}
   {:else if $poller.loaded}
     <div class="empty">
       <strong>{$i18n("profile.none")}</strong>

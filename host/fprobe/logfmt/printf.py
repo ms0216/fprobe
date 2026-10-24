@@ -6,6 +6,10 @@ Trice・SystemView の Print・Event Recorder 等）の文字列を、ホスト�
 - `Words`: 32 ビットの語の列（ターゲットが語で送るとき）。`ll` の整数と double は 2 語（下位が先）、`hh` / `h` は
   語の下位を符号つき・なしで読む。`%s` は語を番地として `string(番地)` で引く（ELF・メモリ）。
 
+long・size_t・ptrdiff_t・ポインタ（`l`・`z`・`t` の整数、`%p`・`%s`・`%n`）の大きさはターゲットの ABI で違う
+（ILP32 = 32 ビット、LP64 = 64 ビット）ので、使う側が pointer_bits で渡す（既定を持たない）。int は 32 ビット、
+long long・intmax_t は 64 ビット（どちらの ABI も同じ）。
+
 書式の誤り（`%` で終わる・知らない変換）は文字のまま残し、引数が足りないときは `<?>` を置く（ログの解読で例外に
 しない。原因の分からない 1 行のために残りのログを失わないため）。
 """
@@ -23,19 +27,30 @@ __all__ = ["Conversion", "Values", "Words", "conversions", "format_c"]
 MISSING = "<?>"
 _SPEC = re.compile(r"%(?P<flags>[-+ #0]*)(?P<width>\*|\d+)?(?:\.(?P<prec>\*|\d*))?"
                    r"(?P<length>hh|h|ll|l|j|z|t|L|q)?(?P<conv>[diouxXeEfFgGaAcspn%])")
-_INT_BITS = {"hh": 8, "h": 16, "": 32, "l": 32, "z": 32, "t": 32, "j": 64, "ll": 64, "q": 64}
+_INT_BITS = {"hh": 8, "h": 16, "": 32, "j": 64, "ll": 64, "q": 64}
+_POINTER_SIZED = ("l", "z", "t")                    # long・size_t・ptrdiff_t: ポインタと同じ大きさ（ILP32・LP64）
+
+
+def _int_bits(length: str, pointer_bits: int) -> int:
+    return pointer_bits if length in _POINTER_SIZED else _INT_BITS.get(length, 32)
+
+
+def _check(pointer_bits: int) -> None:
+    if pointer_bits not in (32, 64):
+        raise ValueError(f"pointer_bits は 32（ILP32）か 64（LP64）: {pointer_bits}")
 
 
 @dataclass(frozen=True)
 class Conversion:
-    """書式の中の 1 つの引数（`*` の幅・精度も 1 つの引数）。bits はターゲットでの大きさ（32 ビットの ABI）。"""
+    """書式の中の 1 つの引数（`*` の幅・精度も 1 つの引数）。bits はターゲットでの大きさ（pointer_bits で決まる）。"""
     conversion: str            # d i o u x X e f g a c s p n、または "*"
     length: str
     bits: int
 
 
-def conversions(fmt: str) -> list[Conversion]:
-    """書式が取る引数の並び（`%%` は除く）。"""
+def conversions(fmt: str, *, pointer_bits: int) -> list[Conversion]:
+    """書式が取る引数の並び（`%%` は除く）。pointer_bits はターゲットのポインタ・long の大きさ（32 / 64）。"""
+    _check(pointer_bits)
     out = []
     for m in _SPEC.finditer(fmt):
         conv, length = m["conv"], m["length"] or ""
@@ -47,10 +62,10 @@ def conversions(fmt: str) -> list[Conversion]:
             out.append(Conversion("*", "", 32))
         if conv in "eEfFgGaA":
             bits = 64
-        elif conv in "sp":
-            bits = 32
+        elif conv in "spn":
+            bits = pointer_bits
         else:
-            bits = _INT_BITS.get(length, 32)
+            bits = _int_bits(length, pointer_bits)
         out.append(Conversion(conv, length, bits))
     return out
 
@@ -79,7 +94,7 @@ class Values:
     def real(self, bits: int) -> float:
         return float(self._next())
 
-    def text(self) -> str:
+    def text(self, pointer_bits: int) -> str:
         v = self._next()
         return v if isinstance(v, str) else str(v)
 
@@ -111,10 +126,10 @@ class Words:
         lo, hi = self._take(2)
         return struct.unpack("<d", struct.pack("<II", lo, hi))[0]
 
-    def text(self) -> str:
-        address = self._take(1)[0]
+    def text(self, pointer_bits: int) -> str:
+        address = self.integer(pointer_bits, False)
         found = self._string(address) if self._string else None
-        return found if found is not None else f"<str@0x{address:08X}>"
+        return found if found is not None else f"<str@0x{address:0{pointer_bits // 4}X}>"
 
 
 def _wrap(value: int, bits: int, signed: bool) -> int:
@@ -124,8 +139,9 @@ def _wrap(value: int, bits: int, signed: bool) -> int:
     return value
 
 
-def format_c(fmt: str, args: Values | Words) -> str:
-    """C の printf と同じ規則で整形する。"""
+def format_c(fmt: str, args: Values | Words, *, pointer_bits: int) -> str:
+    """C の printf と同じ規則で整形する。pointer_bits はターゲットのポインタ・long の大きさ（32 / 64。既定なし）。"""
+    _check(pointer_bits)
     out, pos = [], 0
     while (i := fmt.find("%", pos)) >= 0:
         out.append(fmt[pos:i])
@@ -136,14 +152,14 @@ def format_c(fmt: str, args: Values | Words) -> str:
             continue
         pos = m.end()
         try:
-            out.append(_one(m, args))
+            out.append(_one(m, args, pointer_bits))
         except IndexError:
             out.append(MISSING)
     out.append(fmt[pos:])
     return "".join(out)
 
 
-def _one(m: re.Match, args: Values | Words) -> str:
+def _one(m: re.Match, args: Values | Words, pointer_bits: int) -> str:
     conv, flags, length = m["conv"], m["flags"], m["length"] or ""
     if conv == "%":
         return "%"
@@ -162,20 +178,20 @@ def _one(m: re.Match, args: Values | Words) -> str:
     elif prec is not None:
         prec = int(prec or 0)
     if conv in "di":
-        body, sign = _integer(args.integer(_INT_BITS.get(length, 32), True), conv, flags, prec)
+        body, sign = _integer(args.integer(_int_bits(length, pointer_bits), True), conv, flags, prec)
     elif conv in "ouxX":
-        body, sign = _integer(args.integer(_INT_BITS.get(length, 32), False), conv, flags, prec)
+        body, sign = _integer(args.integer(_int_bits(length, pointer_bits), False), conv, flags, prec)
     elif conv in "eEfFgGaA":
         body, sign = _real(args.real(64), conv, flags, prec)
     elif conv == "c":
         body, sign = chr(args.integer(32, False) & 0xFF if length != "l" else args.integer(32, False)), ""
     elif conv == "s":
-        text = args.text()
+        text = args.text(pointer_bits)
         body, sign = (text if prec is None else text[:prec]), ""
     elif conv == "p":
-        body, sign = f"0x{args.integer(32, False):08x}", ""
+        body, sign = f"0x{args.integer(pointer_bits, False):0{pointer_bits // 4}x}", ""
     else:                                                       # %n: 書き込み先の番地を消費するだけ
-        args.integer(32, False)
+        args.integer(pointer_bits, False)
         return ""
     return _pad(sign, body, width, flags, conv)
 

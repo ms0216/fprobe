@@ -54,9 +54,9 @@ def scenario() -> Psf:
 
 def test_a_stream_decodes_names_tasks_isrs_and_prints():
     trace = decode_tracealyzer(scenario().bytes())
-    assert trace.ts_hz == 48e6 and trace.system["platform"] == "0x1AA1"
+    assert trace.ts_hz == 48e6 and trace.system["platform"] == "0x1AA1" and trace.ts_wraps == 0
     assert {t.id: t.name for t in trace.tasks.values() if t.name} == {T2: "logger", T1: "sensor", IDLE: "IDLE"}
-    assert trace.idle == {IDLE}
+    assert not getattr(trace, "idle", set())       # 名前でアイドルを決めない（使う側が idle_tasks で渡す）
     kinds = [(e.kind, e.ts, e.task) for e in trace.events if e.kind in ("task_in", "isr_enter", "isr_exit")]
     assert kinds == [("task_in", 100, IDLE), ("task_in", 210, T1), ("isr_enter", 300, None),
                      ("isr_exit", 320, None), ("task_in", 460, T2)]
@@ -77,6 +77,16 @@ def test_compact_prints_use_elf_strings():
     trace = decode_tracealyzer(p.bytes(), strings={0x0800_0100: "ch", 0x0800_0200: "n=%u"}.get)
     [e] = [e for e in trace.events if e.kind == "print"]
     assert (e.text, e.args["channel"]) == ("n=7", "ch")
+
+
+def test_kernel_object_operations_are_named_not_a_code_range():
+    # 0x11 以上を一律にカーネルオブジェクトの操作としない: 時刻・ヒープ・眠り・スタックの出来事は object でない
+    p = Psf().table([(T1, "sensor", 3)]).event(0x01, 1, T1)
+    p.event(0x50, 10, 0x2000_0100).event(0x31, 20, 5).event(0x38, 30, 0x2000_0200, 16).event(0x3A, 40, 1)
+    p.event(0xEB, 50, T1, 64).event(0xA0, 60, 0x2000_0300)
+    kinds = {e.name: e.kind for e in decode_tracealyzer(p.bytes()).events}
+    assert kinds["QUEUE_SEND"] == "object" and kinds["TIMER_START"] == "object"
+    assert kinds["NEW_TIME"] == kinds["MALLOC"] == kinds["LOWPOWER_BEGIN"] == kinds["UNUSED_STACK"] == "other"
 
 
 def test_streaming_in_pieces():

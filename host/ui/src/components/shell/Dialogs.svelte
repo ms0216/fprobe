@@ -8,14 +8,18 @@
   import { allowed } from "../../lib/guard";
   import { LANGS, getLang, setLang, i18n, type Lang } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
-  import { diagnose, mhzToHz, pinsText, type DiagnoseReport, type Pins } from "../../lib/diagnose";
+  import { diagnose, mhzListToHz, mhzToHz, pinsText, type DiagnoseReport, type Pins } from "../../lib/diagnose";
+  import { svdLoadParams } from "../../lib/peripherals";
 
   const { app, conn, dbg, ui } = shared();
 
   let path = $state(load("elf", ""));
-  let device = $state(load("connect.target", "stm32f401xe"));
-  let mhz = $state(load("connect.mhz", "4"));
-  let svd = $state(load("svd.device", "STM32F401"));
+  let device = $state(load("connect.target", ""));
+  let mhz = $state(load("connect.mhz", ""));   // 使う人が入れる（品種・速さを初めから入れない）
+  let diagMhz = $state(load("diagnose.mhz", ""));   // 診断で試す速さ（MHz のカンマ区切り。空なら接続の速さ 1 つ）
+  let svd = $state(load("svd.device", ""));
+  // デバイス名かパスかは使う人が選ぶ（文字の形で推さない）
+  let svdKind = $state<"device" | "path">(load("svd.kind", "device") === "path" ? "path" : "device");
   let lang = $state<Lang>(getLang());
   let busy = $state(false);
   let picker = $state<HTMLInputElement>();
@@ -80,26 +84,19 @@
   }
 
   async function runDiagnosis() {
-    const hz = mhzToHz(mhz);
-    badClock = hz === null;
-    if (hz === null || !(await allowed(app))) return;
+    const speeds = mhzListToHz(diagMhz.trim() === "" ? mhz : diagMhz);
+    badClock = speeds === null;
+    if (speeds === null || !(await allowed(app))) return;
+    save("diagnose.mhz", diagMhz);
     busy = true;
-    diagnosis = await diagnose(conn, hz);
+    diagnosis = await diagnose(conn, speeds);
     busy = false;
   }
 
-  /** 診断の提案の引数（target・frequency_hz・jtag_chain・connect_mode）のまま接続する */
-  async function connectSuggested(args: Record<string, unknown>) {
-    if (!(await allowed(app))) return;
-    busy = true;
-    const done = await app.act("target.connect", args as never);
-    busy = false;
-    failed = done === undefined;
-    if (!failed && typeof args.target === "string") {
-      device = args.target;                          // 次に開いたときの既定（提案で接続できたターゲット名）
-      save("connect.target", device);
-    }
-    if (!failed) close();
+  /** 診断が返した部品の候補と応答した速さを、接続の欄に入れる（接続は使う人が押す） */
+  function useCandidate(name: string, hz: number | null) {
+    device = name;
+    if (hz !== null) mhz = String(hz / 1e6);
   }
 
   function close() {
@@ -110,10 +107,12 @@
 
   async function loadSvd() {
     if (!(await allowed(app))) return;
+    const params = svdLoadParams(svdKind, svd);
+    if (!params) return;
     save("svd.device", svd);
+    save("svd.kind", svdKind);
     busy = true;
-    const isPath = /[\\/]|\.svd$/i.test(svd);
-    const done = await app.act("target.svd.load", isPath ? { path: svd } : { device: svd });
+    const done = await app.act("target.svd.load", params);
     busy = false;
     if (done !== undefined) ui.close();
   }
@@ -140,12 +139,14 @@
   {:else if kind === "connect"}
     <h2>{$i18n("dialog.connect")}</h2>
     <form class="grid" onsubmit={(e) => { e.preventDefault(); void connect(); }}>
-      <label for="dev">{$i18n("dialog.device")}</label>
-      <input id="dev" class="mono" bind:value={device} title={$i18n("dialog.deviceHint")} />
-      <label for="clk">{$i18n("dialog.clock")}</label>
-      <span><input id="clk" class="num" bind:value={mhz} inputmode="decimal" /> MHz</span>
+      <label for="dev">{$i18n("dialog.device")}<span class="req" aria-hidden="true">*</span></label>
+      <input id="dev" class="mono" bind:value={device} aria-required="true" title={$i18n("dialog.deviceHint")} />
+      <label for="clk">{$i18n("dialog.clock")}<span class="req" aria-hidden="true">*</span></label>
+      <span><input id="clk" class="num" bind:value={mhz} inputmode="decimal" aria-required="true" /> MHz</span>
       <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
-      <span></span><span class="row"><button class="primary" disabled={!online || !device || busy}>{$i18n("cmd.connect")}</button>
+      <label for="dclk">{$i18n("diagnose.speeds")}</label>
+      <span><input id="dclk" class="mono" bind:value={diagMhz} placeholder={mhz} title={$i18n("diagnose.speedsTip")} /> MHz</span>
+      <span></span><span class="row"><button class="primary" disabled={!online || !device.trim() || !mhz.trim() || busy}>{$i18n("cmd.connect")}</button>
         <button type="button" disabled={!online || busy} title={$i18n("diagnose.tip")} onclick={() => void runDiagnosis()}>
           {$i18n("diagnose.run")}</button></span>
     </form>
@@ -154,7 +155,10 @@
     {#if diagnosis}
       <div class="diagnosis" aria-live="polite">
         {#if diagnosis.report}
-          <p class:bad={!diagnosis.report.ok}><strong>{diagnosis.report.verdict}</strong></p>
+          {@const r = diagnosis.report}
+          <p class:bad={!r.reached}><strong>{r.reached ? $i18n("diagnose.reached") : $i18n("diagnose.notReached")}</strong>
+            {#if r.reached}<span class="mono"> {String(r.protocol).toUpperCase()} {r.frequency_hz?.toLocaleString()} Hz</span>{/if}
+            <span class="muted small"> ({$i18n("diagnose.tried")}: {r.frequencies_hz.map((f) => f.toLocaleString()).join(", ")} Hz)</span></p>
           <table class="steps">
             <tbody>
               {#each diagnosis.report.steps as step, i (i)}
@@ -162,11 +166,11 @@
               {/each}
             </tbody>
           </table>
-          {#if diagnosis.report.suggested_connect}
-            {@const args = diagnosis.report.suggested_connect}
-            <div class="row"><span class="mono small grow">{JSON.stringify(args)}</span>
-              <button class="primary" disabled={!online || busy} onclick={() => void connectSuggested(args)}>
-                {$i18n("diagnose.connectSuggested")}</button></div>
+          {#if r.reached && r.part?.candidates?.length}
+            <div class="row"><span class="small">{$i18n("diagnose.candidates")}:</span>
+              {#each r.part.candidates as c (c)}
+                <button type="button" class="mono" disabled={busy} onclick={() => useCandidate(c, r.frequency_hz)}>{c}</button>
+              {/each}</div>
           {/if}
         {:else if diagnosis.error}
           <p class="bad">{diagnosis.error}</p>
@@ -178,8 +182,13 @@
     <h2>{$i18n("dialog.loadSvd")}</h2>
     <p class="muted">{$i18n("peripherals.noSvdHint")}</p>
     <form class="row" onsubmit={(e) => { e.preventDefault(); void loadSvd(); }}>
-      <input class="mono grow" aria-label={$i18n("peripherals.device")} placeholder={$i18n("peripherals.device")} bind:value={svd} />
-      <button class="primary" disabled={!online || !svd || busy}>{$i18n("dialog.open")}</button>
+      <select bind:value={svdKind} aria-label={$i18n("dialog.svdKind")}>
+        <option value="device">{$i18n("dialog.svdDevice")}</option>
+        <option value="path">{$i18n("dialog.svdPath")}</option>
+      </select>
+      <input class="mono grow" aria-label={$i18n(svdKind === "path" ? "dialog.svdPath" : "dialog.svdDevice")}
+             placeholder={$i18n(svdKind === "path" ? "dialog.svdPath" : "dialog.svdDevice")} bind:value={svd} />
+      <button class="primary" disabled={!online || !svd.trim() || busy}>{$i18n("dialog.open")}</button>
     </form>
   {:else if kind === "settings"}
     <h2>{$i18n("dialog.settings")}</h2>
@@ -235,7 +244,6 @@
   .steps td { padding: 2px 8px 2px 0; vertical-align: top; }
   .steps .st { width: 3.5em; }
   .steps tr.fail .st, .bad { color: var(--bad); }
-  .steps tr.warn .st { color: var(--warn); }
   .steps tr.ok .st { color: var(--ok); }
   .steps tr.skip { color: var(--muted); }
 </style>

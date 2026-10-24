@@ -18,9 +18,11 @@ def test_estimate_clock_from_sampled_cyccnt():
     est = cycles.estimate_clock(samples, hz)
     assert est.clock_hz == pytest.approx(clock, rel=1e-7)
     assert est.samples == len(samples) and est.span_s == pytest.approx(2, rel=1e-3)
-    assert est.stderr_hz < 10 and not est.warnings
+    assert est.max_residual_cycles < 2 and est.residual_rms_cycles < 2 and not est.warnings
     d = est.as_dict()
     assert d["clock_mhz"] == pytest.approx(84, rel=1e-6)
+    # 標準誤差は残差が独立・等分散という仮定の上の推定: 本体は出さない（plugins.heuristics.clock_stderr）
+    assert "stderr_hz" not in d and "ppm" not in d and d["clock_min_hz"] is None and d["clock_max_hz"] is None
 
 
 def test_estimate_clock_warns_when_the_counter_stops():
@@ -36,12 +38,17 @@ def test_two_point_clock_with_bounds():
     hz = 100_000_000
     est = cycles.clock_from_two_reads((1_000_000, 1_000_200, 5_000), (101_000_000, 101_000_200, 16_005_000), hz)
     assert est.clock_hz == pytest.approx(16e6)
-    assert est.stderr_hz == pytest.approx(16e6 * 200 / 100_000_000, rel=0.01)
+    # 読みの前後の時刻で挟んだ範囲（事実）: 進み 16e6 を、最も長い間（b1 − a0）と最も短い間（b0 − a1）で割る
+    assert est.clock_min_hz == pytest.approx(16e6 / 1.000002) and est.clock_max_hz == pytest.approx(16e6 / 0.999998)
+    assert est.max_residual_cycles is None and est.residual_rms_cycles is None
 
 
 def test_counter_delta_and_instructions():
-    assert cycles.counter_delta(250, 4, overflows=0) == 10
-    assert cycles.counter_delta(250, 4, overflows=2) == 10 + 512 - 256      # 溢れは 250→4 の 1 回を含む
+    assert cycles.counter_delta(250, 4, overflows=1) == (10, True)
+    assert cycles.counter_delta(250, 4, overflows=2) == (10 + 256, True)    # 溢れは 250→4 の 1 回を含む
+    # 溢れを数えていない・数えた溢れと値が合わない（パケットが欠けた）: 1 周未満とみなした値と、数えていない印
+    assert cycles.counter_delta(250, 4) == (10, False)
+    assert cycles.counter_delta(250, 4, overflows=0) == (10, False)
     counts = {"cycles": 1000, "cpi": 100, "exc": 20, "sleep": 30, "lsu": 50, "fold": 10}
     assert cycles.instructions(counts) == 1000 - 100 - 20 - 30 - 50 + 10
 

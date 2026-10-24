@@ -87,6 +87,8 @@ class ArmCore:
             return
         self.restarts += 1
         self.halted, self.restarted = False, True
+        if getattr(self, "asleep", False):                  # WFI で眠ったまま: 次の命令に進まない
+            return
         for i in range(self.brps):                          # mismatch: 今の命令だけを実行して次で止まる
             if self.bcr[i] & 1 and (self.bcr[i] >> 20) & 0xF == 4 and self.bvr[i] == self.regs[15] & ~3:
                 nxt = self.regs[15] + (2 if self.thumb else 4)

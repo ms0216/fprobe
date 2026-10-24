@@ -14,9 +14,10 @@ StackTools（静的な呼び出しグラフ `_call_graph`）を使う。機器�
 
 from pathlib import Path
 
+from .debug import Debugger
 from .export.profile_formats import (callgrind_from_profile, callgrind_from_tree, coverage_from_profile,
-                                     coverage_from_testpoint, dot_from_profile, dot_from_tree, gmon_bytes,
-                                     render_lcov, tree_edges, write_gcov)
+                                     coverage_from_testpoint, dot_from_profile, dot_from_tree, dwarf_declarations,
+                                     gmon_bytes, render_lcov, tree_edges, write_gcov)
 from .profile import PcSamples, Profiler, coverage
 from .profile.aggregate import Grouping, call_stats, group_profile, group_rows, timeline, window
 from .symbols import is_network_path
@@ -83,27 +84,33 @@ class ProfileExportTools:
 
     def profile_aggregate(self, by: str = "function", groups: dict[str, list[str]] | None = None,
                           t0_s: float | None = None, t1_s: float | None = None, t0: int | None = None,
-                          t1: int | None = None, top: int = 20, function: str | None = None) -> dict:
+                          t1: int | None = None, top: int = 20, function: str | None = None,
+                          separator: str | None = None) -> dict:
         """プロファイルを区間（t0_s〜t1_s 秒、pcsr はタイムベースの t0〜t1 も）に限って集計する。by: function / line /
-        instruction / exception（profile_result と同じ表）、file / directory / prefix（名前の型）/ groups（{名前:
-        [関数名の glob か "file:" + ファイルの glob]}）のグループ。"""
+        instruction / exception（profile_result と同じ表）、file / directory / prefix（関数名の separator の最初の
+        出現より前。separator は使う側が明示する）/ groups（{名前: [関数名の glob か "file:" + ファイルの glob]}）の
+        グループ。rows_total（グループは groups_total）= top で切る前の行の数。"""
         result, chosen, info, _ = self._windowed(t0_s, t1_s, t0, t1)
-        prof = self._profiler().profile(chosen, names=self._vector_names())
+        prof = self._profiler().profile(chosen, names=self._vector_names(result.run.vector_table))
         if by in _PLAIN_BY:
+            table = prof.table(by, function)
             return {"by": by, "window": info, "total": prof.total, "active": prof.active,
-                    "categories": prof.category_table(), "rows": prof.top(top, by, function), "notes": prof.notes()}
-        out = group_profile(prof, Grouping(by, groups), top=top)
+                    "categories": prof.category_table(), "rows": table[:top], "rows_total": len(table),
+                    "notes": prof.notes()}
+        out = group_profile(prof, Grouping(by, groups, separator), top=top)
         out["window"] = info
         return out
 
     def profile_timeline(self, bucket_s: float = 0.1, by: str = "function", groups: dict[str, list[str]] | None = None,
-                         top: int = 8, t0_s: float | None = None, t1_s: float | None = None) -> dict:
+                         top: int = 8, t0_s: float | None = None, t1_s: float | None = None,
+                         separator: str | None = None) -> dict:
         """CPU 使用率（load = 眠り以外の割合）とグループの割合の推移（bucket_s 秒ごと。全体で多い top 個のグループ、
         残りは "(other)"）。サンプルの時刻が要る（pcsr、または itm の timestamps）。"""
         result, chosen, info, hz = self._windowed(t0_s, t1_s, None, None)
         if hz is None:
             raise ValueError("サンプルの時刻の単位が分からない")
-        out = timeline(chosen, self._profiler(), bucket=bucket_s * hz, grouping=Grouping(by, groups), top=top)
+        out = timeline(chosen, self._profiler(), bucket=bucket_s * hz, grouping=Grouping(by, groups, separator),
+                       top=top)
         origin = next((s.t for s in result.samples.samples if s.t is not None), 0)
         for b in out["buckets"]:
             b["t0_s"] = round((b["t0"] - origin) / hz, 12)
@@ -128,7 +135,7 @@ class ProfileExportTools:
                                     high=high)
             out_path.write_bytes(data)
             return {"format": format, "path": str(out_path), "window": info, "rate_source": source, **meta}
-        prof = self._profiler().profile(chosen, names=self._vector_names())
+        prof = self._profiler().profile(chosen, names=self._vector_names(result.run.vector_table))
         out = {"format": format, "path": str(out_path), "window": info, "total": prof.total}
         if format == "callgrind":
             out_path.write_text(callgrind_from_profile(prof, cmd=self._symbols.path.name), encoding="utf-8",
@@ -136,9 +143,17 @@ class ProfileExportTools:
         elif format in ("lcov", "gcov"):
             with self._lock:
                 disassembler, _ = self._disassembler(from_elf=True)
-            files = coverage_from_profile(coverage(prof, disassembler, all_functions=True), prof)
+            info = Debugger(None, self._symbols).debug_info()
+            if info is None:
+                raise ValueError("lcov / gcov には ELF の DWARF が要る（関数の所在は DW_AT_decl_file・decl_line）")
+            files, undeclared = coverage_from_profile(coverage(prof, disassembler, all_functions=True), prof,
+                                                      dwarf_declarations(info))
             out["files"] = len(files)
             out["notes"] = ["PC サンプリングによる近似: 回数 0 の行が実行されなかったとは限らない"]
+            if undeclared:
+                out["undeclared_functions"] = undeclared
+                out["notes"].append(f"DWARF に宣言の場所（DW_AT_decl_file・decl_line）の無い関数 {len(undeclared)} 個は"
+                                    "関数の記録（FN）を書いていない（undeclared_functions）")
             if format == "lcov":
                 out_path.write_text(render_lcov(files, test_name, source_root=source_root), encoding="utf-8",
                                     newline="\n")
@@ -172,7 +187,8 @@ class ProfileExportTools:
         return files, lines, raw
 
     def testpoint_aggregate(self, t0_s: float | None = None, t1_s: float | None = None, by: str = "function",
-                            groups: dict[str, list[str]] | None = None, top: int = 50) -> dict:
+                            groups: dict[str, list[str]] | None = None, top: int = 50,
+                            separator: str | None = None) -> dict:
         """テストポイントの関数の時間を区間（最初の印からの t0_s〜t1_s 秒）に限って集計: inclusive_s（子を含む。区間で
         切る。再帰は外側だけ）・exclusive_s（自分だけ）・started（区間で始まった回数）・active（区間に掛かった回数）。
         by が function 以外なら file / directory / prefix / groups のグループ（exclusive_s と started の合計）。
@@ -190,11 +206,14 @@ class ProfileExportTools:
             out["rows"] = [{"function": r["function"], "inclusive_s": r["inclusive"] / hz,
                             "exclusive_s": r["exclusive"] / hz, "started": r["started"], "active": r["active"]}
                            for r in rows[:top]]
+            total = len(rows)
         else:
             files, _, _ = self._tp_names(run.live.table)
-            grouped = group_rows(rows, Grouping(by, groups), files.get)
+            grouped = group_rows(rows, Grouping(by, groups, separator), files.get)
             out["rows"] = [{"group": g["group"], "exclusive_s": g["exclusive"] / hz, "started": g["started"],
                             "functions": g["functions"]} for g in grouped[:top]]
+            total = len(grouped)
+        out.update(rows_total=total, rows_truncated=total > top, top=top)    # 切ったことが分かる
         if dropped:
             out["notes"] = [f"古い呼び出し {dropped} 件は持っていない（kept_from_s より前は数えていない。全部は記録の "
                             "stream \"testpoint\"）"]

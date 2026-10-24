@@ -24,6 +24,7 @@ from .calling import FunctionCaller, hard_float, read_return_value, signature_of
 from .dwarf.access import AccessError
 from .dwarf.info import DebugInfo
 from .dwarf.inspector import Inspector
+from .fault import dfsr_bits
 from .stepping import STEP_MODES, Halt, LineStepper, Runner
 from .symbols import Location, Symbols, is_line_location
 
@@ -65,6 +66,7 @@ class Stop:
     where: Location
     elapsed_s: float
     value: dict | None = None     # step_line の out: 出た関数の戻り値（{"type", "value"}）
+    halt_bits: list[str] | None = None   # 最後の停止の DFSR の立っていたビット全部（読んだときだけ。reason は 1 語）
 
 
 @dataclass(frozen=True)
@@ -79,8 +81,9 @@ class Frame:
     pc: int                       # 呼び出し元のフレームでは戻り先、例外で中断された処理では正確な番地
     where: Location               # 呼び出し元では呼び出し命令の行（戻り先 − 1 で引く）
     note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した位置、"lr_without_cfi" = CFI の
-                                  # 無い最内の関数を葉と仮定して LR から出した（確かめていない）
+                                  # 無い最内の関数を葉と仮定して LR から出した（assume_leaf のときだけ。確かめていない）
     cfa: int | None = None        # CFI で巻き戻したときの CFA（呼び出し元の sp）
+    stop: dict | None = None      # CFI で巻き戻したときの最後の段: その先へ巻き戻さなかった理由（dwarf.unwind）
 
 
 class PyocdAccess:
@@ -164,11 +167,13 @@ class Debugger:
         self._apply_breakpoints()
 
     def watchpoint(self, location: str | int, size: int | None = None, kind: str = "write") -> Watch:
-        """変数名か番地にウォッチポイントを置く。size は変数名なら変数の大きさ（1 / 2 / 4）。"""
+        """変数名か番地にウォッチポイントを置く。size は変数名なら省略で変数の大きさ（1 / 2 / 4）。番地なら必須
+        （大きさを仮定しない）。"""
         address = self.address(location)
         if size is None:
-            size = self.symbols.variable(location).size if self.symbols and isinstance(location, str) \
-                and not location.startswith("0x") else 4
+            if not (self.symbols and isinstance(location, str) and not location.startswith("0x")):
+                raise ValueError("番地のウォッチポイントには size（1 / 2 / 4）が要る")
+            size = self.symbols.variable(location).size
         if kind not in _WATCH_KINDS:
             raise ValueError(f"kind は {', '.join(_WATCH_KINDS)} のどれか")
         if not self.target.set_watchpoint(address, size, _WATCH_KINDS[kind]):
@@ -252,11 +257,12 @@ class Debugger:
         if mode == "out" and halt.reason == "arrived":
             with lock:
                 value = self._returned_value(pc)
-        return self._halt_stop(halt, start, value)
+        return self._halt_stop(halt, start, value, runner.dfsr)
 
-    def _halt_stop(self, halt: Halt, start: float, value: dict | None = None) -> Stop:
+    def _halt_stop(self, halt: Halt, start: float, value: dict | None = None, dfsr: int | None = None) -> Stop:
         reason = "step" if halt.reason in ("stepped", "arrived") else halt.reason
-        return Stop(reason, halt.regs.pc, self.where(halt.regs.pc), round(time.monotonic() - start, 4), value)
+        return Stop(reason, halt.regs.pc, self.where(halt.regs.pc), round(time.monotonic() - start, 4), value,
+                    None if dfsr is None else dfsr_bits(dfsr))
 
     def _frame_cfa(self) -> int | None:
         """いまのフレームの CFA（CFI。無ければ None）。CFA は呼び出し元へ 1 段巻き戻すときに決まるので 2 段まで。"""
@@ -381,11 +387,13 @@ class Debugger:
 
     # --- 呼び出しの様子 ------------------------------------------------------------------
 
-    def backtrace(self, max_frames: int = 64, inspector: Inspector | None = None) -> list[Frame]:
+    def backtrace(self, max_frames: int = 64, inspector: Inspector | None = None,
+                  assume_leaf: bool = False) -> list[Frame]:
         """呼び出し履歴。ELF に CFI（.debug_frame）があれば CFI で巻き戻す（例外のフレームも越える）。
-        無ければ簡易版（いまの PC、LR。例外の中なら積まれたフレームの PC・LR）。停止中に呼ぶ。
+        無ければ簡易版（いまの PC、LR。例外の中なら積まれたフレームの PC・LR）。LR から出したフレームは、LR が戻り先の
+        ままだと確かめていないので note = "lr_without_cfi"。停止中に呼ぶ。
         inspector を渡すとその巻き戻しを使う（続けて同じ窓口でフレームの変数を読むとき、巻き戻しは 1 回）。"""
-        inspector = inspector if inspector is not None else self.inspector(max_frames)
+        inspector = inspector if inspector is not None else self.inspector(max_frames, assume_leaf)
         if inspector is not None and len(inspector.unwinder.table):
             frames = []
             for state in inspector.frames():
@@ -393,7 +401,7 @@ class Debugger:
                 if state.lookup_pc != state.pc:                      # 呼び出し元: 番地は戻り先、行は呼び出し命令
                     where = replace(where, address=state.pc,
                                     offset=None if where.offset is None else where.offset + state.pc - state.lookup_pc)
-                frames.append(Frame(state.pc, where, state.note, state.cfa))
+                frames.append(Frame(state.pc, where, state.note, state.cfa, state.stop))
             return frames
         return self._simple_backtrace()
 
@@ -406,9 +414,9 @@ class Debugger:
             sp = regs["psp"] if lr & 0x4 else regs["msp"]
             stacked = self.target.read_memory_block32(sp, 8)       # r0 r1 r2 r3 r12 lr pc xpsr
             frames.append(Frame(stacked[6], self.where(stacked[6]), "exception"))
-            frames.append(Frame(stacked[5] & ~1, self.where(stacked[5] & ~1)))
+            frames.append(Frame(stacked[5] & ~1, self.where(stacked[5] & ~1), "lr_without_cfi"))
         else:
-            frames.append(Frame(lr & ~1, self.where(lr & ~1)))
+            frames.append(Frame(lr & ~1, self.where(lr & ~1), "lr_without_cfi"))
         return frames
 
     # --- ソースの言葉の変数（DWARF） ---------------------------------------------------------
@@ -421,12 +429,12 @@ class Debugger:
         stat = path.stat()
         return _load_debug_info(str(path), (stat.st_mtime_ns, stat.st_size))
 
-    def inspector(self, max_frames: int = 64) -> Inspector | None:
-        """いまの停止の様子を調べる窓口（停止のたびに作る）。DWARF が無ければ None。"""
+    def inspector(self, max_frames: int = 64, assume_leaf: bool = False) -> Inspector | None:
+        """いまの停止の様子を調べる窓口（停止のたびに作る）。DWARF が無ければ None。assume_leaf は dwarf.unwind.Unwinder。"""
         info = self.debug_info()
         if info is None:
             return None
-        return Inspector(info, PyocdAccess(self.target), self.symbols, max_frames)
+        return Inspector(info, PyocdAccess(self.target), self.symbols, max_frames, assume_leaf)
 
     def _require_inspector(self) -> Inspector:
         inspector = self.inspector()
@@ -455,9 +463,12 @@ class Debugger:
 
     # --- RAM へ読み込んで起動 -------------------------------------------------------------
 
-    def load_to_ram(self) -> Stop:
-        """ELF の中身を RAM に書き、そのベクタ表（ELF の最初の区画）から起動できる状態で止める。
-        Flash には書かない（Flash は pyOCD の FileProgrammer = MCP の flash を使う）。"""
+    def load_to_ram(self, vector_table: int | None = None) -> tuple[Stop, dict]:
+        """ELF の中身を RAM に書き、起動できる状態で止める。vector_table（ベクタ表の番地。使う側が明示する）を渡せば
+        その表の初期の MSP・リセットの処理から（VTOR もその番地に）、渡さなければ ELF のヘッダの入口（e_entry。リンカが
+        書いた事実）から起動する（GDB の load と同じ。SP・VTOR は変えない）。ベクタ表を「最も低い番地の区画」等と
+        仮定しない。Flash には書かない（Flash は pyOCD の FileProgrammer = MCP の flash を使う）。
+        返す: (止まった様子, {"from": "vector_table" / "entry", "entry", "vector_table"})。"""
         if self.symbols is None:
             raise RuntimeError("ELF が読み込まれていない")
         # 先にリセットして止める: 元のファームウェアが動かしていた割り込み（SysTick・周辺）が、差し替えたベクタ表へ
@@ -465,12 +476,17 @@ class Debugger:
         self.target.reset_and_halt()
         for segment in self.symbols.segments:
             self.target.write_memory_block8(segment.address, list(segment.data))
-        vectors = min(s.address for s in self.symbols.segments)
-        sp, pc = self.target.read_memory_block32(vectors, 2)
-        self.target.write32(VTOR, vectors)
-        self.target.write_core_register("msp", sp)
-        self.target.write_core_register("sp", sp)
+        entry = self.symbols.entry
+        if vector_table is not None:
+            sp, pc = self.target.read_memory_block32(vector_table, 2)
+            self.target.write32(VTOR, vector_table)
+            self.target.write_core_register("msp", sp)
+            self.target.write_core_register("sp", sp)
+        else:
+            pc = entry
         self.target.write_core_register("pc", pc & ~1)
         self.target.write_core_register("xpsr", XPSR_THUMB)
         self.target.flush()
-        return self._stop(time.monotonic(), "user")
+        start = {"from": "entry" if vector_table is None else "vector_table", "entry": entry,
+                 "vector_table": vector_table}
+        return self._stop(time.monotonic(), "user"), start

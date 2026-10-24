@@ -83,6 +83,7 @@ def test_setup_and_hold_of_data_around_the_clock_edge():
     assert rel["setup"]["count"] == 3 and rel["hold"]["count"] == 2           # 3 回目の後はデータが変わらない
     assert rel["violation_count"] == 1
     assert rel["violations"] == [{"at": 15, "setup_ns": pytest.approx(10)}]
+    assert rel["violations_limit"] == 100 and rel["violations_truncated"] is False   # 一覧を切ったら分かる（?27）
 
 
 def test_a_data_change_on_the_clock_edge_is_zero_setup_and_hold():

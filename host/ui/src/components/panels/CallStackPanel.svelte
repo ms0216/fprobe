@@ -1,9 +1,11 @@
 <script lang="ts">
   // Call Stack: 呼び出し履歴（いまのフレームが上）。フレームを選ぶと Locals・Watch・Disassembly がそのフレームに
-  // なり、Source はその行を開いて選ぶ（VS Code・Ozone と同じ）。↑/↓ で選び直す
+  // なり、Source はその行を開いて選ぶ（VS Code・Ozone と同じ）。↑/↓ で選び直す。
+  // 上に時間軸で選んだ記録の時刻の事実（CodeAtNote。呼び出し履歴は記録に無い）
   import { shared } from "../../lib/context";
   import { focusFrame } from "../../lib/debugger";
   import { i18n } from "../../lib/i18n";
+  import CodeAtNote from "./CodeAtNote.svelte";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
 
@@ -21,6 +23,7 @@
 </script>
 
 <div class="pane" class:stale={$dbg.stale}>
+  <CodeAtNote panel="callStack" />
   {#if $dbg.backtrace.length}
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <ol class="frames mono" aria-label={$i18n("panel.callStack")} onkeydown={onKey}>

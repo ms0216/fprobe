@@ -30,7 +30,7 @@ class VoidType(CType):
 class BaseType(CType):
     name: str
     size: int
-    encoding: str                 # signed / unsigned / signed_char / unsigned_char / float / bool
+    encoding: str                 # signed / unsigned / signed_char / unsigned_char / float / bool / unknown
 
     @property
     def signed(self) -> bool:
@@ -92,7 +92,7 @@ class ArrayType(CType):
 @dataclass(eq=False)
 class EnumType(CType):
     name: str | None
-    size: int
+    size: int | None              # DW_AT_byte_size（も基底の型も）無ければ None（4 バイト等で補わない）
     signed: bool
     enumerators: tuple[tuple[str, int], ...]
 
@@ -184,8 +184,11 @@ def _base_name(t: CType) -> str:
 
 # --- DIE からの読み込み ---------------------------------------------------------------------
 
+# DW_ATE_*（DWARF 5 の 7.8 節）。表に無い符号（DW_AT_encoding が無い・複素数・10 進の浮動小数点・固定小数点等）は
+# "unknown"（unsigned で補わない。値は生のバイトで返す）。0x10 = DW_ATE_UTF（char8_t・char16_t・char32_t。DWARF 5 の
+# 5.1 節: 符号なしの文字の符号）
 _ENCODINGS = {0x1: "unsigned", 0x2: "bool", 0x4: "float", 0x5: "signed", 0x6: "signed_char", 0x7: "unsigned",
-              0x8: "unsigned_char", 0x10: "unsigned"}       # 0x10 = DW_ATE_UTF（char8_t 等）
+              0x8: "unsigned_char", 0x10: "unsigned"}
 _QUALIFIERS = {"DW_TAG_const_type": "const", "DW_TAG_volatile_type": "volatile",
                "DW_TAG_restrict_type": "restrict", "DW_TAG_atomic_type": "atomic"}
 
@@ -256,15 +259,17 @@ class TypeLoader:
     def _simple(self, die) -> CType:
         tag = die.tag
         if tag == "DW_TAG_base_type":
-            encoding = _ENCODINGS.get(_int_attr(die, "DW_AT_encoding") or 0, "unsigned")
+            encoding = _ENCODINGS.get(_int_attr(die, "DW_AT_encoding") or 0, "unknown")
             return BaseType(_name(die) or "?", _int_attr(die, "DW_AT_byte_size") or 0, encoding)
         if tag == "DW_TAG_enumeration_type":
             values = tuple((_name(c) or "?", c.attributes["DW_AT_const_value"].value)
                            for c in die.iter_children() if c.tag == "DW_TAG_enumerator")
             underlying = strip(self.type_of(die)) if "DW_AT_type" in die.attributes else None
+            # 基底の型が無ければ、負の列挙子があることは符号付きの事実（C の列挙は全部の列挙子を表せる型）。負が
+            # 無ければ符号なしで読んでも、どの列挙子の値も同じに読める
             signed = (underlying.signed if isinstance(underlying, BaseType)
                       else any(v < 0 for _, v in values))
-            size = _int_attr(die, "DW_AT_byte_size") or (underlying.size if underlying else 4)
+            size = _int_attr(die, "DW_AT_byte_size") or (underlying.size if underlying else None)
             return EnumType(_name(die), size, signed, values)
         if tag == "DW_TAG_array_type":
             element = self.type_of(die)
@@ -301,7 +306,10 @@ class TypeLoader:
             return Member(_name(die), t, offset)
         data_bit_offset = _int_attr(die, "DW_AT_data_bit_offset")
         if data_bit_offset is None:
-            # DWARF 2/3（GCC）: DW_AT_bit_offset は記憶単位（byte_size、無ければ型の大きさ）の最上位からのビット位置
-            storage = _int_attr(die, "DW_AT_byte_size") or t.size or 4
+            # DWARF 2/3（GCC）: DW_AT_bit_offset は記憶単位（byte_size、無ければ型の大きさ。DWARF 3 の 5.6.6 節）の
+            # 最上位からのビット位置。どちらも無ければ位置は分からない（4 バイト等で補わない）
+            storage = _int_attr(die, "DW_AT_byte_size") or t.size
+            if storage is None:
+                return Member(_name(die), t, offset, bit_size, None)
             data_bit_offset = offset * 8 + storage * 8 - (_int_attr(die, "DW_AT_bit_offset") or 0) - bit_size
         return Member(_name(die), t, data_bit_offset // 8, bit_size, data_bit_offset)

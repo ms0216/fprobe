@@ -68,6 +68,20 @@ def test_message_queue_event_and_fifo(rtos):
     assert objects["rx_fifo"].fields == {"items": 2}
 
 
+def test_lists_cut_at_the_walk_limit_say_so(rtos, monkeypatch):
+    # 黙って数え止めない（総点検）: 辿る上限で止めたら、止めた印と上限を返す（数を全部と誤らせない）
+    import fprobe.rtos.zephyr_objects as zo
+    monkeypatch.setattr(zo, "MAX_ITEMS", 1)
+    objects = by_name(rtos.objects())
+    fifo = objects["rx_fifo"]
+    assert fifo.fields == {"items": 1, "items_truncated": True}
+    assert any("上限 1" in n for n in fifo.notes)
+    blink = objects["blink_timer"]
+    assert "remaining_ticks" not in blink.fields and blink.fields["remaining_truncated"] is True
+    assert any("timeout_list" in n and "上限 1" in n for n in blink.notes)
+    assert objects["watchdog_timer"].fields["remaining_ticks"] == 20                # 上限の内で見つかる
+
+
 def test_timers_remaining_from_the_timeout_list(rtos):
     objects = by_name(rtos.objects())
     blink = objects["blink_timer"].fields
@@ -102,3 +116,23 @@ def test_words_for_the_sampler(rtos, image):
     assert rtos.handle_priority(sleeper) == 7
     address, total = rtos.heap_free_word()
     assert address == symbols.variable("system_heap_state").address + 24 and total == 4000   # free_bytes（chunk0_hdr 16 + 4 + 4）
+
+
+def test_k_stack_counts_entries_by_the_size_of_stack_data_t_from_dwarf():
+    """k_stack の要素の大きさは DWARF の base（stack_data_t *）の指す型から。4 バイトと決め打ちしない（64 ビットは 8）。"""
+    from fprobe.dwarf.typesys import BaseType, PointerType, TypedefType
+    from fprobe.rtos.zephyr_objects import ZephyrObjects
+
+    entry = TypedefType("stack_data_t", BaseType("long unsigned int", 8, "unsigned"))
+    values = {"base": 0x1000, "next": 0x1018, "top": 0x1040}
+
+    class Layout:
+        def has(self, m):
+            return m in values
+
+        def member_type(self, m):
+            return PointerType(entry, 8)
+
+    objects = ZephyrObjects.__new__(ZephyrObjects)
+    objects._u = lambda layout, h, m, signed=False: values[m]
+    assert objects._k_stack(Layout(), 0) == {"size": 8, "used": 3}

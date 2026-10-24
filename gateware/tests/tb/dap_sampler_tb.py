@@ -427,3 +427,30 @@ async def host_commands_at_any_moment_see_their_own_state(dut):
     expect = {0x20000000: 0x11, 0x20000004: 0x22, 0x20000300: 0x33}
     assert len(got) > 50 and all(expect[a] == d and k == OK for a, d, k in got), got[:8]
     assert int(dut.smp_errors.value) == 0
+
+
+@cocotb.test()
+async def wait_retries_follow_the_host_transfer_configure(dut):
+    # 総点検 G2: WAIT の再試行の回数は固定（255）でなく、ホストが DAP_TransferConfigure で設定した値（wait_retry）
+    import struct
+    dap, model = await connected(dut, seed=11)
+    model.memory[0x20000000] = 5
+    await dap.command(bytes([0x04, 0]) + struct.pack("<HH", 1, 3))             # WAIT は 1 回まで
+    got = []
+    task = collect(dut, got)
+    await configure(dut, [(0x20000000, 1)])
+    model.wait_next = 3                                                          # 次の 3 回の AP アクセスは WAIT
+    dut.smp_run.value = 1
+    await rounds(dut, 2)
+    dut.smp_run.value = 0
+    await ClockCycles(dut.clk, 2000)
+    task.cancel()
+    assert int(dut.smp_errors.value) >= 1                                        # 1 回で諦めて誤りに数える
+    errors = int(dut.smp_errors.value)
+    await dap.command(bytes([0x04, 0]) + struct.pack("<HH", 8, 3))             # 8 回まで待つ
+    model.wait_next = 3
+    dut.smp_run.value = 1
+    await rounds(dut, 4)
+    dut.smp_run.value = 0
+    await ClockCycles(dut.clk, 2000)
+    assert int(dut.smp_errors.value) == errors                                   # 3 回の WAIT は待って通る

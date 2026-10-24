@@ -48,11 +48,11 @@ def scenario(header: str = "ts32_id8", base: int = 1_000) -> bytes:
 
 
 def test_builtin_table_decodes_threads_isrs_and_named_events():
-    trace = decode_ctf(scenario())
+    trace = decode_ctf(scenario(), header="ts32_id8")
     assert trace.ts_hz == 1e9
     assert {t.id: (t.name, t.priority, t.stack_size) for t in trace.tasks.values()} == {
         T1: ("sensor", -2, 1024), IDLE: ("idle", None, None)}
-    assert trace.idle == {IDLE}
+    assert not getattr(trace, "idle", set())       # 名前でアイドルを決めない（使う側が idle_tasks で渡す）
     assert [(e.kind, e.ts) for e in trace.events if e.kind in ("task_in", "task_out", "isr_enter", "isr_exit")] == [
         ("task_in", 1010), ("isr_enter", 1020), ("isr_exit", 1025), ("task_out", 1030), ("task_in", 1030),
         ("task_out", 1050)]
@@ -73,8 +73,10 @@ def test_other_header_forms(header):
 
 def test_32_bit_nanoseconds_wrap():
     data = rec(0xFFFF_FFF0, 0x1B) + rec(0x10, 0x1C)
-    trace = decode_ctf(data)
+    trace = decode_ctf(data, header="ts32_id8")
     assert [e.ts for e in trace.events] == [0xFFFF_FFF0, 0x1_0000_0010]
+    # 1 周未満の前提で戻した回数を結果に出す（前提が外れると時刻が 2^32 の倍数ずれる）
+    assert trace.ts_wraps == 1 and trace.summary()["ts_wraps"] == 1
 
 
 def test_real_metadata_file():
@@ -86,19 +88,19 @@ def test_real_metadata_file():
 
 
 def test_unknown_ids_stop_decoding_with_a_reason():
-    trace = decode_ctf(rec(1, 0x1B) + rec(2, 0xF7, b"\x01\x02") + rec(3, 0x1C))
+    trace = decode_ctf(rec(1, 0x1B) + rec(2, 0xF7, b"\x01\x02") + rec(3, 0x1C), header="ts32_id8")
     assert len(trace.events) == 1 and trace.errors == 1 and "0xf7" in trace.notes[0]
 
 
 def test_ram_backend_ends_at_zero_fill():
     data = scenario() + bytes(64)
-    trace = decode_ctf(data, ram_buffer=True)
+    trace = decode_ctf(data, header="ts32_id8", ram_buffer=True)
     assert len(trace.events) == 12 and trace.errors == 0
 
 
 def test_streaming_in_pieces():
     data = scenario()
-    d = CtfDecoder()
+    d = CtfDecoder(header="ts32_id8")
     for i in range(0, len(data), 5):
         d.feed(data[i:i + 5])
     assert len(d.trace.events) == 12
@@ -109,3 +111,25 @@ def test_bad_tsdl():
         parse_tsdl("event { name = x; id = 1; fields := struct { weird_t a; }; };")
     with pytest.raises(CtfError):
         builtin_metadata("ts16")
+
+
+def test_the_header_form_is_not_assumed():
+    """見出しの形（版で違う）は metadata の event_header か、使う側の header で決める。4.3 までの形を既定にしない。"""
+    with pytest.raises(CtfError, match="header"):
+        decode_ctf(scenario())
+    with pytest.raises(CtfError, match="header"):
+        CtfDecoder()
+    with pytest.raises(CtfError, match="event_header"):
+        parse_tsdl("event { name = x; id = 1; };")
+    assert [f.size for f in parse_tsdl("event { name = x; id = 1; };", header="ts64_id16").header] == [64, 16]
+
+
+def test_object_events_are_zephyrs_names_not_a_name_prefix():
+    """カーネルオブジェクトの操作（kind object）は Zephyr の metadata にある名前の表で決める。metadata の任意の名前を
+    接頭辞（event_・work_ 等）で object にしない。"""
+    meta = parse_tsdl("event { name = semaphore_give_enter; id = 1; fields := struct { uint32_t id; }; };"
+                      "event { name = event_custom_counter; id = 2; fields := struct { uint32_t id; }; };",
+                      header="ts32_id8")
+    trace = decode_ctf(rec(1, 1, struct.pack("<I", 7)) + rec(2, 2, struct.pack("<I", 8)), metadata=meta)
+    assert [(e.name, e.kind) for e in trace.events] == [("semaphore_give_enter", "object"),
+                                                        ("event_custom_counter", "other")]

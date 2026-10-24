@@ -94,9 +94,10 @@ ELF が読み込まれていて（`debug.elf.load`、または `monitor elf <pat
   よってトレースポイントはブレークポイント（ログ・ブレークポイントと同じ `_break_hooks`）で、止まった一瞬に集めて
   続ける。1 回に数 ms と、止まったことに気づくまでの見張りの周期（GDB の continue 中は `Options.poll_s`、それ以外は
   背景の見張り）。集めた時間は `monitor trace` の halts に出す。止めずに値を追うなら変数のライブ観測（`watch.set`）。
-- **止めると壊れうるターゲット**: ELF の手がかり（`debug.halt_risk` と同じ `fprobe.halt_risk.assess`）で risky なら、
-  QTStart を理由つきで断る（コンソールにも出す）。`monitor trace allow-halt`（この接続だけ）か、モニタ方式
-  （`target.debug_mode.set` mode=monitor。止まっている間も優先度の高い割り込みは動く）なら始める。
+- **止めると壊れうるターゲット**: 断るのは使う側が明示したときだけ。`monitor trace deny-halt`（この接続だけ）なら、
+  モニタ方式（`target.debug_mode.set` mode=monitor。止まっている間も優先度の高い割り込みは動く）でなければ QTStart を
+  理由つきで断る（コンソールにも出す）。既定（`allow-halt`）は断らない。ELF の名前（`debug.halt_risk`）の一致だけを
+  根拠に既定で断ることはしない（2026-10-23。名前の一致は「止めると壊れる」の証拠ではない）。
 - 共有のブレークポイント: トレースポイントが置いたものの名前は `gdb-trace:0x…`（`debug.breakpoint.list` の tool は
   `gdb.trace`）。同じ番地に GDB・AI・画面のブレークポイントがあれば、集めてから止める。GDB がその番地のブレークポイントを
   外してもトレースポイントの分は残り、トレースを止めても GDB の分は残る。`debug.breakpoint.clear`（全部）で実験は

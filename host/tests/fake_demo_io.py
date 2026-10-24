@@ -14,6 +14,8 @@ DemoProbe（fake_demo.py）に混ぜる mixin。値の形は本物の Probe（pr
 import threading
 import time
 
+from fprobe.api import NoData
+
 __all__ = ["DemoStreams", "IoDemo"]
 
 
@@ -56,12 +58,12 @@ class IoDemo:
         if baud:
             self._uart_baud = baud
         self._streams.echo("uart", data)
-        return len(data)
+        return {"written": len(data), "baud": self._uart_baud}
 
     def uart_read(self, timeout_s=0.5, baud=None):
         if baud:
             self._uart_baud = baud
-        return self._streams.read("uart", 0, 1 << 20)["data"]
+        return {"data": self._streams.read("uart", 0, 1 << 20)["data"], "baud": self._uart_baud}
 
     def uart_configure(self, baud):
         self._uart_baud = baud
@@ -75,7 +77,7 @@ class IoDemo:
         self._streams.stop_swo()
 
     def swo_configure(self, ports=None, timestamps=False, timestamp_prescale=1, exception_trace=False, counters=None,
-                      data_trace=None, value_watch=None, swo_baud=None, core_clock_hz=None, trace_pin=True):
+                      data_trace=None, value_watch=None, swo_baud=None, core_clock_hz=None, trace_pin=None):
         """ITM のポートを有効にして（swo_baud なら）SWO を受け始める。結果の形は本物（probe_swo.py）と同じ。"""
         self._need()
         if swo_baud:
@@ -97,7 +99,7 @@ class IoDemo:
         （時刻はタイムベース = 時間軸の記録と同じ。PC は tick() の counter++ の行）。例外の回数は記録の割り込みから。"""
         req = getattr(self, "_swo_request", None)
         if req is None:
-            raise RuntimeError("swo_configure で設定していない")
+            raise NoData("swo_configure で設定していない")
         view = self._elf._view
         accesses = []
         if req["data_trace"] and view is not None:

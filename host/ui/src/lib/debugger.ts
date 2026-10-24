@@ -6,9 +6,11 @@ import { errorText, type DaemonConnection } from "./api";
 import type { BreakpointAction } from "./breakpoints";
 import { isRunning } from "./commands";
 import { execution, stepParams } from "./execution";
+import { allowed } from "./guard";
 import { load, save } from "./prefs";
 import type { AppState, Snapshot } from "./state";
 import type { UiState } from "./ui";
+import { exprWriteCall } from "./valuewrite";
 
 export interface SourceFile {
   name: string;
@@ -38,6 +40,7 @@ export interface Breakpoint extends Place {
   kind?: "hw" | "flash" | "sw";        // 接続中: 比較器 / Flash の BKPT / RAM の BKPT
   action?: BreakpointAction;           // 条件・ヒット カウント・ログ（lib/breakpoints.ts）
   tool?: string;                       // 道具（heap.trace 等）が置いたもの
+  enabled?: boolean;                   // false = 無効にしたもの（debug.breakpoint.enable。機器には置いていない）
 }
 
 export interface Watchpoint {
@@ -75,22 +78,20 @@ export interface Frame {
   pc: number;
   where: string;
   note: string;
-  function?: string;
-  file?: string;
-  line?: number;
+  function?: string | null;
+  file?: string | null;
+  line?: number | null;
 }
 
-/** "func+0x4 (file.c:12)" 等の場所の文字列から file と line を拾う */
-export function placeOf(where: string): { file: string; line: number } | null {
-  const m = /([\w.\-/\\]+\.[A-Za-z]+):(\d+)/.exec(where);
-  return m ? { file: m[1].split(/[\\/]/).pop()!, line: Number(m[2]) } : null;
+/** デーモンの欄 file・line → ソースの場所（ファイルは名前だけ）。欄が無ければ null（where の文字は解釈しない） */
+export function placeOf(p: { file?: string | null; line?: number | null } | null | undefined)
+  : { file: string; line: number } | null {
+  return p?.file && typeof p.line === "number" ? { file: p.file.split(/[\\/]/).pop()!, line: p.line } : null;
 }
 
-/** フレームのソースの場所（デーモンが file・line を返せばそれ、無ければ where から） */
+/** フレームのソースの場所（デーモンが返す file・line） */
 export function frameLine(f: Frame | undefined): { file: string; line: number } | null {
-  if (!f) return null;
-  if (f.file && f.line !== undefined) return { file: f.file.split(/[\\/]/).pop()!, line: f.line };
-  return placeOf(f.where);
+  return placeOf(f);
 }
 
 /** 呼び出し履歴のフレームに移る: そのフレームの変数・逆アセンブルを読み、Source のその行を選ぶ（Call Stack の
@@ -141,15 +142,16 @@ const ELF_METHODS = new Set(["debug.elf.load", "debug.elf.load_demo", "debug.elf
 const WRITE_METHODS = new Set(["debug.write_expression", "debug.variable.write", "target.memory.write",
                                "target.registers.write", "target.peripheral.write", "debug.call"]);
 // 接続し直す・読み込み直すとデバッガが作り直され、ブレークポイントは空になる
-const BREAK_METHODS = new Set(["debug.breakpoint.set", "debug.breakpoint.clear", "debug.watchpoint.set",
+const BREAK_METHODS = new Set(["debug.breakpoint.set", "debug.breakpoint.clear", "debug.breakpoint.enable",
+                               "debug.watchpoint.set",
                                "debug.watchpoint.clear", "target.connect", "target.disconnect", "target.program_ram",
                                "target.flash"]);
 
 /** 開いているファイルの、ブレークポイントの印を付ける行。置いたときの「ファイル:行」を優先する（同じ番地に複数の行が
  *  あると、番地から引き直した行は押した行とずれる） */
-export function markedLines(d: DebugSnapshot): Set<number> {
+export function markedLines(d: DebugSnapshot, only?: (b: Breakpoint) => boolean): Set<number> {
   const out = new Set<number>();
-  for (const b of d.breakpoints) {
+  for (const b of only ? d.breakpoints.filter(only) : d.breakpoints) {
     const [file, line] = b.location.split(":");
     if (d.open && file === d.open && /^\d+$/.test(line ?? "")) out.add(Number(line));
     else if (b.file === d.open && b.line !== undefined) out.add(b.line);
@@ -336,6 +338,19 @@ export class Debugger {
     await this.reloadBreakpoints();
   }
 
+  /** 開いているファイルの行のブレークポイント（置いたときの「ファイル:行」を優先。toggleBreakpoint と同じ引き方） */
+  breakpointAt(line: number): Breakpoint | undefined {
+    const source = this.snap.source;
+    if (!source) return undefined;
+    return this.snap.breakpoints.find((b) => b.location === `${source.name}:${line}`)
+      ?? this.snap.breakpoints.find((b) => b.file === source.name && b.line === line);
+  }
+
+  async enableBreakpoint(location: string, enabled: boolean): Promise<void> {
+    await this.app.act("debug.breakpoint.enable", { location, enabled });
+    await this.reloadBreakpoints();
+  }
+
   async removeBreakpoint(location: string): Promise<void> {
     await this.app.act("debug.breakpoint.clear", { location });
     await this.reloadBreakpoints();
@@ -384,11 +399,17 @@ export class Debugger {
     return found;
   }
 
-  /** 式の指す値に書き（Watch・Locals の値の編集）、変数を読み直す。書けたら true */
+  /** 式の指す値に書き（Watch・Locals の値の編集）、変数を読み直す。書けたら true。使う API はターゲットの状態で決める
+   *  （lib/valuewrite の exprWriteCall: 止まっていれば選んだフレームで debug.write_expression、走っていれば watch.write）。
+   *  AI の作業中は確かめる（lib/guard の allowed） */
   async writeExpression(expression: string, value: number | string): Promise<boolean> {
-    const done = await this.app.act("debug.write_expression", { expression, value, frame: this.snap.frame });
-    if (done !== undefined) await this.refreshVariables();
-    return done !== undefined;
+    const call = exprWriteCall(this.target?.state, expression, value, this.snap.stop ? this.snap.frame : undefined);
+    if (!call || !(await allowed(this.app))) return false;
+    const done = await this.app.act(call.method as "watch.write", call.params as any);
+    if (done === undefined) return false;
+    if (this.snap.stop) await this.refreshVariables();
+    else await this.refreshWatches();
+    return true;
   }
 
   /** コアレジスタに書く（Registers の値の編集。止まっているとき）。読み直しは書き込みの記録（activity）で。書けたら true */
@@ -431,7 +452,7 @@ export class Debugger {
   async showAddress(address: number): Promise<{ file: string; line: number } | null> {
     const location = `0x${(address >>> 0).toString(16)}`;
     const info = await this.quiet("debug.symbol.info", { location });
-    const at = info?.where ? placeOf(String(info.where)) : null;
+    const at = placeOf(info);
     if (at && this.snap.files.some((f) => f.name === at.file)) await this.openFile(at.file);
     const around = await this.quiet("debug.disasm.around", { address, before: 12, after: 24 });
     if (around?.instructions) this.set({ disasm: around.instructions, focus: address });

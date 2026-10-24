@@ -1,14 +1,15 @@
 // Fault Analyzer の計算: 故障のハンドラの判定・故障で止まったら開く見張り・結果の整理
 import { describe, expect, it } from "vitest";
-import { causeRegister, headline, isFault, reportText, watchFaults, type FaultReport } from "../src/lib/fault";
+import { headline, isFault, reportText, watchFaults, type FaultReport } from "../src/lib/fault";
 import { FakeConn } from "./fake-conn";
 
 const FAULT: FaultReport = {
   architecture: "ARMv7-M / v8-M Mainline",
   exception: { number: 3, name: "HardFault" },
   faulted: true,
-  causes: [{ bit: "FORCED", meaning: "格上げ" }, { bit: "PRECISERR", meaning: "バスエラー", hint: "BFAR" },
-           { bit: "BFARVALID", meaning: "BFAR に番地" }],
+  causes: [{ bit: "FORCED", register: "HFSR", meaning: "格上げ" },
+           { bit: "PRECISERR", register: "BFSR", meaning: "バスエラー", hint: "BFAR" },
+           { bit: "BFARVALID", register: "BFSR", meaning: "BFAR に番地" }],
   registers: { CFSR: 0x8200, HFSR: 0x40000000, DFSR: 8, MMFAR: null, BFAR: 0x20018000, CPACR: 0xf00000 },
   fault_address: { address: 0x20018000, where: "0x20018000" },
   frame: { stack: "MSP", sp: 0x20017fc8, exc_return: 0xfffffff9, fp_context: false, caller_sp: 0x20017fe8,
@@ -54,10 +55,9 @@ describe("Fault Analyzer", () => {
     expect(isFault(FAULT)).toBe(true);
     expect(isFault({ ...FAULT, faulted: false, exception: null, causes: [] })).toBe(false);
     expect(isFault({ ...FAULT, faulted: false, causes: [] })).toBe(true);           // v6-M: HardFault の中
-    expect(headline(FAULT)).toBe("HardFault: PRECISERR");
+    // 見出しは API の立っているビットを全部、API の順で（画面が「主な原因」を選ばない）
+    expect(headline(FAULT)).toBe("HardFault: FORCED, PRECISERR, BFARVALID");
     expect(headline({ ...FAULT, faulted: false, exception: null })).toBeNull();
-    expect([causeRegister("FORCED"), causeRegister("DACCVIOL"), causeRegister("PRECISERR"), causeRegister("NOCP"),
-            causeRegister("x")]).toEqual(["HFSR", "MMFSR", "BFSR", "UFSR", ""]);
     const text = reportText(FAULT);
     expect(text).toContain("PC: 0x2000004C reached_milestone+12 (sram_demo.c:13)");
     expect(text).toContain("LR: 0x200000B4");

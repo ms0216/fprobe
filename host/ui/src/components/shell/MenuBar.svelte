@@ -24,7 +24,9 @@
   const MENUS: { label: Key; items: Item[] }[] = [
     { label: "menu.file", items: [{ cmd: "openElf" }, { recent: true }, { cmd: "loadDemo" }, "sep", { cmd: "programRam" },
                                   "sep", { label: "menu.settings", run: () => ui.open("settings") }] },
-    { label: "menu.view", items: [...viewItems(), "sep", { label: "menu.layoutSystem", run: () => dock.layout("system") },
+    { label: "menu.view", items: [...viewItems(), "sep", { label: "menu.layoutAnalysis", run: () => dock.layout("analysis") },
+                                  { label: "menu.layoutDebug", run: () => dock.layout("debug") },
+                                  { label: "menu.layoutSystem", run: () => dock.layout("system") },
                                   { label: "menu.resetLayout", run: () => dock.reset() }] },
     { label: "menu.debug", items: [{ cmd: "continue" }, { cmd: "halt" }, "sep", { cmd: "stepOver" }, { cmd: "stepInto" },
                                    { cmd: "stepOut" }, { cmd: "stepInstruction" }, { cmd: "runToCursor" }, "sep", { cmd: "toggleBreakpoint" },

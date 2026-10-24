@@ -1,6 +1,6 @@
 // Peripherals: フィールドの定義 → 書く部品、入力 → 値
 import { describe, expect, it } from "vitest";
-import { fieldControl, parseField, parseRegister, type FieldDef } from "../src/lib/peripherals";
+import { fieldControl, parseField, parseRegister, svdLoadParams, type FieldDef } from "../src/lib/peripherals";
 
 const field = (over: Partial<FieldDef>): FieldDef => ({ name: "F", bit_offset: 0, bit_width: 1, access: "read-write", enums: [], ...over });
 
@@ -23,5 +23,14 @@ describe("Peripherals", () => {
     expect(parseField("x", 3)).toBeNull();
     expect(parseRegister("0x0000ABCD", 32)).toBe(0xabcd);
     expect(parseRegister("1FFFF", 16)).toBeNull();
+  });
+});
+
+describe("Load SVD の引数", () => {
+  it("デバイス名かパスかは使う人が選ぶ（文字の形で推さない）", () => {
+    expect(svdLoadParams("path", " C:\\svd\\STM32F401.SVD ")).toEqual({ path: "C:\\svd\\STM32F401.SVD" });
+    expect(svdLoadParams("device", "vendor/part")).toEqual({ device: "vendor/part" });   // / を含むデバイス名もデバイス
+    expect(svdLoadParams("device", "STM32F401.svd")).toEqual({ device: "STM32F401.svd" });
+    expect(svdLoadParams("path", "  ")).toBeNull();
   });
 });

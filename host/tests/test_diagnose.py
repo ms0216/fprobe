@@ -10,24 +10,38 @@ from fprobe.raw_dap import RawDap
 GOOD_VOLTS = {"volts": 3.29, "over_range": False, "live": True, "samples": 10, "errors": 0}
 
 
-def run(target, volts=GOOD_VOLTS, pins=0b1000_0011, **kw):
+def run(target, volts=GOOD_VOLTS, pins=0b1000_0011, frequencies_hz=(1_000_000,), **kw):
     link = FakeDapLink(target, pins=pins)
-    return diagnose(RawDap(link), voltage=lambda: dict(volts), pins=lambda: link.pin_access(0, 0), **kw)
+    return diagnose(RawDap(link), list(frequencies_hz), voltage=lambda: dict(volts), pins=lambda: link.pin_access(0, 0),
+                    **kw)
 
 
 def step(d, name):
     return next(s for s in d.steps if s.name == name)
 
 
-def test_a_healthy_stm32_is_identified_and_a_connect_is_suggested():
+def test_a_healthy_stm32_is_identified():
     d = run(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))
-    assert d.ok and d.protocol == "swd" and d.frequency_hz == 1_000_000
+    assert d.reached and d.protocol == "swd" and d.frequency_hz == 1_000_000
     assert d.part.name == "STM32F401xD/E" and d.core["core"] == "Cortex-M4" and d.core["halted"]
-    assert d.connect == {"target": "stm32f401xe", "frequency_hz": 1_000_000}
+    assert d.part.suggested_target == "stm32f401xe"
     assert [s.status for s in d.steps if s.status != "ok"] == []
     out = d.as_dict()
-    assert out["verdict"].startswith("接続できる（STM32F401xD/E") and out["aps"][0]["kind"] == "mem-ap"
+    assert out["reached"] and out["frequencies_hz"] == [1_000_000] and out["aps"][0]["kind"] == "mem-ap"
     assert out["aps"][0]["rom_table"]["children"][0]["name"] == "SCS (Cortex-M4)"
+
+
+def test_the_body_returns_facts_without_a_verdict_or_a_suggested_connect():
+    # 結論の文・接続の引数のおすすめ・warn の判定は本体に置かない（プラグイン heuristics.diagnose_verdict）
+    out = run(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())})).as_dict()
+    assert not {"ok", "verdict", "suggested_connect"} & set(out)
+    assert {s["status"] for s in out["steps"]} <= {"ok", "fail", "skip"}
+
+
+def test_diagnose_needs_the_speeds_to_try():
+    import pytest
+    with pytest.raises(ValueError):
+        diagnose(RawDap(FakeDapLink(FakeTarget())), [])
 
 
 def test_voltage_is_reported_as_measured_without_a_threshold_verdict():
@@ -36,21 +50,24 @@ def test_voltage_is_reported_as_measured_without_a_threshold_verdict():
     off = dict(GOOD_VOLTS, volts=0.02)
     d = run(FakeTarget(powered=False), volts=off, pins=0b0000_0001)
     v = step(d, "voltage")
-    assert not d.ok and v.status == "ok" and "0.02 V" in v.message and "3.3 V" in v.message
+    assert not d.reached and v.status == "ok" and "0.02 V" in v.message and "3.3 V" in v.message
     assert "電源が入っていない" not in v.message
-    assert step(d, "pins").status == "warn"
+    assert step(d, "pins").status == "ok"                                  # Low の良し悪しは決めない（事実だけ）
     assert step(d, "pins").message == "nRESET = Low / SWDIO = Low"         # 原因の候補（プルアップ・短絡等）は並べない
     assert step(d, "swd").status == "fail" and step(d, "jtag").status == "fail"
-    assert d.verdict().startswith("接続できない: ") and "Vtarget = 0.02 V" in d.verdict()
     for volts in (1.2, 5.0):
         assert step(run(FakeTarget(), volts=dict(GOOD_VOLTS, volts=volts)), "voltage").status == "ok"
 
 
-def test_a_slow_link_is_found_by_lowering_the_speed():
-    d = run(FakeTarget(max_hz=500_000, aps={0: FakeMemAp(words=stm32f401_words())}), frequency_hz=4_000_000)
-    assert d.ok and d.frequency_hz == 400_000 and step(d, "swd").status == "warn"
+def test_a_slow_link_is_found_at_the_speeds_the_caller_gave():
+    target = FakeTarget(max_hz=500_000, aps={0: FakeMemAp(words=stm32f401_words())})
+    d = run(target, frequencies_hz=[4_000_000, 400_000])
+    assert d.reached and d.frequency_hz == 400_000 and step(d, "swd").status == "ok"
     msg = step(d, "swd").message                                   # 事実（頼んだ速さで応答しなかった）だけ。原因は推定しない
-    assert "4,000,000 Hz では応答せず" in msg and "信号品質" not in msg and d.connect["frequency_hz"] == 400_000
+    assert "4,000,000 Hz では応答せず" in msg and "信号品質" not in msg
+    assert step(d, "swd").data["frequency_hz"] == 400_000
+    only = run(FakeTarget(max_hz=500_000, swd=True), frequencies_hz=[4_000_000], jtag=False)   # 暗黙に速さを下げない
+    assert not only.reached and {a["frequency_hz"] for a in step(only, "swd").data["attempts"]} == {4_000_000}
 
 
 def test_rp2040_is_reached_through_targetsel():
@@ -61,12 +78,12 @@ def test_rp2040_is_reached_through_targetsel():
                         aps={0: FakeMemAp(words=words, readable=((0xE0000000, 0xE0100000),))})
     d = run(target)
     attempts = step(d, "swd").data["attempts"]
-    assert d.ok and "targetsel 0x01002927" in str(attempts[-1]["method"])
+    assert d.reached and "targetsel 0x01002927" in str(attempts[-1]["method"])
     # 複数ドロップの部品は TARGETSEL を先に試す: TARGETSEL の無い線では DP が全部同時に応答し、書き込みが救済の DP にも
     # 届く（2026-10-22 の実機。チップがリセットされたまま止まった）。素の JTAG→SWD より前に TARGETSEL で選ぶ
     assert attempts[0]["method"].startswith("targetsel")
     assert d.dp["targetid"]["designer"] == "Raspberry Pi"
-    assert d.part.name == "RP2040" and d.connect["target"] == "rp2040" and d.core["core"] == "Cortex-M0+"
+    assert d.part.name == "RP2040" and d.part.suggested_target == "rp2040" and d.core["core"] == "Cortex-M0+"
 
 
 def test_jtag_only_targets_are_found_on_the_chain():
@@ -74,34 +91,36 @@ def test_jtag_only_targets_are_found_on_the_chain():
                         jtag_dp_index=0, aps={0: FakeMemAp(words=stm32f401_words())})
     d = run(target)
     assert step(d, "swd").status == "skip" and step(d, "jtag").status == "ok"
-    assert d.ok and d.protocol == "jtag" and d.connect["jtag_chain"] == [4, 5]
+    assert d.reached and d.protocol == "jtag" and d.jtag.chain == [4, 5]
     assert d.jtag.devices[1].name == "STM32 boundary scan"
 
 
 def test_a_chain_without_a_jtag_dp_is_explained():
     target = FakeTarget(swd=False, jtag_chain=FakeChain([Tap(8, 0x0000081B)]))
     d = run(target)
-    assert not d.ok and "Gowin" in step(d, "jtag").message and "JTAG-DP が無い" in step(d, "jtag").message
+    assert not d.reached and "Gowin" in step(d, "jtag").message and "JTAG-DP が無い" in step(d, "jtag").message
 
 
-def test_lockup_suggests_connecting_under_reset():
+def test_lockup_is_reported_without_a_suggestion():
     words = stm32f401_words()
     words[0xE000EDF0] = 1 << 19 | 1
     d = run(FakeTarget(aps={0: FakeMemAp(words=words)}))
-    assert step(d, "core").status == "warn" and d.connect["connect_mode"] == "under-reset"
+    core = step(d, "core")
+    assert core.status == "ok" and core.data["lockup"] and "ロックアップ" in core.message
+    assert "under-reset" not in core.message                       # 接続の仕方のおすすめはプラグイン
 
 
 def test_debug_power_that_never_comes_up():
     d = run(FakeTarget(power_ack=False))
-    assert not d.ok and step(d, "power").status == "fail" and "CDBGPWRUPACK" in step(d, "power").message
+    assert not d.reached and step(d, "power").status == "fail" and "CDBGPWRUPACK" in step(d, "power").message
 
 
 def test_nordic_approtect_and_a_disabled_mem_ap():
     ctrl_ap = FakeMemAp(idr=0x02880000, extra={0x0C: 0})
     locked = FakeMemAp(csw=0x03000000, words={})
     d = run(FakeTarget(aps={0: locked, 1: ctrl_ap}))
-    assert "APPROTECT" in step(d, "protection").message
-    assert step(d, "ap_disabled").status == "warn"
+    assert "APPROTECT" in step(d, "protection").message and step(d, "protection").data["approtect"]
+    assert step(d, "ap_disabled").status == "ok" and step(d, "ap_disabled").data["ap"] == 0
 
 
 def test_adiv6_aps_are_found_from_baseptr():
@@ -115,7 +134,7 @@ def test_adiv6_aps_are_found_from_baseptr():
     mem_ap = FakeMemAp(idr=0x34770008, base=0xE00FF003, words=ap_words, extra=window)
     target = FakeTarget(dpidr=0x4C013477, adi_v6=True, baseptr=0x00000001, aps={0x2000: mem_ap}, apb_words=root)
     d = run(target)
-    assert d.ok, [s.as_dict() for s in d.steps]
+    assert d.reached and not [s for s in d.steps if s.status == "fail"], [s.as_dict() for s in d.steps]
     assert d.aps[0]["ap"] == 0x2000 and d.part.name == "RP2350" and d.core["core"] == "Cortex-M33"
 
 
@@ -124,16 +143,16 @@ def test_protection_hook_results_become_a_step():
 
     def protection(part, read):
         seen.append(read(0x40023C14))
-        return {"status": "warn", "message": "RDP Level 1", "level": 1}
+        return {"message": "RDP Level 1", "level": 1}
     d = run(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}), protection=protection)
     assert seen == [0x0FFFAAED]
     assert step(d, "protection").message == "RDP Level 1" and step(d, "protection").data == {"level": 1}
-    assert "ただし: RDP Level 1" in d.verdict()
+    assert step(d, "protection").status == "ok"
 
 
 def test_without_voltage_or_pins_those_steps_are_skipped():
-    d = diagnose(RawDap(FakeDapLink(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))))
-    assert step(d, "voltage").status == "skip" and step(d, "pins").status == "skip" and d.ok
+    d = diagnose(RawDap(FakeDapLink(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))), [1_000_000])
+    assert step(d, "voltage").status == "skip" and step(d, "pins").status == "skip" and d.reached
 
 
 def test_a_responding_target_with_zero_volts_is_both_facts():
@@ -142,7 +161,7 @@ def test_a_responding_target_with_zero_volts_is_both_facts():
     d = run(FakeTarget(), volts=dict(GOOD_VOLTS, volts=0.08))
     step = next(s for s in d.steps if s.name == "voltage")
     assert step.status == "ok" and "0.08 V" in step.message, step
-    assert d.ok, [s.as_dict() for s in d.steps if s.status == "fail"]
+    assert d.reached, [s.as_dict() for s in d.steps if s.status == "fail"]
 
 
 def test_a_sleeping_core_is_attached_without_reset():
@@ -152,15 +171,12 @@ def test_a_sleeping_core_is_attached_without_reset():
     words[0xE000EDF0] = 1 << 18 | 1
     d = run(FakeTarget(aps={0: FakeMemAp(words=words)}))
     assert step(d, "core").status == "ok" and "眠っている" in step(d, "core").message
-    assert "connect_mode" not in d.connect
 
 
-def test_verdict_does_not_say_connectable_when_a_step_failed():
-    # 実機（2026-10-22、RP2040 に TARGETSEL なし）: DP は応答したが AP が見つからず ok = false なのに、結論が
-    # 「接続できる」だった。結論は ok と食い違わない（失敗した段があれば「接続できない」から書く）
+def test_a_dp_without_aps_is_reached_but_the_aps_step_fails():
+    # 実機（2026-10-22、RP2040 に TARGETSEL なし）: DP は応答したが AP が見つからない。両方を事実として返す
     d = run(FakeTarget(aps={}))
-    assert not d.ok and step(d, "aps").status == "fail"
-    assert d.verdict().startswith("接続できない: AP が見つからない")
+    assert d.reached and step(d, "aps").status == "fail" and step(d, "aps").message == "AP が見つからない"
 
 
 def test_swd_failure_messages_are_the_acks_without_guessed_causes():
@@ -178,11 +194,11 @@ def test_a_rescue_dp_that_answers_without_targetsel_is_never_powered_up():
     # TARGETID・DLPIDR で応答した DP を確かめ、複数ドロップの部品の救済の DP なら電源を要求しない
     rescue = FakeTarget(dpidr=0x10212927, targetid=0x01002927, dlpidr=0xF0000001, aps={})
     link = FakeDapLink(rescue)
-    d = diagnose(RawDap(link), voltage=lambda: dict(GOOD_VOLTS), pins=lambda: link.pin_access(0, 0))
+    d = diagnose(RawDap(link), [1_000_000], voltage=lambda: dict(GOOD_VOLTS), pins=lambda: link.pin_access(0, 0))
     assert not link.ctrl_stat & (1 << 28), "救済の DP に CDBGPWRUPREQ を書いた"
     swd = step(d, "swd")
     assert swd.status == "fail" and "救済の DP" in swd.message and "0xF1002927" in swd.message
-    assert not d.ok
+    assert not d.reached
 
 
 def test_a_dp_that_ignores_targetsel_is_not_taken_for_a_multidrop_core():
@@ -190,4 +206,4 @@ def test_a_dp_that_ignores_targetsel_is_not_taken_for_a_multidrop_core():
     # 複数ドロップのコアとはみなさず、素の JTAG→SWD で続ける
     d = run(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))
     attempts = step(d, "swd").data["attempts"]
-    assert d.ok and attempts[-1]["method"] == "jtag_to_swd" and "targetsel" not in d.connect
+    assert d.reached and attempts[-1]["method"] == "jtag_to_swd" and "targetsel" not in step(d, "swd").data

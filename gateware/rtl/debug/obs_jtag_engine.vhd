@@ -20,8 +20,9 @@
 -- イベントにする（値が前と同じで変化の回数も 0 の標本は出さない）。時刻 = Capture-DR を出る TCK の立ち上がり（値を取り込む瞬間）。
 -- 印のイベントは出さない。
 -- 観測の回路が答えない（見出しの印 31:24 が 0xA6 でない = TDO が 0 か 1 に張り付いた・IR が USER でない・ID の応答が
--- "FOBS" でない・前の記録を吸い出した後 16 スキャンで ID の応答が来ない）ときは stuck にして
--- TAP を戻し、線を手放して止まる（enable を 0 に戻すまで）。
+-- "FOBS" でない・前の記録を吸い出した後 id_scans スキャンで ID の応答が来ない）ときは stuck にして
+-- TAP を戻し、線を手放して止まる（enable を 0 に戻すまで）。id_scans は使う側が渡す待つ上限（0 = 上限なし。待ち続ける）。
+-- 上限で打ち切ったときは id_timeout も立てる（stuck の理由が「答えが違う」か「上限まで来なかった」かを分ける）。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -44,6 +45,7 @@ entity obs_jtag_engine is
     user_ir     : in  std_logic_vector(31 downto 0);
     words       : in  unsigned(8 downto 0);
     sync_period : in  unsigned(15 downto 0);
+    id_scans    : in  unsigned(7 downto 0);              -- ID の応答を待つスキャンの上限（0 = 上限なし）
     cmd_push    : in  std_logic;
     cmd_data    : in  std_logic_vector(15 downto 0);
     -- 値の一致（クロストリガの源 bit4。docs/superpowers/specs/2026-10-21-system-analysis-design.md §4.1）:
@@ -61,6 +63,7 @@ entity obs_jtag_engine is
     target_running : out std_logic;                     -- 最後の見出しの「対象の clk 側が記録中」
     id_ok         : out std_logic;
     stuck         : out std_logic;
+    id_timeout    : out std_logic;                      -- stuck の理由: id_scans スキャン待って ID の応答が来なかった
     cmd_pending   : out std_logic;
     overflow_seen : out std_logic;
     cmd_dropped   : out std_logic;
@@ -94,7 +97,6 @@ architecture rtl of obs_jtag_engine is
   constant OP_SYNC    : std_logic_vector(3 downto 0) := x"3";
   constant RESPONSE   : std_logic_vector(5 downto 0) := "110001";        -- 記録の 31:26（制御・応答）
   constant HEADER_WORDS : natural := 1;
-  constant ID_SCANS   : natural := 16;                                   -- この数のスキャンで ID が来なければ答えない
   constant CMD_DEPTH  : natural := 4;
 
   -- 手順。E_IR・E_DR は区間の並び（BEFORE → BODY → AFTER）を 1 片ずつ送る
@@ -129,7 +131,8 @@ architecture rtl of obs_jtag_engine is
   signal scan_count  : unsigned(31 downto 0);
   signal sync_count  : unsigned(15 downto 0);
   signal id_reads    : unsigned(1 downto 0);          -- 出した ID の読み（下位・上位の 2 つ）
-  signal id_wait     : unsigned(4 downto 0);          -- ID がそろうまでのスキャンの数
+  signal id_wait     : unsigned(7 downto 0);          -- ID がそろうまでのスキャンの数
+  signal cfg_id_scans : unsigned(7 downto 0);
   signal id_lo_ok    : std_logic;
   signal id_hi_ok    : std_logic;
   signal upd_time    : unsigned(47 downto 0);        -- このスキャンの Update-DR の時刻
@@ -153,7 +156,7 @@ architecture rtl of obs_jtag_engine is
   signal q_head      : natural range 0 to CMD_DEPTH - 1;
   signal q_count     : natural range 0 to CMD_DEPTH;
 
-  signal running_r, id_ok_r, stuck_r, ovf_r, dropped_r, tgt_run_r : std_logic;
+  signal running_r, id_ok_r, stuck_r, id_timeout_r, ovf_r, dropped_r, tgt_run_r : std_logic;
   signal stop_req : std_logic;                       -- 止める指示を見た（すぐ戻されても区切りで止めて始め直す）
   -- 設定は開始のときに写す（走っている間に CSR を書き換えても、今のスキャンに効かない。jtag_phy は実行中に変えない）
   signal cfg_half_period, cfg_sync_period : unsigned(15 downto 0);
@@ -180,6 +183,7 @@ begin
   target_running <= tgt_run_r;
   id_ok         <= id_ok_r;
   stuck         <= stuck_r;
+  id_timeout    <= id_timeout_r;
   cmd_pending   <= '1' when q_count /= 0 else '0';
   overflow_seen <= ovf_r;
   cmd_dropped   <= dropped_r;
@@ -459,14 +463,15 @@ begin
               if id_ok_r = '0' then
                 if id_lo_ok = '1' and id_hi_ok = '1' then
                   id_ok_r <= '1';
-                elsif id_wait /= ID_SCANS and rec_count <= m_words then
+                elsif id_wait /= cfg_id_scans and rec_count <= m_words then
                   -- 前の観測の読まれていない記録が FIFO に残っていると、ID の応答はその後ろに並ぶ。吸い出し終えて
                   -- （見出しの数が 1 スキャンで読む語数以下）から数える
                   id_wait <= id_wait + 1;
                 end if;
               end if;
-              if bad = '1' or (id_ok_r = '0' and id_wait = ID_SCANS) then
+              if bad = '1' or (id_ok_r = '0' and cfg_id_scans /= 0 and id_wait = cfg_id_scans) then
                 stuck_r <= '1';
+                id_timeout_r <= not bad;
                 running_r <= '0';
                 step <= E_EXIT;
               elsif want_stop then
@@ -498,7 +503,9 @@ begin
               cfg_dr_after <= dr_after;
               cfg_user_ir <= user_ir;
               cfg_words <= words;
+              cfg_id_scans <= id_scans;
               stuck_r <= '0';
+              id_timeout_r <= '0';
               id_ok_r <= '0';
               dropped_r <= '0';
               ovf_r <= '0';
@@ -617,6 +624,8 @@ begin
         running_r <= '0';
         id_ok_r <= '0';
         stuck_r <= '0';
+        id_timeout_r <= '0';
+        cfg_id_scans <= (others => '0');
         ovf_r <= '0';
         tgt_run_r <= '0';
         dropped_r <= '0';

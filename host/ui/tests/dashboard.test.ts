@@ -2,9 +2,10 @@
 import { describe, expect, it } from "vitest";
 import {
   addWidget, exampleLayout, expressionsOf, formatNumber, fraction, gaugeArc, layoutJson, moveWidget, newWidget,
-  parseLayout, readValues, removeWidget, SharedDashboard, sliderStep, truthOf, updateWidget, validateLayout, writeCall,
+  parseLayout, readValues, removeWidget, SharedDashboard, sliderStep, truthOf, updateWidget, validateLayout,
   writeValue, MAX_WIDGETS,
 } from "../src/lib/dashboard";
+import { exprWriteCall } from "../src/lib/valuewrite";
 import { FakeConn } from "./fake-conn";
 
 describe("配置の検証", () => {
@@ -113,8 +114,9 @@ describe("読み書きの API", () => {
   });
 
   it("書く: 走行中は watch.write、止まっているときは debug.write_expression（真偽は数に）", () => {
-    expect(writeCall(true, "x", true)).toEqual({ method: "watch.write", params: { expression: "x", value: true } });
-    expect(writeCall(false, "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
+    // 部品の書き込みは、ほかの窓と同じ規則（lib/valuewrite の exprWriteCall）
+    expect(exprWriteCall("RUNNING", "x", true)).toEqual({ method: "watch.write", params: { expression: "x", value: true } });
+    expect(exprWriteCall("HALTED", "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
   });
 });
 

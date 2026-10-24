@@ -21,7 +21,7 @@
 -- 番地の自動増加は 1 KB の境界をまたげない（ADIv5）。ホストは 1 か所を 1 KB の中に収める。
 -- バスの誤りは SWD では「次の」AP アクセスで FAULT になる（ポスト）。サンプラが起こした誤りは ABORT（STKERRCLR）で
 -- 消してから CSW・TAR・SELECT を戻して渡す（ホストの次の転送が、サンプラの起こした誤りで FAULT にならない）。
--- WAIT は RETRIES 回まで繰り返す。FAULT 以外の異常（応答なし・パリティ）は線の不調なので、SELECT だけ戻して渡す
+-- WAIT は wait_retry 回（ホストが DAP_TransferConfigure で設定）まで繰り返す。FAULT 以外の異常（応答なし・パリティ）は線の不調なので、SELECT だけ戻して渡す
 -- （ponytail: swd_injector と同じ）。誤りはどれも errors に数える。
 -- 前の巡回が終わる前に次の周期が来たら overruns に数え、巡回が終わったら間を空けずに次の巡回を始める（周期に
 -- 追いつかないときは「できるだけ速く」になる。周期を丸ごと飛ばすと実際の速さが半分に落ちた。2026-10-18 に実機で）。
@@ -36,12 +36,13 @@ use ieee.numeric_std.all;
 
 entity dap_sampler is
   generic (
-    SLOTS   : positive := 8;
-    RETRIES : positive := 255
+    SLOTS   : positive := 8
   );
   port (
     clk           : in  std_logic;
     rst           : in  std_logic;
+    -- WAIT の再試行の回数（ホストが DAP_TransferConfigure で設定した値。dap_processor の wait_retry_out）
+    wait_retry    : in  unsigned(15 downto 0);
     -- 設定（CSR）
     run           : in  std_logic;
     period        : in  unsigned(31 downto 0);           -- 巡回の周期（clk の周期数。0 = 止める）
@@ -131,7 +132,11 @@ architecture rtl of dap_sampler is
   signal aborting    : boolean := false;               -- 誤りを数えた後の後始末の最中
   signal saved       : boolean := false;               -- CSW・TAR の戻す値がある（控え、または読んで保存した）
   signal last        : std_logic_vector(31 downto 0) := (others => '0');   -- 最後の語（誤りの確認まで出さない）
-  signal tries       : natural range 0 to RETRIES := 0;
+  signal tries       : unsigned(15 downto 0) := (others => '0');
+  -- 再試行の回数はいったん受けて（めったに変わらない）、比べた結果もレジスタに。WAIT の応答は数十周期ごとなので、
+  -- 1 周期前の tries との比べで足りる（DAP の処理部からの長い経路と 16 ビットの比べを、応答の判定の経路から外す）
+  signal retry_r     : unsigned(15 downto 0) := (others => '0');
+  signal retry_more  : std_logic := '0';
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
   signal fast        : boolean := false;
   signal same        : boolean := false;               -- 有効なか所が 1 つで 1 語: 自動増加なしで TAR を動かさない
@@ -158,6 +163,18 @@ architecture rtl of dap_sampler is
   signal rounds_r, errors_r, overruns_r : unsigned(31 downto 0) := (others => '0');
   signal restores_r  : unsigned(15 downto 0) := (others => '0');
 begin
+  retry_i : process (clk)
+  begin
+    if rising_edge(clk) then
+      retry_r <= wait_retry;
+      if tries < retry_r then
+        retry_more <= '1';
+      else
+        retry_more <= '0';
+      end if;
+    end if;
+  end process;
+
   -- PHY の命令の切り替え（mine は境界でしか変わらない）
   phy_cmd_valid <= valid_r when mine else up_cmd_valid;
   phy_cmd_op    <= OP_TRANSFER when mine else up_cmd_op;
@@ -198,7 +215,7 @@ begin
     -- 線を渡すために戻し始める（CSW・TAR の戻す値が無ければ SELECT だけ）
     procedure start_restore is
     begin
-      tries    <= 0;
+      tries    <= (others => '0');
       aborting <= false;
       state    <= S_ISSUE;
       if saved then
@@ -360,7 +377,7 @@ begin
               if give_back then
                 start_restore;
               elsif up_busy = '0' then
-                tries <= 0;
+                tries <= (others => '0');
                 word  <= 0;
                 state <= S_ISSUE;
                 if tar_ok then
@@ -373,7 +390,7 @@ begin
               mine     <= true;                                  -- 借りる
               step     <= P_SELECT;
               word     <= 0;
-              tries    <= 0;
+              tries    <= (others => '0');
               aborting <= false;
               saved    <= shadow_valid = '1';
               fast     <= shadow_valid = '1';
@@ -393,7 +410,7 @@ begin
             if phy_rsp_valid = '1' then
               ack_r <= phy_rsp_ack;
               if phy_rsp_ack = ACK_OK and phy_rsp_par = '0' then
-                tries <= 0;
+                tries <= (others => '0');
                 state <= S_ISSUE;
                 case step is
                   when P_SELECT =>
@@ -442,11 +459,11 @@ begin
                       slot <= slot + 1;
                     end if;
                 end case;
-              elsif phy_rsp_ack = ACK_WAIT and tries < RETRIES then
+              elsif phy_rsp_ack = ACK_WAIT and retry_more = '1' then
                 tries <= tries + 1;
                 state <= S_ISSUE;
               elsif aborting then                                -- 後始末の最中にまた失敗: SELECT を戻して終える
-                tries <= 0;
+                tries <= (others => '0');
                 if step = P_RESTORE_SELECT then
                   hand_back;
                   slot <= slot + 1;
@@ -457,7 +474,7 @@ begin
               else
                 errors_r <= errors_r + 1;
                 aborting <= true;
-                tries    <= 0;
+                tries    <= (others => '0');
                 state    <= S_ISSUE;
                 if phy_rsp_ack = ACK_FAULT then
                   step <= P_CLEAR;                               -- バスの誤り: 消してから全部戻す

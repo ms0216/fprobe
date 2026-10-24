@@ -4,7 +4,7 @@ GDB サーバ（fprobe.gdb）も開く（IDE とロジアナ・記録・AI を�
 
     fprobe-daemon [--serial 0001 | --name NAME | --port COM3 | --eth 192.168.77.2] [--lan [--token T]]
                   [--gdb 3333 [--gdb-target stm32f401xe] [--gdb-role human]]
-                  [--stream rtt0=19021:telnet --stream swo=3443 …] [--stream-log rtt0=~/rtt0.log …]
+                  [--stream rtt0=19021:telnet --stream swo=3443 …] [--stream-log rtt0=~/rtt0.log:time …]
 
 --stream は生の流れ（rtt0〜 / swo / uart / semihosting）を TCP で公開する（fprobe.probe_streams。127.0.0.1 だけ）。
 """
@@ -50,6 +50,7 @@ DEFAULT_PORT = 7820
 NOTIFY_LIMIT = 1000                                          # 利用者ごとの送り途中の通知の上限
 UI_DIR = Path(__file__).resolve().parents[2] / "ui" / "dist"     # 画面のビルドの出力（host/ui）
 WATCHER = Client(0, "daemon", "script")                    # 見張りの読み（記録しない）。見張りが見つけた止まりのフックも
+_SOURCE = contextvars.ContextVar("fprobe_source", default=None)      # 要求の source（どの窓から。操作の記録に残す）
 _IN_HOOK = contextvars.ContextVar("fprobe_in_hook", default=False)   # フックの動作の中（その操作はフックを起こさない）
 # コアを動かし得る操作。終わるたびに見張りの状態の run を 1 増やす（同じ場所で止まり直しても画面が読み直せる）
 # 記録を開く・始める・止める操作: 終わったら通知 "recording" を送る（画面の時間軸・記録のビューが読み直す。だれが
@@ -95,9 +96,12 @@ class LinkRecovered(Exception):
 
 
 class _Rpc(Exception):
-    def __init__(self, code: int, message: str):
+    """JSON-RPC の誤り。data は構造の欄（機器の誤りなら exception = 例外の型の名前・detail = 例外の文そのまま。
+    画面は文の形を推して頭を外さず、detail を出す）。"""
+    def __init__(self, code: int, message: str, data: dict | None = None):
         super().__init__(message)
         self.code = code
+        self.data = data
 
 
 class _Connection:
@@ -172,11 +176,23 @@ class Daemon:
 
     async def handle(self, conn: _Connection, request: dict) -> dict | None:
         rid, method, params = request.get("id"), request.get("method", ""), request.get("params") or {}
+        token = None
         try:
+            if "source" in request:                      # どの窓から（使われ方の記録。呼び手の申告をそのまま残す）
+                source = request["source"]
+                if not isinstance(source, str) or not 1 <= len(source) <= 64:
+                    raise _Rpc(E_INVALID_REQUEST, "source は 1〜64 文字の文字列")
+                token = _SOURCE.set(source)
             result = await self._dispatch(conn, method, params, request.get("quiet") is True)
             return None if rid is None else {"jsonrpc": "2.0", "id": rid, "result": result}
         except _Rpc as e:
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": e.code, "message": str(e)}}
+            error = {"code": e.code, "message": str(e)}
+            if e.data is not None:
+                error["data"] = e.data
+            return {"jsonrpc": "2.0", "id": rid, "error": error}
+        finally:
+            if token is not None:
+                _SOURCE.reset(token)
 
     async def _dispatch(self, conn: _Connection, method: str, params: dict, quiet: bool = False) -> Any:
         if method not in self.spec.methods:
@@ -235,7 +251,7 @@ class Daemon:
             raise _Rpc(E_NOT_ALLOWED, "トークンが違う（--lan のデーモンにはトークンが要る）")
         if params["api_version"] != API_VERSION:
             raise _Rpc(E_VERSION, f"API の版 {params['api_version']} はこのデーモン（{API_VERSION}）と合わない")
-        conn.client = Client(next(self._ids), params["name"], params["role"])
+        conn.client = Client(next(self._ids), params["name"], params["role"], automated=params.get("automated"))
         self.announce_clients()
         return {"api_version": API_VERSION, "boot": self.boot, "client_id": conn.client.id, "device": self.device,
                 "control": self.arbiter.state()}
@@ -311,7 +327,7 @@ class Daemon:
         except BaseException as e:                       # 機器の処理の BaseException（SystemExit 等）にも必ず応答する
             code = (E_TIMEOUT if isinstance(e, HoldExpired) else E_NOT_CONNECTED if isinstance(e, NotConnected)
                     else E_NO_DATA if isinstance(e, NoData) else E_DEVICE)
-            raise _Rpc(code, f"{type(e).__name__}: {e}") from None
+            raise _Rpc(code, f"{type(e).__name__}: {e}", {"exception": type(e).__name__, "detail": str(e)}) from None
         if method.name in RECORDING_METHODS:
             self._announce_recording(client, method.name, result)
         try:
@@ -339,8 +355,10 @@ class Daemon:
                                    "client": {"id": client.id, "name": client.name, "role": client.role}})
 
     def clients(self) -> list[dict]:
-        return [dataclasses.asdict(c.client) for c in self.connections if c.client] + \
-            [dataclasses.asdict(c) for c in self.guests.values()]
+        """利用者の一覧。WebSocket の利用者には、読まないので捨てた通知の数 notifications_dropped と、使った送り待ちの
+        上限 notify_limit（捨てたことを黙らない）。"""
+        return [{**dataclasses.asdict(c.client), "notifications_dropped": c.dropped, "notify_limit": NOTIFY_LIMIT}
+                for c in self.connections if c.client] + [dataclasses.asdict(c) for c in self.guests.values()]
 
     def new_client(self, name: str, role: str, via: str) -> Client:
         return Client(next(self._ids), name, role, via)
@@ -487,7 +505,11 @@ class Daemon:
             return {"action": kind, "target": target, "ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def _recorder(self, client: Client, method: str, params: dict, started: float) -> Callable[[Future], None]:
-        entry = {"client": client.name, "role": client.role, "method": method, "params": summarize(params)}
+        entry = {"client": client.name, "role": client.role, "via": client.via, "method": method, "params": summarize(params)}
+        if client.automated is not None:                 # 申告の無いものは書かない（推定しない）
+            entry["automated"] = client.automated
+        if (source := _SOURCE.get()) is not None:
+            entry["source"] = source
 
         def record(future: Future) -> None:
             if future.cancelled():                       # 保留のまま利用者が去った: 実行されていない
@@ -545,11 +567,15 @@ def parse_stream(text: str) -> dict:
 
 
 def parse_stream_log(text: str) -> dict:
-    """--stream-log の値 "名前=ファイル" → stream_log_start の引数（行の頭に時刻を付ける）。"""
+    """--stream-log の値 "名前=ファイル[:time]" → stream_log_start の引数。:time なら行の頭に時刻を付ける（文字の流れ
+    用。流れが文字かバイナリかは名前から決めないので、使う側が明示する）。"""
     name, sep, path = text.partition("=")
+    timestamps = path.endswith(":time")
+    if timestamps:
+        path = path[:-len(":time")]
     if not sep or not name or not path:
-        raise ValueError(f"--stream-log は 名前=ファイル（{text!r}）")
-    return {"stream": name, "path": path, "timestamps": not name.startswith("swo")}
+        raise ValueError(f"--stream-log は 名前=ファイル[:time]（{text!r}）")
+    return {"stream": name, "path": path, "timestamps": timestamps}
 
 
 LOCAL_NAMES = {"127.0.0.1", "localhost", "[::1]"}
@@ -600,7 +626,8 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
                 reply = await daemon.handle(conn, request)
             except Exception as e:                       # 想定外でも必ず応答する（利用者を待たせない）
                 reply = {"jsonrpc": "2.0", "id": request.get("id"),
-                         "error": {"code": E_INTERNAL, "message": f"{type(e).__name__}: {e}"}}
+                         "error": {"code": E_INTERNAL, "message": f"{type(e).__name__}: {e}",
+                                   "data": {"exception": type(e).__name__, "detail": str(e)}}}
             if reply is None or "id" not in request:    # 通知（id なし）には、誤りでも応答しない（JSON-RPC 2.0）
                 return
             result = reply.get("result")
@@ -705,8 +732,8 @@ def main() -> None:
     parser.add_argument("--stream", action="append", default=[], type=parse_stream, metavar="NAME=PORT[:telnet]",
                         help="生の流れ（rtt0〜 / swo / uart / semihosting）を 127.0.0.1:PORT で公開する（繰り返せる。"
                              "例 rtt0=19021:telnet。RTT・SWO の受信は API で始める）")
-    parser.add_argument("--stream-log", action="append", default=[], type=parse_stream_log, metavar="NAME=PATH",
-                        help="流れをファイルに書く（繰り返せる。文字の流れは行の頭に時刻）")
+    parser.add_argument("--stream-log", action="append", default=[], type=parse_stream_log, metavar="NAME=PATH[:time]",
+                        help="流れをファイルに書く（繰り返せる。:time なら行の頭に時刻。例 rtt0=rtt0.log:time）")
     parser.add_argument("--new-token", action="store_true", help="--lan の保存した合言葉を作り直す（URL が変わる）")
     args = parser.parse_args()
     from .. import probe_names

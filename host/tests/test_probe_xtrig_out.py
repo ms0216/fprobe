@@ -149,6 +149,15 @@ def test_status_lists_every_pin_and_the_free_actions(probe, device):
     assert by[7]["pattern"] == {"mask": 0b11, "value": 0b01, "any": True}
 
 
+def test_an_undefined_mode_read_back_is_reported_as_read(probe, device):
+    # 読み戻したモードの値が定義の外（3）なら WHILE に丸めず、読んだ値をそのまま返す（?75）
+    probe.xtrig_output_set(channel=7, mode="while", pattern={"mask": 1, "value": 1}, enable=True)
+    lo, width = g.XTRIG_OUT_CTRL0_MODE                                          # (最下位のビット, 幅)
+    device.csr[g.XTRIG_OUT_CTRL0] = device.csr[g.XTRIG_OUT_CTRL0] & ~(((1 << width) - 1) << lo) | 3 << lo
+    out = {o["channel"]: o for o in probe.xtrig_output_status()["outputs"]}[7]
+    assert out["mode"] is None and out["mode_raw"] == 3
+
+
 def test_without_outputs_the_tools_say_so(device):
     p = Probe("unused")
     p._session = SimpleNamespace(device=OutputDevice(pins=(), actions=0))

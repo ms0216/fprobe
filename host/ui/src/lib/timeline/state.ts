@@ -14,18 +14,21 @@
 // - 時刻の 0 は「記録（または捕捉）の始め」（origins。lib/time.ts）。ビューの時刻の欄も同じ 0 を使う。
 // - 段の構成（並び・表示・畳み）は源ごとにブラウザに覚える。
 // 仕様: docs/superpowers/specs/2026-10-18-timeline-tiles-design.md §5
-import type { DaemonConnection } from "../api";
+import { errorText, isNoData, type DaemonConnection } from "../api";
 import { load, save } from "../prefs";
 import type { AppState } from "../state";
 import { NO_ORIGINS, type Origins } from "../time";
-import { panView, zoomView, type CaptureInfo, type CaptureRequest, type View } from "../waveform";
+import { t } from "../i18n";
+import { captureRequest, panView, rateChoices, readCaptureSettings, zoomView, type CaptureInfo, type CaptureRequest,
+         type View } from "../waveform";
 import type { RowSpec, TimelineFrame } from "./compose";
 import { cursorRows, type CursorValues } from "./cursor";
 import { createDecimator, type Anomaly, type Decimator } from "./decimator";
 import { announceSelect } from "./events";
 import type { PickedItem } from "./query";
 import {
-  EMPTY_CONFIG, RowRegistry, moveGroup, moveRow, parseConfig, setShown, toggleFold, type GroupDef, type RowConfig,
+  EMPTY_CONFIG, RowRegistry, moveGroup, moveRow, parseConfig, setShown, systemHides, toggleFold, unhide, type GroupDef,
+  type RowConfig,
   type VisibleRow, systemOrder } from "./rows";
 import { overlapOf, tileServes, type TileHeader } from "./tile";
 
@@ -79,6 +82,7 @@ export interface TimelineSnapshot {
   rows: VisibleRow[];                   // 描く段（上から）
   groups: GroupDef[];                   // すべての段（隠したものも。段の一覧のメニュー）
   config: RowConfig;
+  autoHidden: string[];                 // 頼まれずに隠した段（システム解析の並びで変化の無いピン。画面が数を出して見せ直す）
   selection: number | null;             // 選択カーソル
   reference: number | null;             // 基準のカーソル
   selected: PickedItem | null;          // 選んだ出来事
@@ -122,12 +126,12 @@ export function specsOf(rows: VisibleRow[]): RowSpec[] {
   return rows.map((r) => ({ id: r.def.id, type: r.def.type, color: r.def.color }));
 }
 
-/** 縮図の段: 記録の stream のまとまり（無ければロジアナのチャンネル、最大 8） */
+/** 縮図の段: 記録の stream のまとまり（無ければロジアナのチャンネル全部。切らない） */
 export function overviewSpecs(groups: GroupDef[]): RowSpec[] {
   const streams = groups.filter((g) => g.id !== "logic").map((g) => ({ id: `group:${g.id}`, type: "group" as const,
                                                                          color: 0 }));
   if (streams.length) return streams;
-  return (groups.find((g) => g.id === "logic")?.rows ?? []).slice(0, 8)
+  return (groups.find((g) => g.id === "logic")?.rows ?? [])
     .map((r) => ({ id: r.id, type: r.type, color: r.color }));
 }
 
@@ -156,7 +160,7 @@ export class TimelineState {
     const config = loadConfig("capture");
     this.snap = {
       source: "capture", capture: null, recording: null, extent: null, tickS: 0, view: { start: 0, end: 0 }, width: 0,
-      frame: null, header: null, rows: [], groups: [], config, selection: null, reference: null, selected: null,
+      frame: null, header: null, rows: [], groups: [], config, autoHidden: [], selection: null, reference: null, selected: null,
       overview: null, anomalies: [], capturedBy: null, loading: false, error: null, decimator: decimator.kind,
       marks: [], pointers: [], origins: NO_ORIGINS, live: false, follow: true,
     };
@@ -293,6 +297,7 @@ export class TimelineState {
 
   setRowShown(id: string, show: boolean): void {
     const def = this.snap.groups.flatMap((g) => g.rows).find((r) => r.id === id);
+    if (show && this.snap.autoHidden.includes(id)) this.set({ autoHidden: this.snap.autoHidden.filter((x) => x !== id) });
     if (def) this.setConfig(setShown(this.snap.config, def, show));
   }
 
@@ -305,11 +310,23 @@ export class TimelineState {
   }
 
   /** システム解析の並び（MCU と FPGA が隣り合う。rows.ts の systemOrder） */
+  /** システム解析の並び。flat = 記録の中で変化の無いピン（API の unchanged_channels）を隠す。頼まれずに隠した段は
+   *  autoHidden に覚え、画面が「N ch を隠した」と出して showAutoHidden で見せ直せるようにする */
   arrangeForSystem(flat: number[] = []): void {
+    const hides = systemHides(this.snap.config, flat);
     this.setConfig(systemOrder(this.snap.config, this.snap.groups, flat));
+    this.set({ autoHidden: [...new Set([...this.snap.autoHidden.filter((id) => this.snap.config.hidden.includes(id)), ...hides])] });
+  }
+
+  /** 頼まれずに隠した段を見せ直す */
+  showAutoHidden(): void {
+    const ids = this.snap.autoHidden;
+    this.set({ autoHidden: [] });
+    this.setConfig(unhide(this.snap.config, ids));
   }
 
   resetRows(): void {
+    this.set({ autoHidden: [] });
     this.setConfig(EMPTY_CONFIG);
   }
 
@@ -411,12 +428,26 @@ export class TimelineState {
     return [...new Set(ids)];
   }
 
+  /** 使う人が Timeline のパネルで入れて覚えた設定（速さ・プリトリガ・深いバッファの拍）で捕捉する（メニュー・Logic
+   *  Analyzer・System の捕捉）。設定が足りない・このボードで選べない速さなら捕捉せず、理由を出す（既定の値を仮定しない）。
+   *  read は覚えた値を読む関数（試験で差し替える） */
+  async captureSaved(opts: { deep: boolean; crossOnly?: boolean },
+                     read: (key: string) => string = (key) => load(key, "")) {
+    const caps = this.app.current.probe?.capabilities ?? {};
+    const r = captureRequest(readCaptureSettings(read), opts.deep, rateChoices(Number(caps.la_sample_hz)));
+    if (!r) {
+      this.app.report(t("capture.needSettings"));
+      return undefined;
+    }
+    return this.capture({ ...r, ...(opts.crossOnly ? { crossOnly: true } : {}) });
+  }
+
   /** 捕捉して、最新のキャプチャを読み直す。結果（trigger_time = タイムベースのトリガの時刻 等）を返す（失敗は undefined） */
   async capture(r: CaptureRequest): Promise<{ trigger_time?: number; trigger_index?: number } | undefined> {
     const trigger = r.crossOnly ? { mask: 1, value: 1, fall: 1, rise: 0 } : { rise: r.rise ?? 0, fall: r.fall ?? 0 };
     const done = r.deep
-      ? await this.app.act("la.deep.capture", { rate_hz: r.rate_hz, ...trigger, before_beats: r.beforeBeats ?? 4096,
-                                                  after_beats: r.afterBeats ?? 4096, ...(r.rle !== undefined ? { rle: r.rle } : {}) })
+      ? await this.app.act("la.deep.capture", { rate_hz: r.rate_hz, ...trigger, before_beats: r.beforeBeats,
+                                                  after_beats: r.afterBeats, ...(r.rle !== undefined ? { rle: r.rle } : {}) })
       : await this.app.act("la.capture", { rate_hz: r.rate_hz, pretrigger: r.pretrigger, ...trigger });
     if (done !== undefined) this.reload();
     return done;
@@ -533,11 +564,11 @@ export class TimelineState {
             this.applyReveal(pending);
           }
         } catch (e) {
-          // 捕捉・記録がまだ無いのは誤りにしない（空のまま）。読みの間に操作があれば、その視点で読み直す
-          const message = e instanceof Error ? e.message : String(e);
+          // 捕捉・記録がまだ無い（E_NO_DATA。誤りの符号で見分ける）のは誤りにしない（空のまま）。読みの間に操作があれば、
+          // その視点で読み直す
           this.revealing = null;                // 当てられなかった移動を残さない（後の関係ない読み直しで当たる）
-          if (!/捕捉が無い|読む記録が無い|記録が空/.test(message)) this.set({ error: message });
-          else if (full) this.set({ capture: null, extent: null, frame: null, header: null, overview: null });
+          if (!isNoData(e)) this.set({ error: errorText(e) });
+          else if (full) this.clearExtent();
         }
       } while (this.refetch || this.reset);
     } finally {
@@ -547,6 +578,11 @@ export class TimelineState {
   }
 
   /** 全体: 捕捉なら捕捉の全体、記録なら記録の範囲。新しい捕捉・記録なら全体を表示する */
+  /** 読む物が無い: 全体・縮図・枠を空にする */
+  private clearExtent(): void {
+    this.set({ capture: null, extent: null, frame: null, header: null, overview: null });
+  }
+
   private async fetchAll(): Promise<void> {
     const { source, width } = this.snap;
     if (source === "capture") {
@@ -569,7 +605,10 @@ export class TimelineState {
     }
     const status = await this.conn.call("recording.status", {}, { quiet: true });
     if (this.snap.source !== source) return;
-    if (!status.name || !status.span) throw new Error("読む記録が無い");
+    if (!status.name || !status.span) {         // 読む記録が無い・空（recording.status の事実）: 空のまま
+      this.clearExtent();
+      return;
+    }
     const extent: [number, number] = [status.span[0], status.span[1] + 1];
     const named = status.name !== this.snap.recording;
     const bin = Math.max(1, Math.floor((extent[1] - extent[0]) / Math.max(1, width) / 2));

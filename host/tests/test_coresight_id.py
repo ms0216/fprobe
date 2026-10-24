@@ -67,6 +67,28 @@ def test_a_self_referencing_table_does_not_loop():
     assert [c.address for c in root.children] == [0x2000]
 
 
+def test_the_walk_reports_where_it_stopped_at_its_limits():
+    """深さ・総数の上限で止めたら、止めた ROM テーブルに印を付け、使った上限と総数を根に返す（黙って打ち切らない）。"""
+    words: dict[int, int] = {}
+    add_rom_table(words, 0x1000, [0x2000, 0x3000])
+    add_rom_table(words, 0x2000, [0x4000])
+    add_component(words, 0x3000, 9, ARM, 0x906)
+    add_component(words, 0x4000, 9, ARM, 0x906)
+    full = ci.walk_rom_table(lambda a: words.get(a, 0), 0x1000)
+    assert full.walk == {"depth": 4, "limit": 128, "components": 4, "truncated": False}
+    assert "truncated" not in full.as_dict()
+
+    shallow = ci.walk_rom_table(lambda a: words.get(a, 0), 0x1000, depth=1)
+    assert shallow.children[0].truncated == "depth" and shallow.children[0].children == []
+    assert shallow.walk == {"depth": 1, "limit": 128, "components": 3, "truncated": True}
+    assert shallow.as_dict()["children"][0]["truncated"] == "depth"
+    assert shallow.as_dict()["walk"]["truncated"] is True
+
+    few = ci.walk_rom_table(lambda a: words.get(a, 0), 0x1000, limit=2)
+    assert few.truncated == "limit" and [c.address for c in few.children] == [0x2000]
+    assert few.walk["truncated"] is True and few.walk["limit"] == 2
+
+
 def test_stm32_is_identified_from_dbgmcu():
     part = ci.identify_part(reader(stm32f401_words()), {ST})
     assert part.name == "STM32F401xD/E" and part.id == 0x433 and part.option_family == "f4"
@@ -88,3 +110,25 @@ def test_other_vendors_and_unknown_parts():
 @pytest.mark.parametrize("designer", [(4, 0x3B), (0, 0x20), (2, 0x44), (9, 0x13), (5, 0x55)])
 def test_designer_names(designer):
     assert ci.designer_name(designer)
+
+
+def test_funnel_keeps_the_hold_time_it_reads_even_zero():
+    """ファンネルの最小の保持時間（Ctrl の 11:8）は読んだ値のまま。0 も有効な値なので 3 に置き換えない。"""
+    from fprobe.trace.coresight import Funnel
+
+    class Regs:
+        def __init__(self):
+            self.values = {0x100: 0x000}
+            self.writes = []
+
+        def read(self, address, size):
+            return self.values.get(address, 0)
+
+        def write(self, address, size, value):
+            self.writes.append((address, value))
+            self.values[address] = value
+
+    regs = Regs()
+    assert Funnel(regs, 0x100).enable(0b10) == 0b10
+    regs.values[0x100] = 0x700
+    assert Funnel(regs, 0x100).enable(0b1) == 0x701

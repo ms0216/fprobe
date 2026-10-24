@@ -47,7 +47,10 @@ def test_sampled_long_intervals_are_not_gaps_unless_the_caller_gives_a_factor():
     samples = sampled([IDLE] * 3 + [A] * 2) + sampled([A] * 3 + [IDLE] * 2, t0=10_000)
     plain = timeline_from_samples(samples, NAMES)
     assert plain.gaps == [] and [r.task for r in plain.runs] == ["IDLE", "ctrl", "IDLE"]
-    tl = timeline_from_samples(samples, NAMES, gap_factor=2.5)          # 使う側が明示したときだけ抜けにする
+    # 使う側が明示した間隔（タイムベース）を超えたときだけ抜けにする。中央値を分解能とした倍率では決めない
+    with pytest.raises(TypeError):
+        timeline_from_samples(samples, NAMES, gap_factor=2.5)
+    tl = timeline_from_samples(samples, NAMES, gap=250)
     assert [(g.t0, g.t1) for g in tl.gaps] == [(1400, 10_000)]
     assert [(r.task, r.t0, r.t1) for r in tl.runs] == [
         ("IDLE", 1000, 1250), ("ctrl", 1250, 1400), ("ctrl", 10_000, 10_250), ("IDLE", 10_250, 10_400)]

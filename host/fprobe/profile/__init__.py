@@ -6,7 +6,7 @@
     plan = plan_itm_sampling(16e6, 10_000, 2_000_000, exception_trace=True)   # plan.writes を本流が書く
     samples = PcSamples.from_itm(Timestamper().feed(ItmDecoder().feed(swo_bytes)))
     prof = Profiler(Symbols(elf), Disassembler.from_elf(elf)).profile(samples)
-    prof.top(10)                                   # 関数ごとの割合と信頼区間
+    prof.top(10)                                   # 関数ごとのサンプル数と割合
     coverage(prof, Disassembler.from_elf(elf))     # 近似のカバレッジ
     measure(recording, start, end)                 # 2 点間の時間
 """
@@ -17,10 +17,10 @@ from .dwt import (RegisterWrite, SamplingPlan, SwoPlan, itm_port_writes, plan_it
 from .exceptions import Activation, ExceptionProfile, ExceptionState, exception_name, exception_profile
 from .pcprofile import Profile, Profiler
 from .samples import PcSample, PcSamples
-from .stats import Distribution, wilson_interval
-from .timing import IntervalReport, interval_report, measure, pair_times
+from .stats import Distribution
+from .timing import IntervalReport, interval_report, limit_intervals, measure, pair_times
 
 __all__ = ["Activation", "Coverage", "Distribution", "ExceptionProfile", "ExceptionState", "FunctionCoverage",
            "IntervalReport", "PcSample", "PcSamples", "Profile", "Profiler", "RegisterWrite", "SamplingPlan", "SwoPlan",
            "coverage", "elf_functions", "exception_name", "exception_profile", "interval_report", "itm_port_writes",
-           "measure", "pair_times", "plan_itm_sampling", "plan_pcsr_sampling", "plan_swo", "wilson_interval"]
+           "limit_intervals", "measure", "pair_times", "plan_itm_sampling", "plan_pcsr_sampling", "plan_swo"]

@@ -118,3 +118,43 @@ def test_times_relative_to_trigger():
     j = d.to_dict()["annotations"]
     assert j[0]["kind"] == "transfer" and j[0]["start_rel_s"] == pytest.approx(0)
     assert j[1]["kind"] == "start"
+
+
+def _manual(w, t, *, start_same_sample=False, same_sample_bit=None, value=0xA0):
+    """手で組んだ 1 バイトの書き（START・9 ビット・STOP）。終わりの時刻を返す。"""
+    h = 0.5 / F
+    w.set(SDA, 0, t)                                  # START
+    w.set(SCL, 0, t if start_same_sample else t + h)  # 同じ時刻なら同じサンプルに落ちる
+    t += h
+    for i, bit in enumerate([(value >> (7 - k)) & 1 for k in range(8)] + [0]):
+        w.set(SDA, bit, t + h if i == same_sample_bit else t + h / 2)
+        w.set(SCL, 1, t + h)
+        w.set(SCL, 0, t + 2 * h)
+        t += 2 * h
+    w.set(SDA, 0, t + h / 2)
+    w.set(SCL, 1, t + h)
+    w.set(SDA, 1, t + 2 * h)
+    return t + 2 * h
+
+
+def test_same_sample_scl_and_sda_fall_is_marked():
+    """SCL と SDA が同じサンプルで下がった（順序は測れていない）START は、普通の START と区別できる印を付ける。"""
+    w = wave()
+    t = _manual(w, 10e-6, start_same_sample=True)
+    d = decode_i2c(w.build(end_s=t + 10e-6), scl=SCL, sda=SDA)
+    (s,) = d.of("start")
+    assert s.fields == {"same_sample": True}
+    normal = wave()
+    t = _manual(normal, 10e-6)
+    assert decode_i2c(normal.build(end_s=t + 10e-6), scl=SCL, sda=SDA).of("start")[0].fields is None
+
+
+def test_sda_change_in_same_sample_as_scl_rise_is_marked():
+    """SCL の立ち上がりと同じサンプルで SDA が変わったビットは、どちらの値を読んだかが測れていないので位置を返す。"""
+    w = wave()
+    t = _manual(w, 10e-6, same_sample_bit=2)
+    d = decode_i2c(w.build(end_s=t + 10e-6), scl=SCL, sda=SDA)
+    (a,) = d.of("address")
+    assert a.fields["same_sample_bits"] == [2]
+    assert "same_sample_bits" not in decode_i2c(
+        (lambda w2: w2.build(end_s=_manual(w2, 10e-6) + 10e-6))(wave()), scl=SCL, sda=SDA).of("address")[0].fields

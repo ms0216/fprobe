@@ -8,6 +8,7 @@ Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_captur
 
 from pathlib import Path
 
+from .api import NoData
 from .decode import decoders, load_file
 from .la import write_vcd
 from .sigrok import read_sr, write_sr
@@ -35,7 +36,7 @@ class DecodeTools:
         with self._lock:
             tr, info = self._capture, self._capture_info
         if tr is None:
-            raise RuntimeError("捕捉が無い（la_capture / la_deep_capture / la_load を先に）")
+            raise NoData("捕捉が無い（la_capture / la_deep_capture / la_load を先に）")
         return tr, info
 
     def la_export(self, path: str, format: str = "sr", channels: list[int] | None = None,

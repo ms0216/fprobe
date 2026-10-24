@@ -268,7 +268,8 @@ def test_leaving_while_stopped_keeps_the_stop_at_the_same_pc():
     chip = MonitorChip()
     target = stopped(chip)
     target.step()
-    leave_monitor(target, chip)
+    out = leave_monitor(target, chip)
+    assert out["stop"] == "breakpoint_at_pc" and out["pc_before"] == out["pc_after"] == LOOP + 2
     assert chip.debugen and chip.halted and not chip.demcr & MON_EN
     assert chip.regs["pc"] == LOOP + 2
     assert chip.breakpoints == {}                             # 一時のブレークポイントは外した
@@ -280,6 +281,15 @@ def test_leaving_keeps_a_user_breakpoint_at_the_pc():
     target.set_breakpoint(LOOP)
     leave_monitor(target, chip)
     assert chip.halted and chip.regs["pc"] == LOOP and LOOP in chip.breakpoints
+
+
+def test_leaving_says_when_it_had_to_halt_by_request():
+    # PC に置けない・戻らないときの停止要求（近くで止める）を黙ってしない: どう止めたかと前後の PC を返す（?35）
+    chip = MonitorChip()
+    target = stopped(chip)
+    chip.set_breakpoint = lambda *a, **k: False
+    out = leave_monitor(target, chip)
+    assert out["stop"] == "halt_request" and out["pc_before"] == LOOP and "pc_after" in out
 
 
 def test_leaving_while_running_keeps_running():

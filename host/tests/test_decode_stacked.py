@@ -7,7 +7,9 @@ from fprobe.decode.modbus import modbus_crc
 from fprobe.decode.synth import Wave, i2c, spi, uart
 
 SCK, MOSI, MISO, CS = 0, 1, 2, 3
-SPI = {"sck": SCK, "mosi": MOSI, "miso": MISO, "cs": CS}
+SPI = {"sck": SCK, "mosi": MOSI, "miso": MISO, "cs": CS, "mode": 0, "msb_first": True, "word_bits": 8,
+       "cs_active_low": True}
+UART = {"data_bits": 8, "stop_bits": 1, "invert": False, "lsb_first": True}
 
 
 # ---- SPI Flash ----
@@ -33,7 +35,9 @@ def test_spiflash_commands_addresses_data_and_write_enable():
         ([0xB7], [0]),                                               # 4 バイトのアドレスへ
         ([0x03, 0x01, 0x00, 0x00, 0x00, 0], [0] * 5 + [0x5A]),
     ])
-    d = decode("spiflash", tr, spi=SPI)
+    # 消去の命令は JEDEC で決まった命令でない（JESD216 の SFDP で機器が申告する）: 使う側が表で渡す
+    erase = {"0x20": {"name": "SECTOR_ERASE_4K", "address_bytes": None, "dummy": 0, "direction": None, "write": True}}
+    d = decode("spiflash", tr, spi=SPI, address_bytes=3, extra_commands=erase)
     c = d.of("command")
     assert [a.fields["name"] for a in c] == ["READ_JEDEC_ID", "READ", "FAST_READ", "PAGE_PROGRAM", "WRITE_DISABLE",
                                              "SECTOR_ERASE_4K", "WRITE_ENABLE", "READ_STATUS", "ENTER_4B_ADDRESS",
@@ -44,17 +48,29 @@ def test_spiflash_commands_addresses_data_and_write_enable():
     assert (c[2].fields["address"], c[2].fields["data"]) == (0x010203, [0x11, 0x22])
     assert c[3].error is None and c[3].fields["data"] == [0xAA]
     assert c[5].error == "write_disabled"
-    assert c[7].fields["status"]["wip"] and c[7].fields["status"]["wel"]
+    # 状態のビットは JEDEC で決まる WIP（bit 0）・WEL（bit 1）だけ。ほかは機器ごとなので値のまま
+    assert c[7].fields["status"] == {"value": 0x03, "wip": True, "wel": True}
     assert (c[9].fields["address"], c[9].fields["address_bytes"], c[9].fields["data"]) == (0x01000000, 4, [0x5A])
     assert d.params["spi"]["cs"] == CS
 
 
+def test_spiflash_knows_only_the_jedec_commands_by_default():
+    # 0x35・0x20 等は製造元で意味が違う（または SFDP で申告される）: 既定の表では名前・データの切り分け・誤りを付けない
+    tr = flash_wave([([0x04], [0]), ([0x20, 0, 0x20, 0], [0] * 4), ([0x35, 0], [0, 0x02]), ([0x5A, 0, 0, 0, 0, 0], [0] * 5 + [0x53])])
+    c = decode("spiflash", tr, spi=SPI, address_bytes=3).of("command")
+    assert [a.fields["name"] for a in c] == ["WRITE_DISABLE", None, None, "READ_SFDP"]
+    assert c[1].error is None and c[1].fields["address"] is None                     # 知らない命令: アドレスを切り出さない
+    assert c[3].fields["address"] == 0 and c[3].fields["data"] == [0x53]
+    with pytest.raises(ValueError, match="0x20"):
+        decode("spiflash", tr, spi=SPI, address_bytes=3, extra_commands={"0x20": {"name": "X"}})
+
+
 def test_spiflash_needs_cs_and_bytes():
     tr = flash_wave([([0x06], [0])])
-    with pytest.raises(ValueError):
-        decode("spiflash", tr, spi={"sck": SCK, "mosi": MOSI})
-    with pytest.raises(ValueError):
-        decode("spiflash", tr, spi={**SPI, "word_bits": 16})
+    with pytest.raises(ValueError, match="cs"):
+        decode("spiflash", tr, spi={**SPI, "cs": None}, address_bytes=3)
+    with pytest.raises(ValueError, match="word_bits"):
+        decode("spiflash", tr, spi={**SPI, "word_bits": 16}, address_bytes=3)
 
 
 # ---- 24 系 EEPROM ----
@@ -76,7 +92,7 @@ def test_eeprom_write_random_read_current_read_and_polling():
         {"address": 0x50, "read": True, "data": [3]},                # 現在のアドレス（0x12）
         {"address": 0x68, "data": [0x00, 0x55]},                     # 別のデバイス（RTC）は読まない
     ])
-    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1})
+    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1}, device=0x50, address_bytes=1, block_bits=0)
     kinds = [a.kind for a in d]
     assert kinds == ["write", "poll", "read", "read"]
     write, _, rnd, cur = d.annotations
@@ -90,9 +106,9 @@ def test_eeprom_write_random_read_current_read_and_polling():
 def test_eeprom_two_byte_addresses_page_wrap_and_blocks():
     tr = eeprom_wave([{"address": 0x50, "data": [0x01, 0xFE, 1, 2, 3, 4]},
                       {"address": 0x53, "data": [0x20, 9]}])
-    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1}, address_bytes=2, page_size=64)
+    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1}, address_bytes=2, page_size=64, device=0x50, block_bits=0)
     assert d.of("write")[0].error == "page_wrap" and d.of("write")[0].fields["address"] == 0x01FE
-    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1}, block_bits=3)
+    d = decode("eeprom24", tr, i2c={"scl": 0, "sda": 1}, block_bits=3, device=0x50, address_bytes=1)
     first, second = d.of("write")
     assert second.fields["address"] == 0x3 << 8 | 0x20
 
@@ -128,7 +144,7 @@ def test_modbus_request_response_pairs_exceptions_and_crc_errors():
               frame(2, 16, 0x00, 0x00, 0x00, 0x02),
               frame(1, 0x83, 2),                                     # 例外
               frame(1, 1, 0, 0, 0, 10)[:-1] + b"\x00"]              # CRC の誤り
-    d = decode("modbus", modbus_wave(frames), uart={"channel": 0, "baud": BAUD, "parity": "even"})
+    d = decode("modbus", modbus_wave(frames), uart={**UART, "channel": 0, "baud": BAUD, "parity": "even"})
     a = d.annotations
     assert [x.kind for x in a] == ["request", "response", "request", "response", "request", "response",
                                    "exception", "request"]
@@ -142,10 +158,31 @@ def test_modbus_request_response_pairs_exceptions_and_crc_errors():
     assert d.params["uart"]["parity"] == "even"
 
 
+def test_modbus_direction_is_unknown_when_neither_the_shape_nor_the_previous_frame_decides():
+    # FC5/6 の要求と応答は同じ形（エコー）。捕捉の始まりで直前が見えなければ決められない → kind "frame"・direction None
+    # （「要求」とみなさない）。形で決まるフレーム（FC3 の要求）が来た後は、規格（スレーブは要求なしに送らない・
+    # 応答は同じスレーブ・機能）で決まる
+    frames = [frame(1, 6, 0x00, 0x05, 0xAB, 0xCD),
+              frame(1, 6, 0x00, 0x05, 0xAB, 0xCD),
+              frame(1, 3, 0x00, 0x10, 0x00, 0x02),
+              frame(1, 3, 4, 0x12, 0x34, 0x56, 0x78),
+              frame(1, 6, 0x00, 0x07, 0x00, 0x01),
+              frame(1, 6, 0x00, 0x07, 0x00, 0x01),
+              frame(2, 16, 0x00, 0x00, 0x00, 0x02)]                   # FC16 の応答の形（4 バイト）は形だけで決まる
+    d = decode("modbus", modbus_wave(frames), uart={**UART, "channel": 0, "baud": BAUD, "parity": "even"})
+    a = d.annotations
+    assert [x.kind for x in a] == ["frame", "frame", "request", "response", "request", "response", "response"]
+    assert [x.fields["direction"] for x in a] == [None, None, "request", "response", "request", "response",
+                                                  "response"]
+    assert a[0].error is None and a[0].fields["crc_ok"] and a[0].fields["function_name"] == "WRITE_SINGLE_REGISTER"
+    assert a[0].text.startswith("? 01 ")
+    assert a[6].fields["latency_s"] is None                          # 要求が見えない応答: 遅れは出さない
+
+
 def test_modbus_frames_split_by_silence_only():
     frames = [frame(1, 3, 0, 0, 0, 1), frame(1, 3, 2, 0, 7)]
     tr = modbus_wave(frames, gap_chars=0.5)                          # 無音が短すぎて区切れない
-    lower = decode("uart", tr, channel=0, baud=BAUD, parity="even")
+    lower = decode("uart", tr, channel=0, baud=BAUD, parity="even", **UART)
     d = decode_on("modbus", lower)
     assert len(d) == 1 and d.annotations[0].error == "crc"
     assert len(decode_on("modbus", lower, gap_chars=0.3)) == 2
@@ -157,10 +194,11 @@ def test_modbus_frame_gap_is_the_spec_value_from_the_uart_settings():
     frames = [frame(1, 3, 0, 0, 0, 1), frame(1, 3, 2, 0, 7)]
     fast = 115200
     one = decode_on("modbus", decode("uart", modbus_wave(frames, baud=fast, gap_s=1.0e-3), channel=0, baud=fast,
-                                       parity="even"))
+                                       parity="even", **UART))
     assert len(one) == 1                                           # 1 ms（11 文字分）< 1.75 ms: 区切らない
     two = decode_on("modbus", decode("uart", modbus_wave(frames, baud=fast, gap_s=2.0e-3), channel=0, baud=fast,
-                                       parity="even"))
+                                       parity="even", **UART))
     assert len(two) == 2 and two.params["gap_s"] == 1.75e-3
-    slow = decode_on("modbus", decode("uart", modbus_wave(frames, gap_chars=3.0), channel=0, baud=BAUD, parity="even"))
+    slow = decode_on("modbus", decode("uart", modbus_wave(frames, gap_chars=3.0), channel=0, baud=BAUD, parity="even",
+                                      **UART))
     assert len(slow) == 1 and slow.params["gap_s"] == 3.5 * 11 / BAUD   # 3 文字 < 3.5 文字

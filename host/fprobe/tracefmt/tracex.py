@@ -9,8 +9,8 @@ N + 出来事 32 バイト × M。すべてターゲットのエンディアン�
   0 = 未使用）、priority、event_id、time_stamp（見出しの timer_valid_mask のビットだけ）、info1〜4。
 - 循環: current_pointer が次に書く（= 一番古い）位置。その位置の thread_pointer が 0 でなければ一周済みで、
   順は [current … 終わり] + [始め … current)。走行中に読むと current の近くは書きかけのことがある（止めて読む）。
-- スレッドの切り替えは出来事として無いので、出来事の文脈（thread_pointer）が別のスレッドに変わった所を切り替え
-  とする（時刻はその出来事の時刻 = 近似。TraceX の表示と同じ考え）。
+- スレッドの切り替えは出来事として無い。推定して足さず、各出来事の文脈（thread_pointer）を args.context に入れる
+  （文脈が変わった所を切り替えとみなす見方はプラグイン fprobe.plugins.heuristics.tracex_context_switches）。
 - 時刻の速さは分からない（既定は出来事ごとに 1 増える模擬の時刻、Cortex-M のポートは DWT の CYCCNT）。ts_hz で渡す。
 """
 
@@ -114,26 +114,19 @@ def decode_tracex(data: bytes, ts_hz: float | None = None) -> Trace:
     order = list(range(current, count)) + list(range(0, current)) if wrapped else list(range(0, current))
     mask = h["mask"] or 0xFFFFFFFF
     previous_ts: int | None = None
-    running: int | None = None
-    isr_depth = 0
     for i in order:
         ctx, prio, event_id, stamp, i1, i2, i3, i4 = entry(i)
         if ctx == 0:
             continue
         stamp &= mask
-        ts = stamp if previous_ts is None else previous_ts + ((stamp - previous_ts) & mask)
+        ts = trace.unwrap(previous_ts, stamp, mask)
         previous_ts = ts
         name = _EVENTS.get(event_id, f"USER_{event_id}" if event_id >= USER_EVENT_START else f"EVENT_{event_id}")
-        args = {"info": [i1, i2, i3, i4]}
-        if ctx not in (ISR_CONTEXT, INIT_CONTEXT) and ctx != running and isr_depth == 0:
-            trace.events.append(TraceEvent(ts, "task_in", "context", ctx, {"inferred": True}))
-            running = ctx
+        args = {"info": [i1, i2, i3, i4], "context": ctx}
         if event_id == 3:
-            isr_depth += 1
             trace.events.append(TraceEvent(ts, "isr_enter", name, None, {"number": i2, **args}))
             continue
         if event_id == 4:
-            isr_depth = max(0, isr_depth - 1)
             trace.events.append(TraceEvent(ts, "isr_exit", name, None, args))
             continue
         if event_id == 1:
@@ -143,7 +136,7 @@ def decode_tracex(data: bytes, ts_hz: float | None = None) -> Trace:
         elif event_id == 100:
             trace.task(i1).priority = i2
             trace.events.append(TraceEvent(ts, "task_create", name, i1,
-                                           {"priority": i2, "stack": i3, "stack_size": i4}))
+                                           {"priority": i2, "stack": i3, "stack_size": i4, "context": ctx}))
         elif event_id in (101, 115):
             trace.events.append(TraceEvent(ts, "task_delete", name, i1, args))
         elif event_id >= USER_EVENT_START:
@@ -157,7 +150,8 @@ def decode_tracex(data: bytes, ts_hz: float | None = None) -> Trace:
             trace.events.append(TraceEvent(ts, "object", name, ctx if ctx not in (ISR_CONTEXT, INIT_CONTEXT) else None,
                                            args))
     trace.system = {"objects": {f"0x{p:08X}": {"type": t, "name": n} for p, (t, n) in objects.items()}}
-    trace.notes.append("スレッドの切り替えは出来事の文脈が変わった所（時刻は近似: 間の出来事が無ければ遅れる）")
+    trace.notes.append("TraceX にスレッドの切り替えの出来事は無い: 実行中のスレッドの区間は出さない（各出来事の文脈は"
+                       " args.context）")
     if wrapped:
         trace.notes.append(f"循環バッファが一周している: 直近の {count} 件だけ")
     return trace

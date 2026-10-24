@@ -7,7 +7,7 @@ TCK の立ち上がりで TMS・TDI・TDO（直前の値）を読み、TAP の�
 """
 
 from ..la import Transitions
-from .core import Annotation, Decoding, project
+from .core import Annotation, Channel, Decoding, project
 
 __all__ = ["ARM_DP_IR", "STATES", "decode_jtag", "decode_jtag_arm"]
 
@@ -41,11 +41,11 @@ class _Scan:
         self.end = start + 1
 
 
-def decode_jtag(tr: Transitions, *, tck: int, tms: int, tdi: int | None = None, tdo: int | None = None,
-                trst: int | None = None, initial_state: str | None = None,
-                ir_names: str | dict | None = None) -> Decoding:
+def decode_jtag(tr: Transitions, *, tck: Channel, tms: Channel, tdi: Channel | None, tdo: Channel | None,
+                trst: Channel | None, initial_state: str | None = None, ir_names: str | dict | None = None) -> Decoding:
     """JTAG を解読する。initial_state を省くと TMS = 1 が 5 回続くまで待つ。ir_names は IR の値の名前の表
-    （"arm_dp" か {値: 名前}）。trst は負論理の TRST（0 の間 Test-Logic-Reset）。"""
+    （"arm_dp" か {値: 名前}）。trst は負論理の TRST（0 の間 Test-Logic-Reset）。tdi・tdo・trst は既定を持たない
+    （つながない線は None を明示）。"""
     if initial_state is not None and initial_state not in STATES:
         raise ValueError(f"状態は {sorted(STATES)} のどれか（{initial_state!r}）")
     names = _ir_names(ir_names)
@@ -147,11 +147,12 @@ _JTAG_ACK = {0b010: "OK/FAULT", 0b001: "WAIT"}
 _DP_REGS = {0x0: "ABORT/CTRL", 0x4: "CTRL/STAT", 0x8: "SELECT", 0xC: "RDBUFF"}
 
 
-def decode_jtag_arm(lower: Decoding, *, ir_bits: int = 4, ir_offset: int = 0, dr_offset: int = 0) -> Decoding:
+def decode_jtag_arm(lower: Decoding, *, ir_offset: int, dr_offset: int, ir_bits: int = 4) -> Decoding:
     """JTAG の解読の上で ADIv5 の JTAG-DP を読む。DPACC / APACC の 35 ビットの DR を要求（RnW・A[3:2]・書く値）と
     応答（ACK・前の読みの値）に分ける。IDCODE の DR は 32 ビットの IDCODE。
     鎖に他の TAP があるときは、DP の位置を最初に移すビットからの数で与える: ir_offset は DP より TDO 側の TAP の IR の
-    長さの和、dr_offset は DP より TDO 側の TAP の数（BYPASS で 1 ビットずつ）。例: STM32F4（TDO 側が DP）は 0 / 0。"""
+    長さの和、dr_offset は DP より TDO 側の TAP の数（BYPASS で 1 ビットずつ）。例: STM32F4（TDO 側が DP）は 0 / 0。
+    ir_offset・dr_offset は鎖の構成で決まるので既定を持たない。ir_bits の既定 4 は ADIv5 の JTAG-DP の IR の長さ（規格の値）。"""
     if lower.protocol != "jtag":
         raise ValueError("jtag の解読の上に重ねる")
     if ir_bits < 1 or ir_offset < 0 or dr_offset < 0:

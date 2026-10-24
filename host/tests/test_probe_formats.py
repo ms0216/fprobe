@@ -10,6 +10,7 @@ import pytest
 from probe_fakes import DictMemory, FakeDevice, FakeTarget, use_fake_ring
 from sysview_writer import Writer, varint
 from test_probe_observe import RTT_DEMO, SRAM, FakeCpu, connect, target_writes, wait_for
+from test_tracefmt_ctf import IDLE
 from test_tracefmt_ctf import scenario as ctf_scenario
 from test_tracefmt_eventrecorder import Recorder
 from test_tracefmt_scvd import DATA as SCVD_DATA
@@ -65,12 +66,18 @@ def test_defmt_over_rtt(probe):
     target_writes(cpu, 1, defmt_frame(hello, (5).to_bytes(4, "little"), (2).to_bytes(4, "little"), b"ab", b"\x07"))
     target_writes(cpu, 1, defmt_frame(error, (9).to_bytes(4, "little"), (0xDEAD).to_bytes(4, "little")))
     wait_for(lambda: probe.log_status()["records"] == 2)
+    # 記録していないときは、受けるたびにホストの時計とタイムベースの組を足す（1 点から公称の速さで伸ばし続けない）
+    assert len(probe._log_feed.host_clock._points) >= 2
     out = probe.log_read()
     assert [(r["text"], r["level"]) for r in out["records"]] == [("Hello ab, count=7", "info"),
                                                                   ("fault at 0x0000dead", "error")]
     assert out["records"][0]["location"]["file"].endswith("defmt_demo.c") and out["records"][0]["t"] > 0
     assert [r["text"] for r in probe.log_read(level="error")["records"]] == ["fault at 0x0000dead"]
     assert probe.log_read(since=out["next"])["records"] == []
+    assert out["more"] is False                                          # 続きが残っているかは API が返す
+    first = probe.log_read(limit=1)
+    assert len(first["records"]) == 1 and first["more"] is True
+    assert probe.log_read(since=first["next"], limit=1)["more"] is False
     stopped = probe.log_stop()
     assert not stopped["running"] and stopped["kinds"] == {"info": 1, "error": 1}
     with pytest.raises(RuntimeError):
@@ -118,14 +125,14 @@ def test_trice_over_swo_itm(probe, tmp_path):
     probe._swo_baud = 2_000_000
     til = tmp_path / "til.json"
     til.write_text(json.dumps({"5": {"Type": "TRICE8", "Strg": "inf:v=%u\\n"}}))
-    probe.log_start("trice", source="swo", port=3, til=str(til), framing="none")
+    probe.log_start("trice", source="swo", port=3, til=str(til), framing="none", channel_levels={"inf": "info"})
     assert target.write_log[-1] == (0xE0000E00, 1 << 3)              # ITM_TER: ポート 3
     packet = bytes.fromhex("0540") + bytes([0xC0, 1]) + b"\x2a"     # ID 5・NC（長さ 1）・値 42
     itm = b"".join(bytes([3 << 3 | 1, b]) for b in packet)           # ポート 3 の 1 バイトの書き込み
     dev.swo(dev.ticks + 10, itm)
     wait_for(lambda: probe.log_status()["records"] == 1)
     [r] = probe.log_read()["records"]
-    assert (r["text"], r["level"], r["channel"]) == ("v=42", "info", "inf")
+    assert (r["text"], r["level"], r["channel"]) == ("inf:v=42", "info", "inf")
     probe.log_stop()
     assert target.write_log[-1] == (0xE0000E00, 0)                   # 元に戻す
 
@@ -173,9 +180,9 @@ def test_systemview_over_rtt_becomes_a_recorded_timeline(probe):
     assert got["method"] == "systemview" and not got["running"] and got["exceptions"]["activations"] == 1
     assert abs(got["stats"]["tasks"]["sensor"]["total_us"] - 1000) < 1                # 64 MHz で 64000 サイクル
     assert any("systemview" in w for w in got["warnings"])
-    assert any("名前で決めた" in w and "IDLE" in w for w in got["warnings"])            # どう決めたかを明示する
+    assert not any("IDLE" in w for w in got["warnings"]) and tl["idle_tasks"] is None   # 名前でアイドルを決めない
     runs = probe.recording_events(streams=["rtos"], kinds=["run"])["events"]
-    assert {e["body"]["task"] for e in runs if e["body"].get("idle")} == {"IDLE"}
+    assert not any(e["body"].get("idle") for e in runs)
     load = probe.rtos_timeline_load(window_us=500)
     assert load["windows"]
     assert probe.recording_find({"stream": "trace", "kind": "isr_enter"})["events"]
@@ -189,9 +196,10 @@ def test_ctf_snapshot_from_ram(probe):
     connect(probe, cpu)
     data = ctf_scenario()
     cpu.ram[0x4000:0x4000 + len(data)] = data
-    out = probe.trace_snapshot("ctf", address=SRAM + 0x4000, size=1024)
+    out = probe.trace_snapshot("ctf", address=SRAM + 0x4000, size=1024, ctf_header="ts32_id8")
     assert out["events"] == 12 and out["read"]["source"] == "ram_tracing" and out["timeline"]["made"]
     assert out["clock"]["anchor_t"] > 0 and probe.trace_events(kinds=["marker"])["events"][0]["text"] == "frame"
+    assert out["clock"]["basis"] == "one_anchor_declared_rate" and any("速さの誤差" in n for n in out["notes"])   # ?40
 
 
 def test_event_recorder_is_read_while_running_and_formatted_with_scvd(probe):
@@ -211,7 +219,8 @@ def test_event_recorder_is_read_while_running_and_formatted_with_scvd(probe):
     r.record2(0xF203, 100, 0x2000_1000, 0)
     r.record2(0xF219, 200, 0x2000_1000, 0)
     publish()
-    probe.trace_start("eventrecorder", source="memory", address=info_at, period_s=0.01)
+    probe.trace_start("eventrecorder", source="memory", address=info_at, period_s=0.01, string_limit=64)
+    assert probe.trace_status()["settings"]["string_limit"] == 64          # 文字列を読む上限は使う側が渡せ、使った値が出る
     r.record2(0xF219, 300, 0x2000_2000, 0)
     publish()
     wait_for(lambda: probe.trace_status()["events"] == 3)
@@ -238,13 +247,45 @@ def test_component_viewer_reads_target_memory(probe, tmp_path):
     view = probe.scvd_view()
     cb = Symbols(RTT_DEMO).variable("_SEGGER_RTT").address
     assert view["objects"][0]["children"] == [{"property": "Buffers", "value": f"up 2, down 1 at 0x{cb:X}"}]
+    assert view["list_limit"] == 1024 and view["string_limit"] == 128       # 使った上限も結果に
+    assert probe.scvd_view(string_limit=16)["string_limit"] == 16
 
 
 def test_trace_import_from_a_file_feeds_the_timeline_analysis(probe, tmp_path):
     path = tmp_path / "trace.ctf"
     path.write_bytes(ctf_scenario())
-    out = probe.trace_import("ctf", str(path))
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8")
     assert out["events"] == 12 and out["timeline"]["made"] and not out["timeline"]["recorded"]
     assert probe.rtos_timeline_get()["runs"]
     with pytest.raises(ValueError):
         probe.trace_import("eventrecorder", str(path))
+
+
+def test_priority_order_is_not_guessed_from_the_os_name(probe, tmp_path):
+    # SystemView の系の説明（O=...）はアプリが書く自由な文字列。OS 名の部分一致で優先度の向きを決めない
+    for os_name in ("Zephyr", "FreeRTOS"):
+        path = tmp_path / f"{os_name}.svdat"
+        w = Writer().start(t=1_000, desc=f"N=demo,O={os_name}")
+        w.task_info(0x2000_1000, 3, "sensor", 1_000).packet(4, varint(w.shrink(0x2000_1000)), 2_000)
+        path.write_bytes(w.bytes())
+        out = probe.trace_import("systemview", str(path))
+        assert out["timeline"]["made"] and out["timeline"]["priority_order"] is None
+        assert probe._rtos_last.run.order is None
+    # 形式そのものが 1 つの RTOS のもの（Zephyr の CTF・ThreadX の TraceX）なら、その RTOS のソースで決まる向き
+    path = tmp_path / "trace.ctf"
+    path.write_bytes(ctf_scenario())
+    assert probe.trace_import("ctf", str(path), ctf_header="ts32_id8")["timeline"]["priority_order"] == "lower_is_more_urgent"
+
+
+def test_idle_tasks_are_named_by_the_caller(probe, tmp_path):
+    # アイドルのタスクは名前の規則で決めず、使う側が idle_tasks（タスクの名前の完全一致）で渡す。合った・合わなかった
+    # 名前を結果に返す
+    path = tmp_path / "trace.ctf"
+    path.write_bytes(ctf_scenario())
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8")
+    assert out["timeline"]["idle_tasks"] is None
+    assert any("アイドルのタスクが分からない" in n for n in probe.rtos_timeline_load(window_us=10)["notes"])
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8", idle_tasks=["idle", "IDLE"])
+    given = out["timeline"]["idle_tasks"]
+    assert given["matched"] == {"idle": [IDLE]} and given["unmatched"] == ["IDLE"]
+    assert not any("アイドルのタスクが分からない" in n for n in probe.rtos_timeline_load(window_us=10)["notes"])

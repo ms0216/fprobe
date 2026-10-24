@@ -100,12 +100,14 @@ class FunctionStats:
 
 @dataclass
 class CallTreeNode:
-    """呼び出しの経路ごとの集計（呼び出しの文脈の木）。"""
+    """呼び出しの経路ごとの集計（呼び出しの文脈の木）。cut = この節の下で、木の深さの上限（max_depth）より深いので
+    木に入れなかった呼び出しの数（その時間は、この節の inclusive に子の時間として入っている）。"""
     function: str
     count: int = 0
     inclusive: int = 0
     exclusive: int = 0
     children: dict[str, "CallTreeNode"] = field(default_factory=dict)
+    cut: int = 0
 
     def child(self, name: str) -> "CallTreeNode":
         node = self.children.get(name)
@@ -115,7 +117,7 @@ class CallTreeNode:
 
     def to_dict(self, hz: float) -> dict:
         return {"function": self.function, "count": self.count, "inclusive_s": self.inclusive / hz,
-                "exclusive_s": self.exclusive / hz,
+                "exclusive_s": self.exclusive / hz, "cut": self.cut,
                 "children": [c.to_dict(hz) for c in sorted(self.children.values(), key=lambda n: -n.inclusive)]}
 
 
@@ -193,14 +195,20 @@ class Report:
     variables: dict[int, VariableStats]
     open_frames: list[tuple[str, int]]              # 終わりの時点で出口を見ていない呼び出し (関数, 入口の時刻)
     hit_counts: Counter
+    tree_max_depth: int                             # 呼び出しの木の深さの上限（使った値）
+    tree_cut: int                                   # 上限より深いので木に入れなかった呼び出しの数（節ごとは cut）
 
     def to_dict(self, top: int | None = 20) -> dict:
-        """JSON にできる要約（MCP・AI 向け）。関数は子を含む時間の合計の多い順に top 個。"""
+        """JSON にできる要約（MCP・AI 向け）。関数は子を含む時間の合計の多い順に top 個（None で全部）。
+        functions_total = 切る前の関数の数、functions_truncated = 切ったか、top = 使った値。"""
         funcs = sorted(self.functions.values(), key=lambda f: -f.total_inclusive)
+        shown = funcs if top is None else funcs[:top]
         return {
             "hz": self.hz, "hits": self.hits, "losses": self.losses,
             "span_s": None if self.t_first is None else (self.t_last - self.t_first) / self.hz,
-            "functions": [f.to_dict(self.hz) for f in (funcs if top is None else funcs[:top])],
+            "functions": [f.to_dict(self.hz) for f in shown],
+            "functions_total": len(funcs), "functions_truncated": len(shown) < len(funcs), "top": top,
+            "tree_max_depth": self.tree_max_depth, "tree_cut": self.tree_cut,
             "coverage": self.coverage.to_dict(),
             "anomalies": [{"t_s": a.t / self.hz, "type": a.type, "id": a.probe_id, "function": a.function,
                            "detail": a.detail} for a in self.anomalies],
@@ -216,7 +224,7 @@ class Report:
 class _Frame:
     __slots__ = ("name", "entry_id", "t0", "child", "node")
 
-    def __init__(self, name: str, entry_id: int, t0: int, node: CallTreeNode):
+    def __init__(self, name: str, entry_id: int, t0: int, node: CallTreeNode | None):   # None = 木の上限より深い
         self.name, self.entry_id, self.t0, self.child, self.node = name, entry_id, t0, 0, node
 
 
@@ -226,6 +234,8 @@ class Analyzer:
     long_call: 使う側が long_s（秒）を明示したときだけ、それより長い呼び出し（経験則の「いつもより長い」は付けない。
     いちばん長い呼び出しの長さと時刻は統計の max_s・max_at で事実として返す）。
     silence_s: これより長く何も来なければ silence。open_s: 終わりの時点でこれより長く開いた入口は no_exit。
+    max_depth: 呼び出しの木の深さの上限。より深い呼び出しは木に入れず、上限の節の cut と Report.tree_cut に数える
+    （関数ごとの統計・呼び出しの一覧には入る）。
     on_call / on_hit / on_anomaly: 流しながら記録に書くためのコールバック（record.RecorderSink）。
     """
 
@@ -243,7 +253,8 @@ class Analyzer:
         self.silence_ticks = None if silence_s is None else silence_s * hz
         self.open_ticks = None if open_s is None else open_s * hz
         self.max_depth = max_depth
-        self.on_call, self.on_hit, self.on_anomaly = on_call, on_hit, on_anomaly
+        self.tree_cut = 0
+        self.on_call,self.on_hit, self.on_anomaly = on_call, on_hit, on_anomaly
         self.stack: list[_Frame] = []
         self.root = CallTreeNode("")
         self.functions: dict[str, FunctionStats] = {}
@@ -323,8 +334,12 @@ class Analyzer:
     # --- 呼び出し ---
 
     def _enter(self, h: Hit, name: str) -> None:
-        parent = self.stack[-1].node if self.stack else self.root
-        node = parent.child(name) if len(self.stack) < self.max_depth else parent
+        node = None
+        if len(self.stack) < self.max_depth:
+            node = (self.stack[-1].node if self.stack else self.root).child(name)
+        else:                                 # 上限より深い: 木に入れず、上限の節に数える（親に黙って合流しない）
+            self.tree_cut += 1
+            next((f.node for f in reversed(self.stack) if f.node is not None), self.root).cut += 1
         self.stack.append(_Frame(name, h.id, h.t, node))
         self.active[name] += 1
         stats = self.functions.get(name)
@@ -365,9 +380,10 @@ class Analyzer:
         if self.active[frame.name] == 1:
             stats.total_inclusive += ticks
         self.active[frame.name] -= 1
-        frame.node.count += 1
-        frame.node.inclusive += ticks
-        frame.node.exclusive += own
+        if frame.node is not None:
+            frame.node.count += 1
+            frame.node.inclusive += ticks
+            frame.node.exclusive += own
         call = Call(frame.name, frame.t0, t1, len(self.stack), own, frame.entry_id, exit_id, complete)
         if self.keep_calls:
             self.calls.append(call)
@@ -425,7 +441,7 @@ class Analyzer:
         return Report(self.hz, self.hits, self.losses, self.t_first, self.t_last, self.functions, self.root,
                       self.calls if self.keep_calls else None, list(self.anomalies),
                       [self.buckets[k] for k in sorted(self.buckets)], self.bucket_ticks, self.coverage(),
-                      self.variables, open_frames, Counter(self.hit_counts))
+                      self.variables, open_frames, Counter(self.hit_counts), self.max_depth, self.tree_cut)
 
 
 def analyze(items: Iterable[Item], table: ProbeTable, hz: float, **options) -> Report:

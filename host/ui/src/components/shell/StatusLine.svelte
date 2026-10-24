@@ -1,6 +1,6 @@
 <script lang="ts">
-  // ステータスバー（下）: デーモンとの接続・プローブ・ターゲットの状態・インターフェイスの速度・CPU、右に AI の作業と
-  // 一時停止（fprobe 独自: 人と AI が同じプローブを使う調停）
+  // ステータスバー（下）: デーモンとの接続・プローブ・ターゲットの状態・インターフェイスの速度・CPU、右に AI の接続と
+  // 一時停止（fprobe 独自: 人と AI が同じプローブを使う調停）。AI は接続の事実だけ（作業中かは判定しない）
   import { shared } from "../../lib/context";
   import { frequency } from "../../lib/format";
   import { haltReasonKey, linkOf } from "../../lib/target";
@@ -20,7 +20,7 @@
   // 上限で古い方が落ち、ほかの利用者の接続も混じるので頼らない）
   const link = $derived(linkOf($app.target));
   const haltKey = $derived(haltReasonKey($app.target));
-  const working = $derived($app.clients.some((c) => c.role === "ai"));
+  const aiClients = $derived($app.clients.filter((c) => c.role === "ai"));
 </script>
 
 <footer class="status" class:halted={targetState === "HALTED"} class:running={targetState === "RUNNING" || targetState === "SLEEPING"}>
@@ -43,7 +43,7 @@
   {#if $app.control.paused}
     <span class="item paused">{$i18n("status.ai.paused", { who: $app.control.paused_by ?? "" })}</span>
   {:else}
-    <span class="item">{working ? $i18n("status.ai.working") : $i18n("status.ai.idle")}</span>
+    <span class="item" title={aiClients.map((c) => c.name).join("\n")}>{aiClients.length ? $i18n("status.ai.connected") : $i18n("status.ai.none")}</span>
   {/if}
   <span class="item held" class:some={$app.control.held > 0} title={$i18n("status.heldTip")}>{$i18n("status.held", { n: $app.control.held })}</span>
   {#if $app.control.paused}

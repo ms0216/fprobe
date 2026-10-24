@@ -74,11 +74,20 @@ class SearchDemo:
     def recording_events(self, t0=None, t1=None, streams=None, kinds=None, limit=1000):
         return self._elf.recording_events(t0, t1, streams, kinds, limit)
 
-    def recording_find(self, query):
-        return self._elf.recording_find(query)
+    def recording_find(self, query, limit=1000):
+        return self._elf.recording_find(query, limit)
 
-    def recording_intervals(self, start, end):
-        return self._elf.recording_intervals(start, end)
+    def recording_kinds(self, t0=None, t1=None):
+        return self._elf.recording_kinds(t0, t1)
+
+    def recording_voltage(self, below_v=None, t0=None, t1=None):
+        return self._elf.recording_voltage(below_v, t0, t1)
+
+    def recording_intervals(self, start, end, limit=1000):
+        return self._elf.recording_intervals(start, end, limit)
+
+    def recording_code_at(self, t, elf=None):
+        return self._elf.recording_code_at(t, elf)
 
     def timing_measure(self, start, end, bins=20, longest=10, limit=1000):
         return self._elf.timing_measure(start, end, bins, longest, limit)
@@ -95,8 +104,8 @@ class SearchDemo:
     def recording_segments(self):
         return self._elf.recording_segments()
 
-    def recording_mark(self, text, t=None):
-        return self._elf.recording_mark(text, t)
+    def recording_mark(self, text, t=None, caller=None):
+        return self._elf.recording_mark(text, t, caller)
 
     def record_host_event(self, stream, kind, body):
         self._elf.record_host_event(stream, kind, body)          # デーモンの操作の記録（記録中だけ書かれる）
@@ -209,15 +218,29 @@ class SearchDemo:
 
     def xtrig_sequence_status(self):
         stage, fired, t = self._sequence_state()
-        return {"stage": stage, "fired": fired, "time": t}
+        x = self._xtrig
+        armed = x["armed_at"] is not None
+        stages = len(x["sequence"]["stages"]) if x["sequence"] is not None else 0
+        states = ["done" if fired else "idle" if not armed else
+                  "done" if k < stage else "current" if k == stage else "waiting" for k in range(stages)]
+        seq = x["sequence"] or {"stages": [], "pattern_a": None, "pattern_b": None}
+        pattern = lambda p: {"mask": 0, "value": 0, "rise": 0, "fall": 0, **(p or {})}  # noqa: E731
+        config = {"stages": [{"when": list(st["when"]), "count": st.get("count", 1),
+                              "within_us": st.get("within_us") if k else None} for k, st in enumerate(seq["stages"])],
+                  "pattern_a": pattern(seq["pattern_a"]), "pattern_b": pattern(seq["pattern_b"])}
+        return {"stage": stage, "fired": fired, "time": t, "armed": armed, "stages": stages, "stage_states": states,
+                "config": config}
 
     def xtrig_fire(self):
         pass
 
     def xtrig_status(self):
         x = self._xtrig
-        return {"inject": {"busy": False, "result": "ok", "ack": 1, "count": 0, "time": 0},
-                "match": {"count": x["match_count"], "time": x["match_time"]}}
+        match = x["match"] or {"address": 0, "address_mask": 0xFFFFFFFF, "data": 0, "data_mask": 0, "on_write": False,
+                                "on_read": False}                    # レジスタのリセットの値
+        return {"inject": {"busy": False, "result": "ok", "ack": 1, "count": 0, "time": 0, **x["inject"]},
+                "match": {"count": x["match_count"], "time": x["match_time"], **match},
+                "route": {"to_la": list(x["route"]["to_la"]), "to_inject": list(x["route"]["to_inject"])}}
 
 
 def _with_uart(tr: Transitions, channel: int, baud: int, text: bytes, trigger_time: int) -> Transitions:

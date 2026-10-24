@@ -8,16 +8,18 @@
   import { i18n } from "../../lib/i18n";
   import { agentStartParams, connectParams, coreFetchParams, coreLimitParams, corePatternParams, coreStatusParams,
     perfRecordParams, perfStatParams, type CoreForm, type PerfForm, ftraceParams, gdbBatchParams, gdbServeParams, LinuxEvents, logParams, memapParams,
-    probeParams, ringOpenParams, ringReadParams, ringWatchParams, type ConnectForm, type GdbForm, type LinuxEvent, type LogForm,
+    probeParams, ringOpenParams, ringReadParams, ringWatchParams, syncParams, traceStartParams, type ConnectForm, type GdbForm, type LinuxEvent, type LogForm,
     type MemapForm, type ProbeForm, type RingForm } from "../../lib/linux";
+  import { LINUX_KEEP } from "../../lib/linux";
   import { load, save } from "../../lib/prefs";
 
   const POLL_MS = 500;
   const { app, conn } = shared();
 
-  let form = $state<ConnectForm>(restore("linux.connect", { target: "linux", host: "", user: "", port: "22", key: "", sudo: false, sudoPasswordEnv: "" }));
-  let probe = $state<ProbeForm>(restore("linux.probe", { name: "", binary: "", method: "ptrace", symbol: "", address: "", isa: "",
-    fetchargs: "", regs: "r0", ret: false, pid: "" }));
+  // 接続・プローブの欄も空から（名前・ポート・方式・レジスタを画面で決めない。前に書いた値だけを戻す）
+  let form = $state<ConnectForm>(restore("linux.connect", { target: "", host: "", user: "", port: "", key: "", sudo: false, sudoPasswordEnv: "" }));
+  let probe = $state<ProbeForm>(restore("linux.probe", { name: "", binary: "", method: "", symbol: "", address: "", isa: "",
+    fetchargs: "", regs: "", ret: false, pid: "" }));
   // 道 B などの欄は空で始める（既定の値を置かない。前に書いた値だけを戻す）
   let watchdog = $state(load("linux.watchdog", ""));
   let ring = $state<RingForm>(restore("linux.ring", { phys: "", size: "", cached: false, linger: false, address: "", access: "",
@@ -48,11 +50,12 @@
   let agent = $state<Record<string, any> | null>(null);
   let probes = $state<Record<string, any>[]>([]);
   let lastProbe = $state<Record<string, any> | null>(null);
-  let syncCount = $state("8");
-  let interval = $state("1.0");
+  let syncCount = $state("");                    // 時刻合わせの往復の回数・間隔は使う人が入れる（画面の既定を持たない）
+  let interval = $state("");
   let tracing = $state(false);
   let records = $state<LinuxEvent[]>([]);
   let dropped = $state(0);
+  let discarded = $state(0);                       // 画面に持つ上限を超えて捨てた記録
   let error = $state<string | null>(null);
   const events = new LinuxEvents(conn);
 
@@ -121,6 +124,7 @@
       await events.more(target);
       records = events.records;
       dropped = events.dropped;
+      discarded = events.discarded;
     } catch (e) {
       error = errorText(e);
     }
@@ -141,10 +145,14 @@
 
 <div class="pane linux">
   <form class="pane-bar" onsubmit={(e) => { e.preventDefault(); void connect(); }}>
-    <input class="mono short" bind:value={form.target} placeholder={$i18n("linux.target")} aria-label={$i18n("linux.target")} />
-    <input class="mono" bind:value={form.host} placeholder={$i18n("linux.host")} aria-label={$i18n("linux.host")} />
-    <input class="mono short" bind:value={form.user} placeholder={$i18n("linux.user")} aria-label={$i18n("linux.user")} />
-    <input class="mono num" bind:value={form.port} placeholder="22" aria-label={$i18n("linux.port")} />
+    <input class="mono short" bind:value={form.target} placeholder={$i18n("linux.target")} aria-label={$i18n("linux.target")}
+           aria-required="true" /><span class="req" aria-hidden="true">*</span>
+    <input class="mono" bind:value={form.host} placeholder={$i18n("linux.host")} aria-label={$i18n("linux.host")}
+           aria-required="true" /><span class="req" aria-hidden="true">*</span>
+    <input class="mono short" bind:value={form.user} placeholder={$i18n("linux.user")} aria-label={$i18n("linux.user")}
+           aria-required="true" /><span class="req" aria-hidden="true">*</span>
+    <input class="mono num" bind:value={form.port} placeholder={$i18n("linux.port")} aria-label={$i18n("linux.port")}
+           aria-required="true" /><span class="req" aria-hidden="true">*</span>
     <input class="mono" bind:value={form.key} placeholder={$i18n("linux.key")} aria-label={$i18n("linux.key")} />
     <label><input type="checkbox" bind:checked={form.sudo} /> sudo</label>
     <input class="mono short" bind:value={form.sudoPasswordEnv} placeholder={$i18n("linux.sudoEnv")} aria-label={$i18n("linux.sudoEnv")}
@@ -192,9 +200,10 @@
           <strong>{$i18n("linux.probe")}</strong>
           <input class="mono short" bind:value={probe.name} placeholder={$i18n("linux.name")} aria-label={$i18n("linux.name")} />
           <input class="mono" bind:value={probe.binary} placeholder={$i18n("linux.binary")} aria-label={$i18n("linux.binary")} />
-          <select bind:value={probe.method} aria-label={$i18n("linux.method")}>
+          <select bind:value={probe.method} aria-label={$i18n("linux.method")} aria-required="true">
+            {#if !probe.method}<option value="" disabled></option>{/if}
             <option value="ptrace">ptrace</option><option value="uprobe">uprobe</option>
-          </select>
+          </select><span class="req" aria-hidden="true">*</span>
           <input class="mono short" bind:value={probe.symbol} placeholder={$i18n("linux.symbol")} aria-label={$i18n("linux.symbol")} />
           <input class="mono short" bind:value={probe.address} placeholder={$i18n("linux.address")} aria-label={$i18n("linux.address")} />
           <select bind:value={probe.isa} aria-label="isa"><option value="">isa</option><option value="arm">arm</option><option value="thumb">thumb</option></select>
@@ -216,11 +225,13 @@
       </section>
       <section class="bar">
         <strong>{$i18n("linux.sync")}</strong>
-        <input class="mono num" bind:value={syncCount} aria-label={$i18n("linux.syncCount")} title={$i18n("linux.syncCount")} />
-        <button class="small" onclick={() => void call("linux.sync", { target, count: Number(syncCount) })}>{$i18n("linux.syncNow")}</button>
-        <input class="mono num" bind:value={interval} aria-label={$i18n("linux.interval")} title={$i18n("linux.interval")} />
+        <label class="muted">{$i18n("linux.syncCount")}<span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={syncCount} inputmode="numeric" aria-required="true" /></label>
+        <button class="small" onclick={() => void run("linux.sync", syncParams(target!, syncCount))}>{$i18n("linux.syncNow")}</button>
+        <label class="muted">{$i18n("linux.interval")}<span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={interval} inputmode="decimal" aria-required="true" /></label>
         <button class="primary small" disabled={tracing} onclick={async () => {
-          if ((await call("linux.trace.start", { target, sync_interval_s: Number(interval) })) !== undefined) tracing = true; }}>{$i18n("linux.traceStart")}</button>
+          if ((await run("linux.trace.start", traceStartParams(target!, interval))) !== undefined) tracing = true; }}>{$i18n("linux.traceStart")}</button>
         <button class="small" disabled={!tracing} onclick={async () => { await call("linux.trace.stop", { target }); tracing = false; }}>{$i18n("linux.traceStop")}</button>
       </section>
       <details>
@@ -340,6 +351,7 @@
         {#if perfResult?.stderr}<pre class="mono small muted">{perfResult.stderr}</pre>{/if}
       </details>
       {#if dropped}<div class="muted pad">{$i18n("linux.dropped", { n: dropped })}</div>{/if}
+      {#if discarded}<div class="muted pad">{$i18n("common.discarded", { n: discarded, limit: LINUX_KEEP })}</div>{/if}
       <div class="rows mono small">
         {#each records as r (r.seq)}
           <div class="row">

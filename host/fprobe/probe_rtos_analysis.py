@@ -15,10 +15,10 @@ docs/superpowers/specs/2026-10-18-u10-u16-trace-hooks-user-events-design.md の 
 
 from .rtos.analysis import (Intervals, execution_profile, find_jobs, inversion_episodes, isr_intervals, job_summary, load_series, run_summary,
                             memory_series, run_time_in)
-from .rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, job_events, overhead,
-                        queue_usage)
+from .rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, isr_pairing, job_events,
+                        overhead, queue_usage)
 
-__all__ = ["RtosAnalysisTools"]
+__all__ = ["RtosAnalysisTools", "task_handle"]
 
 WINDOWS_LIMIT = 1000                     # rtos_timeline_load が返す窓の数の既定の上限
 _SAMPLED_ISR = "方法 sampled では割り込みは見えない（タスクの時間に含まれる）。方法 itm の exceptions=true で分かる"
@@ -28,6 +28,22 @@ EVENTS_LIMIT = 500                       # rtos_timeline_events が 1 回に返�
 _JOB_EVENTS = "トレースフックの ready / block の出来事で区切った（応答時間 = 終わり − ready）"
 _JOB_NONE = ("トレースフックの ready / block の出来事が無いので、ジョブ（起きてから待つまで）は作らない（次に動いた"
              "タスクの優先度から横取りか待ちかを推定しない）。runs は区間（続けて動いた間）の事実")
+
+
+def task_handle(names: dict[int, str], task: str) -> int:
+    """タスクの名前か番地（"0x..."）→ ハンドル（TCB の番地）。同じ名前のタスクが複数あれば、ハンドルを挙げて誤り
+    （最初のものと決めない。番地で選ぶ）。"""
+    if task.strip().lower().startswith("0x"):
+        handle = int(task, 16)
+        if handle not in names:
+            raise KeyError(f"タスク {task} は時間軸に無い")
+        return handle
+    handles = sorted(h for h, n in names.items() if n == task)
+    if not handles:
+        raise KeyError(f"タスク {task!r} は時間軸に無い")
+    if len(handles) > 1:
+        raise KeyError(f"タスク {task!r} は複数ある（番地で選ぶ）: " + ", ".join(f"0x{h:08X}" for h in handles))
+    return handles[0]
 
 
 class RtosAnalysisTools:
@@ -59,6 +75,11 @@ class RtosAnalysisTools:
         if result.activations is None and self._activations(result) is not None:
             out["notes"].append("割り込みの区間はトレースフックの isr_enter / isr_exit から（フックを呼ぶ ISR だけ。"
                                 "すべての割り込みは rtos_timeline_start の exceptions=true）")
+            pairs = isr_pairing(result.kernel)
+            out["isr_unpaired"] = pairs.counts()
+            if any(pairs.counts().values()):
+                out["notes"].append(f"対にできなかった isr_enter / isr_exit（回に入れていない）: 出の欠けた回 "
+                                    f"{pairs.missing_exit}・入りの無い出 {pairs.missing_enter}・あふれで忘れた回 {pairs.lost_open}")
         elif result.activations is None:
             out["notes"].append(_SAMPLED_ISR if result.run.method == "sampled" else
                                 "例外トレースを流していない（rtos_timeline_start の exceptions=true）: 割り込みはタスクの時間に含まれる")
@@ -78,7 +99,8 @@ class RtosAnalysisTools:
         self._isr_note(result, out)
         load["windows_total"] = len(load["windows"])
         load["windows"] = load["windows"][:limit]
-        out.update(load)
+        load["limit"] = limit                                  # 使った上限（windows_total と比べて切ったかが分かる）
+        out.update(load, window_us=window_us)                   # 使った窓の幅（既定のときも）
         return out
 
     def rtos_timeline_jobs(self, task: str | None = None, limit: int = 50) -> dict:
@@ -114,16 +136,12 @@ class RtosAnalysisTools:
     def rtos_timeline_interval(self, start: dict, end: dict, task: str | None = None, limit: int = 1000) -> dict:
         """記録の 2 点（start / end は recording_find と同じ条件。timing_measure と同じ組の規則）の各組について、
         タスク（省けば開始の時刻に動いていたタスク）が実際に CPU を使った時間（ほかのタスク・割り込みを除く）と
-        経過時間の分布。時間軸と記録は同じタイムベース。"""
+        経過時間の分布。時間軸と記録は同じタイムベース。task は名前か TCB の番地 "0x..."（同じ名前が複数なら誤り:
+        task_handle）。"""
         result = self._current_timeline()
         out = self._analysis_base(result)
         pairs = self._reading().intervals(start, end)["intervals"]
-        handle = None
-        if task is not None:
-            handles = [h for h, n in result.run.names.items() if n == task]
-            if not handles:
-                raise KeyError(f"タスク {task!r} は時間軸に無い")
-            handle = handles[0]
+        handle = None if task is None else task_handle(result.run.names, task)
         measured = run_time_in(result.timeline, pairs, handle, self._isr(result), result.run.timebase_hz)
         self._isr_note(result, out)
         if len(measured["intervals"]) > limit:
@@ -150,7 +168,7 @@ class RtosAnalysisTools:
         アイドル・どれでもない時間の割合（実行のプロファイル）。割り込みは方法 itm の exceptions=true のとき。"""
         result = self._current_timeline()
         out = self._analysis_base(result)
-        names = self._exception_names()
+        names = self._exception_names(result.run)
         out.update(execution_profile(result.timeline, self._activations(result), result.run.idle, names,
                                      result.run.timebase_hz))
         if result.exception_issues is not None:
@@ -167,7 +185,11 @@ class RtosAnalysisTools:
         result = self._current_timeline()
         run = result.run
         out = self._analysis_base(result)
-        if result.has_kernel:
+        if run.order is None:
+            found = {"available": False, "episodes": [], "count": 0,
+                     "reason": "優先度の向きが分からない（この取り込みの形式は RTOS を決めない。OS 名から推さない）ので、"
+                               "逆転は判定しない"}
+        elif result.has_kernel:
             found = inversions_from_ops(result.timeline, result.kernel, run.priorities, run.order, run.names,
                                         result.objects(), run.timebase_hz)
         else:
@@ -206,7 +228,7 @@ class RtosAnalysisTools:
         準備完了（ready）・delay・suspend・優先度（prio_*）・通知・イベントグループ・ストリームバッファ・割り込みの出入り。
         kinds・task（行為者か対象のタスクの名前）・object（オブジェクトの名前）で絞り、offset から limit 件。"""
         result = self._kernel_result()
-        run, objects, isr_names = result.run, result.objects(), self._exception_names()
+        run, objects, isr_names = result.run, result.objects(), self._exception_names(result.run)
         rows = [op.to_dict(run.names, objects, isr_names) for op in result.kernel.ops if op.kind != "lost"]
         selected = [r for r in rows if (kinds is None or r["kind"] in kinds)
                     and (task is None or task in (r.get("actor"), r.get("task")))
@@ -221,7 +243,8 @@ class RtosAnalysisTools:
         失敗の回数。dot は Graphviz の形。"""
         result = self._kernel_result()
         out = self._kernel_base(result)
-        out.update(communication_flow(result.kernel, result.run.names, result.objects(), self._exception_names()))
+        out.update(communication_flow(result.kernel, result.run.names, result.objects(),
+                                      self._exception_names(result.run)))
         return out
 
     def rtos_timeline_blocking(self, task: str | None = None, limit: int = 200) -> dict:
@@ -249,7 +272,8 @@ class RtosAnalysisTools:
         result = self._kernel_result()
         run, tl = result.run, result.timeline
         out = self._kernel_base(result)
-        found = overhead(result.kernel, tl.t1 - tl.t0, run.timebase_hz, run.baud, run.core_clock_hz)
+        found = overhead(result.kernel, tl.t1 - tl.t0, run.timebase_hz, run.baud, run.core_clock_hz,
+                         run.bits_per_byte)
         out["notes"] += found.pop("notes")
         out.update(found)
         return out

@@ -44,6 +44,18 @@ def os3(image, registers=None, **options) -> tuple[UCOS3, ImageAccess]:
     return UCOS3(info, access, symbols, **options), access
 
 
+def test_kernel_pointers_are_the_kernel_s_own_names_not_a_naming_pattern(image, monkeypatch):
+    """除くのは µC/OS-III が定める変数（os.h）だけ。「OS で始まり Ptr で終わる」アプリの変数は除かない。"""
+    from types import SimpleNamespace
+    rtos, _ = os3(image)
+    real = rtos.info.global_variables
+    monkeypatch.setattr(rtos.info, "global_variables",
+                        lambda: [*real(), SimpleNamespace(name="OSAppTaskPtr")])
+    kernel = rtos.kernel_pointers()
+    assert "OSAppTaskPtr" not in kernel
+    assert {"OSTCBCurPtr", "OSTCBHighRdyPtr", "OSTaskDbgListPtr", "OSTmrListPtr"} <= kernel
+
+
 def by_name(items):
     return {x.name: x for x in items}
 
@@ -126,7 +138,8 @@ def test_stacks(image):
     logger = tasks["logger"].stack                            # OS_OPT_TASK_STK_CLR 無し: 塗りが無い
     assert logger.fill == "none" and logger.untouched is None and not logger.overflow
     parked = tasks["parked"]
-    assert not parked.stack.overflow and parked.stack.fill == "none" and parked.stack.fill_above and parked.notes
+    assert not parked.stack.overflow and parked.stack.fill == "none" and parked.stack.fill_run_above is not None \
+        and parked.notes
     assert tasks["main"].stack.pointer is None                # 実行中: レジスタが読めない
 
 
@@ -161,7 +174,7 @@ def test_backtrace_of_waiting_task(image):
     assert ctx.registers["pc"] == pc and ctx.sp == b.regs["sp"] and not ctx.fp
     frames = rtos.backtrace("sensor", variables=True)
     assert [f["function"] for f in frames] == ["OSSemPend", "AppTaskSensor"]
-    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["p_sem"]["pointer"] == sem
+    assert {a["name"]: a["value"] for a in frames[0]["arguments"]}["p_sem"]["address"] == sem
     assert rtos.saved_context("main") is None
 
 

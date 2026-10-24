@@ -38,8 +38,8 @@ FEATURE_SAMPLER_MATCH = 1 << 10   # サンプラの値の一致をクロスト�
 FEATURE_SYNC = 1 << 9        # ボードの間の時刻の同期（CSR sync・イベント 10・端子 sync_in / sync_out）
 SYNC_RX_LATENCY_TICKS = 2    # 子: sync_in が 1 になった周期 → 組の子の時刻（rtl/core/sync_link.vhd の RX_LATENCY_TICKS）
 SYNC_TX_LATENCY_TICKS = 1    # 親: 送る時刻を決めた周期 → sync_out が 1（同 TX_LATENCY_TICKS）
-SYNC_RX_PHASE_TICKS = 0.5    # 子: 非同期に来る辺を自分の時計で取り込む位相の平均（ロジアナの申告の遅れの 0.5 と同じ。
-                             # 2026-10-22 の実機で、これを入れないと子の出来事が約 0.5 刻み早く出た）
+SYNC_RX_PHASE_SPAN_TICKS = 1   # 子: 非同期に来る辺を自分の時計で取り込む位相の幅。辺は sync_in が 1 になった周期の
+                               # 0 以上 1 未満刻み前のどこか（どこかは測っていない。平均等の値を仮定しない）
 TYPE_DEBUG = 14              # u32 ビットマップ（DEBUG_*。デバッグポートの構成。無い古いデバイスは全部ある）
 DEBUG_JTAG = 1 << 0          # JTAG の PHY（無ければ DAP_Connect の JTAG は失敗）
 DEBUG_INJECT = 1 << 1        # 故障注入 = 割り込み書き込み（swd_injector。xtrig の inject_*）
@@ -57,8 +57,11 @@ LA_CH_PIN = 1                # 拡張ヘッダ（デバッグコネクタ）の�
 LA_CH_INTERNAL = 2           # 内部の信号。0 = プローブが SWDIO を駆動中、1 = DAP の処理中
 LA_CH_INPUT = 3              # 専用の入力（デバッグの線と兼用しない純粋な入力）。番号 = 入力の番号
 LA_INTERNAL_PROBES = 2       # fprobe_core が外部のピンの後に置く内部の信号の数
-TYPE_LA_DELAY = 19           # ロジアナの時刻（trigger_time）がピンの変化より遅い分: u16 × 2（内蔵・深いバッファ）、
-                             # 半刻みの単位（非同期のピンの同期化の平均 0.5 刻みを含む）。無い古いデバイスは 0（直さない）
+TYPE_LA_DELAY = 20           # ロジアナの時刻（trigger_time）がピンの変化より遅い分: u16 × 3 = 内蔵・深いバッファの段数
+                             # （刻み。回路で決まる）と、非同期のピンを取り込む位相の幅（刻み。ピンの変化は段数の分より
+                             # 0 以上その幅未満だけ前）。19 は旧い形（半刻みで平均 0.5 を足していた。読まない）。
+                             # 無い古いデバイスは 0（直さない）
+LA_PHASE_SPAN_TICKS = 1      # 非同期のピンを取り込む位相の幅（同期化の最初の段がどの刻みで変化を見たかは測っていない）
 # ロジアナの入り口から時刻の付くまでの段数（刻み。辺の直後に変わった入力について。gateware/tests の
 # la_filter・la_capture・deep_axi の試験が回路と一致することを確かめる）
 LA_FILTER_DELAY = 3          # la_filter: 2 段の同期化 + 1（LA_FILTER の構成だけ。その後の la_front の同期化も残る）
@@ -154,10 +157,10 @@ def _tlv(kind: int, value: bytes) -> bytes:
     return struct.pack("<HH", kind, len(value)) + value + bytes(-len(value) % 4)
 
 
-def la_delay_halves(caps: Capabilities) -> tuple[int, int]:
-    """ロジアナの時刻がピンの変化より遅い分（内蔵, 深いバッファ）。半刻みの単位、非同期の平均 0.5 刻みを含む。"""
+def la_delay_ticks(caps: Capabilities) -> tuple[int, int]:
+    """ロジアナの時刻がピンの変化より遅い段数（内蔵, 深いバッファ。刻み）。位相の幅（LA_PHASE_SPAN_TICKS）は別に申告する。"""
     front = LA_FILTER_DELAY if caps.la_filter else 0
-    return 2 * (front + LA_INTERNAL_DELAY) + 1, 2 * (front + LA_DEEP_DELAY) + 1
+    return front + LA_INTERNAL_DELAY, front + LA_DEEP_DELAY
 
 
 def encode(caps: Capabilities, build: list[int] | None = None) -> bytes:
@@ -203,7 +206,8 @@ def _encode(caps: Capabilities, build: list[int] | None = None) -> tuple[bytes, 
                                      *(ch | OUTPUT_PULL_UP * pull_up for ch, pull_up in caps.outputs)]))]
           if caps.outputs else []),
         *([_tlv(TYPE_UART_FLOW, bytes(caps.uart_flow))] if caps.uart_flow else []),
-        *([_tlv(TYPE_LA_DELAY, struct.pack("<HH", *la_delay_halves(caps)))] if caps.la_channels else []),
+        *([_tlv(TYPE_LA_DELAY, struct.pack("<HHH", *la_delay_ticks(caps), LA_PHASE_SPAN_TICKS))]
+          if caps.la_channels else []),
     ])
     body = head + _tlv(TYPE_BUILD, b"".join(map(u32, build))) + _tlv(TYPE_END, b"")
     build_word = (8 + len(head) + 4) // 4                   # 先頭（magic・総バイト数）と TLV の頭の後
@@ -283,7 +287,7 @@ HOST_CONSTANTS = {
     "FEATURE_LA_STREAM_EVENTS": FEATURE_LA_STREAM_EVENTS, "FEATURE_FPGA_OBS": FEATURE_FPGA_OBS,
     "FEATURE_OBS_MATCH": FEATURE_OBS_MATCH, "FEATURE_SAMPLER_MATCH": FEATURE_SAMPLER_MATCH, "FEATURE_SYNC": FEATURE_SYNC,
     "SYNC_RX_LATENCY_TICKS": SYNC_RX_LATENCY_TICKS, "SYNC_TX_LATENCY_TICKS": SYNC_TX_LATENCY_TICKS,
-    "SYNC_RX_PHASE_TICKS": SYNC_RX_PHASE_TICKS,
+    "SYNC_RX_PHASE_SPAN_TICKS": SYNC_RX_PHASE_SPAN_TICKS,
     "CAPS_BUILD": TYPE_BUILD,
     "CAPS_DEBUG": TYPE_DEBUG, "CAPS_LA_DELAY": TYPE_LA_DELAY, "DEBUG_JTAG": DEBUG_JTAG, "DEBUG_INJECT": DEBUG_INJECT,
     "CAPS_LA_LAYOUT": TYPE_LA_LAYOUT, "LA_CH_NONE": LA_CH_NONE, "LA_CH_PIN": LA_CH_PIN,

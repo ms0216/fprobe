@@ -33,6 +33,21 @@ def tagged(out):
 
 # --- 1. correlate ---------------------------------------------------------------------------------
 
+def test_tracex_context_switches_are_inferred_only_in_the_plugin():
+    """TraceX の出来事の文脈（args.context）が別のスレッドに変わった所を切り替えとみなす（本体から外した推定）。"""
+    from fprobe.tracefmt.tracex import ISR_CONTEXT
+    t1, t2 = 0x2000_0100, 0x2000_0200
+    events = [{"ts": 10, "kind": "task_create", "args": {"context": t1}},
+              {"ts": 35, "kind": "info", "args": {"context": t2}},
+              {"ts": 40, "kind": "isr_enter", "args": {"context": ISR_CONTEXT}},
+              {"ts": 42, "kind": "object", "args": {"context": t1}},          # 割り込みの中（深さ 1）: 数えない
+              {"ts": 45, "kind": "isr_exit", "args": {"context": ISR_CONTEXT}},
+              {"ts": 60, "kind": "marker", "args": {"context": t1}}]
+    out = h.tracex_context_switches(events)
+    assert out["heuristic"] == "tracex_context_change" and out["assumption"]
+    assert [(e["ts"], e["task"]) for e in out["task_in"]] == [(10, t1), (35, t2), (60, t1)]
+
+
 def test_rank_causes_puts_most_preceding_first_then_by_lift():
     # 元の試験: 先行率 0.01・lift 2.9 が、先行率 1.0・lift 2.57 の本当の原因より上に来ないように
     rare = {"condition": "rare", "preceded": 0.01, "coverage": 0.01 / 2.9}
@@ -240,6 +255,13 @@ def test_heap_growing_puts_growing_before_bigger():
     assert h.heap_growing_from_api(api)["min_age_s"] == 1.0 and api.calls[0][1] == {"min_age_s": 1.0, "top": 20}
 
 
+def test_the_allocator_wrapper_names_are_passed_as_skip_functions():
+    # 本体から外した名前の表（WRAPPERS）は、プラグインが明示の skip_functions として渡す
+    api = FakeApi(heap_trace_start=lambda allocators, skip_functions: {"skip_functions": skip_functions})
+    out = tagged(h.heap_trace_start_skipping_wrappers(api))
+    assert "calloc" in out["skip_functions"] and api.calls[0][1]["skip_functions"] == list(h.ALLOCATOR_WRAPPERS)
+
+
 def test_stack_warning_at_90_percent_and_the_16_byte_guard():
     ram = bytearray(b"\xcd" * 0x1000)
     read = lambda a, n: bytes(ram[a - 0x2000_0000:a - 0x2000_0000 + n])
@@ -316,6 +338,46 @@ def test_diagnose_hints_for_other_swd_failures_and_power():
     assert "保護" in typical_of(h.diagnose_hints({"steps": [power]}), "power")[0]
     over = step("voltage", "warn", "ターゲットの電圧が測れる上限を超えている", over_range=True, live=True)
     assert "分圧" in typical_of(h.diagnose_hints({"steps": [over]}), "voltage")[0]
+
+
+def _diagnosed(target, frequencies_hz=(1_000_000,), pins=0b1000_0011, **kw):
+    """本体の診断（偽の DAP）の API の結果（as_dict）。"""
+    from dap_fakes import FakeDapLink
+    from fprobe.diagnose import diagnose
+    from fprobe.raw_dap import RawDap
+    link = FakeDapLink(target, pins=pins)
+    volts = {"volts": 3.29, "over_range": False, "live": True, "samples": 10, "errors": 0}
+    return diagnose(RawDap(link), list(frequencies_hz), voltage=lambda: dict(volts),
+                    pins=lambda: link.pin_access(0, 0), **kw).as_dict()
+
+
+def test_diagnose_verdict_judges_and_suggests_a_connect_only_in_the_plugin():
+    # 本体から外した判定（ok / warn / fail）・結論の文・接続の引数のおすすめ
+    from coresight_fakes import stm32f401_words
+    from dap_fakes import FakeMemAp, FakeTarget
+    healthy = tagged(h.diagnose_verdict(_diagnosed(FakeTarget(aps={0: FakeMemAp(words=stm32f401_words())}))))
+    assert healthy["ok"] and healthy["verdict"].startswith("接続できる（STM32F401xD/E")
+    assert healthy["suggested_connect"] == {"target": "stm32f401xe", "frequency_hz": 1_000_000}
+    assert all(s["severity"] == "ok" for s in healthy["steps"])
+
+    slow = h.diagnose_verdict(_diagnosed(FakeTarget(max_hz=500_000, aps={0: FakeMemAp(words=stm32f401_words())}),
+                                         frequencies_hz=[4_000_000, 400_000], pins=0b0000_0011))
+    sev = {s["name"]: s["severity"] for s in slow["steps"]}
+    assert sev["swd"] == "warn" and sev["pins"] == "warn" and slow["ok"]           # 遅い速さで応答・nRESET が Low
+    assert slow["suggested_connect"]["frequency_hz"] == 400_000 and "ただし:" in slow["verdict"]
+
+    words = stm32f401_words()
+    words[0xE000EDF0] = 1 << 19 | 1                                                # ロックアップ
+    locked = h.diagnose_verdict(_diagnosed(FakeTarget(aps={0: FakeMemAp(words=words)})))
+    assert locked["suggested_connect"]["connect_mode"] == "under-reset"
+    assert next(s for s in locked["steps"] if s["name"] == "core")["severity"] == "warn"
+
+    off = h.diagnose_verdict(_diagnosed(FakeTarget(powered=False), pins=0b0000_0001))
+    assert not off["ok"] and off["verdict"].startswith("接続できない: SWD に応答が無い")
+    assert off["suggested_connect"] is None and "Vtarget = 3.29 V" in off["verdict"]
+
+    no_aps = h.diagnose_verdict(_diagnosed(FakeTarget(aps={})))                    # DP は届くが AP が無い
+    assert not no_aps["ok"] and no_aps["verdict"].startswith("接続できない: AP が見つからない")
 
 
 # --- 9. disasm ------------------------------------------------------------------------------------
@@ -415,3 +477,160 @@ def test_aliasing_suspects_cut_rows_are_unknown_not_zero():
     assert out["suspects"] == [] and out["unknown"] == [17]
     api = FakeApi(profile_result=lambda by, top: {**result, "top_seen": top})
     assert h.aliasing_suspects_from_api(api)["unknown"] == [] and api.calls == [("profile.result", {"by": "exception", "top": 1000})]
+
+
+# --- 接続スクリプトの名前の候補（connect_scripts から外した） ------------------------------------------
+
+def test_connect_script_name_hints_from_similarity_and_prefixes():
+    check = {"functions": [{"name": "will_conect", "line": 2}, {"name": "did_something", "line": 5},
+                           {"name": "helper", "line": 8}]}
+    out = tagged(h.connect_script_name_hints(check))
+    assert out["cutoff"] == 0.8 and out["prefixes"] == ["will_", "did_"]
+    assert out["hints"] == [{"name": "will_conect", "line": 2, "close": "will_connect"},
+                            {"name": "did_something", "line": 5, "close": None}]
+    assert tagged(h.connect_script_name_hints(check, cutoff=0.99, prefixes=()))["hints"] == []
+
+
+# --- tbb / tbh の表の大きさ（disasm から外した） ------------------------------------------------------
+
+def test_tbb_table_sizes_from_the_preceding_compare():
+    from test_disasm import TBB_CODE, BytesMemory
+
+    from fprobe.disasm import Disassembler
+    plain = Disassembler(BytesMemory(0x100, TBB_CODE)).range(0x100, 0x110).instructions
+    out = tagged(h.tbb_table_sizes(plain))
+    assert out["tables"] == {0x104: 3} and out["window"] == 4
+    assert out["branch_tables"] == [{"address": 0x104, "entries": 3}]                # debug.disasm.* の引数の形
+    listing = Disassembler(BytesMemory(0x100, TBB_CODE), branch_tables=out["tables"]).range(0x100, 0x110)
+    assert [i.mnemonic for i in listing.instructions].count(".byte") == 4
+    assert tagged(h.tbb_table_sizes(plain[2:]))["tables"] == {}                    # cmp が無ければ挙げない
+
+
+# --- 止める前の手がかり・走らせたままの見張りの名前の慣習（本体の halt_risk・liveness から外した表） ------------------
+
+def _halt_api():
+    from fprobe.halt_risk import scan
+    from fprobe.symbols import Symbol
+    symbols = [Symbol("main", 0x100, 4, "function"), Symbol("RADIO_IRQHandler", 0x200, 4, "function"),
+               Symbol("ll_adv_enable", 0x300, 4, "function"), Symbol("tud_task", 0x400, 4, "function"),
+               Symbol("wdt_feed", 0x500, 4, "function"), Symbol("_kernel", 0x20000000, 4, "object"),
+               Symbol("fill_buffer", 0x600, 4, "function"), Symbol("wdt_config", 0x20000010, 4, "object")]
+    state = {}
+
+    def halt_risk_set(names=(), patterns=()):
+        state.update(names=list(names), patterns=list(patterns))
+        return dict(state)
+
+    def halt_risk():
+        return {"elf": "app.elf", **scan(symbols, state.get("names", ()), state.get("patterns", ()))}
+    return FakeApi(debug_halt_risk_set=halt_risk_set, debug_halt_risk=halt_risk)
+
+
+def test_halt_risk_conventions_set_the_names_and_group_them_by_kind():
+    api = _halt_api()
+    out = tagged(h.halt_risk_conventions(api))
+    assert api.calls[0][0] == "debug.halt_risk.set" and "_kernel" in api.calls[0][1]["names"]
+    assert [r["kind"] for r in out["reasons"]] == ["radio", "usb", "watchdog", "rtos"]
+    radio = out["reasons"][0]
+    assert radio["symbols"][0] == "RADIO_IRQHandler" and set(radio["symbols"]) == {"RADIO_IRQHandler", "ll_adv_enable"}
+    assert out["reasons"][2]["symbols"] == ["wdt_feed"]               # 変数の wdt_config は関数の形の対象外
+    assert out["reasons"][3]["rtos"] == "Zephyr" and out["risky"] is True
+
+
+def test_halt_risk_kinds_of_nothing_is_not_risky():
+    out = tagged(h.halt_risk_kinds({"matched": False, "matches": []}))
+    assert out["risky"] is False and out["reasons"] == []
+
+
+def test_liveness_conventions_set_the_fatal_and_fault_names():
+    seen = {}
+    api = FakeApi(target_liveness_set=lambda **kw: (seen.update(kw), kw)[1])
+    out = tagged(h.liveness_conventions(api, pc_samples=4))
+    assert "Error_Handler" in seen["functions"] and "arch_system_halt" in seen["functions"]
+    assert seen["pc_samples"] == 4 and seen["patterns"] == [h.FAULT_HANDLER_PATTERN]
+    assert out["settings"]["pc_samples"] == 4
+
+
+def test_fatal_kind_from_the_function_names():
+    fault = {"kind": "pc_in", "function": "HardFault_Handler", "since": 1, "evidence": []}
+    assert tagged(h.fatal_kind(fault))["kind"] == "fault_loop"
+    assert h.fatal_kind({**fault, "function": "Default_Handler"})["kind"] == "fault_loop"
+    assert h.fatal_kind({**fault, "function": "arch_system_halt"})["kind"] == "fatal_halt"
+    assert h.fatal_kind({"kind": "lockup", "since": 1, "evidence": []})["kind"] == "lockup"
+
+
+# --- 3 回目に外した判断（2026-10-24。点検 3 回目の H1・H2） ------------------------------------------------
+
+def test_wilson_known_values():
+    # 教科書の値（95%、z = 1.959964）
+    lo, hi = h.wilson_interval(5, 10)
+    assert lo == pytest.approx(0.2366, abs=1e-4) and hi == pytest.approx(0.7634, abs=1e-4)
+    lo, hi = h.wilson_interval(0, 10)
+    assert lo == 0 and hi == pytest.approx(0.2775, abs=1e-4)
+    lo, hi = h.wilson_interval(10, 10)
+    assert lo == pytest.approx(0.7225, abs=1e-4) and hi == pytest.approx(1.0)
+
+
+def test_wilson_narrows_with_samples_and_confidence():
+    w100 = h.wilson_interval(30, 100)
+    w10000 = h.wilson_interval(3000, 10000)
+    assert w10000[1] - w10000[0] < (w100[1] - w100[0]) / 5
+    assert h.wilson_interval(30, 100, 0.99)[1] > w100[1]
+
+
+def test_wilson_without_samples_is_unknown():
+    assert h.wilson_interval(0, 0) == (0.0, 1.0)
+    with pytest.raises(ValueError):
+        h.wilson_interval(3, 2)
+
+
+def test_sampling_intervals_add_ci_to_the_rows_and_categories():
+    # 本体の profile.result は回数と割合（事実）だけ。区間は二項の仮定の上の推定なのでプラグインで付ける
+    result = {"by": "function", "total": 100, "rows": [{"function": "tick", "samples": 30, "fraction": 0.3}],
+              "categories": {"sleep": {"samples": 0, "fraction": 0.0}}}
+    out = tagged(h.sampling_intervals(result))
+    assert out["confidence"] == 0.95 and "ci" not in result["rows"][0]                   # 元の結果は変えない
+    assert out["rows"][0]["ci"] == pytest.approx(list(h.wilson_interval(30, 100)))
+    assert out["categories"]["sleep"]["ci"] == pytest.approx(list(h.wilson_interval(0, 100)))
+    # 例外の表の割合の分母は、処理中の例外が分かったサンプル（samples / fraction で戻す）
+    exc = {"by": "exception", "total": 100, "rows": [{"exception": 15, "samples": 5, "fraction": 0.1}]}
+    assert h.sampling_intervals(exc, 0.9)["rows"][0]["ci"] == pytest.approx(list(h.wilson_interval(5, 50, 0.9)))
+
+
+def test_spiflash_conventional_commands_are_a_table_for_the_decoder():
+    from fprobe.decode import decode
+    from fprobe.decode.synth import Wave, spi
+    out = tagged(h.spiflash_conventional_commands())
+    assert out["commands"]["0x35"]["name"] == "READ_STATUS2" and out["commands"]["0x20"]["write"] is True
+    w = Wave(channels=4, sample_rate_hz=20e6, idle={3: 1})
+    t = spi(w, 1e-6, sck=0, mosi=1, miso=2, cs=3, clock_hz=1e6, mosi_words=[0x35, 0], miso_words=[0, 0x02])
+    cfg = {"sck": 0, "mosi": 1, "miso": 2, "cs": 3, "mode": 0, "msb_first": True, "word_bits": 8, "cs_active_low": True}
+    c = decode("spiflash", w.build(end_s=t + 2e-6), spi=cfg, address_bytes=3, extra_commands=out["commands"]).of("command")
+    assert c[0].fields["name"] == "READ_STATUS2" and c[0].fields["data"] == [0x02]
+
+
+def test_clock_stderr_is_the_old_least_squares_error():
+    hz, clock = 100_000_000, 84_000_000
+    samples = [(t, (t * clock // hz + 12345) & 0xFFFFFFFF) for t in range(0, hz * 2, hz // 1000)]
+    out = tagged(h.clock_stderr(samples, hz))
+    assert out["clock_hz"] == pytest.approx(clock, rel=1e-7) and out["stderr_hz"] < 10
+    assert out["ppm"] == pytest.approx(out["stderr_hz"] / out["clock_hz"] * 1e6)
+    with pytest.raises(ValueError):
+        h.clock_stderr(samples[:2], hz)
+
+
+def test_load_outside_interval_is_the_old_body_note():
+    # 数字は 2026-10-18 の実機（rtt_demo、SysTick 1 kHz・17 サイクル、サンプルの間隔 2048 サイクル）
+    systick = {"exception": 15, "name": "SysTick", "load": 0.00106}
+    far = {"by": "exception", "total": 7834, "rows": [{"exception": 15, "name": "SysTick", "samples": 63}],
+           "exceptions": [systick]}
+    out = tagged(h.load_outside_interval(far))
+    assert [r["exception"] for r in out["outside"]] == [15] and out["confidence"] == 0.95
+    assert len(h.load_outside_interval({**far, "rows": []})["outside"]) == 1       # 0 回でも同じ区間で比べる
+    near = {**far, "rows": [{"exception": 15, "name": "SysTick", "samples": 9}]}
+    assert h.load_outside_interval(near)["outside"] == []
+    few = {**far, "total": 500, "rows": []}
+    assert h.load_outside_interval(few)["outside"] == []                            # 0 / 500 の上端 0.76 % の中
+    assert len(h.load_outside_interval(few, confidence=0.5)["outside"]) == 1
+    with pytest.raises(ValueError):
+        h.load_outside_interval({**far, "by": "function"})

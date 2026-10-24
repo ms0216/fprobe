@@ -19,20 +19,28 @@ try:                                                          # 入っていれ�
 except ImportError:                                           # 無くても同じ結果（遅いだけ）
     _np = None
 from .recording import Event
+from .timeline_rows import CarryIn, lookback_ranges
 
-__all__ = ["STREAM", "carry_in", "expand", "raw_items", "signals_of", "summary_sql"]
+__all__ = ["STREAM", "carry_in", "expand", "raw_items", "signals_error", "signals_of", "summary_sql"]
 
 STREAM = "fpga"
-CARRY_LOOKBACK = 16
-CARRY_TRIES = 3
 
 
 def signals_of(rec: Any) -> FpgaSignals:
-    """記録の情報の信号の定義（無い・壊れていれば空 = すべての組を組の値の段 1 本で）。"""
+    """記録の情報の信号の定義（無い・壊れていれば空 = すべての組を組の値の段 1 本で。壊れていたことは signals_error）。"""
     try:
         return FpgaSignals.from_dict(rec.meta.get("fpga.signals"))
     except ValueError:
         return FpgaSignals({})
+
+
+def signals_error(rec: Any) -> str | None:
+    """記録の情報の信号の定義が壊れていればその誤り（段に出す。黙って空にしない）。無い・正しければ None。"""
+    try:
+        FpgaSignals.from_dict(rec.meta.get("fpga.signals"))
+    except ValueError as e:
+        return str(e)
+    return None
 
 
 def _lanes(signals: FpgaSignals, group: int) -> list[tuple[str, str, str, Signal | None]]:
@@ -83,13 +91,14 @@ def expand(events: list[Event], signals: FpgaSignals) -> list[Event]:
     return out
 
 
-def carry_in(rec: Any, t0: int, t1: int) -> list[Event]:
-    """t0 の時点で観測していた組の、t0 の前の最後の値（範囲の始めでの状態を描くため。組の切り替えの記録が無い古い
-    記録は組ごとに）。範囲の幅の 16 倍・256 倍・4096 倍と前を探し、それでも無ければ記録の始めまで
-    （fprobe.timeline_rows.carry_in と同じ探し方）。"""
+def carry_in(rec: Any, t0: int, t1: int) -> CarryIn:
+    """t0 の時点で観測していた組の、t0 の前の最後の値（範囲の始めでの状態を描くため）。組の切り替えの記録があれば、
+    最後の切り替えから t0 まで（その組はそこからしか観測していない: 探すべき範囲をすべて探す）。切り替えの記録が無い
+    古い記録は組ごとに、範囲の幅の 16 倍・256 倍・4096 倍と前を探し、何か見つかった所で止める（それでも無ければ記録の
+    始めまで。fprobe.timeline_rows.carry_in と同じ探し方）。探した始めは searched_from（黙って打ち切らない）。"""
     span = rec.span()
     if span is None or span[0] >= t0:
-        return []
+        return CarryIn([], None, True)
     switches = rec.query_events(span[0], t0, [(
         "SELECT a, t FROM events WHERE stream = ? AND kind = 'group' AND t < ? ORDER BY t DESC LIMIT 1", [STREAM, t0])])
     if switches:
@@ -97,10 +106,9 @@ def carry_in(rec: Any, t0: int, t1: int) -> list[Event]:
         rows = rec.query_events(since, t0, [(
             "SELECT t, stream, kind, a, b, t_end, unc FROM events WHERE stream = ? AND kind = 'value' AND a = ? "
             "AND t >= ? AND t < ? ORDER BY t DESC LIMIT 1", [STREAM, g, since, t0])])
-        return [Event(t, s, kind, a, b, None, t_end, unc) for t, s, kind, a, b, t_end, unc in rows[:1]]
-    width = max(1, t1 - t0)
-    for k in range(CARRY_TRIES + 1):
-        lo = max(span[0], t0 - width * CARRY_LOOKBACK ** (k + 1)) if k < CARRY_TRIES else span[0]
+        return CarryIn([Event(t, s, kind, a, b, None, t_end, unc) for t, s, kind, a, b, t_end, unc in rows[:1]],
+                       since, True)
+    for lo in lookback_ranges(span, t0, t1):
         sql = ("SELECT t, stream, kind, a, b, body, t_end, unc, MAX(t) FROM events "
                "WHERE stream = ? AND kind = 'value' AND t >= ? AND t < ? GROUP BY a")
         latest: dict[int, Event] = {}
@@ -108,14 +116,15 @@ def carry_in(rec: Any, t0: int, t1: int) -> list[Event]:
             if a not in latest or latest[a].t < t:
                 latest[a] = Event(t, s, kind, a, b, None, t_end, unc)
         if latest or lo == span[0]:
-            return sorted(latest.values(), key=lambda e: e.t)
-    return []
+            return CarryIn(sorted(latest.values(), key=lambda e: e.t), lo, lo == span[0])
+    raise AssertionError("lookback_ranges の最後は記録の始め")
 
 
-def raw_items(rec: Any, t0: int, t1: int) -> list[Event]:
-    """生の段の出来事（持ち込みを含め、信号ごとに展開した後）。"""
-    items = carry_in(rec, t0, t1) + list(rec.iter_events(t0, t1, [STREAM], overlapping=True))
-    return expand(sorted(items, key=lambda e: e.t), signals_of(rec))
+def raw_items(rec: Any, t0: int, t1: int) -> tuple[list[Event], CarryIn]:
+    """生の段の出来事（持ち込みを含め、信号ごとに展開した後）と、持ち込みの探し方の事実。"""
+    carried = carry_in(rec, t0, t1)
+    items = carried.events + list(rec.iter_events(t0, t1, [STREAM], overlapping=True))
+    return expand(sorted(items, key=lambda e: e.t), signals_of(rec)), carried
 
 
 def summary_rows(rec: Any, start: int, width: int, count: int, fast: bool = True) -> list[tuple]:

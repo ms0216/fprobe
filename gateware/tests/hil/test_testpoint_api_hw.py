@@ -39,7 +39,7 @@ def run_demo(probe, elf: str) -> None:
 
 def test_two_wire_deep_capture_through_the_tools(probe):
     run_demo(probe, "testpoint_demo_serial.elf")
-    started = probe.testpoint_start("gpio_serial", map_path=MAP, clock_channel=4, data_channel=5, rate_hz=50e6,
+    started = probe.testpoint_start("gpio_serial", map_path=MAP, clock_channel=4, data_channel=5, guard_samples=1, rate_hz=50e6,
                                     after_beats=100_000)
     assert started["capture"] == "deep"
     stopped = probe.testpoint_stop(timeout_s=10)
@@ -60,7 +60,7 @@ def test_two_wire_stream_runs_long_and_goes_to_the_recording(probe):
     run_demo(probe, "testpoint_demo_serial.elf")
     probe.recording_start(name="testpoint-stream")
     try:
-        probe.testpoint_start("gpio_serial", map_path=MAP, clock_channel=4, data_channel=5, capture="stream",
+        probe.testpoint_start("gpio_serial", map_path=MAP, clock_channel=4, data_channel=5, guard_samples=1, capture="stream",
                               rate_hz=25e6, rle=True, duration_s=5.0, bucket_s=1.0,
                               long_s=100e-6)   # 長い呼び出しの印は明示したときだけ（inject_delay の spin(2000) は約 0.5 ms）
         time.sleep(2.5)

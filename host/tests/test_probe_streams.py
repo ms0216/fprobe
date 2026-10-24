@@ -123,7 +123,16 @@ def test_uart_is_served_and_written(probe):
     wait_for(lambda: bytes(link.tx) == b"reset\r")
     a.close()
     link.rx += b"more"
-    wait_for(lambda: probe.uart_read(timeout_s=0) == "boot ok\r\nmore" or False, timeout_s=3)
+    wait_for(lambda: probe.uart_read(timeout_s=0)["data"] == "boot ok\r\nmore" or False, timeout_s=3)
+
+
+def test_uart_results_say_which_baud_was_used(probe):
+    # 頼まれなければ 115200 で開く（道具の既定）: どの速さで送受したかを結果に出す（3 回目の点検 ?32）
+    link = probe.session.link
+    link.uart_baud = None
+    assert probe.uart_write("x") == {"written": 1, "baud": 115200}
+    assert probe.uart_write("y", baud=9600) == {"written": 1, "baud": 9600}
+    assert probe.uart_read(timeout_s=0)["baud"] == 9600
 
 
 def test_a_stream_is_logged_to_a_file_with_times(probe, tmp_path):

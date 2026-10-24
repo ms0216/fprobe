@@ -53,6 +53,7 @@ entity dap_processor is
     -- nRESET（オープンドレイン）
     nreset_low      : out std_logic;                 -- '1' で Low を駆動
     nreset_in       : in  std_logic;                 -- ピンの値（非同期。中で同期化する）
+    wait_retry_out  : out unsigned(15 downto 0);     -- DAP_TransferConfigure の WAIT の再試行の回数（サンプラ・割り込み書き込みも使う）
     -- JTAG（jtag = '1' の間、swd_* の命令は jtag_phy が受ける。チェーン上の位置は jtag_phy の入力と同じ意味）
     jtag            : out std_logic;
     jtag_dr_before  : out natural range 0 to 7;
@@ -122,6 +123,7 @@ architecture rtl of dap_processor is
   signal div_pending : std_logic := '0';               -- 割り算を頼んでいる（done まで）
   signal div_for_cfg : std_logic := '0';               -- 頼んだのは config（'0' なら swo）
 begin
+  wait_retry_out <= wait_retry;
   packet_i : entity work.dap_packet
     port map (clk => clk, rst => rst, packet_size => packet_size,
               in_valid => in_valid, in_ready => in_ready, in_data => in_data, in_last => in_last,

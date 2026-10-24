@@ -50,9 +50,10 @@ def test_event_values_are_formatted(rtx):
     info = rtx.format_event(0xF104, {"val1": 20_010_000, "val2": 50_090_001}, ctx)
     assert info["value"] == "version_api=2.1.0, version_kernel=5.9.1"
     freed = rtx.format_event(0xF005, {"val1": 1, "val2": 2, "val3": 0xFFFF_FFFD}, ctx)
-    assert freed["value"].endswith("status=osErrorResource") and freed["level"] == "info"
+    # 重要度は SCVD の level の名前のまま（Error / API / Op / Detail。fprobe の error / info / debug に写さない）
+    assert freed["value"].endswith("status=osErrorResource") and freed["level"] == "Op"
     error = rtx.format_event(0xF200, {"val1": 1, "val2": 0xFFFF_FFFE}, ctx)
-    assert error["level"] == "error" and error["component"] == "Thread Events"
+    assert error["level"] == "Error" and error["component"] == "Thread Events"
     assert rtx.format_event(0x1234, {}) is None
 
 
@@ -143,6 +144,53 @@ def test_component_viewer_reads_memory_and_builds_the_tree():
     assert nodes["value"] == "3 (busy 2, twice 6)"
     assert [(c["property"], c["value"]) for c in nodes["children"]] == [
         ("alpha", "Busy at 0x20000100"), ("beta", "negative -4"), ("gamma", "Busy at 0x20000300")]
+
+
+def test_lists_stopped_at_the_limit_or_a_cycle_are_noted():
+    # 黙って数え止めない（総点検）: readlist・list を上限で止めた・輪で止めたことを notes に事実として出す
+    scvd = Scvd()
+    scvd.add(VIEW)
+    m = demo_memory()
+    symbol = {"demo_info": (0x2000_0000, 8)}.get
+    [obj] = scvd.view(ScvdContext(read=m.read, symbol=symbol, list_limit=2))
+    assert obj["children"][0]["value"].startswith("2 ")
+    assert any("nodes" in n and "上限 2" in n for n in obj["notes"])
+    m.put(0x2000_0300, struct.pack("<I", 0x2000_0100))                  # 最後の節が最初を指す（輪）
+    [obj] = scvd.view(ScvdContext(read=m.read, symbol=symbol))
+    assert obj["children"][0]["value"].startswith("3 ")
+    assert any("nodes" in n and "輪" in n for n in obj["notes"])
+    loop = Scvd()
+    loop.add(VIEW.replace('<list name="i" start="0" limit="nodes._count">\n        <calc',
+                          '<list name="i" start="0" while="1">\n        <calc'))
+    [obj] = loop.view(ScvdContext(read=demo_memory().read, symbol=symbol, list_limit=5))
+    assert any("<list i>" in n and "上限 5" in n for n in obj["notes"])
+
+
+def test_strings_cut_at_the_limit_are_marked_and_noted():
+    # 黙って切り詰めない（総点検）: %N の文字列が上限 string_limit の中で終わらなければ、切ったことを値の中に印で、
+    # notes に番地と使った上限で出す（上限は引数で渡せる）
+    scvd = Scvd()
+    scvd.add(VIEW)
+    symbol = {"demo_info": (0x2000_0000, 8)}.get
+    [obj] = scvd.view(ScvdContext(read=demo_memory().read, symbol=symbol, string_limit=4))
+    names = [c["property"] for c in obj["children"][0]["children"]]
+    assert names[0] == "alph<上限 4 バイトで切った>" and names[1] == "beta<上限 4 バイトで切った>"
+    assert any("0x20000400" in n and "上限 4 バイト" in n for n in obj["notes"])
+    [obj] = scvd.view(ScvdContext(read=demo_memory().read, symbol=symbol, string_limit=5))
+    assert [c["property"] for c in obj["children"][0]["children"]][1] == "beta"   # NUL が上限の中にある
+    [obj] = scvd.view(ScvdContext(read=demo_memory().read, symbol=symbol))
+    assert "notes" not in obj
+
+
+def test_event_strings_cut_at_the_limit_are_marked_and_noted():
+    scvd = Scvd()
+    scvd.add('<component_viewer><events><component no="0x10" name="Demo"/>'
+             '<event id="0x1001" level="Op" property="Named" value="name=%N[val1]"/></events></component_viewer>')
+    m = demo_memory()
+    out = scvd.format_event(0x1001, {"val1": 0x2000_0400}, ScvdContext(read=m.read, string_limit=3))
+    assert out["value"] == "name=alp<上限 3 バイトで切った>"
+    assert any("0x20000400" in n and "上限 3 バイト" in n for n in out["notes"])
+    assert "notes" not in scvd.format_event(0x1001, {"val1": 0x2000_0400}, ScvdContext(read=m.read))
 
 
 def test_missing_symbols_are_noted_not_raised():

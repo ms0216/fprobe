@@ -9,7 +9,7 @@
     run_time_in(tl, pairs)                                     # 2 点の間で、そのタスクが実際に使った時間
     memory_series(samples, slots)                              # 保存された SP・ヒープの残量の推移
     execution_profile(tl, activations, idle=...)               # スレッド・割り込み・アイドルの割合
-    inversion_episodes(tl, samples, watches, priorities)       # ミューテックスの持ち主・待ちの先頭の語から逆転の区間
+    inversion_episodes(tl, samples, watches, priorities, order)       # ミューテックスの持ち主・待ちの先頭の語から逆転の区間
 
 割り込みの区間（isr）は方法 itm の例外トレースから（`exception_activations`）。無ければ割り込みはタスクの時間に含まれる。
 """
@@ -139,11 +139,14 @@ def load_series(tl: Timeline, window: int, idle: Iterable[int] = (), isr: Iterab
         covered = (w1 - w0) - gaps.overlap(w0, w1)
         isr_time = isr_iv.overlap(w0, w1)
         if covered <= 0:
-            windows.append({"t0": w0, "t1": w1, "covered": 0, "load": None, "isr": None, "tasks": {}})
+            windows.append({"t0": w0, "t1": w1, "covered": 0, "load": None, "isr": None, "other": None, "tasks": {}})
             continue
         idle_time = sum(v for h, v in time[k].items() if h in idle)
+        busy_time = sum(v for h, v in time[k].items() if h not in idle)
         row = {"t0": w0, "t1": w1, "covered": covered, "load": max(0.0, 1 - idle_time / covered),
                "isr": isr_time / covered,
+               # その他: 負荷のうちタスクにも割り込みにも入らない分（整数のタイムベースで数えるので丸めの誤差が無い）
+               "other": (covered - idle_time - isr_time - busy_time) / covered,
                "tasks": {names[h]: v / covered for h, v in sorted(time[k].items(), key=lambda x: -x[1]) if v}}
         windows.append(row)
     loads = [w for w in windows if w["load"] is not None]
@@ -363,7 +366,8 @@ class MemorySlot:
 def memory_series(samples: Iterable[tuple[int, int, int]], slots: Mapping[int, MemorySlot], points: int = 200,
                   hz: float | None = None) -> dict:
     """(時刻, 番地, 値) のサンプルから、タスクごとのスタックの使用量（end − 保存された SP）とヒープの残量の推移。
-    点は全体の時間を points 個の窓に分け、窓ごとに最悪の値（スタックは最大、ヒープは最小）。値は次のサンプルまで続く。"""
+    点は全体の時間を points 個の窓に分け、窓ごとに、その窓に入ったサンプルの最悪の値（スタックは最大、ヒープは最小）。
+    サンプルの無い窓には点を置かない（値が次のサンプルまで続いたとは仮定しない）。"""
     rows = sorted((t, a, v) for t, a, v in samples if a in slots)
     out: dict = {"stacks": {}, "heap": None}
     if not rows:
@@ -379,18 +383,9 @@ def memory_series(samples: Iterable[tuple[int, int, int]], slots: Mapping[int, M
         slot = slots[address]
         pick = max if slot.kind == "stack" else min
         buckets: dict[int, int] = {}
-        current = None
-        k_last = (t_last - t_first) // width
-        i = 0
-        for k in range(k_last + 1):
-            w1 = t_first + (k + 1) * width
-            values = [] if current is None else [current]
-            while i < len(series) and series[i][0] < w1:
-                current = series[i][1]
-                values.append(current)
-                i += 1
-            if values:
-                buckets[k] = pick(values)
+        for t, value in series:                            # 窓に入ったサンプルだけ（前の値を続けて入れない）
+            k = (t - t_first) // width
+            buckets[k] = value if k not in buckets else pick(buckets[k], value)
         points_out = [[t_first + k * width, v] for k, v in sorted(buckets.items())]
         values = [v for _, v in series]
         extreme_t, extreme_v = pick(series, key=lambda x: x[1])
@@ -464,10 +459,10 @@ class MutexWatch:
 
 
 def inversion_episodes(tl: Timeline, samples: Iterable[tuple[int, int, int]], watches: Sequence[MutexWatch],
-                       priorities: Mapping[int, int], order: int = 1, names: Mapping[int, str] | None = None,
+                       priorities: Mapping[int, int], order: int, names: Mapping[int, str] | None = None,
                        hz: float | None = None) -> dict:
     """持ち主の元の優先度より高い待ち手がいる区間（優先度の逆転）。その間に動いた、持ち主と待ち手の間の優先度の
-    タスクの時間（interference: 継承が効いていれば 0。正なら際限の無い逆転の印）と、持ち主が動いた時間。
+    タスクの時間（interference。interfered はそれが正か）と、持ち主が動いた時間。
     サンプラの周期より短い逆転は見えないことがある（回数は下限、端は ± 周期）。"""
     if not watches:
         return {"available": False, "episodes": [], "count": 0,
@@ -476,13 +471,15 @@ def inversion_episodes(tl: Timeline, samples: Iterable[tuple[int, int, int]], wa
     names = dict(names or {})
     names.update({r.handle: r.task for r in tl.runs})
     per = runs_by_task(tl)
+    edges: dict[int, list] = {}             # タスクごとの区間（端の不確かさ = 実際のサンプルの間隔の半分つき）
+    for r in tl.runs:
+        edges.setdefault(r.handle, []).append(r)
 
     def urgency(h: int | None) -> int | None:
         p = priorities.get(h) if h is not None else None
         return None if p is None else p * order
     episodes = []
     rows = sorted(samples)
-    edge = int(tl.resolution // 2)          # 区間の端（サンプルの中点）の不確かさ: 確かな範囲はその分だけ内側
     for w in watches:
         holder = head = None
         opened: tuple[int, int, int] | None = None              # (始め, 持ち主, 待ち手)
@@ -499,7 +496,7 @@ def inversion_episodes(tl: Timeline, samples: Iterable[tuple[int, int, int]], wa
             key = (holder, head)
             if opened is not None and (not inverted or (opened[1], opened[2]) != key):
                 episodes.append(inversion_episode(w.name, opened, t, per, urgency, names,
-                                                  certain=(opened[0] + edge, seen - edge)))
+                                                  certain=(opened[0], seen), edges=edges))
                 opened = None
             if inverted and opened is None:
                 opened = (t, holder, head)
@@ -507,17 +504,21 @@ def inversion_episodes(tl: Timeline, samples: Iterable[tuple[int, int, int]], wa
                 seen = t
         if opened is not None:
             episodes.append(inversion_episode(w.name, opened, tl.t1, per, urgency, names, truncated=True,
-                                              certain=(opened[0] + edge, seen - edge)))
+                                              certain=(opened[0], seen), edges=edges))
     out = inversion_summary(episodes, hz)
     out["notes"] = ["サンプラの周期より短い逆転は見えないことがある（回数は下限、区間の端は ± 周期）"]
     return out
 
 
+def _overlap(a0: int, a1: int, b0: int, b1: int) -> int:
+    return max(0, min(a1, b1) - max(a0, b0))
+
+
 def inversion_summary(episodes: list[dict], hz: float | None = None) -> dict:
-    """逆転の区間の列の要約（回数・際限の無い回数・合計・長さの分布・最長）。"""
+    """逆転の区間の列の要約（回数・中間の優先度のタスクが動いた回数 interfered・合計・長さの分布・最長）。"""
     episodes.sort(key=lambda e: e["t0"])
     durations = [e["duration"] for e in episodes]
-    out = {"available": True, "count": len(episodes), "unbounded": sum(1 for e in episodes if e["unbounded"]),
+    out = {"available": True, "count": len(episodes), "interfered": sum(1 for e in episodes if e["interfered"]),
            "total": sum(durations), "duration": _dist(durations), "episodes": episodes,
            "max": max(episodes, key=lambda e: e["duration"]) if episodes else None}
     if hz:
@@ -526,11 +527,13 @@ def inversion_summary(episodes: list[dict], hz: float | None = None) -> dict:
 
 
 def inversion_episode(mutex: str, opened: tuple[int, int, int], t1: int, per: dict[int, Intervals], urgency, names,
-             truncated: bool = False, certain: tuple[int, int] | None = None) -> dict:
+             truncated: bool = False, certain: tuple[int, int] | None = None,
+             edges: dict[int, list] | None = None) -> dict:
     """逆転の 1 区間: 持ち主・待ち手、その間に動いた中間の優先度のタスクの時間（interference）、持ち主が動いた時間。
-    certain: サンプルで見た区間のとき、逆転が確かに続いていた範囲（初めて見た時刻〜最後に見た時刻を、タスクの区間の
-    端の不確かさだけ内側に縮めたもの）。interference はその中で数える（外では、逆転の前後に中間のタスクが動いたのかも
-    しれない。サンプラは 1 巡回の中で語を順に読むので、タスクの語とミューテックスの語の時刻もずれる）。"""
+    certain: サンプルで見た区間のとき、逆転を見ていた範囲（初めて見た時刻〜最後に見た時刻）。interference はその中で
+    数える（外では、逆転の前後に中間のタスクが動いたのかもしれない）。edges: タスクごとの区間（Run。端の不確かさ
+    uncertainty = その切り替えの前後のサンプルの間隔の半分）。あれば各区間を、範囲をその区間の不確かさだけ内側に
+    縮めて数える（区間の端が範囲の端の外にずれているかもしれない分。間隔の中央値で一律に縮めない）。"""
     t0, holder, waiter = opened
     hu, wu = urgency(holder), urgency(waiter)
     interference = {}
@@ -538,13 +541,17 @@ def inversion_episode(mutex: str, opened: tuple[int, int, int], t1: int, per: di
         u = urgency(h)
         if h not in (holder, waiter) and u is not None and hu < u < wu:
             a, b = certain or (t0, t1)
-            spent = iv.overlap(a, b) if a < b else 0
+            if edges is not None and certain is not None:
+                spent = sum(_overlap(r.t0, r.t1, a + math.ceil(r.uncertainty), b - math.ceil(r.uncertainty))
+                            for r in edges.get(h, ()))
+            else:
+                spent = iv.overlap(a, b) if a < b else 0
             if spent:
                 interference[name_of(names, h)] = spent
     holder_time = per[holder].overlap(t0, t1) if holder in per else 0
     out = {"mutex": mutex, "holder": name_of(names, holder), "waiter": name_of(names, waiter), "t0": t0, "t1": t1,
            "duration": t1 - t0, "holder_time": holder_time, "interference": interference,
-           "unbounded": bool(interference)}
+           "interfered": bool(interference)}
     if truncated:
         out["truncated"] = True
     return out
