@@ -1,6 +1,6 @@
 """Probe の道具: 画面の状態（人の画面・別の窓・AI が共有する「いま見ているところ」）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。機器には触らない。変わるたびに通知 "ui.state" を送る（送り先は
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器には触らない。変わるたびに通知 "ui.state" を送る（送り先は
 デーモンが attach_publisher でつなぐ _publish）。誰が変えたかはデーモンの操作の記録（ui.state.set）に残る。
 
 状態:
@@ -155,7 +155,7 @@ class UiStateTools:
                 self._ui_save(state)
             out = {"rev": self._ui_rev, **copy.deepcopy(state), "pointers": self._pointers()}
         if changed:
-            publish = getattr(self, "_publish", None)
+            publish = self._publish
             if publish is not None:
                 publish("ui.state", {"rev": out["rev"], "origin": origin, "changed": changed,
                                      "state": {k: out[k] for k in KEYS}, "pointers": out["pointers"]})
@@ -184,7 +184,7 @@ class UiStateTools:
                 return False
             self._ui_rev += 1
             out = {"rev": self._ui_rev, **copy.deepcopy(self._ui_state), "pointers": self._pointers()}
-        publish = getattr(self, "_publish", None)
+        publish = self._publish
         if publish is not None:
             publish("ui.state", {"rev": out["rev"], "origin": None, "changed": ["pointers"],
                                  "state": {k: out[k] for k in KEYS}, "pointers": out["pointers"]})

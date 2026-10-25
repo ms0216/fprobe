@@ -110,6 +110,7 @@ begin
         state <= S_IDLE;
         run_r <= '0';
         man_r <= '0';
+        div_r <= to_unsigned(CLK_HZ / 115_200, 16);    -- 宣言の初期値は合成で効かないので、リセットで既定を与える
       else
         case state is
           when S_IDLE =>

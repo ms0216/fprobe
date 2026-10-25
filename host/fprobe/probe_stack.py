@@ -1,7 +1,7 @@
 """Probe の道具: メモリ・スタックの使用量（U26）。ELF のメモリ使用量（Build Analyzer 相当）、静的な最大のスタック
 （.su と逆アセンブルの呼び出しグラフ）、ベアメタルの MSP のスタックの塗りと実測。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols を使う。機器に触るのは
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols を使う。機器に触るのは
 必ず _lock の中（elf_size・stack_static は ELF だけを読み、機器に触らない）。
 
 - 領域（MEMORY）: regions（直接）> map_file（GNU ld の -Map）> linker_script > 接続中のターゲットのメモリマップ。

@@ -5,6 +5,7 @@ import random
 import struct
 
 import cocotb
+from cocotb.triggers import ReadOnly, RisingEdge
 
 from tests.models.jtag_target import BSC_IDCODE, JTAG_DP_IDCODE, Bypass, JtagChain, JtagDp
 from tests.models.swd_target import CDBGPWRUPACK
@@ -48,6 +49,49 @@ async def sequences_capture_tdo(dut):
     tdo = int.from_bytes(r[2:10], "little")
     assert tdo & 0xFFFFFFFF == JTAG_DP_IDCODE and tdo >> 32 == BSC_IDCODE
     assert await dap.command(bytes([JTAG_SEQUENCE, 1]) + sequence(6, tms=1, tdi=0x3F)) == bytes([JTAG_SEQUENCE, 0])
+
+
+@cocotb.test()
+async def random_jtag_sequences_drive_and_capture_exactly(dut):
+    """JTAG_Sequence の境界の長さ（0 = 64、1・31・32・33・63・64）とランダムな並びで、TCK ごとの TMS / TDI を要求と
+    突き合わせ、Shift-DR で取った TDO を分割しても IDCODE の連なりと一致する。"""
+    dap, _ = await setup(dut)
+    rng = random.Random(4321)
+    trace = []
+
+    async def monitor():
+        while True:
+            await RisingEdge(dut.swclk)
+            await ReadOnly()
+            trace.append((str(dut.swdio.value), str(dut.tdi.value)))
+
+    cocotb.start_soon(monitor())
+    for _ in range(25):
+        message, expected = bytearray(), []
+        nseq = rng.randrange(1, 5)
+        for _ in range(nseq):
+            n = rng.choice([1, 2, 31, 32, 33, 63, 64, rng.randrange(1, 65)])
+            tms, tdi = rng.getrandbits(1), rng.getrandbits(n)
+            message += sequence(n, tms=tms, tdi=tdi)
+            expected += [(str(tms), str(tdi >> i & 1)) for i in range(n)]
+        trace.clear()
+        r = await dap.command(bytes([JTAG_SEQUENCE, nseq]) + bytes(message))
+        assert r == bytes([JTAG_SEQUENCE, 0]), r.hex()
+        assert trace == expected, message.hex()
+    reset = bytes([JTAG_SEQUENCE, 2]) + sequence(6, tms=1, tdi=0x3F) + sequence(1, tms=0)
+    assert await dap.command(reset) == bytes([JTAG_SEQUENCE, 0])
+    await dap.command(bytes([JTAG_SEQUENCE, 2]) + sequence(1, tms=1) + sequence(2, tms=0))     # Shift-DR
+    got, pos = 0, 0
+    total = JTAG_DP_IDCODE | BSC_IDCODE << 32
+    while pos < 64:
+        n = min(rng.choice([1, 3, 31, 32, 33]), 64 - pos)
+        r = await dap.command(bytes([JTAG_SEQUENCE, 1]) + sequence(n, tms=0, tdi=(1 << n) - 1, capture=True))
+        assert r[:2] == bytes([JTAG_SEQUENCE, 0]) and len(r) == 2 + (n + 7) // 8
+        value = int.from_bytes(r[2:], "little")
+        assert value >> n == 0, (n, hex(value))
+        got |= value << pos
+        pos += n
+    assert got == total, hex(got)
 
 
 @cocotb.test()

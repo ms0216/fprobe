@@ -130,7 +130,7 @@ export interface Methods {
   "fpga_obs.signals_get": { kind: "read"; params: {  } };
   "fpga_obs.signals_set": { kind: "control"; params: { signals: Record<string, unknown> } };
   "system.status": { kind: "read"; params: { addresses?: Array<unknown> | null; fpga_last?: number } };
-  "watch.set": { kind: "control"; params: { expressions: Array<string>; rate_hz?: number; ap?: number; chase_rate_hz?: number; jitter?: number; names?: Array<string> } };
+  "watch.set": { kind: "control"; params: { expressions: Array<string>; rate_hz?: number; ap?: number; chase_rate_hz?: number; jitter?: number; names?: Array<string> | null } };
   "watch.stop": { kind: "control"; params: {  } };
   "watch.status": { kind: "control"; params: {  } };
   "watch.values": { kind: "control"; params: {  } };

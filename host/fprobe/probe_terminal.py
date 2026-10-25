@@ -1,7 +1,7 @@
 """Probe の道具: 画面の端末（G04）の口。RTT の上りのチャンネル・SWO の ITM のスティミュラス・ポート・UART・
 セミホスティングの出力を、同じ形（位置 since から読む。ほかの読み手の位置は動かさない）で読む。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。ObserveTools の貯め場（_logs・_observe）と受信の口（_tap）を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ObserveTools の貯め場（_logs・_observe）と受信の口（_tap）を使う。
 
 - 源の名前: "rtt0"〜（RTT の上り）、"swo0"〜"swo31"（ITM のポート。printf の出力）、"uart"、"semihosting"。
 - RTT・セミホスティングは ObserveTools が背景で貯めている。UART・SWO は、初めて読んだときから背景で受け始める

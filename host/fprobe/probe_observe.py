@@ -1,6 +1,6 @@
 """Probe の道具: 止めずに見る（RTT・SWO の ITM の解読・セミホスティング）と、捕捉した波形の通信の解読。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_recorder・_capture・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_recorder・_capture・
 _capture_info を使う。機器に触るのは必ず _lock の中。
 
 - RTT: 背景のスレッドが周期的に poll し、受信をチャンネルごとの ByteLog に貯める（GUI と AI が同時に読める）。
@@ -30,6 +30,7 @@ from .decode.registry import split_settings
 from .itm import (DataTraceAddress, DataTracePc, DataTraceValue, DecodeError, ExceptionTrace, Instrumentation,
                   ItmDecoder, Overflow, PcSample, PortText, Timestamper)
 from .events import ACK_OK, EventCursor, EventLog, resolve
+from .profile.exceptions import exception_name as _exception_name_of
 from .rtt import Rtt, find_control_block, rtt_address_from_elf
 from .sampler import Sampler
 from .semihosting import FileAccess, SemihostingHost, SemihostingResult
@@ -45,8 +46,6 @@ LOG_LIMIT = 1 << 20                    # 1 つの貯め場に残すバイト数�
 MARKS_LIMIT = 100_000                  # 1 つの貯め場に残す受け取りの時刻の数
 SWO_LINES_LIMIT = 10_000               # ポートごとに残す行数
 DECODE_CACHE = 8                       # 解読の結果を覚えておく数（同じ解読を offset で読み進める・積み重ねの下の解読）
-_EXCEPTIONS = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault", 11: "SVCall",
-               12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
 
 
 class ByteLog:
@@ -132,7 +131,7 @@ def _jsonable_packet(packet) -> dict:
 
 
 def _exception_name(number: int) -> str:
-    return _EXCEPTIONS.get(number, f"IRQ{number - 16}" if number >= 16 else f"exception {number}")
+    return _exception_name_of(number)                 # 名前の表は profile/exceptions.py の 1 か所
 
 
 class _PyocdSemihosting:
@@ -258,17 +257,18 @@ class ObserveTools:
                 if now < due:
                     continue
                 job[1] = max(due + period, now)                    # 遅れても詰めて走らせない
-                try:
-                    fn()
-                    self._job_errors.pop(name, None)
-                except Exception as e:                             # 走行中の読みの失敗等: 次の周期にやり直す
-                    self._job_errors[name] = f"{type(e).__name__}: {e}"
+                self._run_retrying(self._job_errors, name, fn)     # 走行中の読みの失敗等
             for source in sorted(self._pumps):
-                try:
-                    self._fetch(source)
-                    self._pump_errors.pop(source, None)
-                except Exception as e:                             # COM ポートが無い等: 次の周期にやり直す
-                    self._pump_errors[source] = f"{type(e).__name__}: {e}"
+                self._run_retrying(self._pump_errors, source, lambda source=source: self._fetch(source))   # COM ポートが無い等
+
+    @staticmethod
+    def _run_retrying(errors: dict, key, fn) -> None:
+        """fn() を呼ぶ。失敗は errors[key] に残して次の周期にやり直す（成功すれば消す）。"""
+        try:
+            fn()
+            errors.pop(key, None)
+        except Exception as e:
+            errors[key] = f"{type(e).__name__}: {e}"
 
     def _fetch(self, source: str) -> None:
         """生の流れ source の届いた分を読んで貯める（_lock の中で）。"""
@@ -526,7 +526,7 @@ class ObserveTools:
                 log = self._logs.get(channel)
                 waiting = log is None or (since if since is not None else log.cursor) >= log.end
                 remaining = deadline - time.monotonic()
-                if not waiting or remaining <= 0:
+                if not waiting or not remaining > 0:           # NaN の期限でも待たない（NaN は <= 0 が偽）
                     break
                 self._observe.wait(remaining)
             if log is None:

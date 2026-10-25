@@ -181,6 +181,9 @@ def _parse_when(when: dict, where: str) -> None:
         for k in ("address", "address_mask", "data", "data_mask"):
             if k in p:
                 _word(p[k], f"{where}.dap_match.{k}")
+        for k in ("on_write", "on_read"):
+            if k in p and not isinstance(p[k], bool):
+                raise ScriptError(f"{where}.dap_match.{k} は true / false")
     else:
         if set(p) - {"stages", "pattern_a", "pattern_b"} or not isinstance(p.get("stages"), list) \
                 or not 1 <= len(p["stages"]) <= 4:
@@ -190,6 +193,12 @@ def _parse_when(when: dict, where: str) -> None:
                     or not st["when"] or set(st["when"]) - STAGE_EVENTS:
                 raise ScriptError(f"{where}.sequence.stages[{n}] は {{when: {sorted(STAGE_EVENTS)} の列, count, "
                                   "within_us}")
+            count, within = st.get("count", 1), st.get("within_us")
+            if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 0xFFFF:
+                raise ScriptError(f"{where}.sequence.stages[{n}].count は 1〜65535 の整数")
+            if within is not None and (isinstance(within, bool) or not isinstance(within, (int, float))
+                                       or not within > 0):
+                raise ScriptError(f"{where}.sequence.stages[{n}].within_us は正の数")
         for k in ("pattern_a", "pattern_b"):
             if k in p:
                 _pattern(p[k], f"{where}.sequence.{k}")
@@ -293,6 +302,7 @@ def _run_trial(host: InjectHost, script: InjectScript, trial: Trial, repeat: int
                            "description": trial.description, "when": trial.when, "injected": False, "t": None,
                            "timeout_s": trial.timeout_s, "observe_s": trial.observe_s}
     kind, params = next(iter(trial.when.items()))
+    armed = False                                            # 仕掛けた後なら、途中で失敗しても注入が起きたかもしれない
     try:
         address = host.resolve(trial.write["address"])
         if address % 4:
@@ -307,6 +317,7 @@ def _run_trial(host: InjectHost, script: InjectScript, trial: Trial, repeat: int
         out.update(address=address, value=value)
         host.set_inject(address, value, trial.write.get("ap", 0))
         before = host.inject_status().count
+        armed = True
         host.arm(trial.when)
         try:
             if kind == "host":
@@ -321,6 +332,8 @@ def _run_trial(host: InjectHost, script: InjectScript, trial: Trial, repeat: int
             host.disarm()
     except Exception as e:
         out.update(verdict="error", error=f"{type(e).__name__}: {e}")
+        if armed:                                            # 注入が起きたかもしれないので、戻す手順は必ず試す
+            _restore(host, trial, out)
         return out
     if status.count == before:
         out["verdict"] = "not_triggered"

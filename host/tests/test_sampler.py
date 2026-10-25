@@ -43,6 +43,9 @@ class FakeDevice:
     def read(self, address, count=1):
         return [self.csr.get(address + 4 * i, 0) for i in range(count)]
 
+    def time(self):
+        return 1 << 40                                  # イベントの時刻（48 ビット）を延ばす基準。どの試験のイベントより後
+
     def capabilities(self):
         return SimpleNamespace(sampler=True, sys_clock_hz=100_000_000)
 

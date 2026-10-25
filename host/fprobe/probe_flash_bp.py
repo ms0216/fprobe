@@ -1,7 +1,7 @@
 """Probe の道具: Flash 上の無制限ブレークポイント（fprobe.flash_bp）。J-Link の Unlimited Flash Breakpoints、
 IAR の Flash ブレークポイントの相当。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Flash（書き込みアルゴリズムのある領域）を持つターゲットは、Probe.target が
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Flash（書き込みアルゴリズムのある領域）を持つターゲットは、Probe.target が
 FlashBreakpoints で包んだものを返す。ブレークポイントの道具（breakpoint_set・GDB の Z0・行単位のステップの踏み台・
 関数の呼び出し）は何も変えずに、比較器が尽きたら Flash の BKPT を使う。
 
@@ -11,12 +11,11 @@ FlashBreakpoints で包んだものを返す。ブレークポイントの道具
 """
 
 import logging
-import os
 import re
-from pathlib import Path
 
 from pyocd.core.target import Target
 
+from .home import fprobe_home
 from .flash import Image
 from .flash_bp import DORMANT_LIMIT, FlashBreakpoints, Journal
 
@@ -63,9 +62,7 @@ class FlashBreakpointTools:
         # プローブとターゲットの組ごと（同じ種類のターゲットを 2 台のプローブで同時に使っても記録が混ざらない）
         probe_id = self._serial or self._port or self._eth or "default"
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{self._target_type or 'target'}-{probe_id}")
-        # FPROBE_HOME はデーモン（fprobe.api.daemon.fprobe_home）と同じ
-        home = Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe"))
-        return Journal(home / "flash_breakpoints" / f"{name}.json", name)
+        return Journal(fprobe_home() / "flash_breakpoints" / f"{name}.json", name)
 
     def _flash_bp_attach(self) -> dict | None:
         """接続した直後に: 前のプロセスが残した BKPT を戻す。何かあれば {"restored", "skipped"}。"""
@@ -73,7 +70,7 @@ class FlashBreakpointTools:
         if not isinstance(target, FlashBreakpoints):
             return None
         out = target.recover()
-        return out if out["restored"] or out["skipped"] else None
+        return out if out["restored"] or out["skipped"] or out.get("unreadable") else None
 
     def _flash_bp_detach(self) -> None:
         """切断の前に: 書いた BKPT を戻す。戻せなければ記録が残り、次の接続で戻す。"""

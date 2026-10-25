@@ -343,15 +343,25 @@ def _check_mask(name: str, mask: int, dwt: DwtInfo) -> None:
         raise ValueError(f"{name}: 範囲が大きすぎる（2^{mask} バイト。この DWT の MASK は最大 {dwt.max_mask}）")
 
 
+def _window_mask(u: ComparatorUse, masks: dict[int, int]) -> int:
+    """アクセスを拾う番地の窓の広さ（2^mask バイト）。値一致は番地を絞る link の比較器（DATAVADDR0）の mask。"""
+    if u.role == "value_watch" and u.address is not None:
+        return masks[(u.function >> _DATAVADDR0_SHIFT) & 0xF]
+    return u.mask
+
+
 def _estimate(plan: TracePlan, request: TraceRequest, trace_cmp: list[ComparatorUse], core_clock_hz: float | None,
               swo_baud: float | None) -> None:
     ts = _TIMESTAMP_BYTES if request.timestamps else 0
+    masks = {c.index: c.mask for c in plan.comparators}
     for u in trace_cmp:
+        mask = _window_mask(u, masks)
         n = (_PC_BYTES if "pc" in u.emits else 0) + (_OFFSET_BYTES if "offset" in u.emits else 0)
         n += (1 + min(4, max(u.size, 1)) if "value" in u.emits else 0) + ts
         plan.bytes_per_access[u.name] = n
-        if u.mask > 0 and (1 << u.mask) > u.size:
-            plan.warnings.append(f"{u.name}: 比較器は 0x{u.comp:08X} から {1 << u.mask} バイトに一致する（変数の外の"
+        if mask > 0 and (1 << mask) > u.size:
+            base = u.comp if u.role != "value_watch" else u.address & ~((1 << mask) - 1)
+            plan.warnings.append(f"{u.name}: 比較器は 0x{base:08X} から {1 << mask} バイトに一致する（変数の外の"
                                  "アクセスも SWO に出る" + ("。番地で外のものは捨てる" if "offset" in u.emits
                                                       else "。offset=true にすると外のものを捨てられる") + "）")
     if swo_baud is None:
@@ -405,7 +415,7 @@ class DataAccess:
     name: str
     role: str                             # data_trace / value_watch
     pc: int | None
-    address: int | None                   # offset を出すとき（または変数の大きさが比較の範囲と同じとき）の番地
+    address: int | None                   # offset を出すとき（または変数の大きさが比較の窓と同じとき）の番地。窓が広く offset が無ければ None
     value: int | None
     size: int | None                      # アクセスの大きさ（値のパケットから）
     write: bool | None
@@ -422,6 +432,8 @@ class DataTraceAssembler:
 
     def __init__(self, comparators: list[ComparatorUse]):
         self._uses = {u.index: u for u in comparators if u.emits}
+        masks = {c.index: c.mask for c in comparators}
+        self._masks = {i: _window_mask(u, masks) for i, u in self._uses.items()}
         self._pending: dict[int, tuple[int, int | None, dict]] = {}
         self.lost = 0                     # Overflow・解読の誤りで捨てた組み立て中のもの
         self.outside = 0                  # 番地が変数の外（比較の範囲が変数より広い）で捨てたもの
@@ -475,7 +487,7 @@ class DataTraceAssembler:
         address = None
         if offset is not None:
             address = (use.comp & ~0xFFFF) | offset.address_low
-        elif use.address is not None and use.mask is not None and (1 << use.mask) <= max(use.size, 1):
+        elif use.address is not None and (1 << self._masks[use.index]) <= max(use.size, 1):
             address = use.address
         if address is not None and use.address is not None and use.role == "data_trace" \
                 and not use.address <= address < use.address + use.size:

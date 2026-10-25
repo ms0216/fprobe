@@ -1,7 +1,7 @@
 """Probe の道具: SWO の DWT・ITM の設定（U11）。ITM のポート・TPIU・例外トレース・イベントカウンタ・DWT の比較器による
 データトレース（変数へのアクセスを値・PC・時刻付きで、止めずに）・値一致のウォッチポイント。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・_swo_baud・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・_swo_baud・
 swo_start・_profile_run と、WatchTools（式 → 番地と大きさと型: `_watch_target`）、InspectTools（SVD: `_device`）、
 WindowTools（出来事の窓・write_registers）を使う。機器に触るのは必ず _lock の中。
 
@@ -130,7 +130,7 @@ class SwoTools:
                                tuple(counters or ()), tuple(t for t, _ in traces), tuple(w for w, _ in watches))
         targets = {t.name: w for t, w in traces + watches if w is not None}
         with self._lock:
-            if getattr(self, "_profile_run", None) is not None:
+            if self._profile_run is not None:
                 raise RuntimeError("プロファイルが DWT・ITM を使っている（profile_stop を先に）")
             if self._swo_run is not None and self._swo_run.running:
                 self._swo_finish()                                   # 前の設定を戻してから（戻した後なら何もしない）

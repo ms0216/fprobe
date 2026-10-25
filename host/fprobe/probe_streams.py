@@ -1,6 +1,6 @@
 """Probe の道具: 生のバイトの流れの TCP での公開とファイルへの記録（U05）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。ObserveTools の受信の口（_tap / _untap。RTT の上り・セミホスティング・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ObserveTools の受信の口（_tap / _untap。RTT の上り・セミホスティング・
 SWO・UART）と書き込み（rtt_write・uart_write）を使う。
 
 流れの名前: "rtt0"〜（RTT の上りの番号。書き込みは同じ番号の下りへ）、"swo"（読むだけ）、"uart"、"semihosting"

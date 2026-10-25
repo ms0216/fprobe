@@ -9,9 +9,10 @@ USB で複数台を名前で見分けるには、個体ごとのシリアル番�
 """
 
 import json
-import os
 import re
 from pathlib import Path
+
+from .home import fprobe_home
 
 __all__ = ["ProbeNameError", "address_of", "apply_to_args", "load", "name_of", "names_path", "remove", "resolve",
            "set_name"]
@@ -25,7 +26,7 @@ class ProbeNameError(ValueError):
 
 
 def names_path() -> Path:
-    return Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe")) / "probes.json"
+    return fprobe_home() / "probes.json"
 
 
 def load() -> dict[str, dict]:

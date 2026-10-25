@@ -1,6 +1,6 @@
 """Probe の道具: デバッグの方式（停止方式 halt / モニタ方式 monitor）。J-Link の Monitor Mode Debugging の相当（U37）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。モニタ方式のとき、Probe.target は fprobe.monitor.MonitorTarget（pyOCD の
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。モニタ方式のとき、Probe.target は fprobe.monitor.MonitorTarget（pyOCD の
 CortexM の口を、ターゲットのモニタの箱の読み書きで実現する包み）を返す。止める・再開・ステップ・レジスタ・ブレーク
 ポイント・行単位のステップ・呼び出し履歴・関数の呼び出し・セミホスティング・GDB サーバは、すべて Probe.target を使う
 ので、方式に関係なく同じ道具がそのまま使える。

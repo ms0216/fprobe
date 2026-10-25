@@ -59,6 +59,7 @@ entity dap_sampler is
     csw_shadow    : in  std_logic_vector(31 downto 0);
     tar_shadow    : in  std_logic_vector(31 downto 0);
     shadow_valid  : in  std_logic;
+    shadow_ap     : in  std_logic_vector(7 downto 0);    -- 控えを書いた AP。ap と違えば控えを使わず読んで保存する
     -- 読んだ値（1 周期のパルス）
     sample_valid  : out std_logic;
     sample_addr   : out std_logic_vector(31 downto 0);
@@ -392,8 +393,8 @@ begin
               word     <= 0;
               tries    <= (others => '0');
               aborting <= false;
-              saved    <= shadow_valid = '1';
-              fast     <= shadow_valid = '1';
+              saved    <= shadow_valid = '1' and shadow_ap = ap;
+              fast     <= shadow_valid = '1' and shadow_ap = ap;
               tar_ok   <= false;
               stale    <= false;
               same     <= words = 1 and single;

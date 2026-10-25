@@ -1,7 +1,7 @@
 """Probe の道具: ブレークポイントの動作（条件・無視する回数・ログ）。IAR の Log breakpoint・条件付き、GDB の
 condition / ignore / dprintf の相当。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。止まったときの処理はセミホスティングと同じ場所（ObserveTools の
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。止まったときの処理はセミホスティングと同じ場所（ObserveTools の
 _run_until_halt と背景の見張り）で行い、続けるときは Debugger.resume（ブレークポイントを 1 命令踏み越える）で再開する。
 
 - condition: C の式（止まった場所のローカル変数も使える）。偽なら止まらずに続ける。
@@ -82,8 +82,9 @@ class BreakpointActions:
             address = self.dbg.breakpoint_address(location if not location.startswith("0x") else int(location, 16))
             if enabled:
                 if address in self._disabled:
-                    name, action = self._disabled.pop(address)
+                    name, action = self._disabled[address]
                     self.dbg.breakpoint(address)                         # 解いた番地に置き直し、場所の名前は元のまま
+                    del self._disabled[address]                          # 置けてから無効の帳簿を消す（失敗なら無効のまま残る）
                     self.dbg.breakpoints[address] = name
                     if action is not None:
                         self._actions[address] = action

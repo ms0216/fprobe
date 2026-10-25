@@ -88,21 +88,14 @@ end entity;
 architecture rtl of obs_jtag_engine is
   constant OP_SEQ_OUT : std_logic_vector(1 downto 0) := "00";
   constant OP_SEQ_IN  : std_logic_vector(1 downto 0) := "01";
-  constant ID_LO      : std_logic_vector(15 downto 0) := x"4253";       -- "FOBS"
-  constant ID_HI      : std_logic_vector(15 downto 0) := x"464F";
-  constant MARK       : std_logic_vector(7 downto 0) := x"A6";          -- 見出しの印（v2 の記録型）
-  constant SNAP_MARK  : std_logic_vector(7 downto 0) := x"A7";          -- 標本型の印
-  constant SNAP_ID    : std_logic_vector(31 downto 0) := x"534E4150";   -- 標本型の id の表示（"SNAP"）
   constant OP_READ    : std_logic_vector(3 downto 0) := x"2";
   constant OP_SYNC    : std_logic_vector(3 downto 0) := x"3";
-  constant RESPONSE   : std_logic_vector(5 downto 0) := "110001";        -- 記録の 31:26（制御・応答）
   constant HEADER_WORDS : natural := 1;
   constant CMD_DEPTH  : natural := 4;
 
   -- 手順。E_IR・E_DR は区間の並び（BEFORE → BODY → AFTER）を 1 片ずつ送る
   type step_t is (E_OFF, E_RESET, E_IR_HEAD, E_IR, E_IR_TAIL, E_DR_HEAD, E_DR, E_DR_TAIL, E_EXIT, E_HALT);
   type seg_t is (SEG_BEFORE, SEG_BODY, SEG_AFTER);
-  type cmd_queue_t is array (0 to CMD_DEPTH - 1) of std_logic_vector(15 downto 0);
 
   signal step     : step_t;
   signal pending  : boolean;                          -- 命令を出した（応答を待つ）
@@ -133,30 +126,27 @@ architecture rtl of obs_jtag_engine is
   signal id_reads    : unsigned(1 downto 0);          -- 出した ID の読み（下位・上位の 2 つ）
   signal id_wait     : unsigned(7 downto 0);          -- ID がそろうまでのスキャンの数
   signal cfg_id_scans : unsigned(7 downto 0);
-  signal id_lo_ok    : std_logic;
-  signal id_hi_ok    : std_logic;
   signal upd_time    : unsigned(47 downto 0);        -- このスキャンの Update-DR の時刻
   signal cap_time    : unsigned(47 downto 0);        -- このスキャンの Capture-DR を出る時刻
   signal head_rises  : unsigned(1 downto 0);
-  signal snap_mode   : std_logic;                     -- 対象は標本型
+  signal snap_mode   : std_logic;                     -- 対象は標本型（obs_record_rx が見分ける）
   signal snap_scan   : std_logic;                     -- このスキャンは標本型の 1 語（スキャンの始めに snap_mode から）
-  signal snap_last   : std_logic_vector(31 downto 0); -- 前の標本（同じ標本はイベントにしない）
-  signal snap_seen   : std_logic;
   signal sync_seq    : unsigned(7 downto 0);          -- 印の番号
-  signal m_last      : std_logic_vector(15 downto 0); -- 値の一致: 前の値
-  signal m_hit_last  : std_logic;                     -- 前の値が一致していた
-  signal m_seen      : std_logic;                     -- 前の値がある（開き直すと 0）
-  signal m_count     : unsigned(31 downto 0);
-  signal m_on_prev   : std_logic;
-  signal resp_seq    : unsigned(7 downto 0);          -- 応答の番号（read_value の 31:24）
+  signal obs_valid_r : std_logic;                     -- 観測した値を obs_match に渡す（obs_record_rx から。1 周期遅れ）
+  signal obs_v_r     : std_logic_vector(15 downto 0);
   signal rec_count   : unsigned(15 downto 0);        -- 見出しの count
-  signal bad         : std_logic;                     -- このスキャンで答えない印を見た
+  signal bad         : std_logic;                     -- このスキャンで答えない印を見た（obs_record_rx から）
 
-  signal queue       : cmd_queue_t;
-  signal q_head      : natural range 0 to CMD_DEPTH - 1;
-  signal q_count     : natural range 0 to CMD_DEPTH;
+  -- 命令の待ち行列（obs_cmd_queue）。flush_now・pop_now はレジスタ信号だけから作る（下のプロセスの同じ条件と一致させる）
+  signal q_front     : std_logic_vector(15 downto 0);
+  signal q_nonempty  : std_logic;
+  signal q_dropped   : std_logic;
+  signal flush_now   : std_logic;                     -- 開き直す: 前の観測で送っていない命令は捨てる
+  signal pop_now     : std_logic;                     -- このスキャンの命令に待ち行列の先頭を使う
+  signal want_stop_c : std_logic;
 
-  signal running_r, id_ok_r, stuck_r, id_timeout_r, ovf_r, dropped_r, tgt_run_r : std_logic;
+  signal running_r, stuck_r, id_timeout_r : std_logic;
+  signal id_ok_r, id_known, ovf_r, tgt_run_r : std_logic;   -- obs_record_rx から
   signal stop_req : std_logic;                       -- 止める指示を見た（すぐ戻されても区切りで止めて始め直す）
   -- 設定は開始のときに写す（走っている間に CSR を書き換えても、今のスキャンに効かない。jtag_phy は実行中に変えない）
   signal cfg_half_period, cfg_sync_period : unsigned(15 downto 0);
@@ -165,6 +155,55 @@ architecture rtl of obs_jtag_engine is
   signal cfg_user_ir : std_logic_vector(31 downto 0);
   signal cfg_words : unsigned(8 downto 0);
   signal read_value_r, id_r : std_logic_vector(31 downto 0);
+
+  -- obs_record_rx への脈。レジスタ信号だけから作る（下のプロセスの同じ条件と一致させる）
+  signal rx_word_valid, rx_scan_end : std_logic;
+  signal rx_word      : std_logic_vector(31 downto 0);
+  signal sync_mark    : std_logic;
+  signal rsp_c, scan_start_c : std_logic;
+
+  -- 区間の長さ（ir = IR スキャン）
+  impure function length_of(s : seg_t; ir_scan : boolean) return natural is
+  begin
+    if ir_scan then
+      case s is
+        when SEG_BEFORE => return to_integer(cfg_ir_before);
+        when SEG_BODY   =>
+          if cfg_ir_len = 0 then
+            return 1;
+          elsif cfg_ir_len > 32 then
+            return 32;
+          end if;
+          return to_integer(cfg_ir_len);
+        when SEG_AFTER  => return to_integer(cfg_ir_after);
+      end case;
+    else
+      case s is
+        when SEG_BEFORE => return to_integer(cfg_dr_before);
+        when SEG_BODY   => return 32;
+        when SEG_AFTER  => return to_integer(cfg_dr_after);
+      end case;
+    end if;
+  end function;
+
+  -- 本体の区間の数
+  impure function bodies(ir_scan : boolean) return unsigned is
+  begin
+    if ir_scan or snap_scan = '1' then
+      return to_unsigned(1, 9);                         -- 標本型は語 0 だけ（1 スキャン 32 ビット）
+    end if;
+    return m_words + HEADER_WORDS;
+  end function;
+
+  -- スキャンの最後の区間か（最後のビットは TMS 1）
+  impure function is_last(s : seg_t; b : unsigned; ir_scan : boolean) return boolean is
+  begin
+    case s is
+      when SEG_BEFORE => return false;
+      when SEG_BODY   => return b = bodies(ir_scan) - 1 and length_of(SEG_AFTER, ir_scan) = 0;
+      when SEG_AFTER  => return true;
+    end case;
+  end function;
 begin
   phy_i : entity work.jtag_phy
     port map (clk => clk, rst => rst, enable => phy_enable, half_period => cfg_half_period, idle_cycles => 0,
@@ -173,6 +212,44 @@ begin
               cmd_count => phy_cmd_count, cmd_request => "000" & phy_cmd_tms, cmd_data => phy_cmd_data,
               rsp_valid => phy_rsp_valid, rsp_ack => open, rsp_data => phy_rsp_data,
               tck => phy_tck, tms => tms, tdi => tdi, tdo => tdo);
+
+  queue_i : entity work.obs_cmd_queue
+    generic map (DEPTH => CMD_DEPTH, WIDTH => 16)
+    port map (clk => clk, rst => rst, push => cmd_push, push_data => cmd_data, pop => pop_now, flush => flush_now,
+              front => q_front, nonempty => q_nonempty, dropped => q_dropped);
+
+  rx_i : entity work.obs_record_rx
+    port map (clk => clk, rst => rst, clear => flush_now, scan_start => scan_start_c,
+              word_valid => rx_word_valid, word => rx_word, part => part, scan_index => scan_count,
+              time_count => time_count, cap_time => cap_time,
+              scan_end => rx_scan_end, sync_mark => sync_mark, sync_num => scan_cmd(15 downto 8), sync_time => upd_time,
+              id_ok => id_ok_r, id_known => id_known, bad => bad, snap_mode => snap_mode, rec_count => rec_count,
+              ovf => ovf_r, tgt_run => tgt_run_r, read_value => read_value_r, id => id_r,
+              obs_valid => obs_valid_r, obs_v => obs_v_r,
+              ev_valid => ev_valid, ev_sync => ev_sync, ev_data => ev_data, ev_addr => ev_addr, ev_time => ev_time);
+
+  match_i : entity work.obs_match
+    port map (clk => clk, rst => rst, restart => flush_now, obs_valid => obs_valid_r, obs_v => obs_v_r,
+              match_mask => match_mask, match_value => match_value, match_change => match_change,
+              match_on => match_on, match => match, match_count => match_count);
+
+  -- 止める指示（stop_req は信号の値そのまま。同じ周期に stop_req を立てる効果は含めない）
+  want_stop_c <= '1' when enable = '0' or free_pins = '1' or stop_req = '1' else '0';
+  -- 開き直す: E_OFF で enable（process の E_OFF 側で次の手順に進むのと同じ条件）
+  flush_now <= '1' when step = E_OFF and enable = '1' and free_pins = '0' and not pending else '0';
+  -- 次のスキャンの命令を待ち行列から取る（process の E_DR_HEAD 側の分岐と同じ条件）
+  pop_now <= '1' when step = E_DR_HEAD and not pending and free_pins = '0' and want_stop_c = '0' and snap_mode = '0'
+                      and id_reads = 2 and q_nonempty = '1' else '0';
+
+  -- obs_record_rx への脈（process の pending 側・E_DR_HEAD 側の分岐と同じ条件）
+  rsp_c <= '1' when pending and phy_rsp_valid = '1' and free_pins = '0' else '0';
+  scan_start_c <= '1' when step = E_DR_HEAD and not pending and free_pins = '0' and want_stop_c = '0' else '0';
+  rx_scan_end <= '1' when step = E_DR_TAIL and rsp_c = '1' else '0';
+  -- DR の本体の語。最後の語は先の 31 ビットを預かった後の 1 ビットで完成する
+  rx_word_valid <= '1' when step = E_DR and rsp_c = '1' and seg = SEG_BODY
+                            and not (is_last(SEG_BODY, part, false) and split = '0') else '0';
+  rx_word <= phy_rsp_data(0) & partial when is_last(SEG_BODY, part, false) else phy_rsp_data(31 downto 0);
+  sync_mark <= '1' when scan_cmd(3 downto 0) = OP_SYNC else '0';
 
   tck <= phy_tck;
   oe  <= '0' when step = E_OFF or step = E_HALT or free_pins = '1' else '1';
@@ -184,11 +261,10 @@ begin
   id_ok         <= id_ok_r;
   stuck         <= stuck_r;
   id_timeout    <= id_timeout_r;
-  cmd_pending   <= '1' when q_count /= 0 else '0';
+  cmd_pending   <= q_nonempty;
   overflow_seen <= ovf_r;
-  cmd_dropped   <= dropped_r;
+  cmd_dropped   <= q_dropped;
   scans         <= scan_count;
-  match_count   <= m_count;
   read_value    <= read_value_r;
   id            <= id_r;
 
@@ -197,57 +273,8 @@ begin
     variable last      : boolean;
     variable fill      : std_logic;
     variable data      : std_logic_vector(31 downto 0);
-    variable word      : std_logic_vector(31 downto 0);
-    variable word_done : boolean;
     variable k         : natural range 0 to 63;
-    variable want_stop : boolean;
     variable ir        : boolean;
-    variable push_ok   : boolean;
-    variable pop       : boolean;
-    variable flush     : boolean;                            -- 開き直す: 待ち行列を空にする
-
-    -- 区間の長さ（ir = IR スキャン）
-    impure function length_of(s : seg_t; ir_scan : boolean) return natural is
-    begin
-      if ir_scan then
-        case s is
-          when SEG_BEFORE => return to_integer(cfg_ir_before);
-          when SEG_BODY   =>
-            if cfg_ir_len = 0 then
-              return 1;
-            elsif cfg_ir_len > 32 then
-              return 32;
-            end if;
-            return to_integer(cfg_ir_len);
-          when SEG_AFTER  => return to_integer(cfg_ir_after);
-        end case;
-      else
-        case s is
-          when SEG_BEFORE => return to_integer(cfg_dr_before);
-          when SEG_BODY   => return 32;
-          when SEG_AFTER  => return to_integer(cfg_dr_after);
-        end case;
-      end if;
-    end function;
-
-    -- 本体の区間の数
-    impure function bodies(ir_scan : boolean) return unsigned is
-    begin
-      if ir_scan or snap_scan = '1' then
-        return to_unsigned(1, 9);                         -- 標本型は語 0 だけ（1 スキャン 32 ビット）
-      end if;
-      return m_words + HEADER_WORDS;
-    end function;
-
-    -- スキャンの最後の区間か（最後のビットは TMS 1）
-    impure function is_last(s : seg_t; b : unsigned; ir_scan : boolean) return boolean is
-    begin
-      case s is
-        when SEG_BEFORE => return false;
-        when SEG_BODY   => return b = bodies(ir_scan) - 1 and length_of(SEG_AFTER, ir_scan) = 0;
-        when SEG_AFTER  => return true;
-      end case;
-    end function;
 
     -- 区間 s（本体なら番号 b）に入る。長さ 0 の前の区間は飛ばす（後の区間は呼ぶ側が長さを見る）
     procedure enter(s : seg_t; b : unsigned; ir_scan : boolean) is
@@ -275,41 +302,8 @@ begin
       pending       <= true;
     end procedure;
 
-    -- 観測した値ごとに: 一致を比べてパルス・回数（無効でも前の値は追う）
-    procedure observe(v : std_logic_vector(15 downto 0)) is
-      variable hit, fire : boolean;
-    begin
-      hit := ((v xor match_value) and match_mask) = x"0000";
-      if match_change = x"0000" then
-        fire := hit and m_hit_last = '0';
-      else
-        fire := hit and ((v xor m_last) and match_change) /= x"0000";
-      end if;
-      if fire and m_seen = '1' and match_on = '1' then
-        match <= '1';
-        m_count <= m_count + 1;
-      end if;
-      m_last <= v;
-      m_hit_last <= '1' when hit else '0';
-      m_seen <= '1';
-    end procedure;
-
-    procedure emit(sync : std_logic; d, a : std_logic_vector(31 downto 0); t : unsigned(47 downto 0)) is
-    begin
-      ev_valid <= '1';
-      ev_sync  <= sync;
-      ev_data  <= d;
-      ev_addr  <= a;
-      ev_time  <= std_logic_vector(t);
-    end procedure;
   begin
     if rising_edge(clk) then
-      ev_valid <= '0';
-      match <= '0';
-      m_on_prev <= match_on;
-      if match_on = '1' and m_on_prev = '0' then                 -- 一致を有効にしたら数え直す
-        m_count <= (others => '0');
-      end if;
       tck_prev <= phy_tck;
       if phy_cmd_valid = '1' and phy_cmd_ready = '1' then
         phy_cmd_valid <= '0';
@@ -329,20 +323,9 @@ begin
         end if;
       end if;
 
-      -- 命令の待ち行列（積むのはここ、取り出すのは下の pop。数は最後にまとめて）
-      push_ok := cmd_push = '1' and q_count < CMD_DEPTH;
-      pop := false;
-      flush := false;
-      if push_ok then
-        queue((q_head + q_count) mod CMD_DEPTH) <= cmd_data;
-      elsif cmd_push = '1' then
-        dropped_r <= '1';
-      end if;
-
       if enable = '0' and step /= E_OFF and step /= E_HALT then
         stop_req <= '1';
       end if;
-      want_stop := enable = '0' or free_pins = '1' or stop_req = '1';
 
       if free_pins = '1' and step /= E_OFF and step /= E_HALT then
         -- すぐ手放す（jtag_phy も止まる）
@@ -361,69 +344,9 @@ begin
               enter(SEG_BEFORE, to_unsigned(0, 9), true);
             when E_IR | E_DR =>
               ir := step = E_IR;
-              -- 受けた語（DR の本体だけ）
-              word_done := false;
-              word := phy_rsp_data(31 downto 0);
-              if not ir and seg = SEG_BODY then
-                if is_last(SEG_BODY, part, false) and split = '0' then
-                  partial <= phy_rsp_data(30 downto 0);
-                elsif is_last(SEG_BODY, part, false) then
-                  word := phy_rsp_data(0) & partial;
-                  word_done := true;
-                else
-                  word_done := true;
-                end if;
-              end if;
-              if word_done then
-                if part = 0 and word(31 downto 24) = SNAP_MARK then
-                  -- 標本型: この語が標本（後ろの語は使わない）
-                  rec_count <= (others => '0');
-                  tgt_run_r <= '1';
-                  snap_mode <= '1';
-                  id_ok_r <= '1';
-                  id_r <= SNAP_ID;
-                  -- 値が前と同じで、その間の変化も無い標本は何も伝えないので出さない（イベントを変化の数まで減らす）
-                  snap_last <= word;
-                  snap_seen <= '1';
-                  if snap_seen = '0' or word(15 downto 0) /= snap_last(15 downto 0) or word(23 downto 16) /= x"00" then
-                    emit('0', word, std_logic_vector(scan_count), cap_time);
-                    observe(word(15 downto 0));
-                  end if;
-                elsif part = 0 then
-                  rec_count <= unsigned(word(15 downto 0));
-                  ovf_r <= word(16);
-                  tgt_run_r <= word(17);
-                  if word(31 downto 24) /= MARK then                 -- 印（旗のほかのビットは見ない）
-                    bad <= '1';
-                  end if;
-                elsif part - HEADER_WORDS < rec_count and bad = '0' then
-                  if word(31 downto 26) = RESPONSE then
-                    -- 応答: read_value に写す。ID の 2 つは照合する
-                    read_value_r <= std_logic_vector(resp_seq + 1) & "0000" & word(19 downto 0);
-                    resp_seq <= resp_seq + 1;
-                    if word(19 downto 16) = x"0" then
-                      id_r(15 downto 0) <= word(15 downto 0);
-                      if word(15 downto 0) = ID_LO then
-                        id_lo_ok <= '1';
-                      else
-                        bad <= '1';
-                      end if;
-                    elsif word(19 downto 16) = x"1" then
-                      id_r(31 downto 16) <= word(15 downto 0);
-                      if word(15 downto 0) = ID_HI then
-                        id_hi_ok <= '1';
-                      else
-                        bad <= '1';
-                      end if;
-                    end if;
-                  end if;
-                  if id_ok_r = '1' then
-                    emit('0', word, std_logic_vector(scan_count), time_count);
-                    if word(31 downto 30) = "00" then                -- 値の記録（31:30 = 0）
-                      observe(word(15 downto 0));
-                    end if;
-                  end if;
-                end if;
+              -- 受けた語（DR の本体だけ）は obs_record_rx へ（rx_word_valid）。最後の語の先の 31 ビットだけここで預かる
+              if not ir and seg = SEG_BODY and is_last(SEG_BODY, part, false) and split = '0' then
+                partial <= phy_rsp_data(30 downto 0);
               end if;
               -- 次の片
               if is_last(seg, part, ir) and split = '0' then
@@ -455,26 +378,21 @@ begin
               step <= E_DR;
               enter(SEG_BEFORE, to_unsigned(0, 9), false);
             when E_DR_TAIL =>
-              -- スキャンの終わり: 印を載せたなら、その Update-DR の時刻を印のイベントにする
+              -- スキャンの終わり（印のイベントと id_ok は obs_record_rx。rx_scan_end）
               scan_count <= scan_count + 1;
-              if scan_cmd(3 downto 0) = OP_SYNC and id_ok_r = '1' and bad = '0' and snap_mode = '0' then
-                emit('1', x"000000" & scan_cmd(15 downto 8), (others => '0'), upd_time);
-              end if;
               if id_ok_r = '0' then
-                if id_lo_ok = '1' and id_hi_ok = '1' then
-                  id_ok_r <= '1';
-                elsif id_wait /= cfg_id_scans and rec_count <= m_words then
+                if id_known = '0' and id_wait /= cfg_id_scans and rec_count <= m_words then
                   -- 前の観測の読まれていない記録が FIFO に残っていると、ID の応答はその後ろに並ぶ。吸い出し終えて
                   -- （見出しの数が 1 スキャンで読む語数以下）から数える
                   id_wait <= id_wait + 1;
                 end if;
               end if;
-              if bad = '1' or (id_ok_r = '0' and cfg_id_scans /= 0 and id_wait = cfg_id_scans) then
+              if bad = '1' or (id_known = '0' and cfg_id_scans /= 0 and id_wait = cfg_id_scans) then   -- ID が今のスキャンで揃ったなら打ち切らない
                 stuck_r <= '1';
                 id_timeout_r <= not bad;
                 running_r <= '0';
                 step <= E_EXIT;
-              elsif want_stop then
+              elsif want_stop_c = '1' then
                 step <= E_EXIT;
               else
                 step <= E_DR_HEAD;
@@ -492,8 +410,7 @@ begin
           when E_OFF =>
             stop_req <= '0';
             if enable = '1' and free_pins = '0' then
-              step <= E_RESET;
-              flush := true;                                  -- 前の観測で送っていない命令は捨てる（R17）
+              step <= E_RESET;                                -- 前の観測で送っていない命令は捨てる（flush_now。R17）
               cfg_half_period <= half_period;
               cfg_sync_period <= sync_period;
               cfg_ir_len <= ir_len;
@@ -506,16 +423,8 @@ begin
               cfg_id_scans <= id_scans;
               stuck_r <= '0';
               id_timeout_r <= '0';
-              id_ok_r <= '0';
-              dropped_r <= '0';
-              ovf_r <= '0';
-              m_seen <= '0';                                 -- 開き直した: 前の値を忘れる
               id_reads <= (others => '0');
               id_wait <= (others => '0');
-              id_lo_ok <= '0';
-              id_hi_ok <= '0';
-              snap_mode <= '0';
-              snap_seen <= '0';
               scan_count <= (others => '0');
               sync_count <= (others => '0');
             end if;
@@ -534,7 +443,7 @@ begin
           when E_EXIT =>
             issue(OP_SEQ_OUT, 5, '1', x"00000000_0000001F");     -- TMS 1 × 5 → Test-Logic-Reset
           when E_DR_HEAD =>
-            if want_stop then
+            if want_stop_c = '1' then
               step <= E_EXIT;
             else
               -- このスキャンの命令と語数
@@ -543,10 +452,8 @@ begin
               elsif id_reads /= 2 then
                 scan_cmd <= x"00" & "000" & std_logic(id_reads(0)) & OP_READ;   -- ID の下位（番地 0）・上位（1）
                 id_reads <= id_reads + 1;
-              elsif q_count /= 0 then
-                scan_cmd <= queue(q_head);
-                q_head <= (q_head + 1) mod CMD_DEPTH;
-                pop := true;
+              elsif q_nonempty = '1' then
+                scan_cmd <= q_front;                                 -- 待ち行列から取る（pop_now）
               elsif cfg_sync_period /= 0 and sync_count + 1 >= cfg_sync_period then
                 scan_cmd <= std_logic_vector(sync_seq) & x"0" & OP_SYNC;
                 sync_seq <= sync_seq + 1;
@@ -562,7 +469,6 @@ begin
               else
                 m_words <= cfg_words;
               end if;
-              bad <= '0';
               running_r <= id_ok_r;
               issue(OP_SEQ_OUT, 3, '1', x"00000000_00000001");   -- 1,0,0 → Shift-DR
               head_rises <= (others => '0');
@@ -605,55 +511,22 @@ begin
         end case;
       end if;
 
-      if flush then                                          -- 開き直す（取り出しは無い）: この周期に積んだ 1 つだけ残す
-        q_head  <= (q_head + q_count) mod CMD_DEPTH;
-        q_count <= 1 when push_ok else 0;
-      elsif push_ok and not pop then
-        q_count <= q_count + 1;
-      elsif pop and not push_ok then
-        q_count <= q_count - 1;
-      end if;
-
       if rst = '1' then
         step <= E_OFF;
         pending <= false;
         stop_req <= '0';
         phy_cmd_valid <= '0';
-        q_head <= 0;
-        q_count <= 0;
         running_r <= '0';
-        id_ok_r <= '0';
         stuck_r <= '0';
         id_timeout_r <= '0';
         cfg_id_scans <= (others => '0');
-        ovf_r <= '0';
-        tgt_run_r <= '0';
-        dropped_r <= '0';
         scan_count <= (others => '0');
-        read_value_r <= (others => '0');
-        id_r <= (others => '0');
-        resp_seq <= (others => '0');
-        m_last <= (others => '0');
-        m_hit_last <= '0';
-        m_seen <= '0';
-        m_count <= (others => '0');
-        match <= '0';
         sync_seq <= (others => '0');
         id_reads <= (others => '0');
         id_wait <= (others => '0');
-        id_lo_ok <= '0';
-        id_hi_ok <= '0';
-        snap_mode <= '0';
         snap_scan <= '0';
-        snap_seen <= '0';
-        snap_last <= (others => '0');
         head_rises <= (others => '0');
         cap_time <= (others => '0');
-        ev_valid <= '0';
-        ev_sync <= '0';
-        ev_data <= (others => '0');
-        ev_addr <= (others => '0');
-        ev_time <= (others => '0');
       end if;
     end if;
   end process;

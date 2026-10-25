@@ -1,6 +1,6 @@
 """Probe の道具: 規則の検査・状態遷移図・証跡・故障注入の台本（U25）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。記録（_reading・_recordings_dir・_recorder）、ELF（_symbols）、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。記録（_reading・_recordings_dir・_recorder）、ELF（_symbols）、
 ターゲット（target・target_status・evaluate・target_reset・target_resume）を使う。規則と証跡の計算は fprobe.rules、
 試行の進め方は fprobe.inject。機器に触るのは _InjectHost の各操作で、必ず _lock の中。
 

@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .la import Transitions, Waveform
+from .la import Transitions, Waveform, vcd_blocks
 
 __all__ = ["ClockMap", "Event", "Recorder", "Recording"]
 
@@ -107,15 +107,36 @@ class _Chunk:
     length: int
 
 
-def _connect(path: Path) -> sqlite3.Connection:
-    db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-    db.execute("PRAGMA journal_mode=WAL")                         # 書いている間も読める・落ちても壊れない
+def in_list(column: str, values: Iterable, negate: bool = False) -> str:
+    """SQL の `column IN (?, ?, ...)`（negate なら NOT IN）。値は呼び出し側が同じ順で渡す。"""
+    return f"{column} {'NOT ' if negate else ''}IN ({','.join('?' * len(list(values)))})"
+
+
+def connect_db(path: Path, schema: str = "", timeout: float = 5.0) -> sqlite3.Connection:
+    """記録の SQLite を開く（WAL: 書いている間も読める・落ちても壊れない）。schema があれば表を作る。"""
+    db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=timeout)
+    db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
-    db.executescript(_SCHEMA)
+    if schema:
+        db.executescript(schema)
     return db
 
 
-class Recorder:
+def _connect(path: Path) -> sqlite3.Connection:
+    return connect_db(path, _SCHEMA)
+
+
+class HostEvents:
+    """書き手の共通の口: ホストで起きた出来事を時計の対応付け（self.clock）で写して add する。"""
+
+    def add_host(self, stream: str, kind: str, host_s: float, **fields: Any) -> int:
+        """ホストで起きた出来事: ホストの時刻を時計の対応付けで写し、不確かさを付けて入れる。写した時刻を返す。"""
+        t, unc = self.clock.to_ticks(host_s)
+        self.add(stream, kind, t, uncertainty=unc, **fields)
+        return t
+
+
+class Recorder(HostEvents):
     """記録の書き手。add / add_many / add_waveform を溜め、flush でまとめて書く（スレッド安全）。"""
 
     def __init__(self, directory: Path, timebase_hz: float, meta: dict | None = None):
@@ -152,12 +173,6 @@ class Recorder:
             out.append((t, t_end, stream, kind, a, b, None if body is None else json.dumps(body, ensure_ascii=False), unc))
         with self._lock:
             self._pending.extend(out)
-
-    def add_host(self, stream: str, kind: str, host_s: float, **fields: Any) -> int:
-        """ホストで起きた出来事: ホストの時刻を時計の対応付けで写し、不確かさを付けて入れる。写した時刻を返す。"""
-        t, unc = self.clock.to_ticks(host_s)
-        self.add(stream, kind, t, uncertainty=unc, **fields)
-        return t
 
     def add_waveform(self, tr: Transitions, start_ticks: int) -> str:
         """ロジアナの変化点（サンプル 0 がタイムベース start_ticks）を、かたまりのファイルとして入れる。
@@ -258,10 +273,10 @@ class Recording:
 
     def iter_events(self, t0: int | None = None, t1: int | None = None, streams: list[str] | None = None,
                     kinds: list[str] | None = None, limit: int | None = None,
-                    overlapping: bool = False) -> Iterator[Event]:
+                    overlapping: bool = False, a: int | None = None) -> Iterator[Event]:
         """events と同じ（時刻順）だが、読みながら返す（大きな記録の書き出し用）。overlapping = True なら、t0 より前に
-        始まって t0 より後に終わる区間（t_end を持つ出来事）も含める。"""
-        sql, args = self._where(t0, t1, streams, kinds, overlapping)
+        始まって t0 より後に終わる区間（t_end を持つ出来事）も含める。a を渡せば a が一致する出来事だけ（SQL で絞る）。"""
+        sql, args = self._where(t0, t1, streams, kinds, overlapping, a)
         sql = f"SELECT t, stream, kind, a, b, body, t_end, unc FROM events {sql} ORDER BY t, rowid"
         if limit is not None:
             sql += f" LIMIT {int(limit)}"
@@ -269,7 +284,7 @@ class Recording:
             yield Event(t, s, k, a, b, None if body is None else json.loads(body), te, unc)
 
     @staticmethod
-    def _where(t0, t1, streams, kinds, overlapping: bool = False) -> tuple[str, list]:
+    def _where(t0, t1, streams, kinds, overlapping: bool = False, a: int | None = None) -> tuple[str, list]:
         clauses, args = [], []
         if t0 is not None:
             clauses.append("(t >= ? OR t_end > ?)" if overlapping else "t >= ?")
@@ -279,8 +294,11 @@ class Recording:
             args.append(t1)
         for column, values in (("stream", streams), ("kind", kinds)):
             if values:
-                clauses.append(f"{column} IN ({','.join('?' * len(values))})")
+                clauses.append(in_list(column, values))
                 args.extend(values)
+        if a is not None:
+            clauses.append("a = ?")
+            args.append(a)
         return ("WHERE " + " AND ".join(clauses)) if clauses else "", args
 
     def nearest(self, t: int, before: bool, stream: str, kind: str | None = None, a: int | None = None,
@@ -329,6 +347,7 @@ class Recording:
         except BaseException:
             self._db.execute("ROLLBACK")
             raise
+        self._distinct.clear()                      # 消したので distinct の覚えは古い（rowid の最大では消したことが分からない）
         return len(rows)
 
     def count(self) -> int:
@@ -471,7 +490,7 @@ class Recording:
         区間の境が density の画素の境と同じなら、結果は density と同じ（1 回の問い合わせで数える）。"""
         if width < 1 or count < 1:
             raise ValueError("区間の幅と数は 1 以上")
-        where = f" AND stream IN ({','.join('?' * len(streams))})" if streams else ""
+        where = f" AND {in_list('stream', streams)}" if streams else ""
         out: dict[str, array] = {}
         for stream, b, n in self._db.execute(
                 f"SELECT stream, (t - ?) / ?, COUNT(*) FROM events WHERE t >= ? AND t < ?{where} GROUP BY 1, 2",
@@ -581,16 +600,13 @@ class Recording:
         lines += ["$upscope $end", "$enddefinitions $end"]
 
         def wave() -> Iterator[tuple[int, str]]:
-            previous: dict[int, int] = {}
+            previous = None
+            wave_ids = {ch: ids[ch] for ch in wanted}
             for c in chunks:
                 tr = self._transitions(c)
-                for value, start in zip(tr.values, tr.starts):
-                    bits = [(ch, value >> ch & 1) for ch in wanted if previous.get(ch) != value >> ch & 1]
-                    if bits:
-                        t = round((c.t0 + start * c.ticks_per_sample) * 1e9 / hz)
-                        for ch, bit in bits:
-                            yield t, f"{bit}{ids[ch]}"
-                        previous.update(bits)
+                blocks, previous = vcd_blocks(tr.values, tr.starts, wave_ids, previous)
+                for start, text in blocks:
+                    yield round((c.t0 + start * c.ticks_per_sample) * 1e9 / hz), text
 
         def fpga() -> Iterator[tuple[int, str]]:
             if not plan:

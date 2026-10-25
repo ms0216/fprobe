@@ -1,6 +1,6 @@
 """Probe の道具の共通の部品: DAP サンプラの持ち主と、デバイスの時刻付きの出来事の「窓」。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・_recorder・_collector・_view を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・_recorder・_collector・_view を使う。
 
 - DAP サンプラ（F4）は機器に 1 つ。使う道具（watch・RTOS の時間軸の方法 A・プロファイルの pcsr）は
   `_claim_sampler` で持ち主になり、終えたら `_release_sampler` で返す。ほかの道具が使っている間は、設定を
@@ -158,6 +158,8 @@ class WindowTools:
         if new > n:
             window.lost = max(window.lost, new - n)
         events = log.read(n, end=written) if n else []
+        if log.overwritten:                                       # 読む間に書き手に追い越された先頭も読めなかった分
+            window.lost = max(window.lost, new - n + log.overwritten)
         now = device.time()
         t1 = window.t1 if window.t1 is not None else now
         kind = _RING_KINDS[stream]

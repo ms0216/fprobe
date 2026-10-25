@@ -29,6 +29,7 @@ pytestmark = [pytest.mark.hil,
 COUNTER_HZ = 27_000_000 / 4096           # 観測する組 0 = カウンタの 27〜12 ビットが変わる頻度
 MARK_CH = 10                             # Primer のカウンタの 12 ビット（JB の 1 番）
 FICR_PART = 0x10000100                   # XIAO（nRF52840）の部品の番号（変わらない番地）
+DBGMCU_IDCODE = 0xE0042000               # Nucleo F401RE（STM32F401）の ID（変わらない番地）。FPROBE_OBS_MCU=nucleo のとき
 
 
 @pytest.fixture(scope="module")
@@ -104,9 +105,11 @@ def test_o2_the_same_edge_on_the_analyzer_and_the_observation(session):
 def test_the_mcu_and_the_fpga_in_one_record(session):
     # XIAO のサンプラ（FPGA が SWD で周期的に読む）と FPGA の観測が、同じイベントの記録に時刻の順で入る
     from fprobe.sampler import Sampler
-    with session.debug(target_override="nrf52840", frequency=4_000_000, connect_mode="attach"):
+    nucleo = os.environ.get("FPROBE_OBS_MCU") == "nucleo"          # 既定は XIAO。PYNQ の JA に Nucleo F401RE をつないだときは nucleo
+    target, address = ("stm32f401xe", DBGMCU_IDCODE) if nucleo else ("nrf52840", FICR_PART)
+    with session.debug(target_override=target, frequency=4_000_000, connect_mode="attach"):
         sampler = Sampler(session.device)
-        sampler.configure([(FICR_PART, 1)], period_s=1e-3)
+        sampler.configure([(address, 1)], period_s=1e-3)
         sampler.start()
         try:
             _, _, status, lost, events = observe(session, 5, 1.0)

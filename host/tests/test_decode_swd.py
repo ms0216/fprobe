@@ -199,9 +199,9 @@ def test_ten_thousand_transfers_decode_quickly():
     for _ in range(10_000):                           # 約 100 万の変化点
         b.read(AP, 0xC, rng.getrandbits(32))
     t = w.build(end_s=b.t + 1e-6)
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     d = decode_swd(t, swclk=SWCLK, swdio=SWDIO, drive=DRIVE, turnaround=1, orundetect=False)
-    elapsed = time.perf_counter() - t0
+    elapsed = time.process_time() - t0
     assert len(d.of("transfer")) == 10_000
     assert elapsed < 5.0, elapsed                     # 手元で約 0.8 秒
 

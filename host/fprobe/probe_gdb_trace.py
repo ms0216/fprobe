@@ -1,7 +1,7 @@
 """Probe の道具: GDB のトレースポイント（U48）の機器の側。トレースの実験（fprobe.gdb.trace.Experiment）を持ち、
 有効なトレースポイントの番地にブレークポイントを置き、当たったら止まった一瞬にレジスタ・メモリを集めて続ける。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_monitor・_record_host と、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_monitor・_record_host と、
 BreakpointActions の _break_hooks（道具が置くブレークポイントの処理）・ObserveTools の _watch_stops（再開した後の
 見張り）、GdbTools の _gdb_breaks・_gdb_read_core・_gdb_step_over を使う。機器に触るのは必ず _lock の中。
 API（JSON-RPC・MCP）には出さない（呼ぶのはデーモンの GDB サーバだけ）。
@@ -79,7 +79,7 @@ class GdbTraceTools:
         with self._lock:
             exp = self.gdb_trace_experiment()
             self.target                                        # 未接続ならここで失敗する
-            if deny_halt and getattr(self, "_monitor", None) is None:
+            if deny_halt and self._monitor is None:
                 raise RuntimeError("monitor trace deny-halt が指定されている: トレースポイントは当たるたびにコアを止めて集める"
                                    "（1 回に数 ms と、止まったことに気づくまでの見張りの周期）。許すなら monitor trace "
                                    "allow-halt、止めずに済ませるならモニタ方式（monitor target.debug_mode.set mode=monitor）"

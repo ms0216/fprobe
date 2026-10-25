@@ -1,5 +1,6 @@
 -- SPDX-License-Identifier: Apache-2.0
--- fprobe_obs の例: Tang Primer 20K で 27 MHz のカウンタを観測する（fprobe の FPGA 観測の実機の確かめ、O1・O2）。
+-- fprobe_obs の例: Tang Primer 20K で 27 MHz のカウンタを観測する（obs_soft_tap + obs_core の 2 クロック版。TCK をそのまま
+-- クロックの網につなぐ。fprobe_gw の obs_target_primer の設計で、fprobe の FPGA 観測の実機の確かめに使う）。
 --
 -- 観測の口は拡張ヘッダ J12 のふつうのピン 4 本（obs_soft_tap）: J12 の 5 番 TCK・6 番 TMS・7 番 TDI・8 番 TDO。
 -- 観測する値（GROUPS = 2）: 組 0 = カウンタの 27〜12 ビット（4096 周期 = 約 152 µs ごとに変わる）、組 1 = 43〜28 ビット。
@@ -22,7 +23,8 @@ entity primer20k_obs_counter_top is
 end entity;
 
 architecture rtl of primer20k_obs_counter_top is
-  signal por      : unsigned(3 downto 0) := (others => '0');   -- 電源投入のリセット（構成の直後は 0）
+  signal por      : unsigned(3 downto 0) := (others => '0');   -- 電源投入のリセット（構成の直後は宣言の初期値の 0。
+                                                                -- 初期値を持たない FPGA ではリセットのピンから作る）
   signal rst      : std_logic;
   signal counter  : unsigned(43 downto 0);
   signal probes   : std_logic_vector(31 downto 0);

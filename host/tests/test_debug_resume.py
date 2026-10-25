@@ -22,6 +22,9 @@ class FakeTarget:
     def read_core_register(self, name):
         return self.pc
 
+    def read32(self, address):                      # DFSR: ステップ後の理由に対応するビット（HALTED = 1 / DWTTRAP = 4）
+        return {Target.HaltReason.DEBUG: 1, Target.HaltReason.WATCHPOINT: 4}[self.reason]
+
     def remove_breakpoint(self, address):
         self.calls.append("remove")
 

@@ -16,7 +16,7 @@ __all__ = ["analyze", "decode_cfsr", "decode_hfsr", "decode_dfsr", "dfsr_bits", 
 CPUID, ICSR, CFSR, HFSR, DFSR, MMFAR, BFAR, AFSR, CPACR = (0xE000ED00, 0xE000ED04, 0xE000ED28, 0xE000ED2C,
                                                            0xE000ED30, 0xE000ED34, 0xE000ED38, 0xE000ED3C, 0xE000ED88)
 WRITE_ONE_TO_CLEAR = ("CFSR", "HFSR", "DFSR")   # ARMv7-M / v8-M の rc_w1（1 を書いたビットを消す）
-_V6M_PARTNOS = {0xC20, 0xC60, 0xD20}       # Cortex-M0 / M0+ / M23（M23 は v8-M Baseline: CFSR が無い）
+_V6M_PARTNOS = {0xC20, 0xC21, 0xC60, 0xD20}       # Cortex-M0 / M1 / M0+ / M23（0xC24 は Cortex-M4。pyocd core_ids）（M23 は v8-M Baseline: CFSR が無い）
 EXCEPTIONS = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault", 7: "SecureFault",
               11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
 

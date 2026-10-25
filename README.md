@@ -1,27 +1,30 @@
 # fprobe — FPGA マルチファンクション・デバッグプローブ
 
 SWD/JTAG デバッガ・ロジックアナライザ・SWO/UART・クロストリガを 1 台に統合したデバッグプローブ。
+PC から（特に AI から）ターゲットとその FPGA の中を、1 本の時間軸で観測・制御できる。fprobe は測定器で、測った事実だけを返し、判断は使う人・AI がする。
 全体設計は [docs/superpowers/specs/2026-10-15-fprobe-architecture-design.md](docs/superpowers/specs/2026-10-15-fprobe-architecture-design.md)。
 
-> **English summary.** fprobe is an FPGA-based multi-function debug probe built on the Sipeed Tang Primer 20K
-> (GW2A-18): a CMSIS-DAP v2 SWD/JTAG debugger (hardware FSM, works with pyOCD / OpenOCD / probe-rs), a 100 MS/s
-> logic analyzer with a 128 MB DDR3 buffer and protocol decoders, SWO / UART / RTT, cross-triggering, and a common
-> 64-bit timebase so that waveforms, debug events and target variables line up on one timeline. A Python library,
-> a JSON-RPC daemon with a browser UI, and an MCP server let both people and AI agents drive it. The gateware is
-> written in VHDL-2008 (including the USB 2.0 High-Speed device stack). Documentation is mostly in Japanese.
+## ここから読む
 
-## 状況 / Status
+| 知りたいこと | 文書 |
+|---|---|
+| 何を用意し、どう書き込み、どう接続を確かめるか | [はじめに](docs/guide/getting-started.md) |
+| 対象の FPGA の中を観測して MCU・ピンと並べる通しの手順 | [FPGA 解析](docs/guide/fpga-analysis.md) |
+| ピンの信号を読む（配線・取り込み・解読・観測と並べる） | [ロジアナ](docs/guide/logic-analyzer.md) |
+| AI（MCP）から使う（登録・デーモン・道具の名前） | [MCP](docs/guide/mcp.md) |
+| うまくいかない | [トラブルシューティング](docs/guide/troubleshooting.md) |
+| 全メソッド・全道具の一覧 | [API 一覧](docs/api.md) |
+| ボードごとの機能の対応表 | [ボードの対応表](docs/architecture/feature-matrix.md) |
 
-開発中（2026-10）。手元の Nucleo F401RE・XIAO nRF52840（ZMK）で実機確認しながら進めている。機能ごとの状況は
-[docs/superpowers/plans/2026-10-18-backlog.md](docs/superpowers/plans/2026-10-18-backlog.md)。
+最短の例（PYNQ-Z2 を Ethernet で使う。詳細は [はじめに](docs/guide/getting-started.md)）:
 
-## ライセンス / License
+```sh
+.venv/Scripts/python -m pip install -e "gateware[dev]" -e "host[dev,mcp]"      # インストール
+.venv/Scripts/python -m fprobe_gw build fprobe_pynq --program                  # ビルドして書き込み
+claude mcp add fprobe -- .venv\Scripts\fprobe-mcp.exe --eth 192.168.77.2       # MCP に登録（AI から使う）
+```
 
-部分ごとに違う（詳しくは [LICENSING.md](LICENSING.md)）。
-
-- PC 側（ライブラリ・デーモン・画面・MCP）: **AGPL-3.0-only**
-- FPGA のゲートウェア（`gateware/`）: **GPL-3.0-only**
-- ターゲットのファームに組み込むもの（`host/firmware/`・テストポイントのヘッダ）: **Apache-2.0**（利用者のファームをコピーレフトにしない）
+あとは AI に「`probe_info` で機能を確かめて」と頼む。FPGA の観測（`fpga_obs`）を持つのは PYNQ-Z2 の構成だけ（[FPGA 解析](docs/guide/fpga-analysis.md)）。
 
 ## セットアップ（Windows）
 
@@ -51,7 +54,7 @@ RTL は VHDL-2008（`gateware/rtl/`）。シミュレーションには GHDL 6�
 .venv/Scripts/python -m fprobe_gw gen                      # 生成物（ディスクリプタ ROM・CSR・ケイパビリティ等）を再生成
 ```
 
-書き込みは Primer 20K（USB シリアル `FACTORYAIOT_PRO` の接続ポートにある `USB Debugger A`、IDCODE `0x0000081B`）
+書き込みは Primer 20K（BL702 の USB シリアル番号から引いた接続ポートにある `USB Debugger A`、IDCODE `0x0000081B`）
 にのみ行われ、該当が一意でない場合や IDCODE が一致しない場合は拒否される。
 
 ## ホストから使う
@@ -110,7 +113,7 @@ PYNQ-Z2 では、同じ fprobe_core を PL に載せ、PS（ARM）の Linux の�
 
 ```sh
 FPROBE_PYNQ_SUDO_PASSWORD=... python -m fprobe_gw pynq install   # 中継と書き込みの補助を PYNQ に据え付ける（一度）
-python -m fprobe_gw build fprobe_pynq --program                  # Vivado でビルドし、JTAG（1234-TUL・IDCODE 照合）で書く
+python -m fprobe_gw build fprobe_pynq --program                  # Vivado でビルドし、JTAG（PYNQ-Z2 の USB シリアル番号で口を選び、IDCODE を照合）で書く
 python -m fprobe_gw pynq status
 ```
 

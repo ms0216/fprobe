@@ -1,6 +1,6 @@
 """Probe の道具: 読み込んだ ELF の更新の検出と自動の再読込（U46。SEGGER Ozone の再ビルドの検出 SEG-52 に相当）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_symbols・elf_load と、ObserveTools の _record_host、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_symbols・elf_load と、ObserveTools の _record_host、
 FlashTools の _publish（デーモンの通知の送り先）を使う。
 
 - elf_load のたびに、ファイルの印（更新時刻・大きさ）と、書き込む中身（PT_LOAD の区画）の要約（SHA-256）を覚える。
@@ -153,7 +153,7 @@ class ElfWatchTools:
             ("stale" if notice.get("image_changed") and self._written_digest is not None else self._target_image())
         notice["message"] = self._elf_message(notice)
         self._elf_last = notice
-        publish = getattr(self, "_publish", None)
+        publish = self._publish
         if publish is not None:
             publish(ELF_TOPIC, notice)
         self._record_host("host", ELF_TOPIC, time.monotonic(), body=notice)

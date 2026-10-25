@@ -8,8 +8,8 @@ import collections
 import hashlib
 import itertools
 import json
-import re
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +33,33 @@ FTRACE_EVENT = re.compile(r"[a-z0-9_-]+/[a-z0-9_]+")       # tracefs の events/
 _PERF_EVENT = re.compile(r"^[A-Za-z0-9_:\-./]+$")           # perf のイベントの名前（シェルに渡すので形を限る）
 
 
+def _ring_stats() -> dict:
+    return {"reads": 0, "halted_ms_total": 0.0, "halted_ms_max": 0.0, "records": 0, "lost": 0, "torn": 0, "corrupt": 0,
+            "header_errors": 0, "error": None}
+
+
+def _count_ring_read(stats: dict, out: dict, records: list[dict], halted_ms: float, header_error: bool) -> None:
+    """1 回の linux.ring.read の結果を ring_stats に足す（t.lock の中で）。"""
+    stats["reads"] += 1
+    stats["halted_ms_total"] += halted_ms
+    stats["halted_ms_max"] = max(stats["halted_ms_max"], halted_ms)
+    stats["records"] += sum(not r["duplicate"] for r in records)
+    stats["lost"] += sum(b - a for a, b in out["lost"])
+    stats["torn"] += len(out["torn"])
+    stats["corrupt"] += len(out["corrupt"])
+    stats["header_errors"] += header_error
+
+
+def _text(data: bytes) -> str:
+    """ターゲットの出力（バイト列）を文字に（読めないバイトは置き換える）。"""
+    return data.decode(errors="replace")
+
+
+def _where(pid: int | None) -> str:
+    """perf の対象: プロセス pid か、無ければ全体 -a。"""
+    return f"-p {int(pid)}" if pid is not None else "-a"
+
+
 def _home() -> Path:
     return Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe")) / "linux"
 
@@ -52,6 +79,8 @@ class _Target:
     events: collections.deque = field(default_factory=lambda: collections.deque(maxlen=KEEP))
     seq: int = 0
     pending: list = field(default_factory=list)   # (出来事, 受けたときの記録): 後ろに組ができるのを待つ（記録中に受けた分だけ）
+    examined: int = 0                                # pending の先頭のうち、組の最後の時刻 examined_last で調べ済み（まだ待つ）の数
+    examined_last: int | None = None
     not_recorded: int = 0                            # 記録中に受けたのに記録に入れられなかった数（組が足りない・記録が替わった）
     dropped: int = 0
     trace_clock: str | None = None                   # uprobes の出来事の時計（trace_clock の名前）
@@ -60,7 +89,7 @@ class _Target:
     by_seq: collections.OrderedDict = field(default_factory=collections.OrderedDict)   # 通しの番号 → 出来事（A と B を 1 つに）
     ring: dict | None = None                         # ring_open の結果（phys・size・capacity・first）
     ring_reader: RingReader | None = None
-    ring_stats: dict = field(default_factory=lambda: _ring_stats())
+    ring_stats: dict = field(default_factory=_ring_stats)
     ring_stop: threading.Event | None = None
     gdb: GdbRelay | None = None                     # linux.gdb.serve の中継
     memap: object | None = None                      # linux.memap.connect の止めずに読む口（read_words・info・close）
@@ -100,8 +129,8 @@ class LinuxTools:
         pre, stdin = self._sudo(t)
         r = t.ssh.run(f"{pre}sh -c {_quote(cmd)}" if t.sudo else cmd, input=stdin, timeout=timeout)
         if r.returncode:
-            raise RuntimeError(f"ターゲットで失敗した（{r.returncode}）: {cmd}: {r.stderr.decode(errors='replace').strip()}")
-        return r.stdout.decode(errors="replace")
+            raise RuntimeError(f"ターゲットで失敗した（{r.returncode}）: {cmd}: {_text(r.stderr).strip()}")
+        return _text(r.stdout)
 
     # --- つなぐ・能力 ----------------------------------------------------------------
 
@@ -118,11 +147,11 @@ class LinuxTools:
                 raise RuntimeError(f"sudo のパスワードの環境変数 {sudo_password_env} が無い")
             v = ssh.run("sudo -S -k -v -p ''", input=(password + "\n").encode(), timeout=30)
             if v.returncode:
-                raise RuntimeError(f"sudo のパスワードの確かめに失敗した（{v.returncode}）: {v.stderr.decode(errors='replace').strip()}")
+                raise RuntimeError(f"sudo のパスワードの確かめに失敗した（{v.returncode}）: {_text(v.stderr).strip()}")
         r = ssh.run("sh -s", input=CAPS_SCRIPT.encode(), timeout=60)
         if r.returncode:
-            raise RuntimeError(f"{user}@{host} に入れない（{r.returncode}）: {r.stderr.decode(errors='replace').strip()}")
-        caps = parse_caps(r.stdout.decode(errors="replace"))
+            raise RuntimeError(f"{user}@{host} に入れない（{r.returncode}）: {_text(r.stderr).strip()}")
+        caps = parse_caps(_text(r.stdout))
         self._linux[target] = _Target(ssh, sudo, caps, sudo_password_env)
         return caps
 
@@ -162,7 +191,7 @@ class LinuxTools:
 
     def linux_agent_start(self, target: str, watchdog_s: float | None = None) -> dict:
         t = self._lt(target)
-        if t.agent is not None and t.agent.status()["running"]:
+        if self._running(t):
             return {"hello": None, "already_running": True, "watchdog_s": t.agent.watchdog_s}   # 今効いている値（求めた値ではない）
         with t.lock:                                         # 新しいエージェントの seq は 0 から（前の番号と取り違えない）
             t.by_seq.clear()
@@ -188,8 +217,12 @@ class LinuxTools:
             t.by_bp.pop(t.probes.pop(n).get("bp"), None)
         return {**self.linux_agent_status(target=target), "cleared_probes": cleared}
 
+    @staticmethod
+    def _running(t: _Target) -> bool:
+        return t.agent is not None and t.agent.status()["running"]
+
     def _agent(self, t: _Target) -> Agent:
-        if t.agent is None or not t.agent.status()["running"]:
+        if not self._running(t):
             raise RuntimeError("エージェントが動いていない（linux.agent.start）")
         return t.agent
 
@@ -249,7 +282,7 @@ class LinuxTools:
         if p["method"] == "uprobe":
             events = t.caps["tracefs"]
             self._sh(t, f"echo 0 > {events}/events/{GROUP}/{name}/enable; echo -:{GROUP}/{name} >> {events}/uprobe_events")
-        elif not p.get("ended") and t.agent is not None and t.agent.status()["running"]:
+        elif not p.get("ended") and self._running(t):
             try:
                 t.agent.request("bp_remove", bp=p["bp"])
             except RuntimeError as e:
@@ -261,7 +294,7 @@ class LinuxTools:
         out = {"removed": name}
         if p.get("ended"):
             out["ended"] = p["ended"]
-        elif p["method"] == "ptrace" and not (t.agent and t.agent.status()["running"]):
+        elif p["method"] == "ptrace" and not self._running(t):
             out["agent_running"] = False                  # エージェントが先に終わった: ターゲットに BKPT が残っているかもしれない
         return out
 
@@ -317,7 +350,7 @@ class LinuxTools:
         for name, t in list(self._linux.items()):
             if not t.pending:
                 continue
-            if t.agent is not None and t.agent.status()["running"]:
+            if self._running(t):
                 try:
                     self.linux_sync(target=name, count=1)
                 except RuntimeError:
@@ -326,30 +359,28 @@ class LinuxTools:
 
     # --- カーネルの出来事・ログ（段階 4）------------------------------------------------------
 
-    def _ftrace_names(self, t: _Target, events: list[str]) -> list[tuple[str, str]]:
+    @staticmethod
+    def _ftrace_paths(t: _Target, events: list[str]) -> list[str]:
+        """tracefs のイベントの名前 "グループ/名前" を確かめて返す（ターゲットに tracefs が無ければ誤り）。"""
         if not t.caps.get("tracefs"):
             raise RuntimeError("ターゲットに tracefs が無い（linux.capabilities の tracefs）")
-        out = []
         for e in events:
             if not FTRACE_EVENT.fullmatch(e):
                 raise ValueError(f"イベントの名前 {e!r} は「グループ/名前」（英小文字・数字・_）")
-            out.append((e, e.split("/")[1]))
-        return out
+        return list(events)
 
     def linux_ftrace_enable(self, target: str, events: list[str]) -> dict:
         """tracefs のイベント（例 "sched/sched_switch"）を有効にする。出来事は linux.trace.start の trace_pipe で受け、
         method "ftrace"・stream "<target>.ftrace" に入る（時刻は trace_clock）。"""
         t = self._lt(target)
-        names = self._ftrace_names(t, events)
-        for path, _ in names:
+        for path in self._ftrace_paths(t, events):
             self._sh(t, f"echo 1 > {t.caps['tracefs']}/events/{path}/enable")
             t.ftrace.add(path)
         return {"enabled": sorted(t.ftrace), "tracefs": t.caps["tracefs"]}
 
     def linux_ftrace_disable(self, target: str, events: list[str]) -> dict:
         t = self._lt(target)
-        names = self._ftrace_names(t, events)
-        for path, _ in names:
+        for path in self._ftrace_paths(t, events):
             self._sh(t, f"echo 0 > {t.caps['tracefs']}/events/{path}/enable")
             t.ftrace.discard(path)
         return {"enabled": sorted(t.ftrace)}
@@ -366,7 +397,7 @@ class LinuxTools:
             command += f" --after-cursor {_quote(since_cursor)}"
         r = t.ssh.run(command, input=stdin, timeout=60)
         entries, bad = [], 0
-        for line in r.stdout.decode(errors="replace").splitlines():
+        for line in _text(r.stdout).splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:
@@ -376,7 +407,7 @@ class LinuxTools:
             else:
                 bad += 1
         return {"entries": entries, "next_cursor": entries[-1].get("__CURSOR") if entries else None,
-                "clock": "CLOCK_MONOTONIC", "exit_code": r.returncode, "stderr": r.stderr.decode(errors="replace"),
+                "clock": "CLOCK_MONOTONIC", "exit_code": r.returncode, "stderr": _text(r.stderr),
                 "bad_lines": bad, "command": command}
 
     # --- core dump（段階 4。仕様 §3.3 の linux.core.*）-----------------------------------------
@@ -438,7 +469,7 @@ class LinuxTools:
         pre, stdin = self._sudo(t)
         r = t.ssh.run(f"{pre}cat -- {_quote(path)}", input=stdin, timeout=300)
         if r.returncode:
-            raise RuntimeError(f"{path} を読めない（{r.returncode}）: {r.stderr.decode(errors='replace').strip()}")
+            raise RuntimeError(f"{path} を読めない（{r.returncode}）: {_text(r.stderr).strip()}")
         local = Path(local_path)
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_bytes(r.stdout)
@@ -463,10 +494,10 @@ class LinuxTools:
         if not 0 < duration_s <= 3600:
             raise ValueError("duration_s は 0 より大きく 3600 以下")
         pre, stdin = self._sudo(t)
-        where = f"-p {int(pid)}" if pid is not None else "-a"
+        where = _where(pid)
         command = f"{pre}env LC_ALL=C perf stat --no-scale -x, -e {','.join(events)} {where} -- sleep {duration_s:.6f}"
         r = t.ssh.run(command, input=stdin, timeout=duration_s + 60)
-        err = r.stderr.decode(errors="replace")
+        err = _text(r.stderr)
         return {"rows": parse_perf_stat(err), "exit_code": r.returncode, "stderr": err, "command": command}
 
     def linux_perf_record(self, target: str, duration_s: float, frequency_hz: int, max_samples: int,
@@ -482,7 +513,7 @@ class LinuxTools:
         if not 0 < duration_s <= 600 or not 1 <= frequency_hz <= 100_000 or not 1 <= max_samples <= KEEP:
             raise ValueError(f"duration_s は 0 より大きく 600 以下、frequency_hz は 1〜100000、max_samples は 1〜{KEEP}")
         pre, stdin = self._sudo(t)
-        where = f"-p {int(pid)}" if pid is not None else "-a"
+        where = _where(pid)
         script = (f'd=$(mktemp); trap \'rm -f "$d" "$d.old" "$d.txt"\' EXIT; '
                   f'perf record --clockid monotonic_raw --sample-cpu -F {int(frequency_hz)} {where} -o "$d" '
                   f'-- sleep {duration_s:.6f} >/dev/null; rr=$?; '
@@ -491,10 +522,10 @@ class LinuxTools:
                   f'head -n {int(max_samples)} "$d.txt"')
         command = f"{pre}env LC_ALL=C sh -c {_quote(script)}"
         r = t.ssh.run(command, input=stdin, timeout=duration_s + 120)
-        err = r.stderr.decode(errors="replace")
+        err = _text(r.stderr)
         dropped_before = t.dropped
         samples, unparsed, examples = 0, 0, []
-        for line in r.stdout.decode(errors="replace").splitlines():
+        for line in _text(r.stdout).splitlines():
             s = parse_perf_sample(line)
             if s is None:
                 unparsed += 1
@@ -537,10 +568,10 @@ class LinuxTools:
         try:
             r = t.ssh.run(command, input=stdin, timeout=timeout_s + BATCH_BACKSTOP_S)
         except SshTimeout as e:                              # 途中までの出力は事実として返す
-            return {"exit_code": None, "timed_out": True, "stdout": e.stdout.decode(errors="replace"),
-                    "stderr": e.stderr.decode(errors="replace"), "command": command}
+            return {"exit_code": None, "timed_out": True, "stdout": _text(e.stdout),
+                    "stderr": _text(e.stderr), "command": command}
         return {"exit_code": r.returncode, "timed_out": r.returncode == 124,     # 124 = timeout が止めた
-                "stdout": r.stdout.decode(errors="replace"), "stderr": r.stderr.decode(errors="replace"), "command": command}
+                "stdout": _text(r.stdout), "stderr": _text(r.stderr), "command": command}
 
     def linux_gdb_serve(self, target: str, pid: int, port: int) -> dict:
         """ターゲットで gdbserver を pid につけ（標準入出力。sudo なら sudo -n）、PC の 127.0.0.1:port で gdb の接続を 1 つ待って
@@ -604,25 +635,28 @@ class LinuxTools:
             raise RuntimeError("Cortex-A のコアに target.connect していない（道 B の access=halt はそのコアに読ませる）")
         return _ArmACpu(target)
 
-    def linux_ring_read(self, target: str, address: int, access: str, max_records: int) -> dict:
-        """リングの新しい記録を、古い方から max_records 個まで読む。address はリングの頭の、読み手から見た番地。
-        access = "halt": target.connect でつないだコアを止めて、そのコアに読ませ（address は仮想番地）、すぐ再開する。
-        access = "memap": linux.memap.connect の口で、止めずに読む（address は物理番地）。"""
-        t = self._lt(target)
+    def _linux_ring_reader(self, t: _Target, access: str):
+        """access に合う読み手（halt = 止めて読む CPU、memap = 止めずに読む口）。リングのキャッシュの開き方と合わなければ誤り。"""
         if access == "halt":
             if t.ring is not None and not t.ring["cached"]:
                 raise ValueError("cached=false で開いたリングは access=halt で読まない: エージェントは O_SYNC（キャッシュしない）で書き、"
                                  "止めたコアはキャッシュする線形の写しで読むので、古い値を読みうる（cached=true で開き直す）")
-            cpu = self._linux_ring_cpu()
-        elif access == "memap":
+            return self._linux_ring_cpu()
+        if access == "memap":
             if t.memap is None:
                 raise RuntimeError("止めずに読む口が無い（linux.memap.connect）")
             if t.ring is not None and t.ring["cached"]:
                 raise ValueError("cached=true で開いたリングは access=memap で読まない: memap は CPU のキャッシュを通らずに物理メモリを"
                                  "読むので、キャッシュに残った書き込みが見えない（cached=false で開き直す）")
-            cpu = _MemapReader(t.memap)
-        else:
-            raise ValueError(f"access は halt / memap（{access!r}）")
+            return _MemapReader(t.memap)
+        raise ValueError(f"access は halt / memap（{access!r}）")
+
+    def linux_ring_read(self, target: str, address: int, access: str, max_records: int) -> dict:
+        """リングの新しい記録を、古い方から max_records 個まで読む。address はリングの頭の、読み手から見た番地。
+        access = "halt": target.connect でつないだコアを止めて、そのコアに読ませ（address は仮想番地）、すぐ再開する。
+        access = "memap": linux.memap.connect の口で、止めずに読む（address は物理番地）。"""
+        t = self._lt(target)
+        cpu = self._linux_ring_reader(t, access)
         words = 0
 
         def read(address: int, count: int) -> bytes:
@@ -664,15 +698,7 @@ class LinuxTools:
                 halted_ms = read_ms if access == "halt" else 0.0       # memap は止めない
         records = [self._linux_ring_record(target, t, r) for r in out["records"]]
         with t.lock:
-            st = t.ring_stats
-            st["reads"] += 1
-            st["halted_ms_total"] += halted_ms
-            st["halted_ms_max"] = max(st["halted_ms_max"], halted_ms)
-            st["records"] += sum(not r["duplicate"] for r in records)
-            st["lost"] += sum(b - a for a, b in out["lost"])
-            st["torn"] += len(out["torn"])
-            st["corrupt"] += len(out["corrupt"])
-            st["header_errors"] += header_error is not None
+            _count_ring_read(t.ring_stats, out, records, halted_ms, header_error is not None)
         return {"records": records, "lost": out["lost"], "torn": out["torn"], "corrupt": out["corrupt"],
                 "head": out["head"], "left": out["left"], "header_error": header_error, "halted_ms": halted_ms,
                 "read_ms": read_ms, "words": words, "core": cpu.index, "access": access,
@@ -718,7 +744,7 @@ class LinuxTools:
     def linux_trace_stop(self, target: str) -> dict:
         t = self._lt(target)
         self._linux_stop_sync(t)
-        if t.agent is not None and t.agent.status()["running"]:
+        if self._running(t):
             if t.trace_clock is not None:
                 t.agent.request("trace_close")
             self.linux_sync(target=target, count=1)    # 最後の出来事の後ろに組を置いてから記録に入れる
@@ -748,27 +774,9 @@ class LinuxTools:
             body = {"method": "ptrace", "probe": name, "tid": ev["tid"], "target_ns": ev["t_ns"], "regs": ev["regs"],
                     "clock": "CLOCK_MONOTONIC_RAW", "seq": seq, "paths": ["a"]}
         elif kind == "trace":
-            # エージェントは 0x80 以上のバイトを u00XX の形で送る: バイトに戻して UTF-8 で読む
-            line = ev["line"].encode("latin-1", errors="replace").decode("utf-8", errors="replace")
-            lost = parse_lost(line)
-            if lost is not None:                             # カーネルのバッファがあふれて捨てた数（事実として残す）
-                body = {"method": "agent", "probe": "trace_lost", "target_ns": None, "detail": lost}
-                self._linux_keep(target, t, body)
+            body = self._linux_trace_body(target, t, ev["line"])
+            if body is None:
                 return
-            r = parse_trace_line(line)
-            if r is None:
-                t.trace_unparsed += 1
-                return
-            probe = t.probes.get(r["event"])
-            if r["ip"] is not None and probe is not None and probe["method"] == "uprobe":
-                method = "uprobe"                            # uprobe の行は番地の括弧つき
-            elif self._ftrace_enabled(t, r["event"]):
-                method = "ftrace"
-            else:
-                t.trace_unrouted += 1                        # 有効にしていないイベント
-                return
-            body = {"method": method, "probe": r["event"], "pid": r["pid"], "comm": r["comm"], "cpu": r["cpu"],
-                    "target_ns": r["t_ns"], "args": r["args"], "text": r["text"], "clock": t.trace_clock}
         else:
             if kind == "exit":                       # ptrace していたプロセスが終わった: その bp はエージェントから消えた
                 for p in t.probes.values():
@@ -776,6 +784,30 @@ class LinuxTools:
                         p["ended"] = {"code": ev.get("code"), "signal": ev.get("signal")}
             body = {"method": "agent", "probe": kind, "target_ns": None, "detail": ev}
         self._linux_keep(target, t, body)
+
+    def _linux_trace_body(self, target: str, t: _Target, raw: str) -> dict | None:
+        """trace_pipe の 1 行を出来事の本体に。捨てる行（形が分からない・有効にしていないイベント）は数えて None。
+        カーネルのバッファのあふれは、その場で出来事として残して None（呼び手は入れ直さない）。"""
+        # エージェントは 0x80 以上のバイトを u00XX の形で送る: バイトに戻して UTF-8 で読む
+        line = raw.encode("latin-1", errors="replace").decode("utf-8", errors="replace")
+        lost = parse_lost(line)
+        if lost is not None:                             # カーネルのバッファがあふれて捨てた数（事実として残す）
+            self._linux_keep(target, t, {"method": "agent", "probe": "trace_lost", "target_ns": None, "detail": lost})
+            return None
+        r = parse_trace_line(line)
+        if r is None:
+            t.trace_unparsed += 1
+            return None
+        probe = t.probes.get(r["event"])
+        if r["ip"] is not None and probe is not None and probe["method"] == "uprobe":
+            method = "uprobe"                            # uprobe の行は番地の括弧つき
+        elif self._ftrace_enabled(t, r["event"]):
+            method = "ftrace"
+        else:
+            t.trace_unrouted += 1                        # 有効にしていないイベント
+            return None
+        return {"method": method, "probe": r["event"], "pid": r["pid"], "comm": r["comm"], "cpu": r["cpu"],
+                "target_ns": r["t_ns"], "args": r["args"], "text": r["text"], "clock": t.trace_clock}
 
     @staticmethod
     def _ftrace_enabled(t: _Target, printed: str) -> bool:
@@ -836,10 +868,15 @@ class LinuxTools:
         """後ろに組がある出来事（final なら全部）を、内挿で換算して記録に入れる。記録していなければ捨てる（メモリには残る）。"""
         with t.lock:
             last = t.clock.pairs[-1][0] if t.clock.pairs else None
-            ready, wait = [], []
-            for e in t.pending:
+            # 組の最後の時刻が前に調べたときと同じなら、待っていた分はまだ待つ（新しく入った分だけを調べる。毎回全部を
+            # 見直すと、組が来るまでの間に出来事が増えるほど 1 つごとの入れ方が遅くなる）
+            start = t.examined if not final and last == t.examined_last else 0
+            fresh = t.pending[start:]
+            del t.pending[start:]                              # 調べ済みの分はそのまま（コピーしない）
+            ready, wait = [], t.pending
+            for e in fresh:
                 (ready if final or (last is not None and e[0]["target_ns"] <= last) else wait).append(e)
-            t.pending = wait
+            t.examined, t.examined_last = len(wait), last
             converted = [(self._linux_converted(t, e), rec) for e, rec in ready]
         for body, rec in converted:
             if rec is not self._recorder or "sync" not in body:
@@ -911,11 +948,6 @@ class _ArmACpu:
 
     def read_words(self, address: int, count: int) -> list[int]:
         return self.target.read_memory_block32(address, count)
-
-
-def _ring_stats() -> dict:
-    return {"reads": 0, "halted_ms_total": 0.0, "halted_ms_max": 0.0, "records": 0, "lost": 0, "torn": 0, "corrupt": 0,
-            "header_errors": 0, "error": None}
 
 
 def _quote(s: str) -> str:

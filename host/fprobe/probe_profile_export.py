@@ -1,7 +1,7 @@
 """Probe の道具: プロファイル・カバレッジの集計と書き出し（U18）。時間の区間に限る集計、関数のグループ、CPU 使用率の
 推移、gmon.out・callgrind・lcov・gcov・dot への書き出し（PC サンプリングとテストポイントの両方）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。ProfileTools（いまのプロファイル `_current_profile`・ベクタの名前
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ProfileTools（いまのプロファイル `_current_profile`・ベクタの名前
 `_vector_names`）、InspectTools（ELF の逆アセンブラ `_disassembler`）、TestpointTools（いまの受け取り `_tp_current`）、
 StackTools（静的な呼び出しグラフ `_call_graph`）を使う。機器に触るのは必ず _lock の中。
 

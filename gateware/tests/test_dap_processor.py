@@ -11,11 +11,11 @@ SOURCES = [*rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "serial/uart_rx.vh
 
 
 def test_dap_processor(tmp_path):
-    run_cocotb(toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_processor_tb", build_dir=tmp_path)
+    run_cocotb(parallel=True, toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_processor_tb", build_dir=tmp_path)
 
 
 def test_swd_injector_and_monitor(tmp_path):
-    run_cocotb(toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.swd_injector_tb", build_dir=tmp_path)
+    run_cocotb(parallel=True, toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.swd_injector_tb", build_dir=tmp_path)
 
 
 def test_swo(tmp_path):
@@ -28,7 +28,7 @@ def test_swo_without_manchester(tmp_path):
 
 
 def test_jtag(tmp_path):
-    run_cocotb(toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_jtag_tb", build_dir=tmp_path)
+    run_cocotb(parallel=True, toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_jtag_tb", build_dir=tmp_path)
 
 
 def test_without_jtag(tmp_path):
@@ -42,4 +42,6 @@ def test_dap_packet(tmp_path):
 
 
 def test_dap_sampler(tmp_path):
-    run_cocotb(toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_sampler_tb", build_dir=tmp_path)
+    # jitter_... は直前のテストが終えた状態（巡回の周期カウンタ）から始める前提（単独だと最初の間隔が違う）ので、直前と同じプロセスで走らせる
+    run_cocotb(parallel=True, with_previous=["jitter_varies_the_period_but_keeps_the_mean"],
+               toplevel="dap_harness", sources=SOURCES, test_module="tests.tb.dap_sampler_tb", build_dir=tmp_path)

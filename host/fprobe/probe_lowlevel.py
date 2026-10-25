@@ -1,7 +1,7 @@
 """Probe の道具: 接続の診断と低レベル操作（U29）。J-Link Commander の ReadDP / WriteAP / JTAG の IR・DR / ピン /
 TestRSpeed、EmuDiag、BMP の swdp_scan に当たる。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・target・_debug と target_voltage を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_debug と target_voltage を使う。
 機器に触るのは必ず _lock の中。
 
 二つの経路:

@@ -38,6 +38,7 @@ class Design:
     placements: tuple[str, ...] = ()                # 配置制約（.cst に足す）
     cdc_max_delay_ns: float | None = None           # クロックまたぎの最大遅延（GowinProject の説明を参照）
     block_designs: tuple[Path, ...] = ()            # Vivado のブロック設計を作る TCL（PS7 等）
+    ps_axi: bool = False                            # PS が AXI で触る PL の回路（中継は無し）。書いた後にレベルシフタを有効にする
 
     def project(self) -> GowinProject | VivadoProject:
         stamp = build_info.stamp(RTL_ROOT.parent) if self.capabilities is not None else None
@@ -66,14 +67,14 @@ _USB = ("usb/usb_types_pkg.vhd", "usb/usb_timing_pkg.vhd", "usb/usb_crc_pkg.vhd"
         "usb/usb_device.vhd")
 
 _CORE = ("common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.vhd", "core/timebase.vhd", "core/caps_rom.vhd",
-         "common/udiv.vhd", "common/udiv_shared.vhd", "debug/generated/dap_info_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
+         "common/udiv.vhd", "common/udiv_shared.vhd", "common/reset_fanout.vhd", "debug/generated/dap_info_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
          "debug/dap_pkg.vhd", "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
          "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
          "la/la_filter.vhd", "la/la_pulse.vhd", "la/la_front.vhd", "la/la_capture.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
          "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_encoder.vhd", "mem/la_mem_writer.vhd",
          "mem/mem_reader.vhd", "la/la_deep_buffer.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
-         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/fprobe_core.vhd")
+         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_collector.vhd", "core/fprobe_core.vhd")
 
 
 def core_sources(caps_package: Path) -> list[Path]:
@@ -172,6 +173,17 @@ DESIGNS: dict[str, Design] = {
                                 "fprobe_obs/examples/primer20k_counter/primer20k_obs_counter_top.vhd")),
         pin_groups=("clk27", "led", "obs_target"),
         clocks=(PRIMER20K.input_clock(), ClockConstraint("obs_tck", "obs_tck", "port", 30_000_000))),
+    # Primer の fprobe が外からデバッグする側（Zynq DUT。docs/superpowers/specs/2026-10-24-zynq-dut-environment-design.md）:
+    # PS（Linux のアプリ）が AXI-Lite でサンプル生成 + FIFO を読み、注目信号を PMOD JB に出す。PS の DAP の PJTAG は素通し
+    "zynq_dut": Design(
+        name="zynq_dut", board=PYNQ_Z2, top="pynq_z2_dut_top",
+        sources=tuple(dict.fromkeys(rtl(*_COMMON, "boards/pynq_z2/pynq_z2_pkg.vhd", "boards/pynq_z2/xilinx_mmcm.vhd",
+                                        "designs/dut_stream_core.vhd", "designs/dut_pins.vhd", "designs/dut_axil_slave.vhd",
+                                        "designs/dut_axil_core.vhd", "boards/pynq_z2/pynq_z2_dut_top.vhd"))),
+        pin_groups=("clk125", "led", "dut_dbg", "dut_rpi", "ps_pjtag"),
+        clocks=(PYNQ_Z2.input_clock(), PYNQ_Z2.sys_clock()),
+        block_designs=(RTL_ROOT / "boards" / "pynq_z2" / "ps7_bd.tcl",),
+        ps_axi=True),
     "bringup": Design(
         name="bringup", board=PRIMER20K, top="primer20k_bringup_top",
         sources=tuple(rtl(*_COMMON, *_SERIAL, *_PRIMER20K, "designs/bringup_core.vhd",

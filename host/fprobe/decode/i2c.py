@@ -142,6 +142,8 @@ def decode_i2c(tr: Transitions, *, scl: Channel, sda: Channel) -> Decoding:
                     partial(at)
                     out.append(Annotation(at, at + 1, "stop", "P"))
                     close_transfer(at + 1)
+                else:                                 # START を見ていない STOP（捕捉が取引の途中から始まる・迷い STOP）
+                    out.append(Annotation(at, at + 1, "stop", "P", error="no_start", fields={"start_seen": False}))
                 ten_bit_memory = None
             else:                                     # START / Sr
                 restart = cur is not None

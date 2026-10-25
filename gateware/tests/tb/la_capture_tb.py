@@ -145,3 +145,13 @@ async def trigger_time_is_la_internal_delay_after_the_trigger_sample(dut):
     p0, t0 = int(dut.probes.value), int(dut.time.value)
     await capture(dut, mask=0xF, value=5)
     assert (int(dut.trigger_time.value) - 5 - (t0 - p0)) % 16 == LA_INTERNAL_DELAY
+
+
+@cocotb.test()
+async def with_no_pretrigger_the_first_sample_can_trigger(dut):
+    """pretrigger = 0 なら、最初のサンプル（0 番）から受け付ける（トリガの位置 = 0）。1 なら 1 番から。"""
+    await setup(dut)
+    for pre in (0, 1, 2):
+        await capture(dut, pretrigger=pre)                                  # 条件なし（常に成立）
+        assert int(dut.trigger_index.value) == pre, pre
+        await ClockCycles(dut.clk, 5)

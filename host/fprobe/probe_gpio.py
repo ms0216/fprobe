@@ -6,7 +6,7 @@
 状態）なので、使い終えたら gpio.release する。
 
 機器固有の手順（SPI Flash の JEDEC の命令等）は本体に入れない: fprobe.plugins.spiflash がこの API の上に載る。
-Probe（fprobe.mcp_server）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
 仕様: docs/superpowers/specs/2026-10-19-u42-spi-flash-design.md
 """
 

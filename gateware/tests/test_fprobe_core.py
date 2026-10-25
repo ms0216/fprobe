@@ -20,12 +20,17 @@ CONFIGURATIONS = {
     "no_sampler_match": dataclasses.replace(TEST_CAPS, sampler_match=False),   # R21 を外した構成（Primer）
     "sync": dataclasses.replace(TEST_CAPS, sync=True, event_ring_bits=6),   # ボードの間の時刻の同期（組をイベントで読む）
 }
+# リセットの扇出の分割（RESET_SPLIT = true）でも同じ試験が通ること（PYNQ と同じ構成の機能: 全部入り・同期つき）
+RESET_SPLIT_CONFIGURATIONS = ("full", "sync", "event_ring")
 
 
 @pytest.mark.parametrize("configuration", CONFIGURATIONS)
-def test_fprobe_core(tmp_path, configuration):
+@pytest.mark.parametrize("split", [False, True], ids=["single_reset", "reset_split"])
+def test_fprobe_core(tmp_path, configuration, split):
+    if split and configuration not in RESET_SPLIT_CONFIGURATIONS:
+        pytest.skip("RESET_SPLIT は代表の構成だけ試験する")
     pkg = tmp_path / "test_caps_pkg.vhd"
     pkg.write_text(caps.render_package("test_caps_pkg", CONFIGURATIONS[configuration]), encoding="utf-8")
-    run_cocotb(toplevel="fprobe_core_harness",
+    run_cocotb(parallel=True, toplevel="fprobe_core_harness",
                sources=[*core_sources(pkg), TEST_RTL / "fprobe_core_harness.vhd"],
-               test_module="tests.tb.fprobe_core_tb", build_dir=tmp_path / "sim")
+               test_module="tests.tb.fprobe_core_tb", generics={"RESET_SPLIT": split}, build_dir=tmp_path / "sim")

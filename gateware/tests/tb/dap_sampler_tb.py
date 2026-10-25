@@ -454,3 +454,45 @@ async def wait_retries_follow_the_host_transfer_configure(dut):
     dut.smp_run.value = 0
     await ClockCycles(dut.clk, 2000)
     assert int(dut.smp_errors.value) == errors                                   # 3 回の WAIT は待って通る
+
+
+async def configure_pattern(dut, table, period=20_000):
+    """table: 8 要素の (番地, 語数) か None（無効）。"""
+    for k, slot in enumerate(table):
+        a, n = slot or (0, 1)
+        dut.smp_index.value = k
+        dut.smp_addr.value = a
+        dut.smp_enable.value = int(slot is not None)
+        dut.smp_words.value = n - 1
+        dut.smp_write.value = 1
+        await RisingEdge(dut.clk)
+    dut.smp_write.value = 0
+    dut.smp_ap.value = 0
+    dut.smp_period.value = period
+
+
+@cocotb.test()
+async def random_tables_are_read_in_slot_order_with_every_word(dut):
+    """ランダムな表（有効なか所の並び・語数 1〜16・番地）を、表を書き換えながら何度か巡回させ、出てきた（番地, 値）が
+    「有効なか所を番号順に、各か所の語を番地順に」の期待に一致する（途中の巡回の分も欠けず、重複しない）。"""
+    dap, model = await connected(dut, seed=21)
+    rng = random.Random(5)
+    for k in range(8 * 256):                                    # 各か所は別の 1 KB に置く
+        model.memory[0x20000000 + 4 * k] = rng.getrandbits(32)
+    for trial in range(6):
+        table = [None] * 8
+        for k in rng.sample(range(8), rng.choice([1, 1, 2, 5, 8])):
+            words = rng.choice([1, 1, 2, 7, 16])
+            table[k] = (0x20000000 + 0x400 * k + 4 * rng.randrange(0, 256 - words + 1), words)
+        expected = [(a + 4 * i, model.memory[a + 4 * i])
+                    for slot in table if slot for a, n in [slot] for i in range(n)]
+        got = []
+        task = collect(dut, got)
+        await configure_pattern(dut, table, period=rng.choice([1, 300, 5000]))
+        dut.smp_run.value = 1
+        await rounds(dut, int(dut.smp_rounds.value) + 4)
+        dut.smp_run.value = 0
+        await ClockCycles(dut.clk, 3000)
+        task.cancel()
+        assert [(a, d) for a, d, _ in got[:3 * len(expected)]] == expected * 3, (trial, table)
+        assert all(k == OK for _, _, k in got) and int(dut.smp_errors.value) == 0

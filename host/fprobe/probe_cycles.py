@@ -1,7 +1,7 @@
 """Probe の道具: サイクルの計測（U12）。CYCCNT による 2 つのブレークポイントの間のサイクル、DWT のイベントカウンタ
 （CPI・EXC・SLEEP・LSU・FOLD）と命令数、DAP サンプラで CYCCNT を時刻付きで読む CPU クロックの実測。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・session・dbg・_run_until_halt・_place_of と、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・dbg・_run_until_halt・_place_of と、
 WindowTools（DAP サンプラの持ち主・出来事の窓・write_registers）、SwoTools（イベントカウンタの溢れの数）を使う。
 機器に触るのは必ず _lock の中（止まるのを待つ間は放す）。
 

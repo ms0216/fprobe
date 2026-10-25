@@ -1,6 +1,6 @@
 """Probe の道具: Primer の構成（ビットストリーム）を知る・切り替える（B22）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・close・_debug と、接続の設定（_serial・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・close・_debug と、接続の設定（_serial・
 _port・_eth）を使う。構成の対応と書き込みは fprobe.bitstreams。
 
 - probe_design_get: 今のデザイン・線と機能の有無・切り替えられる構成（ビットストリームの場所と有無）。

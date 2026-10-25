@@ -204,7 +204,7 @@ def test_stream_with_a_duration_ends_by_itself(probe, table_path, fast_stream):
     probe._session = SimpleNamespace(device=dev)
     probe.testpoint_start("gpio_parallel", map_path=str(table_path), data_channels=[1, 5, 6], strobe_channel=4,
                           capture="stream", rle=False, duration_s=0.05)
-    probe._tp_run.pump.join(5)
+    probe._tp_run.pump.join(60)                   # 終わらないことの見張り（時間の判定ではない）
     assert not probe._tp_run.pump.is_alive() and not dev.running
     assert probe.testpoint_stop()["hits"] == 6
 

@@ -40,7 +40,7 @@ from pyocd.core.target import Target
 from .flash import FlashMemory, Image, Segment
 from .thumb_step import NeedsRewrite, OutOfLine, invalidate_icache
 
-__all__ = ["BKPT_CODE", "FlashBreakpoints", "Journal"]
+__all__ = ["BKPT_CODE", "FlashBreakpoints", "Journal", "JournalError"]
 
 LOG = logging.getLogger(__name__)
 
@@ -67,6 +67,10 @@ class _Written:
         return cls(d["address"], bytes.fromhex(d["original"]), d["window"], bytes.fromhex(d["window_original"]))
 
 
+class JournalError(Exception):
+    """記録（Journal）が読めない・形が違う。"""
+
+
 class Journal:
     """書き換えの記録（JSON。書き換えの前に書く）。key: どのターゲットのものか（ターゲットの名前等）。"""
 
@@ -86,14 +90,27 @@ class Journal:
         os.replace(temporary, self.path)                       # 途中で落ちても前の記録か新しい記録のどちらか
 
     def load(self) -> list[_Written] | None:
-        """このターゲットの記録。無い・別のターゲットのものなら None。"""
+        """このターゲットの記録。無い・別のターゲットのものなら None。壊れていれば JournalError。"""
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
+        except (ValueError, OSError) as e:                     # JSON が不正・文字コードが不正・読めない
+            raise JournalError(f"記録 {self.path} を読めない: {e}") from e
+        if not isinstance(data, dict):
+            raise JournalError(f"記録 {self.path} の形が違う（JSON のオブジェクトでない）")
         if data.get("target") != self.key:
             return None
-        return [_Written.from_dict(e) for e in data.get("entries", [])]
+        try:
+            return [_Written.from_dict(e) for e in data.get("entries", [])]
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise JournalError(f"記録 {self.path} の中身が違う: {e!r}") from e
+
+    def set_aside(self) -> Path:
+        """壊れた記録を .bad に改名して退避する（捨てずに残す。次の保存は新しい記録に書く）。退避先を返す。"""
+        bad = self.path.with_suffix(self.path.suffix + ".bad")
+        os.replace(self.path, bad)
+        return bad
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -479,8 +496,13 @@ class FlashBreakpoints:
 
     def recover(self) -> dict:
         """前のプロセスが残した BKPT（記録）を戻す。周りの中身が記録と違う（別のファームウェアを書いた）番地は触らない。
-        {"restored": [番地], "skipped": [番地]}。"""
-        entries = self.journal.load() if self.journal is not None else None
+        {"restored": [番地], "skipped": [番地]}。記録が壊れていて読めなければ、記録を .bad に退避して
+        {"unreadable": {"journal": 退避先, "reason": 理由}} を足す（Flash に残った BKPT は戻せていない。利用者が確かめる）。"""
+        try:
+            entries = self.journal.load() if self.journal is not None else None
+        except JournalError as e:
+            bad = self.journal.set_aside()
+            return {"restored": [], "skipped": [], "unreadable": {"journal": str(bad), "reason": str(e)}}
         if entries is None:
             return {"restored": [], "skipped": []}
         bkpts = {w.address + i: b for w in entries for i, b in enumerate(BKPT_CODE)}

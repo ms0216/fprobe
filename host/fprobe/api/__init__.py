@@ -1,6 +1,17 @@
 """fprobe の API（デーモンと利用者の約束）。仕様の正は host/api/fprobe_api.json。"""
 
 API_VERSION = 2
+DEFAULT_PORT = 7820                                          # デーモンの待ち受けポートの既定
+
+
+def device_of(serial: str | None, port: str | None, eth: str | None) -> dict:
+    """握る機器の表し方（利用者が、頼んだ機器と同じかを確かめるため）: link = usb / serial / eth と番地。"""
+    if eth:
+        return {"link": "eth", "address": eth}
+    if port:
+        return {"link": "serial", "address": port}
+    return {"link": "usb", "address": serial}
+
 
 # 誤りのコード（JSON-RPC の error.code。-32000〜-32099 はアプリケーション定義）
 E_PARSE = -32700

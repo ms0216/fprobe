@@ -22,6 +22,8 @@ entity obs_tck_sampler is
 end entity;
 
 architecture rtl of obs_tck_sampler is
+    -- 初期値（TCK = 0・TMS = 1）は構成の直後に偽の辺を出さないため。初期値が効かなくても、偽の辺は 1 回出るだけで、
+    -- 後ろの obs_soft_tap は TMS = 1 を 5 回受ければ Test-Logic-Reset に戻る。
     signal s_tck : std_logic_vector(2 downto 0) := (others => '0');
     signal s_tms : std_logic_vector(1 downto 0) := (others => '1');
     signal s_tdi : std_logic_vector(1 downto 0) := (others => '0');

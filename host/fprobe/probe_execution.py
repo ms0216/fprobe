@@ -1,6 +1,6 @@
 """Probe の道具: 実行の制御（ソース行単位のステップ・ベクタキャッチ・ターゲットの関数の呼び出し）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_stop_dict・_service・_break_action・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_stop_dict・_service・_break_action・
 _with_fault を使う。行単位のステップと関数の呼び出しは、run_until_halt と同じく待つ間は機器のロックを放す
 （背景の RTT 等を止めない）。仕様: docs/reports/2026-10-18-gap-analysis.md の U01・U02・U53。
 

@@ -79,6 +79,15 @@ def test_compare_reports_differing_runs():
     assert summary["more_differences"] == 1
 
 
+def test_compare_edges_runs_at_both_ends_and_short_read():
+    expected = Image([Segment(0x1000, b"abcd")])
+    result = compare(expected, lambda address, length: b"Xbc" + b"Y")
+    assert [(d.address, d.expected, d.actual) for d in result.differences] == [(0x1000, b"a", b"X"), (0x1003, b"d", b"Y")]
+    assert compare(expected, lambda address, length: b"abcd").match
+    with pytest.raises(ValueError, match="短い"):
+        compare(expected, lambda address, length: b"abc")
+
+
 def test_rate_is_bytes_per_second():
     assert Rate(1000, 0.5).as_dict() == {"bytes": 1000, "seconds": 0.5, "bytes_per_s": 2000.0}
     assert Rate(10, 0.0).as_dict()["bytes_per_s"] is None

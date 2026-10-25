@@ -1,0 +1,14 @@
+# /etc/systemd/system/fprobe-boot.service
+# 起動のとき、U-Boot が PL に書いた fprobe の回路があれば、印を置いて中継を起動する（host/pynq/fprobe-boot）
+[Unit]
+Description=fprobe: mark the PL design written by U-Boot and start the relay
+After=local-fs.target
+Before=fprobe-relay.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fprobe-boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

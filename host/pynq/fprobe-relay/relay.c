@@ -73,6 +73,11 @@ size_t relay_to_pc(const struct pl_ops *pl, uint8_t *out, size_t cap, struct rel
     return (size_t)n + 1;
 }
 
+int64_t relay_ns(int64_t sec, int64_t nsec)
+{
+    return sec * 1000000000 + nsec;
+}
+
 void relay_peer_update(struct relay_peer *peer, uint32_t addr, uint16_t port)
 {
     peer->addr = addr;

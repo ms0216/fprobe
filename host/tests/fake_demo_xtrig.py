@@ -1,6 +1,6 @@
 """機器なしで画面を試すデモ（fake_daemon.py --demo）の一部: クロストリガーの窓（源 × 動作の経路）が読む源・行き先の偽物。
 
-DemoProbe（fake_demo.py）に混ぜる mixin。値の形は本物の Probe（mcp_server.py の fpga_obs_trigger_* / sampler_trigger_*、
+DemoProbe（fake_demo.py）に混ぜる mixin。値の形は本物の Probe（probe_match_trigger.py の fpga_obs_trigger_* / sampler_trigger_*、
 probe_xtrig_out.py の xtrig_output_*）と同じにする（画面はデモと本物を区別しない）。経路（xtrig.route・xtrig.status の
 route）は fake_demo_search.SearchDemo の self._xtrig["route"] を共有し、本物と同じく FPGA の条件・サンプラの値の一致の
 設定はその源のビットだけを変える。

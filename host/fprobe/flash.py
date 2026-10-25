@@ -19,6 +19,7 @@ pyOCD の Flash の操作はコアで書き込みアルゴリズムを走らせ�
 
 import contextlib
 import functools
+import re
 import time
 import zlib
 from dataclasses import dataclass, field
@@ -251,23 +252,31 @@ class Comparison:
                 "more_differences": max(0, len(self.differences) - limit), "read": self.rate.as_dict()}
 
 
+_DIFF_RUN = re.compile(rb"[^\x00]+")
+
+
+def _differing_runs(expected: bytes, actual: bytes) -> list[tuple[int, int]]:
+    """expected と actual で違うバイトの連続 [(始め, 終わり)]。全体を 1 つの整数の XOR にして 0 でない連続を C の正規表現で
+    拾う（バイトごとの Python のループより 1 MiB で数十倍速い）。actual が短ければ読みの欠け（ValueError）。"""
+    n = len(expected)
+    if len(actual) < n:
+        raise ValueError(f"読んだ中身が短い（{len(actual)} / {n} バイト）")
+    actual = actual[:n]
+    if expected == actual:
+        return []
+    mixed = int.from_bytes(expected, "little") ^ int.from_bytes(actual, "little")
+    return [m.span() for m in _DIFF_RUN.finditer(mixed.to_bytes(n, "little"))]
+
+
 def compare(image: Image, read: Callable[[int, int], bytes], progress: "Progress | None" = None) -> Comparison:
     """image とターゲットのメモリ（read(番地, 長さ)）を比べる。違うバイトの連続は 1 つの Difference にまとめる。"""
     differences: list[Difference] = []
     differing, done, started = 0, 0, time.perf_counter()
     for seg in image.segments:
         actual = bytes(read(seg.address, len(seg.data)))
-        i = 0
-        while i < len(seg.data):
-            if seg.data[i] == actual[i]:
-                i += 1
-                continue
-            j = i
-            while j < len(seg.data) and seg.data[j] != actual[j]:
-                j += 1
+        for i, j in _differing_runs(seg.data, actual):
             differences.append(Difference(seg.address + i, seg.data[i:j], actual[i:j]))
             differing += j - i
-            i = j
         done += len(seg.data)
         if progress is not None:
             progress.report("verify", done / image.size if image.size else 1.0)
@@ -356,24 +365,34 @@ class FlashMemory:
         outermost = self._guard_depth == 0
         guards = list(self.guards) if outermost else []
         primask = None
+        entered: list = []
         if outermost:
             # 割り込みを止める（PRIMASK = 1）: 走っていたプログラムの割り込み（SysTick 等）がアルゴリズムの間に入ると、
             # プログラムのハンドラがアルゴリズムの置かれた RAM を書き換えて書き込みが失敗する（2026-10-18 に実機で）
             self.target.halt()
             primask = self.target.read_core_registers_raw(["primask"])[0]
             self.target.write_core_registers_raw(["primask"], [1])
-        entered = [(g, g.enter(self.target)) for g in guards]
         self._guard_depth += 1
         try:
+            for g in guards:                               # enter が途中で失敗しても、入れた守りと PRIMASK は下で戻す
+                entered.append((g, g.enter(self.target)))
             yield
         finally:
             self._guard_depth -= 1
-            if outermost:
-                self.target.halt()
-            for guard, saved in reversed(entered):
-                guard.exit(self.target, saved)
-            if primask is not None:
-                self.target.write_core_registers_raw(["primask"], [primask])
+            try:
+                if outermost:
+                    self.target.halt()
+                errors = []
+                for guard, saved in reversed(entered):
+                    try:
+                        guard.exit(self.target, saved)
+                    except Exception as e:                 # 1 つの守りの失敗で残りの守りと PRIMASK の復元を飛ばさない
+                        errors.append(e)
+            finally:
+                if primask is not None:
+                    self.target.write_core_registers_raw(["primask"], [primask])
+            if errors:
+                raise errors[0]
 
     # --- 構成 ---
 
@@ -446,6 +465,8 @@ class FlashMemory:
     # --- 読む ---
 
     def read(self, address: int, length: int, progress: Progress | None = None) -> tuple[bytes, Rate]:
+        if length < 0:
+            raise ValueError(f"読む長さが負（{length}）")
         out = bytearray()
         started = time.perf_counter()
         if progress is not None:
@@ -643,11 +664,16 @@ class FlashMemory:
         spans = self._algorithm_ram({self.region_at(a) for a in addresses})
         running = self.target.get_state().name != "HALTED"
         self.target.halt()
-        names = self._context_names()
-        registers = self.target.read_core_registers_raw(names)
-        saved_ram = [(a, bytes(self.target.read_memory_block8(a, b - a))) for a, b in spans]
-        guard = self._clock_guarded()
-        guard.__enter__()
+        try:
+            names = self._context_names()
+            registers = self.target.read_core_registers_raw(names)
+            saved_ram = [(a, bytes(self.target.read_memory_block8(a, b - a))) for a, b in spans]
+            guard = self._clock_guarded()
+            guard.__enter__()
+        except BaseException:
+            if running:
+                self.target.resume()                   # 保存・守りの開始が失敗したら、走っていたものを止めたまま放置しない
+            raise
         try:
             yield
         finally:

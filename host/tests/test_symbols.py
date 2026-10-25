@@ -77,7 +77,7 @@ def test_a_second_file_with_the_same_name_does_not_mix_its_lines(syms, monkeypat
     # 同じ名前（basename）のファイルが 2 つあると、場所は先のものを使う。行も先のファイルのものだけにする
     first, other = syms.sources()["sram_demo.c"], Path("C:/elsewhere/sram_demo.c")
     rows = [(0x100, "sram_demo.c", 10, first), (0x200, "sram_demo.c", 99, other)]
-    monkeypatch.setattr(syms, "_lines", rows)
+    syms._set_lines(rows, {"sram_demo.c": [first, other]})            # 行表を差し替える（索引も作り直される）
     assert syms.lines_of("sram_demo.c") == [10]
     with pytest.raises(KeyError):
         syms.resolve("sram_demo.c:99")

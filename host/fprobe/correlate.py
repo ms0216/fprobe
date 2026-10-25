@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .fpga_signals import FpgaSignals, Signal
+from .obs_value import number
 
 try:                                                      # あれば多い瞬間（ピンのクロック等）の照合を速く（fast の依存）
     import numpy as _np
@@ -47,8 +48,9 @@ class Condition:
 
 def parse_condition(text: str, need_edge: bool = True) -> Condition:
     """「restart changed and state=BUSY」→ 項の並び。瞬間の項（changed / rose / fell）が 1 つも無ければ誤り。
-    空白・= を含む名前は "…" で囲む（"Error count" changed）。ponytail: 名前の中の " and " は区切りとみなす。"""
-    parts = [p.strip() for p in re.split(r"\s+(?:and|かつ)\s+|\s*&&\s*", text.strip(), flags=re.I) if p.strip()]
+    空白・= を含む名前は "…" で囲む（"Error count" changed）。引用符の中の " and " は区切りにしない。"""
+    outside = r'(?=(?:[^"]*"[^"]*")*[^"]*$)'                 # 後ろの引用符が偶数個 = いまは引用符の外
+    parts = [p.strip() for p in re.split(rf"(?:\s+(?:and|かつ)\s+|\s*&&\s*){outside}", text.strip(), flags=re.I) if p.strip()]
     terms = []
     for p in parts:
         m = re.fullmatch(r'(?:"([^"]+)"|(\S+))\s+(changed|rose|fell|が変化)', p)
@@ -110,14 +112,23 @@ class _Variables:
         self.gap_s = gap_s                    # 使う側が明示したときだけ、これより長い読みの空白を欠けにする
         self.seeds = seeds or {}              # 変数の正体 → 範囲の前の最後の (時刻, 値)（少しずつ調べるとき）
         meta = rec.meta
-        self.mcu = {name: int(a, 16) for a, name in (meta.get("sample.names") or {}).items()}
+        self.dups: set[tuple[str, str]] = set()      # 同じ名前が別の番地・チャンネルを指す (種類, 名前)。使うと ConditionError
+        self.mcu: dict[str, int] = {}
+        for a, name in (meta.get("sample.names") or {}).items():
+            if name in self.mcu and self.mcu[name] != int(a, 16):
+                self.dups.add(("mcu", name))
+            self.mcu[name] = int(a, 16)
         self.fpga: dict[str, tuple[int, Signal]] = {}
         signals = FpgaSignals.from_dict(meta.get("fpga.signals"))
         for g, sigs in signals.groups.items():
             for s in sigs:
                 self.fpga[s.name] = (g, s)
-        self.pins = {str(n): ch for names in (meta.get("pins"), meta.get("channel_names"))
-                     for ch, n in enumerate(names or [])}
+        self.pins: dict[str, int] = {}
+        for names in (meta.get("pins"), meta.get("channel_names")):
+            for ch, n in enumerate(names or []):
+                if str(n) in self.pins and self.pins[str(n)] != ch:
+                    self.dups.add(("pin", str(n)))
+                self.pins[str(n)] = ch
         self._cache: dict[tuple[str, Any], _Series] = {}
         self._groups: dict[int, list[tuple[int, int]]] = {}
         self.hidden = 0                       # 範囲の中の標本型の見えない変化の数
@@ -127,6 +138,9 @@ class _Variables:
         """名前 → (種類, 鍵, 表示の名前)。"""
         kind, _, bare = name.partition(".") if name.split(".", 1)[0] in KINDS else ("", "", name)
         found = []
+        for k in ("mcu", "pin"):
+            if kind in ("", k) and (k, bare) in self.dups:
+                raise ConditionError(f"{k}.{bare} は複数の{'番地' if k == 'mcu' else 'チャンネル'}に付いている（記録の名前の重複）")
         if kind in ("", "mcu"):
             if bare in self.mcu:
                 found.append(("mcu", self.mcu[bare]))
@@ -148,29 +162,45 @@ class _Variables:
     def ident(self, name: str) -> tuple:
         """変数の正体（種類と番地・信号の名前・ch。同じ変数を別の書き方で指しても同じ）。"""
         kind, key, _ = self.resolve(name)
+        return self._ident_of(kind, key)
+
+    @staticmethod
+    def _ident_of(kind: str, key: Any) -> tuple:
         return kind, key[1].name if kind == "fpga" else key
 
     def series(self, name: str) -> _Series:
         kind, key, _ = self.resolve(name)
-        cached = self._cache.get((kind, key if kind != "fpga" else key[1].name))
+        ident = self._ident_of(kind, key)
+        cached = self._cache.get(ident)
         if cached is not None:
             return cached
         s = {"mcu": self._mcu, "fpga": self._fpga, "pin": self._pin}[kind](key)
-        seed = self.seeds.get((kind, key[1].name if kind == "fpga" else key))
-        if seed is not None and (not s.times or s.times[0] > seed[0]) and (not s.values or s.values[0] != seed[1]):
-            s.times.insert(0, seed[0])                             # 前の範囲の最後の値: 範囲の最初の変化を落とさない
-            s.values.insert(0, seed[1])
-        self._cache[(kind, key if kind != "fpga" else key[1].name)] = s
+        seed = self.seeds.get(ident)
+        if seed is not None and (not s.times or s.times[0] > seed[0]):
+            if s.values and s.values[0] == seed[1]:
+                s.times[0] = seed[0]                               # 値が同じ: 変化ではない。持ち越しの時刻から続く 1 つの値にする
+            else:
+                s.times.insert(0, seed[0])                         # 前の範囲の最後の値: 範囲の最初の変化を落とさない
+                s.values.insert(0, seed[1])
+        self._cache[ident] = s
         return s
 
     def _mcu(self, address: int) -> _Series:
         times, values, raw, failed = [], [], [], []
-        for e in self.rec.iter_events(self.t0, self.t1, ["sample"]):
-            if e.a != address:
-                continue
+        runs: list[list[int]] = []                   # 続けて読めなかった読みのまとまり [前の読めた時刻, 最初の失敗, 最後の失敗, 件数]
+        run_open = False
+        for e in self.rec.iter_events(self.t0, self.t1, ["sample"], a=address):
             if isinstance(e.body, dict) and e.body.get("ack", 1) != 1:
                 failed.append(e.t)
+                if run_open:
+                    runs[-1][2:] = [e.t, runs[-1][3] + 1]
+                else:
+                    runs.append([raw[-1] if raw else e.t, e.t, e.t, 1])
+                    run_open = True
                 continue
+            if run_open:
+                runs[-1].append(e.t)                 # 次の読めた時刻（欠けの終わり）
+                run_open = False
             raw.append(e.t)
             if not values or values[-1] != e.b:
                 times.append(e.t)
@@ -186,8 +216,8 @@ class _Variables:
             s = _Series(times, values)
             for g in gaps:                           # 前後の値: 欠けの間に動いた量（回数は分からない）
                 g["before"], g["after"] = s.at(g["t0"]), s.at(g["t1"])
-        if failed:
-            gaps.append({"reason": "read_failed", "t0": failed[0], "t1": failed[-1], "count": len(failed)})
+        for before, first, last, count, *after in runs:     # 読めなかった語ごとのまとまり: 前の読めた時刻から次の読めた時刻まで
+            gaps.append({"reason": "read_failed", "t0": before, "t1": after[0] if after else last, "count": count})
         longest = max(zip(raw, raw[1:]), key=lambda ab: ab[1] - ab[0]) if intervals else None
         reads = {"count": len(raw), "failed": len(failed), "intervals": intervals,
                  "longest": list(longest) if longest else None}
@@ -264,10 +294,10 @@ class _Variables:
 def _target(series: _Series, text: str, name: str) -> int:
     if series.enum and text in series.enum:
         return series.enum[text]
-    try:
-        return int(text, 0)
-    except ValueError:
-        raise ConditionError(f"{name} の値 {text!r} が数でも列挙の名前でもない") from None
+    n = number(text)
+    if n is None:
+        raise ConditionError(f"{name} の値 {text!r} が数でも列挙の名前でもない")
+    return n
 
 
 def _instants(cond: Condition, vars_: _Variables) -> list[int]:
@@ -305,6 +335,9 @@ def _holding(instants: list[int], states: list[tuple["_Series", int]]) -> list[i
         keep = _np.ones(len(arr), dtype=bool)
         for series, value in states:
             st, vals = series.arrays()
+            if not len(st):                              # 値を 1 件も持たない変数: どの時刻も一致しない（numpy 無しと同じ）
+                keep[:] = False
+                continue
             idx = _np.searchsorted(st, arr, side="right") - 1
             valid = idx >= 0
             keep &= valid & (vals[_np.where(valid, idx, 0)] == value)
@@ -573,6 +606,8 @@ def _candidates(vars_: "_Variables", effect: Condition) -> list[str]:
     named: list[tuple[str, str, _Series]] = []                     # (条件での名前, 種類, 値の並び)
     for kind, names in (("mcu", vars_.mcu), ("fpga", vars_.fpga), ("pin", vars_.pins)):
         for name in names:
+            if (kind, name) in vars_.dups:                         # 名前が曖昧（記録の側の重複）: 候補にしない
+                continue
             label = name if _unique(vars_, name) else f"{kind}.{name}"
             ident = vars_.ident(label)
             if ident in excluded:                                  # 結果の変数・同じ変数の別の名前（ピンの ch<N> 等）
@@ -670,7 +705,8 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
         raise ConditionError(f"区間の始め {start!r} が範囲の中で一度も成り立たない")
     ends = starts[1:] + [hi]
     hits = [_instants(c, vars_) for c in conds]
-    lag = round(effect_lag_s * rec.meta["timebase_hz"])      # 結果を lag だけ前の時刻で区間に割り当てる
+    hz = rec.meta["timebase_hz"]
+    lag = round(effect_lag_s * hz)                           # 結果を lag だけ前の時刻で区間に割り当てる
     effects = [t - lag for t in _instants(effect_cond, vars_)] if effect_cond else []
     series = vars_.series(by) if by else None
     label = {v: k for k, v in ((series.enum or {}) if series else {}).items()}
@@ -696,9 +732,9 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
         key = None if value is None else label.get(value, str(value))
         n = [inside(h, a, b) for h in hits]
         hit = inside(effects, a, b) > 0 if effect_cond else None
-        lengths.append((b - a) / rec.meta["timebase_hz"])
+        lengths.append((b - a) / hz)
         if hit:
-            offsets.append((effects[bisect_left(effects, a)] - a) / rec.meta["timebase_hz"])
+            offsets.append((effects[bisect_left(effects, a)] - a) / hz)
         listed += 1
         if len(out_rows) < rows:
             out_rows.append({"t": a, "end": b, "by": key, "counts": n, "effect": hit})
@@ -716,7 +752,7 @@ def transactions(rec: Any, start: str, by: str | None = None, counts: list[str] 
                            "effect_rate": g["effects"] / g["count"] if effect_cond else None,
                            "counts": {c: x / g["count"] for c, x in zip(counts, g["sums"])}})
     return {"start": start_cond.text, "by": by, "effect": effect_cond.text if effect_cond else None,
-            "range": [lo, hi], "timebase_hz": rec.meta["timebase_hz"], "transactions": len(starts), "excluded": excluded,
+            "range": [lo, hi], "timebase_hz": hz, "transactions": len(starts), "excluded": excluded,
             "excluded_by": excluded_by, "length_s": _quantiles(lengths),
             "effect_offset_s": _quantiles(offsets) if effect_cond else None, "effect_lag_s": effect_lag_s,
             "warnings": [f"データの欠けにかかる {excluded} 区間を除いた（"

@@ -27,6 +27,9 @@ class BreakCpu(FakeCpu):
     def step(self):
         pass
 
+    def read32(self, address):                      # DFSR: 1 命令のステップは HALTED だけ立つ
+        return 1
+
     def read_core_register_raw(self, name):
         return self.regs.get(name, 0x20007000 if name in ("sp", "msp") else 0)
 

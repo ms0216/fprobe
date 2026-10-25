@@ -1,8 +1,8 @@
-"""la_collect のチャンネルごとの要約（fprobe.mcp_server._channel_summary）: 切ったこと・省いたことを結果に出す。"""
+"""la_collect のチャンネルごとの要約（fprobe.probe_la._channel_summary）: 切ったこと・省いたことを結果に出す。"""
 
 from types import SimpleNamespace
 
-from fprobe.mcp_server import _channel_summary
+from fprobe.probe_la import _channel_summary
 
 
 def capture(*channels: str, trigger: int = 0):

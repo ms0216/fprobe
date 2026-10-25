@@ -1,7 +1,7 @@
 """Probe の道具: マルチコア（U31）。コアごとに DP を持つ複数ドロップの SWD の部品（RP2040）で、コアを選んで接続し、
 両方のコアの状態を出し、接続していないコアを止める・再開する。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_debug・_link・session・target_connect と _place_of を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・_link・session・target_connect と _place_of を使う。
 
 - コアの選択: target_connect の core（pyOCD のターゲット名を fprobe.multidrop の表で選ぶ）。target_core_select は
   同じ速度で connect_mode="attach"（止めずに）別のコアにつなぎ直す。ブレークポイント・レジスタ等の道具はすべて
@@ -83,7 +83,7 @@ class MulticoreTools:
         found = self._multidrop()
         if found is None or found[0].rescue is None:
             raise ValueError("rescue のリセットは救済の DP を持つ部品（RP2040）に接続中だけ")
-        connect = dict(getattr(self, "_last_connect", None) or {"target": self._link["target"]})
+        connect = dict(self._last_connect or {"target": self._link["target"]})
         probe = self._core_probe()
         self._monitor_detach()                              # チップが生きている間に: Flash に書いた BKPT を戻す等
         self._flash_bp_detach()

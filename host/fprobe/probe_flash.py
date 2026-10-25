@@ -2,7 +2,7 @@
 書き込みアルゴリズム（.FLM）、CMSIS-Pack の導入と選択。J-Link Commander の loadfile / erase / verifybin / savebin、
 OpenOCD の flash write_image / erase_sector / verify_image / read_bank、pyOCD の load / erase / pack の相当。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。部品は fprobe.flash（Flash の操作）と fprobe.packs（Pack）。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。部品は fprobe.flash（Flash の操作）と fprobe.packs（Pack）。
 
 - 進捗: 書き込み・消去・検証・読み出しの進み具合を通知 "flash.progress"（operation・phase・fraction・elapsed_s）で
   送る（デーモンが attach_publisher で送り先をつなぐ。MCP の道具には結果だけが返る）。
@@ -64,7 +64,7 @@ class FlashTools:
             RegisterGuard.from_dict(guard)                     # 形を確かめる（誤りは ValueError）
         with self._lock:
             self._flash_guard = guard
-            fbp = getattr(self, "_flash_bp", None)
+            fbp = self._flash_bp
             if fbp is not None:
                 fbp._memory.guards = self._flash_guards()
             return {"guard": guard}
@@ -158,6 +158,9 @@ class FlashTools:
                 main = memory.main_flash()
                 address = main.address if address is None else address
                 length = main.end - address if length is None else length
+            if length <= 0:
+                raise ValueError(f"読む長さが 0 以下（address 0x{address:08X}、length {length}）。"
+                                 "address は Flash の終わりより手前に")
             data, rate = memory.read(address, length, self._flash_progress("read"))
         fmt = save_image(path, address, data)
         return {"path": str(Path(path)), "format": fmt, "address": address, "bytes": len(data), "crc32": crc32(data),
@@ -252,8 +255,7 @@ class FlashTools:
                 target.resume()
         return {"address": region.start, "write": write.as_dict(), "read": read.as_dict(), "verified": back == pattern}
 
-    @staticmethod
-    def _bench_program(memory: FlashMemory, address: int, length: int | None) -> dict:
+    def _bench_program(self, memory: FlashMemory, address: int, length: int | None) -> dict:
         if length is None:
             length = memory.sector_at(address).size
         blocks = memory.sectors(address, length)
@@ -264,10 +266,10 @@ class FlashTools:
         pattern = Image([Segment(address, random.Random(address).randbytes(length))])
         with memory.preserving([address]):
             try:
-                report = memory.program(pattern, erase="sector", smart=False)
+                report = self._flash_bp_program(memory, pattern, erase="sector", smart=False)
                 verified = memory.verify(pattern).match
             finally:
-                memory.program(Image([Segment(address, original)]), erase="sector", smart=True)
+                self._flash_bp_program(memory, Image([Segment(address, original)]), erase="sector", smart=True)
             restored = memory.verify(Image([Segment(address, original)])).match
         return {"address": address, "length": length,
                 "erase": Rate(report.erased_bytes, report.erase_s).as_dict(),

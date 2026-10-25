@@ -235,3 +235,31 @@ async def trigger_is_ignored_until_the_pretrigger_samples_are_recorded(dut):
     dut.pretrigger.value = 1000
     beat, slot, written = await capture(dut, rle=False, rate=0, post=10, value=0, mask=0)
     assert beat * 8 + slot >= 1000                                      # トリガは 1000 サンプル目以降
+
+
+@cocotb.test()
+async def post_trigger_of_zero_and_one_beat_stop_at_the_right_beat(dut):
+    """post_beats = 0 はトリガの拍で止まり、1 はその次の拍で止まる（written = トリガの拍の番号 + 1 + post）。"""
+    await setup(dut)
+    for post in (0, 1, 2):
+        dut.pretrigger.value = 24                                           # 3 拍目でトリガ（条件は常に成立）
+        beat, slot, written = await capture(dut, rle=False, rate=0, post=post, value=0, mask=0)
+        assert (beat, slot) == (3, 0) and written == beat + 1 + post, (post, beat, slot, written)
+        data = await read_bytes(dut, 0, written)
+        samples = decode_beats(data, rle=False)
+        assert trigger_sample(data, False, beat, slot) == 24 and len(samples) == 8 * written
+        await ClockCycles(dut.clk, 50)
+
+
+@cocotb.test()
+async def pretrigger_samples_are_recorded_exactly(dut):
+    """pretrigger = P のとき、条件が常に成立していても最初の P サンプルは受け付けず、P 番目（0 起点）のサンプルがトリガになる
+    （トリガ前に P サンプル残る）。P が 8 の倍数の前後（拍の境目）でも同じ。"""
+    await setup(dut)
+    for pre in (0, 1, 7, 8, 9, 63, 64):
+        dut.pretrigger.value = pre
+        beat, slot, written = await capture(dut, rle=False, rate=0, post=4, value=0, mask=0)
+        data = await read_bytes(dut, 0, written)
+        t = trigger_sample(data, False, beat, slot)
+        assert t == pre, (pre, t)
+        await ClockCycles(dut.clk, 50)

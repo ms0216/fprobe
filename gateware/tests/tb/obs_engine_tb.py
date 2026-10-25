@@ -371,3 +371,128 @@ async def an_id_wait_limit_of_zero_has_no_bound(dut):
     await eng.push(START)
     await eng.wait_for(lambda: dut.id_ok.value == 1 or dut.stuck.value == 1)
     assert dut.id_ok.value == 1 and dut.stuck.value == 0 and dut.id_timeout.value == 0
+
+
+async def _reopen(dut, eng, **ports):
+    """止めて（線を手放すまで待って）、ポートを変えて、また始める。"""
+    dut.enable.value = 0
+    await eng.wait_for(lambda: dut.oe.value == 0 and dut.running.value == 0)
+    await ClockCycles(dut.clk, 20)
+    for name, value in ports.items():
+        getattr(dut, name).value = value
+    dut.enable.value = 1
+
+
+@cocotb.test()
+async def a_failed_reopen_does_not_show_the_previous_id(dut):
+    # レビュー（実機でも確認: 失敗した open のエラーの文面に、前の観測の ID 0x464F4253 が出た）: 開き直したら ID・「対象が記録中」を消す
+    eng = await setup(dut)
+    assert int(dut.id.value) == 0x464F4253
+    await _reopen(dut, eng, stuck_low=1)                       # 対象が答えない
+    await eng.wait_for(lambda: dut.stuck.value == 1)
+    assert int(dut.id.value) == 0, f"前の ID が残っている: {int(dut.id.value):#x}"
+    assert dut.target_running.value == 0
+
+
+@cocotb.test()
+async def an_id_that_arrives_at_the_limit_is_not_a_timeout(dut):
+    # レビュー: ID の応答が id_scans のスキャンで揃ったとき、同じスキャンで stuck・id_timeout を立てて、ID が正しいのに「答えない」と報告していた。
+    # どの上限でも「ID が揃った」と「stuck」が同時に立たず、上限が大きいほど成功へ単調に進む
+    eng = await setup(dut)
+    results = []
+    for limit in (1, 2, 3, 4, 5, 8):
+        await _reopen(dut, eng, id_scans=limit)
+        await eng.wait_for(lambda: dut.id_ok.value == 1 or dut.stuck.value == 1)
+        results.append((limit, int(dut.id_ok.value), int(dut.stuck.value), int(dut.id_timeout.value)))
+    assert all(not (ok and stuck) for _, ok, stuck, _ in results), results
+    oks = [ok for _, ok, _, _ in results]
+    assert oks == sorted(oks), results                        # 上限を増やして失敗に戻らない
+    assert oks[-1] == 1
+
+
+@cocotb.test()
+async def cmd_dropped_reports_only_the_last_push(dut):
+    # レビュー: 一度でも溢れると、その後の（積めた）命令も「捨てられた」と報告され続けた。最後の push の結果にする
+    eng = await setup(dut)
+    dut.half_period.value = 50
+    for _ in range(6):
+        await eng.push(command(2, 0x00))
+    assert dut.cmd_dropped.value == 1
+    dut.half_period.value = 5
+    await eng.wait_for(lambda: dut.cmd_pending.value == 0, cycles=400_000)      # 待ち行列が空くまで
+    await eng.push(command(2, 0x01))                                              # 積める命令
+    assert dut.cmd_dropped.value == 0, "積めたのに「捨てられた」のまま"
+
+
+@cocotb.test()
+async def enabling_a_new_condition_does_not_fire_on_the_state_the_old_condition_tracked(dut):
+    # レビュー: 無効の間も、前の一致の状態（m_hit_last）を、そのときの条件（古いマスク）で追っている。条件を替えて有効にした直後の
+    # 最初の値で、新しい条件が既に成り立っている状態を「入った瞬間」と誤って成立させていた。有効にしたら、最初の値は覚えるだけ
+    eng = await setup(dut)
+    dut.probes.value = 0x0001
+    await eng.push(START)
+    await eng.scans(3)
+    pulses: list = []
+    cocotb.start_soon(_count_pulses(dut, pulses))
+    dut.match_mask.value, dut.match_value.value, dut.match_change.value = 0x0001, 0x0000, 0     # 古い条件（bit0 = 0）: 今は不成立
+    await _step(dut, eng, 0x0011)                                                              # 追わせる（無効のまま）
+    await _step(dut, eng, 0x0001)
+    dut.match_mask.value, dut.match_value.value = 0x0002, 0x0000                               # 新しい条件（bit1 = 0）: 今は既に成立
+    dut.match_on.value = 1
+    for v in (0x0011, 0x0001, 0x0011):                                                         # 条件に無いビットだけ動かす
+        await _step(dut, eng, v)
+    assert pulses == [], "有効にした直後に、既に成立していた状態を「入った瞬間」として成立させた"
+    assert int(dut.match_count.value) == 0
+
+
+async def _random_match(dut, eng, rng, rounds: int, steps: int):
+    """ランダムな (mask, value, change) と値の列で、1 歩ごとの一致の有無が基準のモデルと同じか。
+    モデル: 前の値が無ければ成り立たない。change = 0 なら「一致に入った瞬間」、それ以外は「一致していて、change のどれかの
+    ビットが前から変わった」。有効にし直すと前の値を忘れる。"""
+    pulses: list = []
+    cocotb.start_soon(_count_pulses(dut, pulses))
+    for r in range(rounds):
+        mask = rng.choice([0x0001, 0x0003, 0x00F0, 0x0F0F, 0xFFFF, rng.randrange(1, 0x10000)])
+        value = rng.randrange(0x10000) & mask
+        change = rng.choice([0, 0, rng.randrange(1, 0x10000), 0x0008, mask])
+        dut.match_on.value = 0
+        await eng.scans(2)
+        dut.match_mask.value, dut.match_value.value, dut.match_change.value = mask, value, change
+        dut.match_on.value = 1
+        prev = None
+        for i in range(steps):
+            roll = rng.random()
+            v = value if roll < 0.35 else (prev if roll < 0.5 and prev is not None else rng.randrange(0x10000))
+            if roll >= 0.35 and rng.random() < 0.4:
+                v = (v & ~mask) | (value & mask)                           # 一致する値を多めに（変化のビットだけ違う）
+                v ^= rng.choice([0, 0, change & ~mask & 0xFFFF])
+            before = len(pulses)
+            await _step(dut, eng, v)
+            now = len(pulses) - before
+            if prev is None:
+                want = 0
+            elif change == 0:
+                want = int(v & mask == value and prev & mask != value)
+            else:
+                want = int(v & mask == value and (v ^ prev) & change != 0)
+            assert now == want, f"round {r} step {i}: {prev and hex(prev)} → {v:#x} mask {mask:#x} value {value:#x} change {change:#x}: 出た {now} 期待 {want}"
+            prev = v
+
+
+@cocotb.test()
+async def random_match_conditions_agree_with_the_model_on_snapshots(dut):
+    import random
+    eng = await setup(dut)
+    dut.probes.value = 0x0000
+    await eng.scans(3)
+    await _random_match(dut, eng, random.Random(21), rounds=8, steps=14)
+
+
+@cocotb.test()
+async def random_match_conditions_agree_with_the_model_on_records(dut):
+    import random
+    eng = await setup(dut)
+    dut.probes.value = 0x0000
+    await eng.push(START)
+    await eng.scans(3)
+    await _random_match(dut, eng, random.Random(22), rounds=8, steps=14)

@@ -19,7 +19,7 @@ import enum
 import itertools
 import json
 import math
-import os
+import re
 import secrets
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -32,21 +32,22 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from . import (API_VERSION, E_DEVICE, E_INTERNAL, E_INVALID_PARAMS, E_INVALID_REQUEST, E_METHOD_NOT_FOUND,
-               E_NO_DATA, E_NO_HELLO, E_NOT_ALLOWED, E_NOT_CONNECTED, E_PARSE, E_TIMEOUT, E_VERSION, NoData,
-               NotConnected)
+from . import (API_VERSION, DEFAULT_PORT, E_DEVICE, E_INTERNAL, E_INVALID_PARAMS, E_INVALID_REQUEST,
+               E_METHOD_NOT_FOUND, E_NO_DATA, E_NO_HELLO, E_NOT_ALLOWED, E_NOT_CONNECTED, E_PARSE, E_TIMEOUT, E_VERSION,
+               NoData, NotConnected, device_of)
 from .activity import ActivityLog, summarize
 from .arbiter import Arbiter, Client, HoldExpired, NotAllowed
 from .binary import BinaryResult, encode_frame
 from .spec import InvalidParams, Spec, load_spec
 from ..gdb.server import GdbServer
+from ..home import fprobe_home
 from ..hooks import HookRefused, event_of, expand
+from ..probe import Probe
 from ..gdb.session import Options as GdbOptions
 
 __all__ = ["DEFAULT_PORT", "GdbOptions", "StreamHost", "create_app", "device_of", "main", "parse_stream",
            "parse_stream_log"]
 
-DEFAULT_PORT = 7820
 NOTIFY_LIMIT = 1000                                          # 利用者ごとの送り途中の通知の上限
 UI_DIR = Path(__file__).resolve().parents[2] / "ui" / "dist"     # 画面のビルドの出力（host/ui）
 WATCHER = Client(0, "daemon", "script")                    # 見張りの読み（記録しない）。見張りが見つけた止まりのフックも
@@ -63,13 +64,43 @@ BUILD_HELP = ("<!doctype html><meta charset=utf-8><title>fprobe</title>"
               "<p>API（ws://…/api）はこのままでも使えます。")
 
 
-def fprobe_home() -> Path:
-    return Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe"))
+_PLAIN = frozenset({str, int, bool, type(None)})             # そのまま返せる型（派生型は列挙などの分岐を通す）
+
+
+class _NonFinite(Exception):
+    """JSON に無い字句 NaN・Infinity・-Infinity を受けた。number の検証を NaN がすり抜け、待ち時間が NaN になると作業スレッドが戻らない。"""
+
+
+def _refuse_constant(token: str):
+    raise _NonFinite(token)
+
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _has_lone_surrogate(value: Any) -> bool:
+    """引数に孤立サロゲートの文字列があるか（UTF-8 に符号化できず、実装の encode が UnicodeEncodeError で漏れる）。"""
+    if isinstance(value, str):
+        return _SURROGATE.search(value) is not None
+    if isinstance(value, dict):
+        return any(_has_lone_surrogate(k) or _has_lone_surrogate(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_lone_surrogate(v) for v in value)
+    return False
 
 
 def jsonable(value: Any) -> Any:
     """結果を JSON にできる形に: 集合は並べたリスト、バイト列は 16 進、データクラスは辞書、列挙は名前、Path は文字列。
     （ライブラリの結果には frozenset 等が含まれる。MCP の SDK は自動で変換するがデーモンでは明示する）"""
+    kind = type(value)
+    if kind in _PLAIN:                                   # 大きな結果の大半: 型の判定を 1 回で済ませる
+        return value
+    if kind is dict:
+        return {(k if type(k) is str else str(k)): jsonable(v) for k, v in value.items()}
+    if kind is list or kind is tuple:
+        return [jsonable(v) for v in value]
+    if kind is float:
+        return value if math.isfinite(value) else None   # NaN・無限大は JSON に無い（ブラウザが読めなくなる）
     if isinstance(value, dict):
         return {str(k): jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -84,11 +115,16 @@ def jsonable(value: Any) -> Any:
         return value.name
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, float) and not math.isfinite(value):
-        return None                                      # NaN・無限大は JSON に無い（ブラウザが読めなくなる）
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (bool, int, str)):
         return value
-    raise TypeError(f"{type(value).__name__} は JSON にできない")
+    raise TypeError(f"{kind.__name__} は JSON にできない")
+
+
+def _who(client: Client) -> dict:
+    """利用者の名乗り {id, name, role}（実装への caller と通知 recording に渡す）。"""
+    return {"id": client.id, "name": client.name, "role": client.role}
 
 
 class LinkRecovered(Exception):
@@ -175,9 +211,13 @@ class Daemon:
             conn.sending -= 1
 
     async def handle(self, conn: _Connection, request: dict) -> dict | None:
-        rid, method, params = request.get("id"), request.get("method", ""), request.get("params") or {}
+        rid, method, params = request.get("id"), request.get("method"), request.get("params")
         token = None
         try:
+            if not isinstance(method, str):              # 配列・辞書を辞書引きすると内部の TypeError（unhashable）が漏れる
+                raise _Rpc(E_INVALID_REQUEST, "method が無い" if method is None else "method は文字列")
+            if params is None:                           # null と省略は同じ（JSON-RPC 2.0）。[]・0・""・false は検証で断る
+                params = {}
             if "source" in request:                      # どの窓から（使われ方の記録。呼び手の申告をそのまま残す）
                 source = request["source"]
                 if not isinstance(source, str) or not 1 <= len(source) <= 64:
@@ -194,13 +234,19 @@ class Daemon:
             if token is not None:
                 _SOURCE.reset(token)
 
-    async def _dispatch(self, conn: _Connection, method: str, params: dict, quiet: bool = False) -> Any:
+    def _validate(self, method: str, params: dict) -> None:
+        """メソッドが仕様にあり、引数が仕様に合うか（合わなければ _Rpc）。"""
         if method not in self.spec.methods:
             raise _Rpc(E_METHOD_NOT_FOUND, f"{method} は無い")
         try:
             self.spec.validate_params(method, params)
         except InvalidParams as e:
             raise _Rpc(E_INVALID_PARAMS, str(e)) from None
+        if _has_lone_surrogate(params):
+            raise _Rpc(E_INVALID_PARAMS, f"{method}: 引数に孤立サロゲート（UTF-8 にできない文字。JSON の ud800 等）がある")
+
+    async def _dispatch(self, conn: _Connection, method: str, params: dict, quiet: bool = False) -> Any:
+        self._validate(method, params)
         if method == "session.hello":
             return self._hello(conn, params)
         if conn.client is None:
@@ -224,10 +270,7 @@ class Daemon:
             raise _Rpc(E_METHOD_NOT_FOUND, f"{method} は無い")
         if self.spec.methods[method].binary:
             raise _Rpc(E_NOT_ALLOWED, f"{method} の応答はバイナリ（WebSocket の利用者だけ）")
-        try:
-            self.spec.validate_params(method, params)
-        except InvalidParams as e:
-            raise _Rpc(E_INVALID_PARAMS, str(e)) from None
+        self._validate(method, params)
         return await self._invoke(client, method, params)
 
     async def _invoke(self, client: Client, method: str, params: dict, quiet: bool = False) -> Any:
@@ -312,7 +355,7 @@ class Daemon:
     async def _call(self, client: Client, method, params: dict, quiet: bool = False) -> Any:
         fn = getattr(self.backend, method.impl)
         if method.caller:                                # 呼び出し元を実装へ（引数の仕様・記録には出さない）
-            fn = functools.partial(fn, caller={"id": client.id, "name": client.name, "role": client.role})
+            fn = functools.partial(fn, caller=_who(client))
         # quiet（画面の自動の読み）は状態を変えない読みにだけ効く。操作は必ず記録する
         record = method.record and not (quiet and (method.kind == "read" or method.observes))
         try:
@@ -352,7 +395,7 @@ class Daemon:
         if isinstance(result, dict):
             name = result.get("name") or result.get("recording")
         self.publish("recording", {"action": RECORDING_METHODS[method], "name": name,
-                                   "client": {"id": client.id, "name": client.name, "role": client.role}})
+                                   "client": _who(client)})
 
     def clients(self) -> list[dict]:
         """利用者の一覧。WebSocket の利用者には、読まないので捨てた通知の数 notifications_dropped と、使った送り待ちの
@@ -586,15 +629,6 @@ def _host_name(host: str) -> str:
     return host[:host.index("]") + 1] if host.startswith("[") else host.split(":")[0]
 
 
-def device_of(serial: str | None, port: str | None, eth: str | None) -> dict:
-    """握る機器の表し方（利用者が、頼んだ機器と同じかを確かめるため）: link = usb / serial / eth と番地。"""
-    if eth:
-        return {"link": "eth", "address": eth}
-    if port:
-        return {"link": "serial", "address": port}
-    return {"link": "usb", "address": serial}
-
-
 def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spec | None = None,
                device: dict | None = None, ui_dir: Path = UI_DIR, watch_s: float = 1.0, gdb_port: int | None = None,
                gdb_options: GdbOptions | None = None, gdb_role: str = "human", streams: list[dict] = (),
@@ -640,7 +674,16 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
             while True:
                 text = await ws.receive_text()
                 try:
-                    request = json.loads(text)
+                    request = json.loads(text, parse_constant=_refuse_constant)
+                except _NonFinite as e:                    # 要求の id が要るので、字句だけ無害な値にして読み直し、id 付きで断る
+                    try:
+                        rid = json.loads(text, parse_constant=lambda _t: None).get("id")
+                    except (ValueError, AttributeError):
+                        rid = None
+                    await ws.send_json({"jsonrpc": "2.0", "id": rid,
+                                        "error": {"code": E_INVALID_PARAMS,
+                                                  "message": f"JSON に無い字句 {e.args[0]} は使えない（数は有限の値）"}})
+                    continue
                 except ValueError:
                     await ws.send_json({"jsonrpc": "2.0", "id": None,
                                         "error": {"code": E_PARSE, "message": "JSON として読めない"}})
@@ -710,7 +753,6 @@ def lan_token(given: str | None, home: Path, renew: bool = False) -> str:
 
 def main() -> None:
     import uvicorn
-    from ..mcp_server import Probe
     from ..serial_link import DEFAULT_BAUD
     parser = argparse.ArgumentParser(description="fprobe-daemon: fprobe を握って API を出す")
     parser.add_argument("--serial", help="fprobe の USB シリアル番号")

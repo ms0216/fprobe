@@ -10,6 +10,7 @@
 """
 
 import contextlib
+import dataclasses
 import threading
 import time
 from typing import Any
@@ -20,7 +21,7 @@ from .fpga_obs import ObsDecoder
 from .la import Transitions
 from .recording import Recorder
 
-__all__ = ["Collector", "add_capture", "add_events", "sample_clock", "unwrap48"]
+__all__ = ["Collector", "add_capture", "add_events", "sample_clock", "unwrap48", "unwrap_events"]
 
 MASK48 = (1 << 48) - 1
 _STREAMS = {"ap_read": "dap", "ap_write": "dap", "drw_read": "dap", "drw_write": "dap", "inject": "dap", "dp_read": "dap",
@@ -33,6 +34,12 @@ _KINDS = {"uart_rx": "rx", "uart_tx": "tx", "swo": "byte", "aux": "mv", "sample"
 def unwrap48(t48: int, reference: int) -> int:
     """48 ビットの時刻を、それより後に読んだタイムベース reference の上位で 64 ビットにする。"""
     return reference - ((reference - t48) & MASK48)
+
+
+def unwrap_events(events: list[DapEvent], reference: int) -> list[DapEvent]:
+    """イベントの 48 ビットの時刻を、それより後に読んだタイムベース reference で 64 ビットにしたイベントの並び
+    （48 ビットの折り返しをまたいでも時刻が戻らない）。"""
+    return [dataclasses.replace(e, time=unwrap48(e.time, reference)) for e in events]
 
 
 def add_capture(rec: Recorder, tr: Transitions) -> None:
@@ -282,6 +289,11 @@ class Collector:
             self.obs.events_lost()
             new = self.events.capacity
         batch = self.events.read(last=new, end=written)
+        overwritten = getattr(self.events, "overwritten", 0)       # 読む間に書き手に追い越された先頭（読めなかった）
+        if overwritten:
+            self.lost += overwritten
+            self.rec.add("annotation", "events_lost", self.device.time(), a=overwritten)
+            self.obs.events_lost()
         self._carry = add_events(self.rec, batch, self.device.time(), carry=self._carry, obs=self.obs)
         self._seen = written
 

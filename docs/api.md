@@ -151,7 +151,7 @@ over_range が True なら測れる上限を超えている（volts は None。�
 script: 接続・リセット等の手順を上書きする pyOCD のユーザスクリプト（"builtin:<名前>" かファイル。target_script_check で検査できる）。
 core: コアごとに DP を持つ複数ドロップの部品（RP2040）のコアの番号。target="rp2040" と組む（pyOCD のターゲット rp2040_core0 / rp2040_core1 を選ぶ）。
 RISC-V: target="rp2350_riscv" で RP2350 の Hazard3 に（pyOCD を使わず、APB-AP の向こうの Debug Module を直接）。core はハートの番号、connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（pc・x0〜x31・ABI の名前・主な CSR）・メモリ（システムバス）・ブレークポイント（トリガ）。リセット・Flash・SWO・RTOS 等は断る。
-Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"（Raspberry Pi 2、Cortex-A7 × 4。core はコアの番号）/ "cortex_a"（ARMv7-A、コアは ROM テーブルから）/ "bcm2835"（Pi Zero・1、ARM1176）/ "arm11"。チェーンの装置は IDCODE で探す（jtag_chain で IR 長の列を与えてもよい）。connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（r0〜r15・sp・lr・pc・cpsr）・メモリ（コアを通す。番地はコアの見る番地 = MMU が有効なら仮想番地。書いた範囲はキャッシュを揃える）・ハードのブレークポイント / ウォッチポイント。止めるのは選んだコアだけ。リセット・ベクタキャッチ・Flash・SWO・RTOS 等は断る。
+Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"（Raspberry Pi 2、Cortex-A7 × 4。core はコアの番号）/ "cortex_a"（ARMv7-A、コアは ROM テーブルから） / "zynq7000"（Zynq-7000、Cortex-A9 × 2。PS の DAP は independent の起動で PJTAG から）/ "bcm2835"（Pi Zero・1、ARM1176）/ "arm11"。チェーンの装置は IDCODE で探す（jtag_chain で IR 長の列を与えてもよい）。connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（r0〜r15・sp・lr・pc・cpsr）・メモリ（コアを通す。番地はコアの見る番地 = MMU が有効なら仮想番地。書いた範囲はキャッシュを揃える）・ハードのブレークポイント / ウォッチポイント。止めるのは選んだコアだけ。リセット・ベクタキャッチ・Flash・SWO・RTOS 等は断る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1108,7 +1108,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 
 ## fpga_obs.count
 
-種類: `control`。観測した値の最後の last 件（fpga_obs.read の窓。使う側が明示する。既定の値は無い）で、FPGA の信号の条件（restart changed and state=BUSY の形。瞬間の項 changed / rose / fell が要る）ごとに成り立った回数を数える。条件ごとに count と、数えた範囲の事実: values（数えた値の数）・t0_us / t1_us（最初と最後の値の fprobe の時刻。値が無ければ null）・span_s（その間の秒）・gaps（切れ目の数）・lost（失った変化の数）。「変化」は同じ組の直前の値と比べる。読めない条件は error に理由。
+種類: `control`。観測した値の最後の last 件（fpga_obs.read の窓。使う側が明示する。既定の値は無い）で、FPGA の信号の条件（restart changed and state=BUSY の形。瞬間の項 changed / rose / fell が要る）ごとに成り立った回数を数える。条件ごとに count と、数えた範囲の事実: values（数えた値の数）・t0_us / t1_us（最初と最後の値の fprobe の時刻。値が無ければ null）・span_s（その間の秒）・gaps（切れ目の数）・hidden（標本型の見えない変化の数）・lost（失った変化の数）。「変化」は同じ組の直前の値と比べる。読めない条件は error に理由。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1147,7 +1147,7 @@ overrun = True はホストが遅れて途中で止まったこと（それま�
 | `ap` | `number` |  |
 | `chase_rate_hz` | `number` |  |
 | `jitter` | `number` |  |
-| `names` | `Array<string>` |  |
+| `names` | `Array<string> | null` |  |
 
 ## watch.stop
 

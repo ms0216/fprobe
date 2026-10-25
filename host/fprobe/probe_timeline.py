@@ -1,6 +1,6 @@
 """Probe の道具: 共通タイムラインのタイル（G01。画面が毎フレームの間引きに使う材料をバイナリで返す）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _capture_wave（最後の捕捉）・_reading（読む記録）を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _capture_wave（最後の捕捉）・_reading（読む記録）を使う。
 機器には触らない（読みだけ）。
 
 仕様: docs/superpowers/specs/2026-10-18-timeline-tiles-design.md

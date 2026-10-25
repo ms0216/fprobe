@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from fprobe.api.spec import load_spec
-from fprobe.mcp_server import Notices, Probe, tool_function
+from fprobe.mcp_client import Notices, tool_function
+from fprobe.mcp_server import Probe
 from fprobe.probe_elf_watch import image_digest
 from fprobe.symbols import Symbols
 
@@ -142,7 +143,7 @@ def test_notices_are_attached_to_the_next_dict_result_of_a_tool():
 
 def test_dropped_notices_are_counted():
     # 溜めるのは最新 NOTICE_LIMIT 件。古いものを捨てたら、捨てた数と上限を添える（黙って捨てない。?33）
-    from fprobe.mcp_server import NOTICE_LIMIT
+    from fprobe.mcp_client import NOTICE_LIMIT
     notices = Notices()
     for i in range(NOTICE_LIMIT + 3):
         notices.add("t", {"n": i})

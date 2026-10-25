@@ -1,4 +1,6 @@
-"""ロジックアナライザ: 設定・捕捉・読み出しと VCD 出力。
+"""ロジックアナライザ: 設定・捕捉・読み出し（深いバッファ・連続ストリーミング）。
+
+値の表現と復号は fprobe.la_wave、VCD 出力は fprobe.la_vcd（どちらもここから再公開する）。
 
 仕様: docs/superpowers/specs/2026-10-16-m7-logic-analyzer-design.md
       docs/superpowers/specs/2026-10-16-m8c-la-streaming-design.md（連続ストリーミング）
@@ -7,8 +9,7 @@
 import math
 import time
 from array import array
-from bisect import bisect_left, bisect_right
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,14 +17,15 @@ from . import generated as g
 from .caps import LaChannel, legacy_la_layout
 from .device import Device
 from .events import DapEvent, decode_events
+from .la_vcd import DEFAULT_NAMES, VcdWriter, vcd_blocks, write_vcd  # noqa: F401  (再公開)
+from .la_wave import (BEAT_BYTES, Capture, Transitions, Waveform, decode_beats, decode_transitions,  # noqa: F401  (再公開)
+                      trigger_sample)
+from .la_wave import _array_of, _np
 
 __all__ = ["Capture", "DeepAnalyzer", "Front", "channel_layout", "channel_names", "check_trigger_channels",
            "external_channels", "LaStream", "LogicAnalyzer", "Pulse", "SegmentSplitter", "StreamChunk",
            "StreamFormatError", "StreamSegment", "StreamStats", "Transitions", "VcdWriter", "Waveform", "decode_beats",
-           "decode_transitions", "split_segments", "write_vcd"]
-
-# 古い並び（ケイパビリティ LA_LAYOUT の前）の内部の ch の名前。今の並びは channel_names（申告から）
-DEFAULT_NAMES = {c.channel: c.name for c in legacy_la_layout(10) if c.kind == "internal"}
+           "decode_transitions", "split_segments", "vcd_blocks", "write_vcd"]
 
 
 def channel_layout(caps) -> tuple[LaChannel, ...]:
@@ -55,136 +57,6 @@ def check_trigger_channels(caps, **masks: int) -> None:
 def external_channels(caps) -> list[int]:
     """外の信号が入る ch（拡張ヘッダのピンと専用の入力）。グリッチフィルタをかけられる ch。"""
     return [c.channel for c in channel_layout(caps) if c.kind in ("pin", "input")]
-
-
-try:                                                          # 入っていれば波形の変化点の表を一括の計算で作る
-    import numpy as _np
-except ImportError:                                           # 無くても同じ結果（遅いだけ）
-    _np = None
-
-
-@dataclass(frozen=True)
-class Capture:
-    samples: Sequence[int]       # 時間順（深いバッファでは array）
-    trigger: int                 # トリガのサンプルの位置
-    trigger_time: int            # トリガ時のタイムベース（カウント）
-    sample_period_s: float
-    channels: int
-
-    def channel(self, index: int) -> list[int]:
-        return [s >> index & 1 for s in self.samples]
-
-
-@dataclass(frozen=True)
-class Transitions:
-    """変化点の表現（長い記録を毎サンプルに展開しない）。starts[i] から次の starts まで値 values[i] が続く。"""
-    values: Sequence[int]
-    starts: Sequence[int]        # サンプル番号（昇順、starts[0] = 0）
-    length: int                  # 全サンプル数
-    trigger: int                 # トリガのサンプル番号
-    trigger_time: int
-    sample_period_s: float
-    channels: int
-
-    @classmethod
-    def from_capture(cls, cap: "Capture") -> "Transitions":
-        values, starts, previous = array("H"), array("Q"), None
-        for i, v in enumerate(cap.samples):
-            if v != previous:
-                values.append(v)
-                starts.append(i)
-                previous = v
-        return cls(values, starts, len(cap.samples), cap.trigger, cap.trigger_time, cap.sample_period_s,
-                   cap.channels)
-
-    def edges(self, channel: int) -> list[int]:
-        """チャンネルが変化したサンプル番号。"""
-        out, previous = [], None
-        for v, t in zip(self.values, self.starts):
-            bit = v >> channel & 1
-            if previous is not None and bit != previous:
-                out.append(t)
-            previous = bit
-        return out
-
-    def level_at(self, channel: int, index: int) -> int:
-        return self.values[bisect_right(self.starts, index) - 1] >> channel & 1
-
-
-class Waveform:
-    """画面に返す縮めた波形: 見ている区間を width 画素に分け、画素ごと・チャンネルごとに '0'（ずっと 0）/ '1'（ずっと 1）/
-    'x'（区間内で変化）。チャンネルごとの変化点の表を一度だけ作り、表示のたびには二分探索で引く（全サンプルを送らない）。"""
-
-    def __init__(self, tr: Transitions):
-        # 変化点の表だけを持つ（元の並び tr は持たない）。サンプル番号が 32 ビットに収まれば 4 バイトの整数で
-        # （記録のかたまりは 1 秒程度。大きな記録の時間軸でデーモンのメモリが 1 GB を超えた）
-        self.length = tr.length
-        first = tr.values[0] if len(tr.values) else 0
-        self._initial = [first >> ch & 1 for ch in range(tr.channels)]
-        code = "I" if tr.length < 1 << 32 else "Q"
-        self._edges = [array(code) for _ in range(tr.channels)]         # チャンネルが変わったサンプル番号
-        if _np is not None and len(tr.values) > 1:
-            # numpy があれば一括の計算で（SWD のクロック等で数千万の変化点がある記録も数秒で開く）
-            values, starts = _np.asarray(tr.values), _np.asarray(tr.starts, dtype=_np.uint64)
-            dtype = _np.uint32 if code == "I" else _np.uint64
-            changed = values[1:] ^ values[:-1]
-            for ch, edges in enumerate(self._edges):
-                edges.frombytes(starts[_np.flatnonzero((changed >> ch) & 1) + 1].astype(dtype).tobytes())
-            return
-        # ponytail: 変化点ごとの Python のループ（100 万変化点で 1 秒ほど、捕捉ごとに 1 回）。numpy が無いとき
-        previous = first
-        for v, t in zip(tr.values, tr.starts):
-            changed = v ^ previous
-            while changed:
-                bit = changed & -changed
-                self._edges[bit.bit_length() - 1].append(t)
-                changed ^= bit
-            previous = v
-
-    @property
-    def channels(self) -> int:
-        return len(self._edges)
-
-    @property
-    def nbytes(self) -> int:
-        """変化点の表の大きさ（記録の読み手が覚えておく量の上限に使う）。"""
-        return sum(len(e) * e.itemsize for e in self._edges)
-
-    def level_at(self, ch: int, s: int) -> int:
-        """チャンネル ch のサンプル s の値（s 自身の変化を含む）。"""
-        return self._initial[ch] ^ (bisect_right(self._edges[ch], s) & 1)
-
-    def edges_between(self, ch: int, s0: int, s1: int) -> array:
-        """チャンネル ch の s0 < t < s1 の変化点（サンプル番号の昇順。共通タイムラインのタイル用）。"""
-        edges = self._edges[ch]
-        return edges[bisect_right(edges, s0):bisect_left(edges, s1)]
-
-    def count_between(self, ch: int, s0: int, s1: int) -> int:
-        """edges_between の数（取り出さずに数える）。"""
-        edges = self._edges[ch]
-        return max(0, bisect_left(edges, s1) - bisect_right(edges, s0))
-
-    def view(self, start: int, end: int, width: int) -> list[str]:
-        """サンプル [start, end) を width 画素に縮めた、チャンネルごとの文字列。区間は捕捉の中に切り詰める。"""
-        start, end = max(0, int(start)), min(self.length, int(end))
-        if end <= start or width < 1:
-            raise ValueError(f"表示の区間が空（start={start}, end={end}, width={width}）")
-        span = end - start
-        bounds = []
-        for i in range(width):                                          # 整数で割る（浮動小数の誤差で区間が延びない）
-            s = start + i * span // width
-            bounds.append((s, max(s + 1, start - (-(i + 1) * span // width))))
-        out = []
-        for initial, edges in zip(self._initial, self._edges):
-            chars = []
-            for s, e in bounds:
-                before = bisect_right(edges, s)                         # s までの変化の数（s 自身の変化を含む）
-                if before < bisect_left(edges, e):
-                    chars.append("x")
-                else:
-                    chars.append("1" if initial ^ (before & 1) else "0")
-            out.append("".join(chars))
-        return out
 
 
 # --- 前段の追加の条件（U21）: グリッチフィルタとパルス幅のトリガ -------------------------------------------
@@ -359,145 +231,6 @@ class LogicAnalyzer:
         period = self.start(**trigger)
         self.wait(timeout_s)
         return self.read(period)
-
-
-def write_vcd(capture: "Capture | Transitions", path: str | Path, names: dict[int, str] | None = None) -> None:
-    """VCD（PulseView 等で表示）。時刻 0 = 最初のサンプル、単位は ns。トリガ位置にマーカー用の信号を置く。"""
-    if isinstance(capture, Transitions):
-        _write_vcd_transitions(capture, path, names)
-        return
-    ids, trigger_id, lines = _vcd_header(capture.channels, names, trigger=True)
-    previous = None
-    for i, sample in enumerate(capture.samples):
-        changes = [f"{sample >> ch & 1}{ids[ch]}" for ch in range(capture.channels)
-                   if previous is None or (sample ^ previous) >> ch & 1]
-        if i in (0, capture.trigger, capture.trigger + 1):
-            changes.append(f"{int(i == capture.trigger)}{trigger_id}")
-        if changes:
-            lines.append(f"#{round(i * capture.sample_period_s * 1e9)}")
-            lines += changes
-        previous = sample
-    Path(path).write_text("\n".join(lines) + "\n", encoding="ascii")
-
-
-def _vcd_header(channels: int, names: dict[int, str] | None, trigger: bool) -> tuple[dict[int, str], str, list[str]]:
-    """チャンネルの識別子・トリガの識別子・ヘッダの行。"""
-    names = {**DEFAULT_NAMES, **(names or {})}
-    ids = {ch: chr(33 + ch) for ch in range(channels)}
-    trigger_id = chr(33 + channels)
-    lines = ["$timescale 1ns $end", "$scope module fprobe $end"]
-    lines += [f"$var wire 1 {ids[ch]} {names.get(ch, f'ch{ch}')} $end" for ch in range(channels)]
-    if trigger:
-        lines.append(f"$var wire 1 {trigger_id} trigger $end")
-    lines += ["$upscope $end", "$enddefinitions $end"]
-    return ids, trigger_id, lines
-
-
-def _write_vcd_transitions(tr: "Transitions", path: str | Path, names: dict[int, str] | None) -> None:
-    ids, trigger_id, lines = _vcd_header(tr.channels, names, trigger=True)
-    events: dict[int, list[str]] = {}
-    previous = None
-    for v, t in zip(tr.values, tr.starts):
-        changes = [f"{v >> ch & 1}{ids[ch]}" for ch in range(tr.channels)
-                   if previous is None or (v ^ previous) >> ch & 1]
-        if changes:
-            events.setdefault(t, []).extend(changes)
-        previous = v
-    events.setdefault(0, []).append(f"0{trigger_id}")
-    events.setdefault(tr.trigger, []).append(f"1{trigger_id}")
-    events.setdefault(tr.trigger + 1, []).append(f"0{trigger_id}")
-    for t in sorted(events):
-        lines.append(f"#{round(t * tr.sample_period_s * 1e9)}")
-        lines += events[t]
-    Path(path).write_text("\n".join(lines) + "\n", encoding="ascii")
-
-
-class VcdWriter:
-    """VCD を変化点の順に少しずつ書く（ストリーミング用。全体をメモリに持たない）。トリガの信号は無い。"""
-
-    def __init__(self, path: str | Path, channels: int, sample_period_s: float, names: dict[int, str] | None = None):
-        self._ids, _, header = _vcd_header(channels, names, trigger=False)
-        self._period = sample_period_s
-        self._previous: int | None = None
-        self._file = open(path, "w", encoding="ascii", newline="\n")
-        self._file.write("\n".join(header) + "\n")
-
-    def write(self, values: Sequence[int], starts: Sequence[int]) -> None:
-        """変化点（値, 通し番号の開始）を書き足す。starts は前回の続きから昇順。"""
-        lines, previous = [], self._previous
-        for v, t in zip(values, starts):
-            changes = [f"{v >> ch & 1}{i}" for ch, i in self._ids.items()
-                       if previous is None or (v ^ previous) >> ch & 1]
-            if changes:
-                lines.append(f"#{round(t * self._period * 1e9)}")
-                lines += changes
-            previous = v
-        self._previous = previous
-        if lines:
-            self._file.write("\n".join(lines) + "\n")
-
-    def close(self) -> None:
-        self._file.close()
-
-    def __enter__(self) -> "VcdWriter":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
-
-
-# --- 深いバッファ（外部メモリ）の拍の復号（gateware/rtl/la/la_encoder.vhd の符号化） ---------------------
-
-BEAT_BYTES = 16
-
-
-def decode_beats(data: bytes, rle: bool) -> "array[int]":
-    """拍の列（16 バイト単位）をサンプル列に戻す。RAW: 1 拍 = 8 サンプル。RLE: 1 拍 = 4 レコード（値, 繰り返し）。"""
-    if len(data) % BEAT_BYTES:
-        raise ValueError("拍（16 バイト）の倍数でない")
-    if not rle:
-        samples = array("H")
-        samples.frombytes(data)                     # リトルエンディアンの 16 ビット（このホストもリトル）
-        return samples
-    records = array("I")
-    records.frombytes(data)
-    samples = array("H")
-    for record in records:
-        samples.extend(array("H", [record & 0xFFFF]) * ((record >> 16) + 1))
-    return samples
-
-
-def decode_transitions(data: bytes, rle: bool) -> tuple["array[int]", "array[int]", int]:
-    """拍の列を変化点（値, 開始サンプル）と全サンプル数にする（RLE は展開しない）。"""
-    values, starts, previous = array("H"), array("Q"), None
-    if not rle:
-        samples = decode_beats(data, False)
-        for i, v in enumerate(samples):
-            if v != previous:
-                values.append(v)
-                starts.append(i)
-                previous = v
-        return values, starts, len(samples)
-    records = array("I")
-    records.frombytes(data)
-    position = 0
-    for record in records:
-        v = record & 0xFFFF
-        if v != previous:
-            values.append(v)
-            starts.append(position)
-            previous = v
-        position += (record >> 16) + 1
-    return values, starts, position
-
-
-def trigger_sample(data: bytes, rle: bool, beat: int, slot: int) -> int:
-    """拍 beat の slot 番目（トリガ）が、data の先頭から何サンプル目か。"""
-    if not rle:
-        return beat * 8 + slot
-    records = array("I")
-    records.frombytes(data[:beat * BEAT_BYTES + slot * 4])
-    return sum((r >> 16) + 1 for r in records)
 
 
 # --- 見出し付きのストリーム（R1: ロジアナとイベントを 1 本に流す構成。
@@ -734,6 +467,8 @@ class StreamChunk:
         """変化点（値, 通し番号の開始）。直前のチャンクの最後と同じ値は含めない（つなぐと全体の変化点になる）。"""
         values, starts, _ = decode_transitions(self.data, self.rle)
         skip = 1 if len(values) and values[0] == self.previous else 0
+        if _np is not None:
+            return values[skip:], _array_of("Q", _np.frombuffer(starts, dtype=_np.uint64)[skip:] + _np.uint64(self.first))
         return values[skip:], array("Q", (s + self.first for s in starts[skip:]))
 
 

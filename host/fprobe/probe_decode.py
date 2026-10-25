@@ -1,6 +1,6 @@
 """Probe の道具: 解読器の一覧と利用者の解読器の読み込み、捕捉のファイルへの書き出し（sigrok の .sr・VCD）と読み込み。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_capture・_capture_info・_capture_names・_keep_capture を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_capture・_capture_info・_capture_names・_keep_capture を使う。
 機器には触らない（捕捉は la_capture 等が取ったもの）。解読そのもの（la_decode）は probe_observe にある。
 
 仕様: docs/superpowers/specs/2026-10-18-u20-decoders-design.md

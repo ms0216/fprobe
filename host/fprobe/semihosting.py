@@ -265,10 +265,23 @@ class SemihostingHost:
         self.console("stdout", target.read_memory(r1, 1))
         return None
 
+    @staticmethod
+    def _read_string_chunk(target, address: int) -> bytes:
+        """NUL を探して読む 1 回分。64 バイトを読み、領域の終わりで失敗したら半分ずつ縮めて 1 バイトまで読み直す
+        （終端が領域の中にある文字列を、先読みの失敗で落とさない）。1 バイトも読めなければその誤りを出す。"""
+        size = 64
+        while True:
+            try:
+                return target.read_memory(address, size)
+            except Exception:                                  # noqa: BLE001  転送・領域外のエラーは種類を問わず縮めて読み直す
+                if size == 1:
+                    raise
+                size //= 2
+
     def _write0(self, target, r1):
         text = bytearray()
         while len(text) < WRITE0_LIMIT:
-            chunk = target.read_memory(r1 + len(text), 64)
+            chunk = self._read_string_chunk(target, r1 + len(text))
             end = chunk.find(b"\0")
             text += chunk if end < 0 else chunk[:end]
             if end >= 0:

@@ -1,7 +1,7 @@
 """Probe の道具: ヒープの解析（U27）。走査（使用量・断片化・壊れ）と、malloc / free の記録（ブレークポイント）からの
 呼び出し元ごとの生きている確保（リークかは判定しない）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_where / _place_of・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_where / _place_of・
 _record_host・_watch_stops と、BreakpointActions の _break_hooks（道具が置くブレークポイントの処理）を使う。
 機器に触るのは必ず _lock の中。
 

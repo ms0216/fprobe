@@ -1,6 +1,6 @@
 """Probe の道具: 既存のログ・トレースの形式の取り込み（U14・U15）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder・_debug と、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder・_debug と、
 ObserveTools（RTT の受信 `rtt_start`・`_rtt_listen`・`_rtt`）、WindowTools（デバイスの時刻付きの SWO・UART の
 バイトの窓 `_open_window`・`_window_cursor`・`_window_new`・write_registers）、RtosTools（時間軸の結果
 `_rtos_last` = 解析の道具が読むもの）を使う。機器に触るのは必ず _lock の中。
@@ -140,9 +140,12 @@ class FormatTools:
 
     def _feed_start(self, feed: _Feed, channel: int | str | None, port: int, swo_baud: int | None,
                     core_clock_hz: float | None) -> None:
-        """受け口を始める（rtt: listener、swo / uart: 窓を読む背景のスレッド）。"""
+        """受け口を始める（rtt: listener、swo / uart: 窓を読む背景のスレッド）。rtt で実際に選んだチャンネルは
+        settings["channel"] に入れ直す。"""
         if feed.source == "rtt":
             self._feed_start_rtt(feed, channel)
+            if feed.rtt_channel is not None:
+                feed.settings["channel"] = feed.rtt_channel
         elif feed.source == "swo":
             self._feed_start_swo(feed, port, swo_baud, core_clock_hz)
         elif feed.source == "uart":
@@ -356,8 +359,6 @@ class FormatTools:
         feed = _Feed("log", format, source, {"channel": channel, "port": port, "framing": framing,
                                              "annotate": stream.annotator is not None}, stream, time.monotonic())
         self._feed_start(feed, channel, port, swo_baud, core_clock_hz)
-        if feed.rtt_channel is not None:
-            feed.settings["channel"] = feed.rtt_channel
         self._log_feed = feed
         return self._log_state(feed)
 
@@ -411,6 +412,10 @@ class FormatTools:
                "records": feed.seq, "kept": len(feed.records), "kinds": dict(feed.counts), "bytes": feed.bytes,
                "errors": feed.decoder.errors, "recorded": self._recorder is not None,
                "elapsed_s": (feed.stopped or time.monotonic()) - feed.started, "warnings": list(feed.warnings)}
+        return self._with_error_and_window(feed, out)
+
+    def _with_error_and_window(self, feed: _Feed, out: dict) -> dict:
+        """ログ・トレースの状態の末尾に共通の欄（背景の読みの誤りと、SWO・UART の窓の様子）。"""
         if feed.error is not None:
             out["error"] = feed.error
         if feed.cursor is not None:
@@ -514,8 +519,6 @@ class FormatTools:
                                                "ctf_header": ctf_header}, stream, time.monotonic())
         feed.trace = stream.trace
         self._feed_start(feed, channel, port, swo_baud, core_clock_hz)
-        if feed.rtt_channel is not None:
-            feed.settings["channel"] = feed.rtt_channel
         self._trace_feed = feed
         return self._trace_state(feed)
 
@@ -564,11 +567,7 @@ class FormatTools:
                                 "不確かさに入れていない（対応点から離れるほどずれうる）")
         elif trace.events:
             out["notes"].append("時刻の対応が無い（ターゲットの時刻の速さか受けた時刻が分からない）: 記録には書かない")
-        if feed.error is not None:
-            out["error"] = feed.error
-        if feed.cursor is not None:
-            out["window"] = self._window_info(feed.cursor.window, feed.timebase_hz or 1.0)
-        return out
+        return self._with_error_and_window(feed, out)
 
     def trace_status(self) -> dict:
         """トレースの取り込みの様子（形式・出来事の数・タスク・失った数・時刻の対応）。"""
@@ -613,7 +612,7 @@ class FormatTools:
         events = task_events(trace.events, clock)
         if not any(e.kind == "task_in" for e in events):
             return {"made": False, "reason": "タスクの切り替えの出来事が無い"}
-        if getattr(self, "_rtos_run", None) is not None:
+        if self._rtos_run is not None:
             return {"made": False, "reason": "rtos_timeline_start の時間軸を取っている最中（止めてから）"}
         names = {k: v for k, v in trace.names().items()}
         idle, given = _idle_tasks(names, idle_tasks)

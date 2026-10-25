@@ -420,6 +420,7 @@ class TimedPacket:
     local_time: int | None           # ローカルのタイムスタンプの累積（最初のタイムスタンプからのクロック数）
     global_time: int | None          # グローバルのタイムスタンプ（上位が分からなければ None）
     after_overflow: bool = False     # 同じ区切りにオーバーフローがあった（時刻の基準が怪しい）
+    time_relation: "TimestampRelation | None" = None   # ローカルの時刻の TC（SYNC 以外は時刻が遅れている）。時刻が未定なら None
 
 
 class Timestamper:
@@ -430,6 +431,7 @@ class Timestamper:
         self._pending: list[Packet] = []
         self._local = 0
         self._overflow = False
+        self._relation: TimestampRelation | None = None
         self._low = 0                    # グローバルの下位 26 ビット
         self._high: int | None = None    # グローバルの上位（ビット 26 から上）
 
@@ -442,6 +444,7 @@ class Timestamper:
         for p in packets:
             if isinstance(p, LocalTimestamp):
                 self._local += p.delta
+                self._relation = p.relation
                 out += self._release(self._local)
             elif isinstance(p, GlobalTimestamp1):
                 mask = (1 << p.bits) - 1
@@ -460,7 +463,8 @@ class Timestamper:
         return self._release(None)
 
     def _release(self, local: int | None) -> list[TimedPacket]:
-        out = [TimedPacket(p, local, self.global_time, self._overflow) for p in self._pending]
+        relation = None if local is None else self._relation
+        out = [TimedPacket(p, local, self.global_time, self._overflow, relation) for p in self._pending]
         self._pending, self._overflow = [], False
         return out
 

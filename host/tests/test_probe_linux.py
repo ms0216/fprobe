@@ -112,6 +112,32 @@ def test_event_after_last_pair_waits_for_next_pair(probe, tmp_path):
     assert len(events) == 1 and events[0].body["sync"]["outside"] is False
 
 
+def test_waiting_events_are_released_by_a_later_pair_even_when_scanned_in_between(probe, tmp_path):
+    """組を待つ出来事は、待つ間に新しい出来事が入っても（調べ済みの分を飛ばしても）、後ろの組ができたときに全部入る。"""
+    _connect(probe)
+    rec = probe._recorder = Recorder(tmp_path / "rec", 100e6)
+    now = time.monotonic()
+    rec.clock.add(now - 1, 0, 1e-4)
+    rec.clock.add(now + 1, 200_000_000, 1e-4)
+    t = probe._linux["pynq"]
+    t.clock.add(1_000_000_000, now, 1e-4)
+    t.clock.add(2_000_000_000, now + 1, 1e-4)
+
+    def keep(ns):
+        probe._linux_keep("pynq", t, {"method": "ptrace", "probe": "p", "target_ns": ns, "clock": "CLOCK_MONOTONIC_RAW"})
+
+    keep(1_500_000_000)                                           # 最後の組の前: すぐ入る
+    keep(2_100_000_000)                                           # 後: 待つ
+    keep(2_200_000_000)                                           # 待つ間にもう 1 つ（前の調べを飛ばす）
+    keep(1_600_000_000)                                           # 古い時刻で遅れて着いた: すぐ入る
+    assert [e[0]["target_ns"] for e in t.pending] == [2_100_000_000, 2_200_000_000]
+    t.clock.add(3_000_000_000, now + 2, 1e-4)
+    probe._linux_flush("pynq", t, final=False)
+    assert t.pending == [] and t.not_recorded == 0
+    rec.flush()
+    assert len(Recording.open(tmp_path / "rec").events(streams=["pynq.ptrace"])) == 4
+
+
 def test_events_without_recording_stay_in_memory(probe):
     _connect(probe)
     probe.linux_probe_add(target="pynq", name="tick", binary="/tmp/tick_arm", symbol="tick", method="ptrace", pid=1)

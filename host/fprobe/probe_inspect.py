@@ -1,7 +1,7 @@
 """Probe の道具: 止まったターゲットをソースの言葉で調べる（C の式・フレームの変数・型・逆アセンブル・
 周辺レジスタ（SVD）・メモリの表示）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_target_type を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_target_type を使う。
 結果はすべて JSON にできる形。仕様: docs/superpowers/specs/2026-10-17-f2-dwarf-design.md、
 docs/superpowers/specs/2026-10-17-f2-disasm-svd-design.md、計画: docs/superpowers/plans/2026-10-17-api-integration-a-d.md
 """

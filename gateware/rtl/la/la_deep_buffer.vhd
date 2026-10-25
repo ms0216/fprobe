@@ -111,9 +111,17 @@ architecture rtl of la_deep_buffer is
   constant SEG_EVENTS : std_logic_vector(7 downto 0) := x"02";
   constant EV_SIZE : unsigned(ADDR_BITS downto 0) := shift_left(to_unsigned(1, ADDR_BITS + 1), ADDR_BITS - 4);
   constant LA_SIZE : unsigned(ADDR_BITS downto 0) := shift_left(to_unsigned(1, ADDR_BITS + 1), ADDR_BITS) - EV_SIZE;
+  -- 1 つのかたまりで読む拍数（未読 n。最大 STREAM_CHUNK 拍）
+  function chunk_of(n : unsigned(31 downto 0)) return unsigned is
+  begin
+    if n > STREAM_CHUNK then
+      return to_unsigned(STREAM_CHUNK, ADDR_BITS + 1);
+    end if;
+    return resize(n, ADDR_BITS + 1);
+  end function;
   -- sys
   signal s_valid, s_hit, s_hit_raw, enc_trig, enc_triggered, enc_valid, enc_ready : std_logic;
-  signal pre_count : unsigned(31 downto 0) := (others => '0');
+  signal pre_left : unsigned(31 downto 0) := (others => '0');
   signal armed : std_logic := '0';
   signal s_data : std_logic_vector(WIDTH - 1 downto 0);
   signal enc_data : std_logic_vector(127 downto 0);
@@ -204,17 +212,23 @@ begin
               trig_fall => trig_fall, pw_enable => pw_enable, pw_event => pw_event, sample_valid => s_valid, sample => s_data, sample_hit => s_hit_raw);
   s_hit <= s_hit_raw and armed;
 
-  -- 開始からのサンプル数を数え、pretrigger に達したらトリガを受け付ける
+  -- 受け付けるまでの残りのサンプル数を数え、0 になったらトリガを受け付ける。armed は「このサンプルの前に残りが 0」
+  -- （サンプル n が来る周期に armed = '1' ⟺ n >= pretrigger。レジスタの 1 周期遅れで 1 サンプル余計に溜めない）
   process (clk)
   begin
     if rising_edge(clk) then
-      if run = '0' then
-        pre_count <= (others => '0');
-        armed     <= '0';
-      elsif pre_count >= pretrigger then
-        armed <= '1';
-      elsif s_valid = '1' then
-        pre_count <= pre_count + 1;
+      if run = '0' or run_prev = '0' then                  -- 止まっている間と開始の周期（run と同時に書かれた値も取る）
+        pre_left <= pretrigger;
+        if pretrigger = 0 and run = '1' then
+          armed <= '1';
+        else
+          armed <= '0';
+        end if;
+      elsif s_valid = '1' and pre_left /= 0 then
+        pre_left <= pre_left - 1;
+        if pre_left = 1 then
+          armed <= '1';
+        end if;
       end if;
     end if;
   end process;
@@ -401,21 +415,13 @@ begin
             end if;
             if r_busy = '0' then
               if take_ev then
-                seg_kind <= '1';
-                if resize(ev_unread_r, 32) > STREAM_CHUNK then
-                  rdr_count <= to_unsigned(STREAM_CHUNK, ADDR_BITS + 1);
-                else
-                  rdr_count <= resize(ev_unread_r, ADDR_BITS + 1);
-                end if;
-                s_state <= T_SUM;
+                seg_kind  <= '1';
+                rdr_count <= chunk_of(resize(ev_unread_r, 32));
+                s_state   <= T_SUM;
               elsif take_la then
-                seg_kind <= '0';
-                if unread_r > STREAM_CHUNK then
-                  rdr_count <= to_unsigned(STREAM_CHUNK, ADDR_BITS + 1);
-                else
-                  rdr_count <= resize(unread_r, ADDR_BITS + 1);
-                end if;
-                s_state <= T_SUM;
+                seg_kind  <= '0';
+                rdr_count <= chunk_of(unread_r);
+                s_state   <= T_SUM;
               elsif w_running = '0' then                       -- （止まっていれば ripe なので、未読は両方 0）
                 s_on <= '0';                                   -- 書き込みが止まり、出し切った
               end if;

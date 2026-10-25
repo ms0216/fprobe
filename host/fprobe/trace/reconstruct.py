@@ -15,6 +15,7 @@
     flow.history(32)                       # 最後の 32 命令（事後の命令履歴）
 """
 
+import re
 import bisect
 from collections import deque
 from collections.abc import Iterable
@@ -132,6 +133,10 @@ class Flow:
         return self.instructions(offset=max(0, self.count - count))
 
 
+# 行き先が命令の即値で決まる直接の分岐。PC を書く ldr/mov/add/pop は、即値が事後加算などでも常に間接
+_DIRECT_BRANCH = re.compile(r"(b|bl|blx)(eq|ne|cs|hs|cc|lo|mi|pl|vs|vc|hi|ls|ge|lt|gt|le|al)?|cbn?z")
+
+
 class Reconstructor:
     def __init__(self, memory: MemoryReader, symbols: Symbols | None = None, walk_limit: int = WALK_LIMIT):
         """memory: 命令を読むもの（ElfImage・TargetMemory・BytesMemory）。symbols: 関数名・ファイル:行（任意）。"""
@@ -156,7 +161,7 @@ class Reconstructor:
         base = decoded.mnemonic.split(".")[0]
         waypoint = bool(flow) or base in _TABLE_BRANCHES
         target = None
-        if flow in ("call", "jump") and base not in _TABLE_BRANCHES:
+        if flow in ("call", "jump") and _DIRECT_BRANCH.fullmatch(base):
             imms = [o.imm for o in decoded.operands if o.type == arm.ARM_OP_IMM]
             if imms:
                 target = imms[-1] & 0xFFFF_FFFF
@@ -200,8 +205,10 @@ class _Run:
                 self._mark("timestamp", value=e.value, **({"cycles": e.cycles} if e.cycles is not None else {}))
             elif isinstance(e, el.Event):
                 self._mark("event", events=e.events)
-            elif isinstance(e, (el.DecodeError, el.Truncated)):
-                message = e.message if isinstance(e, el.DecodeError) else "バイト列の終わりで切れたパケット"
+            elif isinstance(e, (el.DecodeError, el.Truncated, el.Unsynced)):
+                message = (e.message if isinstance(e, el.DecodeError) else
+                           f"同期が来ないまま終わり {len(e.raw)} バイトを読み飛ばした" if isinstance(e, el.Unsynced) else
+                           "バイト列の終わりで切れたパケット")
                 self._mark(e.kind, offset=e.offset, message=message)
                 self.errors.append(f"トレースの {e.offset} バイト目: {message}")
                 self._lose()

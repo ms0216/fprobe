@@ -1,7 +1,7 @@
 """Probe の道具: ターゲットが出す値とイベント（U16）。ITM のポート・RTT のチャンネルを型で解釈した値と、fprobe_user.h の
 名前付きイベント（mark / start / stop / value）を集め、区間を対にして集計する。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・swo_start・_swo_baud、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・swo_start・_swo_baud、
 WindowTools（出来事の窓）、ObserveTools（RTT の受信の横取り _rtt_listen）を使う。機器に触るのは必ず _lock の中。
 
 - ITM: SWO のバイト（イベント記録・記録の stream swo。デバイスの時刻）を窓で読む。SWO の受信のエンドポイント

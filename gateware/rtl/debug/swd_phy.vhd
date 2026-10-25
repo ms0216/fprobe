@@ -75,7 +75,7 @@ architecture rtl of swd_phy is
   signal timer     : unsigned(15 downto 0) := (others => '0');
   signal expired   : boolean := false;                      -- timer = 0（1 周期前に timer = 1 を見て決める。比較を
                                                             -- 多くのレジスタのクロックイネーブルの経路から外す。R24）
-  signal bits_left : natural range 0 to 64 := 0;            -- 今のビットを含む残り
+  signal bits_left : natural range 0 to 255 := 0;           -- 今のビットを含む残り（アイドル相は idle_cycles で最大 255）
   signal tx        : std_logic_vector(63 downto 0) := (others => '1');   -- 出すビット（下位から）
   signal rx        : std_logic_vector(63 downto 0) := (others => '0');   -- 取り込んだビット（読みデータは上位から、
                                                                          -- シーケンスはビット番号の位置へ入る）
@@ -294,7 +294,7 @@ begin
             elsif bits_left > 1 then
               bits_left <= bits_left - 1;
               tx        <= '1' & tx(63 downto 1);
-              if drives(phase) = '1' then
+              if drives(phase) = '1' and phase /= P_IDLE then       -- アイドル相は 0 のまま（64 ビットを超えても tx から 1 を出さない）
                 sdo <= tx(1);
               end if;
               sclk  <= '0';

@@ -87,6 +87,7 @@ class Etmv4Decoder:
             if not synced:
                 j = self._find_async(data, i)
                 if j is None:
+                    self._emit(el.Unsynced(offset=i, raw=data[i:]))      # 読み飛ばしたまま終わる: 捨てた分を明示する
                     break
                 self._emit(el.Async(offset=j, raw=data[j:j + _ASYNC_ZEROS + 1], skipped=j - i))
                 i, synced = j + _ASYNC_ZEROS + 1, True

@@ -10,6 +10,7 @@
  * 深いバッファ（P3）: /etc/fprobe/mem に「物理番地 大きさ」（例: 0x1E000000 0x2000000）があれば、その領域が Linux の
  * メモリ（/proc/iomem の System RAM）と重ならないことを確かめて PL の MEM_BASE に書く（重なれば書かない = PL は使わない）。
  *
+ * fprobe-relay --enable: レベルシフタを有効にするだけ（--isolate の対）。
  * fprobe-relay --isolate: レベルシフタを無効にするだけ（PL を書き直す前に fprobe-pl before が呼ぶ）。シフタが有効なまま
  * PL を書き直す・PS7 を持たない回路でシフタを有効にすると、PL から PS への信号が定まらず Linux が固まった（2026-10-20）。
  * SPDX-License-Identifier: AGPL-3.0-only
@@ -38,7 +39,7 @@
 #define MARKER "/run/fprobe/pl-design"
 #define MEM_CONF "/etc/fprobe/mem"
 #define UDP_PORT 63920
-#define SPIN_NS 2000000L               /* 動きがあった後は 2 ms 窓を見続ける（DAP の往復を速くする） */
+#define SPIN_NS 2000000               /* 動きがあった後は 2 ms 窓を見続ける（DAP の往復を速くする） */
 #define DRAIN_MAX 4                    /* 1 周に PC へ送るフレームの上限 */
 
 static volatile sig_atomic_t stop;
@@ -54,11 +55,11 @@ static void mmio_wr(void *ctx, uint32_t addr, uint32_t value)
     *(volatile uint32_t *)((uint8_t *)ctx + addr) = value;
 }
 
-static long now_ns(void)
+static int64_t now_ns(void)
 {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec * 1000000000L + t.tv_nsec;
+    return relay_ns(t.tv_sec, t.tv_nsec);
 }
 
 static void *map(int fd, uint32_t base)
@@ -85,8 +86,9 @@ static void setup_deep_buffer(const struct pl_ops *pl)
     if (m)
         fclose(m);
     iomem[n] = 0;
+    int truncated = n >= sizeof iomem - 1;                /* 後ろの System RAM を見落とすので、使えないとして断る */
     uint32_t mem_bytes = pl->rd(pl->ctx, REG_MEM_BYTES);  /* PL が MEM_BASE から実際に使う大きさ */
-    int r = (base > 0xFFFFFFFFull || size > 0xFFFFFFFFull || n == 0) ? -5
+    int r = (base > 0xFFFFFFFFull || size > 0xFFFFFFFFull || n == 0 || truncated) ? -5
             : relay_deep_region_ok(iomem, (uint32_t)base, (uint32_t)size, mem_bytes);
     if (r == 1) {
         fprintf(stderr, "fprobe-relay: この回路は深いバッファを持たない（MEM_BYTES = 0）\n");
@@ -116,10 +118,27 @@ static int isolate(void)
     return 0;
 }
 
+/* fprobe-relay --enable: レベルシフタを有効にするだけ（--isolate の対。Zynq DUT のように PS が AXI で PL を触る回路を書いた後） */
+static int enable_shifter(void)
+{
+    int mem = open("/dev/mem", O_RDWR | O_SYNC);
+    void *slcr = mem < 0 ? NULL : map(mem, SLCR_BASE);
+    if (!slcr) {
+        perror("fprobe-relay --enable");
+        return 1;
+    }
+    mmio_wr(slcr, SLCR_UNLOCK, 0xDF0D);
+    mmio_wr(slcr, SLCR_LVL_SHFTR_EN, 0xF);
+    mmio_wr(slcr, SLCR_LOCK, 0x767B);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--isolate") == 0)
         return isolate();
+    if (argc > 1 && strcmp(argv[1], "--enable") == 0)
+        return enable_shifter();
     if (access(MARKER, F_OK) != 0) {
         fprintf(stderr, "fprobe-relay: %s が無い（fprobe の回路が載っていない）。PL を読まずに終わる\n", MARKER);
         return 2;
@@ -165,7 +184,7 @@ int main(int argc, char **argv)
     struct relay_peer peer = { 0 };
     uint8_t in[2048], out[RELAY_MAX_PAYLOAD + 2];
     ssize_t pending = -1;                /* PL が busy で渡せていないデータグラムの長さ（-1 = 無い） */
-    long last_activity = now_ns(), last_check = last_activity;
+    int64_t last_activity = now_ns(), last_check = last_activity;
 
     while (!stop) {
         int active = 0;
@@ -197,10 +216,10 @@ int main(int argc, char **argv)
             }
             active = 1;
         }
-        long t = now_ns();
+        int64_t t = now_ns();
         if (active)
             last_activity = t;
-        if (t - last_check > 100000000L) {
+        if (t - last_check > 100000000) {
             last_check = t;
             if (relay_check_design(&pl) != 0) {
                 fprintf(stderr, "fprobe-relay: PL の ID が読めなくなった。終わる\n");

@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
@@ -44,6 +45,29 @@ class Spec:
             e = errors[0]
             where = ".".join(str(p) for p in e.path) or "(引数)"
             raise InvalidParams(f"{name}: {where}: {e.message}")
+        _integral(method.params, params)
+
+
+def _integral(schema: dict, value: Any):
+    """検証を通った値の中で、整数だけを受ける所（"integer"）の 3.0 のような整数値の小数を int にする（JSON Schema は 3.0 を整数と
+    みなすが、実装は range(count) 等で TypeError になる）。dict・list は in place、戻り値は直した値。number も受ける所は触らない。"""
+    kinds = [schema.get("type")] if "type" in schema else []
+    for alt in schema.get("anyOf", []):
+        kinds.append(alt.get("type"))
+    if isinstance(value, float) and "integer" in kinds and "number" not in kinds and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        for key in value:
+            if key in props:
+                value[key] = _integral(props[key], value[key])
+    elif isinstance(value, list):
+        subs = [schema] + schema.get("anyOf", [])
+        items = next((s["items"] for s in subs if isinstance(s.get("items"), dict)), None)
+        if items is not None:
+            for i, v in enumerate(value):
+                value[i] = _integral(items, v)
+    return value
 
 
 def load_spec(path: Path | None = None) -> Spec:

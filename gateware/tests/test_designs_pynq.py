@@ -41,3 +41,22 @@ def test_only_the_pynq_designs_have_the_fpga_observation_port():
         ports = {pin.port for pin in DESIGNS[name].project().pins}
         assert {"obs_tck", "obs_tms", "obs_tdi", "obs_tdo"} <= ports
         assert {"ps_pjtag_tck", "ps_pjtag_tms", "ps_pjtag_tdi", "ps_pjtag_tdo"} <= ports
+
+
+def test_zynq_dut_is_a_vivado_project_without_the_relay():
+    # Primer の fprobe が外からデバッグする側の回路（docs/superpowers/specs/2026-10-24-zynq-dut-environment-design.md）
+    d = DESIGNS["zynq_dut"]
+    assert d.capabilities is None and d.ps_axi
+    assert not any(other.ps_axi for name, other in DESIGNS.items() if name != "zynq_dut")
+    p = d.project()
+    assert isinstance(p, VivadoProject) and p.top == "pynq_z2_dut_top"
+    assert [b.name for b in p.block_designs] == ["ps7_bd.tcl"]
+    names = {s.name for s in p.sources}
+    assert {"dut_stream_core.vhd", "dut_pins.vhd", "dut_axil_slave.vhd", "dut_axil_core.vhd", "pynq_z2_dut_top.vhd",
+            "xilinx_mmcm.vhd", "reset_sync.vhd"} <= names
+    assert not names & {"zynq_frame_link.vhd", "fprobe_core.vhd"}
+    ports = {pin.port for pin in p.pins}
+    assert {f"dut_dbg[{i}]" for i in range(6)} <= ports
+    assert {f"rpi_pin[{i}]" for i in range(16)} <= ports
+    assert {"ps_pjtag_tck", "ps_pjtag_tms", "ps_pjtag_tdi", "ps_pjtag_tdo", "sys_clk_in"} <= ports
+    assert not any(port.startswith(("pmod1", "la_in")) for port in ports)      # JA は持たない（キーの線を動かさない）

@@ -15,6 +15,11 @@ def test_uart_rx(tmp_path):
                build_dir=tmp_path)
 
 
+def test_uart_fuzz(tmp_path):
+    run_cocotb(toplevel="uart_loopback", sources=[*UART, TEST_RTL / "uart_loopback.vhd"],
+               test_module="tests.tb.uart_fuzz_tb", build_dir=tmp_path)
+
+
 def test_uart_loopback(tmp_path):
     run_cocotb(toplevel="uart_loopback", sources=[*UART, TEST_RTL / "uart_loopback.vhd"],
                test_module="tests.tb.uart_loopback_tb", build_dir=tmp_path)

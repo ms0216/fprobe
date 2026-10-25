@@ -68,6 +68,10 @@ int relay_region_free(const char *iomem, uint32_t base, uint32_t size);
  * （-1 = 16 の倍数でない、-2 = 予約が PL の大きさより小さい、-3 = DDR の外、-4 = Linux のメモリと重なる） */
 int relay_deep_region_ok(const char *iomem, uint32_t base, uint32_t size, uint32_t mem_bytes);
 
+/* CLOCK_MONOTONIC の秒とナノ秒を 64 ビットのナノ秒にする。ARM の long は 32 ビットなので、秒 × 10^9 を long で
+ * 計算すると 2.1 秒で溢れる（経過時間の比べが狂い、待ちが効かず CPU を使い切る）。時刻の計算は必ずこれを通す */
+int64_t relay_ns(int64_t sec, int64_t nsec);
+
 /* 正しいデータグラムを受けたら宛先をその送り主に替える */
 void relay_peer_update(struct relay_peer *peer, uint32_t addr, uint16_t port);
 

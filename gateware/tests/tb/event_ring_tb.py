@@ -143,3 +143,42 @@ async def an_event_in_the_enabling_cycle_goes_to_the_head(dut):
     await ClockCycles(dut.clk, 2)
     assert int(dut.ev_written.value) == 1
     assert await read_events(dut, 0, 1) == [99]
+
+
+@cocotb.test()
+async def random_sessions_match_a_ring_model(dut):
+    # ランダムな記録（再開・休み・あふれ）の後に、ランダムな範囲を読む（書きが止まっている間）。
+    # 模型: 開始から n 件目はスロット n % DEPTH に入る。読みは first から count 件を折り返して出す。
+    await setup(dut)
+    rng = random.Random(77)
+    for session in range(60):
+        dut.ev_enable.value = 0
+        await ClockCycles(dut.clk, rng.randrange(1, 4))
+        dut.ev_enable.value = 1
+        slots, written = [None] * DEPTH, 0
+        for _ in range(rng.randrange(1, 5)):
+            n = rng.choice([0, 1, 3, DEPTH - 1, DEPTH, DEPTH + 1, 2 * DEPTH, rng.randrange(0, 2 * DEPTH)])
+            for _ in range(n):
+                v = rng.getrandbits(128)
+                dut.ev_valid.value = 1
+                dut.ev_data.value = v
+                await RisingEdge(dut.clk)
+                slots[written % DEPTH] = v
+                written += 1
+                if rng.random() < 0.3:
+                    dut.ev_valid.value = 0
+                    await ClockCycles(dut.clk, rng.randrange(1, 4))
+            dut.ev_valid.value = 0
+            await ClockCycles(dut.clk, rng.randrange(1, 5))
+        await ClockCycles(dut.clk, 3)
+        assert int(dut.ev_written.value) == written, (session, int(dut.ev_written.value), written)
+        for _ in range(3):
+            first = rng.randrange(0, 256)
+            count = rng.choice([1, 2, DEPTH - 1, DEPTH, DEPTH + 3, rng.randrange(1, 40)])
+            ready = random.Random(rng.random()) if rng.random() < 0.5 else None
+            got = await read_events(dut, first, count, ready_rng=ready)
+            assert len(got) == count
+            for i, g_ in enumerate(got):
+                e_ = slots[(first + i) % DEPTH]
+                if e_ is not None:                       # 書かれていないスロットは不定
+                    assert g_ == e_, (session, first, count, i)

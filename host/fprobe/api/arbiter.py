@@ -37,12 +37,16 @@ class Arbiter:
         self._ready: queue.Queue = queue.Queue()
         self._held: deque[tuple[Client, Callable[[], Any], Future, float]] = deque()      # 最後は保留した時刻
         self._paused_by: Client | None = None
+        self._closed = False
         self._thread = threading.Thread(target=self._work, name="fprobe-arbiter", daemon=True)
         self._thread.start()
 
     def submit(self, client: Client, kind: str, fn: Callable[[], Any]) -> Future:
         future: Future = Future()
         with self._lock:
+            if self._closed:                                  # 作業スレッドが止まった後は、積んでも実行されない
+                future.set_exception(RuntimeError("調停が閉じている（デーモンの終了中）"))
+                return future
             if self._paused_by is not None and kind == "control" and client.role != "human":
                 self._held.append((client, fn, future, time.monotonic()))
                 held = True
@@ -89,6 +93,8 @@ class Arbiter:
                     "paused_by": self._paused_by.name if self._paused_by else None, "held": len(self._held)}
 
     def close(self) -> None:
+        with self._lock:
+            self._closed = True
         self._ready.put(None)
         self._thread.join(timeout=5)
 

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ class Value:
 _TOKEN = re.compile(r"""
     \s*(?:
       (?P<float>\d+\.\d*(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)[fF]?
-    | (?P<number>0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)[uUlL]*
+    | (?P<number>0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)(?P<suffix>[uUlL]*)
     | (?P<char>'(?:\\.|[^\\'])')
     | (?P<file>"[^"]+")
     | (?P<name>[A-Za-z_]\w*)
@@ -83,8 +84,12 @@ def _tokens(text: str) -> list[tuple[str, object]]:
             out.append(("number", float(m["float"])))
         elif m["number"]:
             n = m["number"].lower()
-            out.append(("number", int(n, 16) if n.startswith("0x") else int(n[2:], 2) if n.startswith("0b")
-                        else int(n, 10)))
+            try:
+                value = (int(n, 16) if n.startswith("0x") else int(n[2:], 2) if n.startswith("0b")
+                         else int(n, 8) if len(n) > 1 and n.startswith("0") else int(n, 10))   # 先頭 0 は C の 8 進
+            except ValueError:
+                raise ExpressionError(f"整数として読めない: {m['number']}") from None
+            out.append(("unumber" if "u" in m["suffix"].lower() else "number", value))   # u 付きは unsigned
         elif m["char"]:
             body = m["char"][1:-1]
             out.append(("number", _ESCAPES.get(body[1], ord(body[1])) if body.startswith("\\") else ord(body)))
@@ -183,10 +188,14 @@ class _Evaluator:
                 left = self.apply(op, left, self.binary(level + 1))
 
     def apply(self, op: str, left: Value, right: Value) -> Value:
-        """+ - と && || 以外の二項演算（ponytail: 整数は数学の整数で計算する。unsigned の折り返しは見ない）。"""
+        """+ - と && || 以外の二項演算。整数どうしは C の整数拡張と通常の算術変換（int と unsigned は unsigned へ）で
+        型を決め、その幅で折り返す。"""
         a, b = self.scalar(left), self.scalar(right)
         if self.skip:
             return self.constant(0)
+        kind = self.integer_kind(left, right, shift=op in ("<<", ">>"))
+        if kind is not None and isinstance(a, int) and isinstance(b, int):
+            return self.integer_op(op, a, b, kind, self.integer_kind(right) if op in ("<<", ">>") else kind)
         if op in ("==", "!=", "<", ">", "<=", ">="):
             return self.constant(int({"==": a == b, "!=": a != b, "<": a < b, ">": a > b, "<=": a <= b,
                                       ">=": a >= b}[op]))
@@ -203,7 +212,62 @@ class _Evaluator:
             return self.constant(q if op == "/" else a - b * q)
         if isinstance(a, float) or isinstance(b, float):
             raise ExpressionError(f"{op} は整数だけ")
+        if op in ("<<", ">>") and not 0 <= b < 64:
+            raise ExpressionError(f"シフト量 {b} は 0〜63 の外（C では未定義）")
         return self.constant({"&": a & b, "|": a | b, "^": a ^ b, "<<": a << b, ">>": a >> b}[op])
+
+    def _int_type(self, size: int, signed: bool) -> CType:
+        return self._base_type((([] if signed else ["unsigned"]) + (["int"] if size == 4 else ["long", "long"])))
+
+    @staticmethod
+    def _promoted(value: Value) -> tuple[int, bool] | None:
+        """整数拡張した (大きさ, 符号あり)。整数・列挙・_Bool 以外（浮動小数・ポインタ・配列）は None。"""
+        s = strip(value.type)
+        if isinstance(s, BaseType) and s.encoding not in ("float", "unknown") and s.size:
+            size, signed = s.size, s.signed
+        elif isinstance(s, EnumType) and s.size:
+            size, signed = s.size, s.signed
+        else:
+            return None
+        if value.is_bitfield and value.bit_size < 32:
+            return 4, True
+        return (4, True) if size < 4 else (size, signed)
+
+    def integer_kind(self, left: Value, right: Value | None = None, shift: bool = False) -> tuple[int, bool] | None:
+        """二項演算の型 (大きさ, 符号あり)。シフトは左の型。整数どうしでなければ None。"""
+        a = self._promoted(left)
+        if right is None or shift:
+            return a
+        b = self._promoted(right)
+        if a is None or b is None:
+            return None
+        if a[0] == b[0]:
+            return a[0], a[1] and b[1]
+        return a if a[0] > b[0] else b
+
+    def integer_op(self, op: str, a: int, b: int, kind: tuple[int, bool], right_kind: tuple[int, bool]) -> Value:
+        size, signed = kind
+        def wrap(n: int, size: int = size, signed: bool = signed) -> int:
+            n &= (1 << (size * 8)) - 1
+            return n - (1 << (size * 8)) if signed and n >> (size * 8 - 1) else n
+        a = wrap(a)
+        if op in ("<<", ">>"):
+            if not 0 <= b < size * 8:
+                raise ExpressionError(f"シフト量 {b} は 0〜{size * 8 - 1} の外（C では未定義）")
+        else:
+            b = wrap(b)
+        if op in ("==", "!=", "<", ">", "<=", ">="):
+            return self.constant(int({"==": a == b, "!=": a != b, "<": a < b, ">": a > b, "<=": a <= b,
+                                      ">=": a >= b}[op]))
+        if op in ("/", "%"):
+            if b == 0:
+                raise ExpressionError("0 で割った")
+            q = abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1)       # C: 0 の方へ切り捨て
+            result = q if op == "/" else a - b * q
+        else:
+            result = {"*": a * b, "&": a & b, "|": a | b, "^": a ^ b, "<<": a << b if b < 1 << 16 else 0,
+                      ">>": a >> b}[op]
+        return self.rvalue(self._int_type(size, signed), wrap(result))
 
     def number(self, n: int | float) -> Value:
         return self.rvalue(self._base_type(["double"]), n) if isinstance(n, float) else self.constant(n)
@@ -247,6 +311,8 @@ class _Evaluator:
         kind, token = self.take()
         if kind == "number":
             return self.constant(token)
+        if kind == "unumber":
+            return self.rvalue(self._int_type(4 if token < (1 << 32) else 8, False), token)
         if kind == "file":                                  # "ファイル"::名前・"ファイル"::関数::名前（同じ名前の static を選ぶ）
             self.expect("::")
             name = f"{token[1:-1]}::{self.name()}"
@@ -393,7 +459,12 @@ class _Evaluator:
         if not size:
             raise ExpressionError(f"大きさの分からない型 {type_name(t)} の値は作れない")
         if isinstance(s, BaseType) and s.encoding == "float":
-            data = struct.pack("<f" if size == 4 else "<d", float(number))
+            if size not in (4, 8):
+                raise ExpressionError(f"大きさ {size} の浮動小数は扱えない")
+            try:
+                data = struct.pack("<f" if size == 4 else "<d", float(number))
+            except OverflowError:                       # C のキャストは範囲外を無限大にする
+                data = struct.pack("<f" if size == 4 else "<d", math.copysign(math.inf, number))
         else:
             data = (int(number) & ((1 << (size * 8)) - 1)).to_bytes(size, "little")
         return Value(t, ValuePlace(data), lvalue=False)
@@ -507,6 +578,10 @@ class _Evaluator:
         if isinstance(rs, (PointerType, ArrayType)) and sign > 0:
             return self.add(right, left, +1)
         a, b = self.scalar(left), self.scalar(right)
+        kind = self.integer_kind(left, right)
+        if kind is not None and isinstance(a, int) and isinstance(b, int):
+            size, signed = kind
+            return self.rvalue(self._int_type(size, signed), a + sign * b)    # rvalue が型の幅で折り返す
         result = a + sign * b
         if isinstance(result, float):
             return self.rvalue(self._base_type(["double"]), result)
@@ -521,6 +596,9 @@ class _Evaluator:
         if integer_only and not isinstance(number, int):
             raise ExpressionError(f"{symbol} は整数だけ")
         result = op(number)
+        kind = self._promoted(value)
+        if kind is not None and isinstance(result, int):
+            return self.rvalue(self._int_type(*kind), result)
         if isinstance(result, float):
             return self.rvalue(value.type, result)
         return self.constant(result)

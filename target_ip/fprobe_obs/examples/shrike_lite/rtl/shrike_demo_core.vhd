@@ -113,7 +113,7 @@ begin
             port map (clk => clk, rst => rst, probes => probes, tck => tck, tms => tms, tdi => tdi, tdo => tdo,
                       tdo_oe => tdo_oe);
     end generate;
-    no_obs_g : if OBS = 0 generate
+    no_obs_g : if OBS /= 1 and OBS /= 2 generate    -- 0 = なし。範囲外の値も tdo を 0 に駆動する
         tdo <= '0';
         tdo_oe <= '0';
     end generate;

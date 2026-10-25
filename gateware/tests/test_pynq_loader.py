@@ -55,7 +55,7 @@ def test_jtag_failure_does_not_start_the_relay(tmp_path):
     bit = tmp_path / "top.bit"
     bit.write_bytes(b"bit")
     with pytest.raises(PynqError, match="JTAG"):
-        PynqLoader(VivadoToolchain(tmp_path / "v"), run=run).program(bit, relay=True, design_id="x")
+        PynqLoader(VivadoToolchain(tmp_path / "v"), run=run).program(bit, relay=True, design_id="ab")
     assert len(run.calls) == 2
 
 
@@ -77,3 +77,26 @@ def test_a_relative_bitstream_path_is_passed_to_vivado_as_absolute(loader, tmp_p
     pynq.program(Path("b") / "top.bit", relay=False)
     tcl = Path(run.calls[1][run.calls[1].index("-source") + 1])
     assert tcl.is_absolute() and tcl.is_file()
+
+
+def test_shifter_is_enabled_after_writing_for_a_design_the_ps_reaches_over_axi(loader, tmp_path):
+    # PS7 を持つが中継を持たない回路（Zynq DUT）: 書いた後にレベルシフタを有効にしないと PS の AXI が PL に届かない
+    pynq, run = loader
+    bit = tmp_path / "top.bit"
+    bit.write_bytes(b"bit")
+    pynq.program(bit, relay=False, shifter=True)
+    before, vivado, enable = run.calls
+    assert before[-1].endswith("fprobe-pl before") and vivado[0].endswith("vivado.bat")
+    assert enable[0] == "ssh" and enable[-1] == "sudo -n /usr/local/bin/fprobe-pl enable"
+
+
+def test_shifter_stays_disabled_by_default_and_without_a_successful_write(loader, tmp_path):
+    pynq, run = loader
+    bit = tmp_path / "top.bit"
+    bit.write_bytes(b"bit")
+    pynq.program(bit, relay=False)
+    assert not any(c[-1].endswith("enable") for c in run.calls)
+    failing = FakeRun(fail_on="-source")
+    with pytest.raises(PynqError):
+        PynqLoader(VivadoToolchain(tmp_path / "v"), run=failing).program(bit, relay=False, shifter=True)
+    assert not any(c[-1].endswith("enable") for c in failing.calls)
