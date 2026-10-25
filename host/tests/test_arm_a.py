@@ -284,3 +284,10 @@ def test_arm11_not_found_on_the_chain():
     with pytest.raises(ArmDebugError, match="ARM1176"):
         connect(link, "bcm2835")
     assert link.closed
+
+
+def test_zynq7000_is_in_the_part_table():
+    # Zynq-7000（Cortex-A9 × 2）。デバッグの番地は OpenOCD の zynq の設定と同じ値で、実機では未確認（ROM テーブルが読めればそちらが先）
+    part = arm_a_part("zynq7000")
+    assert part is not None and part.kind == "v7" and part.idcode == 0x0BA00477
+    assert part.debug_bases == (0x80090000, 0x80092000)

@@ -14,7 +14,16 @@ fprobe と PC のソフトは同じで、見出しの印（0xA6 / 0xA7）で型�
 
 ## 入れ方（記録型）
 
-1. `rtl/obs_async_fifo.vhd` と `rtl/obs_core.vhd` を足す（VHDL-2008）。
+1. 構成に合わせて、次のファイルを足す（VHDL-2008。すべて `rtl/` の下）。
+
+   | 構成 | 足すファイル |
+   |---|---|
+   | FPGA の JTAG のユーザーの DR を使う（Xilinx `BSCANE2`・Intel `sld_virtual_jtag`）。2 クロック版 | `obs_async_fifo.vhd`、`obs_core.vhd` |
+   | ふつうのピン 4 本に TAP を作る（`obs_soft_core`）。`ONE_CLOCK = true`（既定）・`false` のどちらも | `obs_async_fifo.vhd`、`obs_core.vhd`、`obs_soft_tap.vhd`、`obs_soft_core.vhd`、**`obs_tck_sampler.vhd`** |
+   | 標本型（極小の FPGA 向け） | `obs_snap_core.vhd`、`obs_soft_tap.vhd`、`obs_tck_sampler.vhd` |
+
+   `obs_soft_core` は `ONE_CLOCK = false` でも `obs_tck_sampler` を参照するので、`obs_tck_sampler.vhd` を省くとビルドが止まる
+   （GHDL で「unit not found」になることを確認した。Vivado・Gowin・Quartus でも同じかは未確認）。
 2. `obs_core` の JTAG の口を、FPGA の JTAG のユーザーの DR につなぐ。
    - Xilinx: `BSCANE2`（`JTAG_CHAIN => 1` 等）の `TCK`・`TDI`・`TDO`・`SEL`・`CAPTURE`・`SHIFT`・`UPDATE`・`RESET`（→ `tlr`）。
    - Intel（MAX10 等）: `sld_virtual_jtag` の同じ意味の口。
@@ -90,7 +99,11 @@ PC が足し合わせ、印（fprobe が Update-DR の瞬間の自分の時刻�
 | 14 | CONTROL | bit0 = 開始（0 → 1 で始め直す。溢れの印も消える） |
 | 15 | SELECT | 観測する組（GROUPS 以上は無視）。記録中は、変化の無い周期（か溢れの立て直し）に組の記録を書くまで前の組を見続ける |
 
-TAP の Test-Logic-Reset で CONTROL と SELECT は 0 に戻る（たまった記録は残る）。
+TAP の Test-Logic-Reset で CONTROL と SELECT は 0 に戻る（たまった記録は残る）。`rst`（対象の回路のリセット）でも
+たまった記録は残る（読み出しの最中に捨てると FIFO の位置が壊れるため）。リセットの明けは、TCK 側の CONTROL・SELECT に
+従って鎖の始めから書き直す。ただしリセットの間の変化は数えられない（欠け）ので、再開は溢れの経路に乗せて「組 → 溢れ → 値」と書く
+（溢れの記録の `lost` は再開の準備の間に数えられた分だけ。0 でもよい = 「リセットなどで連続性が切れた」。溢れの印 `overflowed` も立つ）。
+鎖の始めの値（`delta` 0）は直前と同じ値でも必ず書く（変化の記録ではなく、鎖の出発点）。
 
 ## 標本型の DR
 

@@ -4,7 +4,7 @@ import cocotb
 from cocotb.triggers import ReadOnly, RisingEdge
 
 from tests.models.swd_target import (ACK_FAULT, ACK_OK, ACK_WAIT, AP_IDR, CDBGPWRUPACK, CDBGPWRUPREQ, DPIDR,
-                                     STKERRCLR, SwdTarget)
+                                     STICKYERR, STKERRCLR, SwdTarget)
 from tests.tb.common import start_clock_and_reset
 
 OP_SEQ_OUT, OP_SEQ_IN, OP_TRANSFER, OP_PINS = 0, 1, 2, 3
@@ -183,6 +183,91 @@ async def sample_delay_moves_the_sample_point(dut):
         await host.connect()
         ack, value, _ = await host.transfer(DP_READ_IDCODE)
         assert (ack, value) != (ACK_OK, DPIDR), delay
+
+
+@cocotb.test()
+async def random_configurations_and_outcomes_have_exact_clock_counts(dut):
+    """半周期・ターンアラウンド・データ相・アイドル・取り込みの遅れをランダムに変え、OK / WAIT / FAULT / パリティ異常 /
+    無応答（プロトコル異常）の転送とシーケンスを混ぜて、結果と SWCLK の立ち上がりの数（CMSIS-DAP 参照実装の
+    ビット数）が合う。"""
+    import random
+    rng = random.Random(97)
+    host, model = await setup(dut, output_delay_ns=15)
+    edges = [0]
+
+    async def count_edges():
+        while True:
+            await RisingEdge(dut.swclk)
+            edges[0] += 1
+
+    cocotb.start_soon(count_edges())
+    count_ref = host.command
+
+    async def counted(op, **kw):
+        edges[0] = 0
+        result = await count_ref(op, **kw)
+        return result, edges[0]
+
+    # 接続前: 無応答（ACK = 7 = プロトコル異常）。ビット数はターンアラウンド + 33 のバックオフを含む
+    for it in range(150):
+        turnaround, data_phase = rng.randint(1, 4), rng.getrandbits(1)
+        idle, half = rng.choice([0, 0, 1, 3, 8, 255]), rng.choice([2, 2, 3, 5])
+        dut.turnaround.value, dut.data_phase.value, dut.idle_cycles.value = turnaround, data_phase, idle
+        dut.half_period.value, dut.sample_delay.value = half, rng.choice([0, 1])
+        model.turnaround = turnaround
+        t = turnaround
+        if not model.line_reset:                                     # 最初の 1 回だけ接続前
+            (ack, _, _), n = await counted(OP_TRANSFER, request=DP_READ_IDCODE)
+            assert ack == 0b111 and n == 8 + t + 3 + t + 33, (it, ack, n)
+            await host.connect()
+        kind = rng.choice(["dp_read", "dp_write", "ap_ok", "wait", "fault", "parity", "seq_out", "seq_in", "pins"])
+        if kind == "dp_read":
+            (ack, data, perr), n = await counted(OP_TRANSFER, request=DP_READ_IDCODE)
+            assert (ack, data & 0xFFFFFFFF, perr) == (ACK_OK, DPIDR, 0), (it, ack, hex(data), perr)
+            assert n == 8 + t + 3 + 33 + t + idle, (it, n, t, idle)
+        elif kind == "parity":
+            model.corrupt_next_parity = True
+            (ack, data, perr), n = await counted(OP_TRANSFER, request=DP_READ_IDCODE)
+            assert (ack, data & 0xFFFFFFFF, perr) == (ACK_OK, DPIDR, 1), (it, ack, hex(data), perr)
+            assert n == 8 + t + 3 + 33 + t + idle, (it, n)
+        elif kind == "dp_write":
+            value = rng.getrandbits(32) & ~(1 << 29) & ~(1 << 31)
+            (ack, _, _), n = await counted(OP_TRANSFER, request=DP_WRITE_SELECT, data=value & ~0x1F0)
+            assert ack == ACK_OK and n == 8 + t + 3 + t + 33 + idle, (it, ack, n)
+            assert model.select == value & ~0x1F0
+        elif kind == "ap_ok":
+            tar = rng.getrandbits(32)
+            (ack, _, _), n = await counted(OP_TRANSFER, request=AP_WRITE_TAR, data=tar)
+            await host.transfer(DP_WRITE_SELECT, 0)
+            assert ack in (ACK_OK, ACK_FAULT) and n == (8 + t + 3 + t + 33 + idle if ack == ACK_OK
+                                                       else 8 + t + 3 + t + 33 * data_phase), (it, ack, n)
+        elif kind in ("wait", "fault"):
+            if kind == "wait":
+                model.wait_next = 1
+            else:
+                model.ctrl_stat |= STICKYERR
+            rw = rng.choice([AP_WRITE_TAR, AP_READ_DRW])
+            (ack, _, _), n = await counted(OP_TRANSFER, request=rw, data=5)
+            assert ack == (ACK_WAIT if kind == "wait" else ACK_FAULT), (it, kind, ack)
+            assert n == 8 + t + 3 + t + 33 * data_phase, (it, kind, rw, n, t, data_phase)
+            if rw == AP_READ_DRW and data_phase:                     # 読みのダミーデータ相はプルアップの 1 が続く
+                await host.command(OP_SEQ_OUT, count=8, data=0)           # （モデルは 0 の後の 1 を開始ビットと見る）
+            if kind == "fault":
+                assert (await host.transfer(DP_WRITE_ABORT, STKERRCLR))[0] == ACK_OK
+        elif kind == "seq_out":
+            c = rng.choice([1, 2, 31, 32, 33, 63, 64, rng.randint(1, 64)])
+            value = rng.getrandbits(c)
+            (ack, _, _), n = await counted(OP_SEQ_OUT, count=c, data=value)
+            assert n == c, (it, c, n)
+            await host.connect()                                     # ランダムなビットがモデルを迷わせたので繋ぎ直す
+        elif kind == "seq_in":
+            c = rng.choice([1, 2, 31, 32, 33, 63, 64, rng.randint(1, 64)])
+            (_, data, _), n = await counted(OP_SEQ_IN, count=c)
+            assert n == c and data == (1 << c) - 1, (it, c, n, hex(data))
+            await host.command(OP_SEQ_OUT, count=8, data=0)          # モデルは 0 の後の 1 を開始ビットと見る
+        else:
+            _, pins, _ = await host.command(OP_PINS, data=(1 << 9) | 0b10)
+            await host.command(OP_PINS, data=(1 << 9) | (1 << 8) | 0b11)
 
 
 @cocotb.test()

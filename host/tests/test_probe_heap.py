@@ -60,6 +60,9 @@ class HeapCpu:
     def step(self):
         pass
 
+    def read32(self, address):                      # DFSR: 1 命令のステップは HALTED だけ立つ
+        return 1
+
     def resume(self):
         while self.stops:
             stop = self.stops.pop(0)

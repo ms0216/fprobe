@@ -41,8 +41,8 @@ begin
     generic map (INIT => '1')
     port map (clk => clk, d => rx, q => rx_sync);
 
-  bit_end  <= timer = divisor - 1;
-  half_bit <= timer = shift_right(divisor, 1) - 1;
+  bit_end  <= timer >= divisor - 1;    -- 途中で divisor を小さくされても通り過ぎない（= だと 2^N 周期止まる）
+  half_bit <= timer >= shift_right(divisor, 1) - 1;
 
   process (clk)
   begin

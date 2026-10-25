@@ -300,6 +300,7 @@ begin
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
                  HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
                  UART_FLOW => work.design_caps_pkg.UART_FLOW,
+                 RESET_SPLIT => true,        -- 最悪の経路が reset_sync の出力の扇出（約 3500）だった。docs/reports/fprobe-core-notes.md §2
                  LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
                  LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
                  AUX => work.design_caps_pkg.AUX, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,

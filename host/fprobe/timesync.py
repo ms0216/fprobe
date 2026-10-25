@@ -33,7 +33,7 @@ class ParentTime:
 
 def fit_parent(pairs: list[tuple[int, int]]) -> ParentTime | None:
     """組 (子の刻み, 親の刻み) の直線。2 組未満は傾きが決まらないので None。"""
-    if len(pairs) < 2:
+    if len({local for local, _ in pairs}) < 2:          # 子の時刻が 1 種類以下: 傾きが決まらない
         return None
     edges = [(local - _RX, parent + g.SYNC_TX_LATENCY_TICKS) for local, parent in pairs]
     local0, parent0, ratio = fit_line(edges)
@@ -66,9 +66,12 @@ def interpolator(pairs: list[tuple[int, int]]) -> Callable[[float], float]:
     """両側の組の間の直線（内挿）で子の時刻を親の刻みに。2 枚の時計の速さの比が記録の間に変わっても（温度等）、
     組の分解能で合う（全体に 1 本の直線 fit_parent では、比の揺れの分だけ場所によってずれる）。
     組の範囲の外は、端の 2 組の直線をそのまま延ばす（範囲の外を使うかは呼ぶ側が決める）。2 組以上が要る。"""
-    edges = sorted((local - _RX, parent + g.SYNC_TX_LATENCY_TICKS) for local, parent in pairs)
+    by_x: dict[int, list[int]] = {}
+    for local, parent in pairs:
+        by_x.setdefault(local - _RX, []).append(parent + g.SYNC_TX_LATENCY_TICKS)
+    edges = [(x, sum(ys) / len(ys)) for x, ys in sorted(by_x.items())]      # 同じ子の時刻の組は親の時刻の平均 1 点に
     if len(edges) < 2:
-        raise ValueError("内挿には組が 2 つ以上要る")
+        raise ValueError("内挿には子の時刻が違う組が 2 つ以上要る")
     xs = [x for x, _ in edges]
 
     def to(local: float) -> float:

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .la import Transitions
-from .recording import NO_DATA, ClockMap, Event, Recorder, Recording, _Chunk, write_json
+from .recording import NO_DATA, ClockMap, Event, HostEvents, Recorder, Recording, _Chunk, connect_db, in_list, write_json
 from .recording_summary import SummaryGrid, bin_counts
 
 __all__ = ["DEFAULT_DECIMATE", "INDEX_LEVEL", "Policy", "SegmentedRecorder", "SegmentedRecording"]
@@ -97,12 +97,7 @@ class Policy:
 
 
 def _connect(path: Path, schema: str = "") -> sqlite3.Connection:
-    db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=10)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")
-    if schema:
-        db.executescript(schema)
-    return db
+    return connect_db(path, schema, timeout=10)
 
 
 def _bytes_of(directory: Path) -> int:
@@ -110,16 +105,16 @@ def _bytes_of(directory: Path) -> int:
 
 
 def _toggles(values) -> int:
-    out, previous = 0, values[0] if len(values) else 0
-    for v in values:
-        out |= v ^ previous
-        previous = v
+    """値の列の中で変化したビット。あるビットが変化する = 最初の値と違う値が出る（異なる値だけ見れば足りる）。"""
+    first, out = values[0] if len(values) else 0, 0
+    for v in set(values):
+        out |= v ^ first
     return out
 
 
 # --- 書き手 ------------------------------------------------------------------------------------
 
-class SegmentedRecorder:
+class SegmentedRecorder(HostEvents):
     """長期の記録の書き手（Recorder と同じ口。スレッド安全）。clock は分割の時間と間引きの年齢に使う壁時計（秒）。"""
 
     def __init__(self, directory: Path, timebase_hz: float, meta: dict | None = None, policy: Policy | None = None,
@@ -158,11 +153,6 @@ class SegmentedRecorder:
         rows = list(rows)
         with self._lock:
             self._current.add_many(rows)
-
-    def add_host(self, stream: str, kind: str, host_s: float, **fields: Any) -> int:
-        t, unc = self.clock.to_ticks(host_s)
-        self.add(stream, kind, t, uncertainty=unc, **fields)
-        return t
 
     def add_waveform(self, tr: Transitions, start_ticks: int) -> str:
         tps = tr.sample_period_s * self.timebase_hz
@@ -278,7 +268,7 @@ class SegmentedRecorder:
             db = _connect(directory / "recording.sqlite")
             try:
                 if streams:
-                    db.execute(f"DELETE FROM events WHERE stream IN ({','.join('?' * len(streams))})", streams)
+                    db.execute(f"DELETE FROM events WHERE {in_list('stream', streams)}", streams)
                 if WAVEFORM in self.policy.decimate_streams:
                     for name, in db.execute("SELECT path FROM chunks").fetchall():
                         (directory / "waveform" / name).unlink(missing_ok=True)
@@ -413,7 +403,7 @@ class SegmentedRecording(Recording):
 
     def iter_events(self, t0: int | None = None, t1: int | None = None, streams: list[str] | None = None,
                     kinds: list[str] | None = None, limit: int | None = None,
-                    overlapping: bool = False) -> Iterator[Event]:
+                    overlapping: bool = False, a: int | None = None) -> Iterator[Event]:
         """範囲に重なる分割だけを読み、時刻順に返す（時刻の重なる分割どうしは混ぜて並べる）。"""
         segs = sorted((s for s in self._live() if overlapping and t0 is not None and s.t0 is not None
                        and (t1 is None or s.t0 < t1) or s.overlaps(t0, t1)), key=lambda s: s.t0)
@@ -428,7 +418,7 @@ class SegmentedRecording(Recording):
             for group in groups:
                 readers = [Recording(self.directory / s.path) for s in group]
                 try:
-                    its = [r.iter_events(t0, t1, streams, kinds, None, overlapping) for r in readers]
+                    its = [r.iter_events(t0, t1, streams, kinds, None, overlapping, a) for r in readers]
                     yield from heapq.merge(*its, key=lambda e: e.t)
                 finally:
                     for r in readers:
@@ -517,7 +507,7 @@ class SegmentedRecording(Recording):
         上限も分からない（unknown["bounded"] = False）。按分等で推定しない。"""
         sealed = [s for s in segs if s.state == "sealed"]
         deleted = [s for s in segs if s.state == "deleted"]
-        where_streams = f" AND stream IN ({','.join('?' * len(streams))})" if streams else ""
+        where_streams = f" AND {in_list('stream', streams)}" if streams else ""
         args_streams = list(streams or [])
 
         def add(out: dict, rows) -> None:
@@ -548,14 +538,14 @@ class SegmentedRecording(Recording):
                     continue
                 db = reads.db(seg)
                 dropped = [s for s in seg.dropped if s != WAVEFORM and (not streams or s in streams)]
-                keep = f" AND stream NOT IN ({','.join('?' * len(dropped))})" if dropped else ""
+                keep = f" AND {in_list('stream', dropped, negate=True)}" if dropped else ""
                 add(out, db.execute(f"SELECT stream, COUNT(*) FROM events WHERE t >= ? AND t < ?{where_streams}{keep} "
                                     "GROUP BY stream", [a, b, *args_streams, *dropped]))
                 if dropped:                                        # 間引いた stream: [a, b) の件数は分からない（bin の件数以下）
                     w0 = self.grid.w0
                     bin_ = a // w0
-                    for _s, n in db.execute(f"SELECT stream, count FROM summary WHERE level = 0 AND bin = ? AND stream IN "
-                                            f"({','.join('?' * len(dropped))})", [bin_, *dropped]):
+                    for _s, n in db.execute("SELECT stream, count FROM summary WHERE level = 0 AND bin = ? AND "
+                                            + in_list("stream", dropped), [bin_, *dropped]):
                         if n:
                             unknown["any"] = True
                             unknown["extra"] += n
@@ -603,7 +593,7 @@ class SegmentedRecording(Recording):
         aligned = level is not None and start % width == 0
         end = start + width * count
         first = start // width
-        where = f" AND stream IN ({','.join('?' * len(streams))})" if streams else ""
+        where = f" AND {in_list('stream', streams)}" if streams else ""
         out: dict[str, array] = {}
 
         def add(rows, offset: int) -> None:
@@ -665,7 +655,7 @@ class SegmentedRecording(Recording):
         first, last = lo // w, -(-hi // w)
         per_pixel = -(-(last - first) // width)
         edges = [(first + i * per_pixel) * w for i in range(width + 1)]
-        where = f" AND stream IN ({','.join('?' * len(streams))})" if streams else ""
+        where = f" AND {in_list('stream', streams)}" if streams else ""
         table: dict[str, list[int]] = {}
         for stream, b, n in self._index.execute(
                 f"SELECT stream, bin, count FROM summary WHERE level = ? AND bin >= ? AND bin < ?{where}",

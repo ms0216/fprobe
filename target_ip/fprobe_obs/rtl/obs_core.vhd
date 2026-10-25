@@ -106,23 +106,63 @@ architecture rtl of obs_core is
     constant T_VALUE    : std_logic_vector(1 downto 0) := "00";
     constant T_MARK     : std_logic_vector(1 downto 0) := "01";
     constant T_OVERFLOW : std_logic_vector(1 downto 0) := "10";
-    constant T_CTRL  : std_logic_vector(1 downto 0) := "11";
+    constant T_CTRL     : std_logic_vector(1 downto 0) := "11";
     constant C_GROUP    : std_logic_vector(3 downto 0) := x"0";
     constant C_RESPONSE : std_logic_vector(3 downto 0) := x"1";
 
     subtype count_t is unsigned(DEPTH_BITS downto 0);
     subtype group_t is natural range 0 to GROUPS - 1;
+    subtype delta_t is unsigned(13 downto 0);
+    subtype word16_t is std_logic_vector(15 downto 0);
+    constant DELTA_ONE  : delta_t := to_unsigned(1, 14);                 -- 記録を書いた直後の delta（次の周期で 1）
+    -- 制御の記録（組の番号・応答）の上位 14 ビットと下位 16 ビット
+    constant GROUP_HEAD : std_logic_vector(13 downto 0) := C_GROUP & (9 downto 0 => '0');
+
+    function response_head(addr : std_logic_vector(3 downto 0)) return std_logic_vector is
+    begin
+        return C_RESPONSE & "000000" & addr;
+    end function;
+
+    function group_low(g : group_t) return word16_t is
+    begin
+        return x"00" & std_logic_vector(to_unsigned(g, 8));
+    end function;
+
+    -- 読みの応答の値（CONTROL・SELECT は TCK 側の値。書いた後は動かない）
+    function register_value(addr : std_logic_vector(3 downto 0); control : std_logic; select_group : group_t)
+        return word16_t is
+    begin
+        case to_integer(unsigned(addr)) is
+            when 0 => return x"4253";
+            when 1 => return x"464F";
+            when 2 => return std_logic_vector(to_unsigned(VERSION, 16));
+            when 3 => return std_logic_vector(to_unsigned(GROUPS, 16));
+            when 4 => return std_logic_vector(to_unsigned(FIFO_DEPTH, 16));
+            when 5 => return std_logic_vector(to_unsigned(CLOCK_HZ mod 65536, 16));
+            when 6 => return std_logic_vector(to_unsigned(CLOCK_HZ / 65536, 16));
+            when 7 => return std_logic_vector(to_unsigned(SYNC_DELAY_HALVES, 16));
+            when 8 => return std_logic_vector(to_unsigned(SAMPLE_DELAY, 16));
+            when 9 => return std_logic_vector(to_unsigned(LOST_BITS, 16));
+            when REG_CONTROL => return (0 => control, others => '0');
+            when REG_SELECT => return std_logic_vector(to_unsigned(select_group, 16));
+            when others => return (others => '0');
+        end case;
+    end function;
 
     -- FIFO
     signal w_valid : std_logic;
     signal w_data  : std_logic_vector(31 downto 0);
     signal w_free  : count_t;
     signal r_pop   : std_logic;
-    signal r_ahead : std_logic;
     signal r_data  : std_logic_vector(31 downto 0);
     signal r_count : count_t;
 
     ---------------------------------------------------------------- TCK 側
+    -- TCK は動かないことがあるので reset を持たず、tlr（Test-Logic-Reset）で初期化する。tlr より前に使う信号は無い:
+    -- t_cmd は 16 ビット受けた後（t_bits）、t_cnt・t_flags は Capture-DR の後、t_req_* は t_req_tog が変わった後にだけ読まれ、
+    -- t_reg_tog・t_req_tog は値そのものに意味が無い（clk 側が reset で今の値を写し取って、変わったのを見る）。
+    -- よって宣言の初期値を合成が無視しても動作は変わらない（tlr までの t_control・t_select を除く。clk 側は reset の明けに
+    -- t_control を写すので、構成の直後に TCK が来ないまま reset が明けても記録は始まらない前提 = 初期値 0 に頼る）。
     signal t_in_hdr    : std_logic := '0';                          -- 今の語は見出し
     signal t_cnt       : count_t := (others => '0');                -- 見出しの count（Capture-DR の時点の記録の数）
     signal t_flags     : std_logic_vector(1 downto 0) := (others => '0');   -- 見出しの bit17・16
@@ -177,8 +217,8 @@ begin
 
     fifo : entity work.obs_async_fifo
         generic map (WIDTH => 32, DEPTH_BITS => DEPTH_BITS, SAME_CLOCK => ONE_CLOCK)
-        port map (w_clk => clk, w_rst => rst, w_valid => w_valid, w_data => w_data, w_free => w_free,
-                  r_clk => tck, r_pop => r_pop, r_ahead => r_ahead, r_data => r_data, r_count => r_count);
+        port map (w_clk => clk, w_valid => w_valid, w_data => w_data, w_free => w_free,
+                  r_clk => tck, r_pop => r_pop, r_data => r_data, r_count => r_count);
 
     ---------------------------------------------------------------- TCK 側
     -- TDO は語の中の位置 t_pos のビットを選んで出す（語をシフトレジスタに読み込まない。FIFO の先頭 r_data は
@@ -187,7 +227,6 @@ begin
     tdo <= t_hdr(to_integer(t_pos)) when t_in_hdr = '1' else
            r_data(to_integer(t_pos)) when t_record = '1' else
            '0';
-    r_ahead <= '0';
     -- 記録の語の最後のビットを送り出す周期に取り除く
     r_pop <= tck_ce and sel and shift and t_record and not tlr when t_pos = 31 else '0';
 
@@ -268,7 +307,7 @@ begin
         variable avail    : count_t;               -- 実効の空き（w_valid は登録の出力なので、まだ FIFO に届いていない）
         variable free_1, free_2, free_4 : boolean; -- 空きが 1・2・4 語以上（FIFO の深さの幅で比べる）
         variable lost_1   : unsigned(LOST_BITS - 1 downto 0);   -- lost + 1（上限で止める。加算器は 1 つ）
-        variable delta_1  : unsigned(13 downto 0);              -- delta + 1（上限で止める）
+        variable delta_1  : delta_t;                            -- delta + 1（上限で止める）
         variable reg      : std_logic_vector(15 downto 0);
         -- この周期に書く記録 = 種類 | 上位 14 ビット | 下位 16 ビット（時刻のある記録の delta はどれも上位）
         variable wr       : boolean;
@@ -303,22 +342,7 @@ begin
             wl := (others => '0');
             resync := false;
 
-            -- 読みの応答の値（CONTROL・SELECT は TCK 側の値。書いた後は動かない）
-            case to_integer(unsigned(p_addr)) is
-                when 0 => reg := x"4253";
-                when 1 => reg := x"464F";
-                when 2 => reg := std_logic_vector(to_unsigned(VERSION, 16));
-                when 3 => reg := std_logic_vector(to_unsigned(GROUPS, 16));
-                when 4 => reg := std_logic_vector(to_unsigned(FIFO_DEPTH, 16));
-                when 5 => reg := std_logic_vector(to_unsigned(CLOCK_HZ mod 65536, 16));
-                when 6 => reg := std_logic_vector(to_unsigned(CLOCK_HZ / 65536, 16));
-                when 7 => reg := std_logic_vector(to_unsigned(SYNC_DELAY_HALVES, 16));
-                when 8 => reg := std_logic_vector(to_unsigned(SAMPLE_DELAY, 16));
-                when 9 => reg := std_logic_vector(to_unsigned(LOST_BITS, 16));
-                when REG_CONTROL => reg := (0 => t_control, others => '0');
-                when REG_SELECT => reg := std_logic_vector(to_unsigned(t_select, 16));
-                when others => reg := (others => '0');
-            end case;
+            reg := register_value(p_addr, t_control, t_select);
 
             -- 頼み（読み・印）を受ける。印は記録中だけ（止まっている間の時刻は意味を持たない）
             if p_sync = '1' and late /= LATE_MAX then
@@ -348,10 +372,16 @@ begin
                     p_value <= '0';
                 elsif running = '0' then
                     sel_group <= t_select;
-                    overflowed <= '0';
+                    -- リセットの明けの再開は、リセットの間の変化を数えられない = 欠け。溢れの経路に乗せて、lost = 0
+                    -- （これから数えられる分だけ）の溢れの記録（gap）を鎖の始めの前に書く
+                    overflowed <= reload;
                     chained <= '0';
                     lost <= (others => '0');
-                    dropping <= '0';
+                    dropping <= reload;
+                    if reload = '1' then
+                        -- rst が prev を 0 にしたので、開始時の値を基準にし直す（そうしないと変わっていない値を失った変化に数える）
+                        prev <= probes(16 * t_select + 15 downto 16 * t_select);
+                    end if;
                     resync := true;
                 elsif sel_group /= t_select then
                     -- 記録中の切り替え: 再同期せず、変化の無い周期（か溢れの立て直し）に組の記録を書くまで前の組を
@@ -371,7 +401,7 @@ begin
                         if p_resp = '1' and free_1 then
                             wr := true;
                             wk := T_CTRL;
-                            wh := C_RESPONSE & "000000" & p_addr;
+                            wh := response_head(p_addr);
                             wl := reg;
                             p_resp <= '0';
                         end if;
@@ -391,13 +421,13 @@ begin
                     when S_GROUP =>
                         wr := true;
                         wk := T_CTRL;
-                        wh := C_GROUP & (9 downto 0 => '0');
+                        wh := GROUP_HEAD;
                         if p_switch = '1' then                         -- 待っていた切り替えもここで（前の組が毎周期
-                            wl := x"00" & std_logic_vector(to_unsigned(next_group, 8));   -- 変わって変化の無い周期が
+                            wl := group_low(next_group);   -- 変わって変化の無い周期が
                             sel_group <= next_group;                   -- 来なくても、溢れの後には切り替わる）
                             p_switch <= '0';
                         else
-                            wl := x"00" & std_logic_vector(to_unsigned(sel_group, 8));
+                            wl := group_low(sel_group);
                         end if;
                         if dropping = '1' and changed then             -- この周期の変化も失ったものとして数える（R17）
                             lost <= lost_1;
@@ -434,7 +464,7 @@ begin
                             wh := std_logic_vector(delta);
                         end if;
                         prev <= value;
-                        delta <= to_unsigned(1, 14);
+                        delta <= DELTA_ONE;
                         chained <= '1';
                         state <= S_RUN;
                     when S_RUN =>
@@ -453,7 +483,7 @@ begin
                                     p_value <= '0';
                                 end if;
                             end if;
-                            delta <= to_unsigned(1, 14);
+                            delta <= DELTA_ONE;
                         elsif delta = DELTA_MAX then
                             -- 変化の無いまま delta が上限: 刻み（書けなければ溢れとして始め直す）
                             if free_1 then
@@ -467,7 +497,7 @@ begin
                                 chained <= '0';
                                 state <= S_RESYNC;
                             end if;
-                            delta <= to_unsigned(1, 14);
+                            delta <= DELTA_ONE;
                         elsif p_sync = '1' and free_2 then
                             wr := true;
                             wk := T_MARK;
@@ -476,12 +506,12 @@ begin
                             p_sync <= '0';
                             p_group <= '1';
                             p_value <= '1';
-                            delta <= to_unsigned(1, 14);
+                            delta <= DELTA_ONE;
                         elsif p_switch = '1' and free_2 then
                             wr := true;                            -- 組の切り替え: 組の記録、次の周期に今の値
                             wk := T_CTRL;
-                            wh := C_GROUP & (9 downto 0 => '0');
-                            wl := x"00" & std_logic_vector(to_unsigned(next_group, 8));
+                            wh := GROUP_HEAD;
+                            wl := group_low(next_group);
                             sel_group <= next_group;
                             p_switch <= '0';
                             p_group <= '0';
@@ -490,8 +520,8 @@ begin
                         elsif p_group = '1' and free_2 then
                             wr := true;
                             wk := T_CTRL;
-                            wh := C_GROUP & (9 downto 0 => '0');
-                            wl := x"00" & std_logic_vector(to_unsigned(sel_group, 8));
+                            wh := GROUP_HEAD;
+                            wl := group_low(sel_group);
                             p_group <= '0';
                             delta <= delta_1;
                         elsif p_value = '1' and free_2 then
@@ -499,11 +529,11 @@ begin
                             wh := std_logic_vector(delta);
                             wl := value;
                             p_value <= '0';
-                            delta <= to_unsigned(1, 14);
+                            delta <= DELTA_ONE;
                         elsif p_resp = '1' and free_2 then
                             wr := true;
                             wk := T_CTRL;
-                            wh := C_RESPONSE & "000000" & p_addr;
+                            wh := response_head(p_addr);
                             wl := reg;
                             p_resp <= '0';
                             delta <= delta_1;

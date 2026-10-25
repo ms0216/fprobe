@@ -98,12 +98,12 @@ def test_probe_reads_the_halt_reason_from_dfsr_and_the_instruction_at_pc():
         def read16(self, address):
             return self.code[address]
 
-    panic = SimpleNamespace(target=Core(0x02, {0x1003B5E0: 0xBE00}), _dbg=None)
+    panic = SimpleNamespace(target=Core(0x02, {0x1003B5E0: 0xBE00}), _dbg=None, _link=None)
     assert Probe._halt_reason(panic, 0x1003B5E0) == {"halt_reason": "bkpt_instruction", "halt_bits": ["BKPT"]}
-    mine = SimpleNamespace(target=Core(0x03, {0x20000100: 0xBE00}), _dbg=SimpleNamespace(breakpoints={0x20000100: 1}))
+    mine = SimpleNamespace(target=Core(0x03, {0x20000100: 0xBE00}), _dbg=SimpleNamespace(breakpoints={0x20000100: 1}), _link=None)
     assert Probe._halt_reason(mine, 0x20000100) == {"halt_reason": "breakpoint", "halt_bits": ["HALTED", "BKPT"]}
-    assert Probe._halt_reason(SimpleNamespace(target=Core(0x01, {}), _dbg=None), 0x100)["halt_reason"] == "request"
-    assert Probe._halt_reason(SimpleNamespace(target=SimpleNamespace(), _dbg=None), 0x100) == {}   # 読めない
+    assert Probe._halt_reason(SimpleNamespace(target=Core(0x01, {}), _dbg=None, _link=None), 0x100)["halt_reason"] == "request"
+    assert Probe._halt_reason(SimpleNamespace(target=SimpleNamespace(), _dbg=None, _link=None), 0x100) == {}   # 読めない
 
 
 def test_halt_reason_is_only_read_on_cortex_m():

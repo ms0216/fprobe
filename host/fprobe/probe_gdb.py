@@ -1,7 +1,7 @@
 """Probe の道具: GDB サーバ（fprobe.gdb）の粒度の操作。レジスタ・メモリ・ブレークポイント・実行と停止の判定・
 RTOS のタスク（GDB のスレッド）・Flash の書き込み。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・dbg・_debug・_symbols・target_connect・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_debug・_symbols・target_connect・
 target_halt・target_reset・target_fault・_kernel（RtosTools）・_watch_stops・_service_in_background・_sh_watch・
 _sh_exit・_logs（ObserveTools）を使う。機器に触るのは必ず _lock の中。API（JSON-RPC・MCP）には出さない
 （呼ぶのはデーモンの GDB サーバだけ。調停と記録はデーモンが行う）。
@@ -22,6 +22,7 @@ from pyocd.core.target import Target
 from pyocd.flash.loader import MemoryLoader
 
 from .debug import _REASONS
+from .flash import Image, Segment
 from .gdb.description import Region
 from .probe_observe import SEMIHOSTING
 
@@ -67,7 +68,7 @@ class GdbTools:
 
     def _init_gdb(self) -> None:
         self._gdb_breaks: dict[int, set[str]] = {}      # 番地 → GDB の持ち主（接続）
-        self._gdb_watches: dict[int, set[str]] = {}
+        self._gdb_watches: dict[int, dict[str, set[tuple[str, int]]]] = {}
         self._gdb_exit_seen = None                       # 最後に GDB へ返したセミホスティングの終了（_sh_exit）
 
     # --- 接続 ----------------------------------------------------------------------------------
@@ -177,7 +178,7 @@ class GdbTools:
             elif insert:
                 self._gdb_watch(owner, address, length, _KINDS[kind])
             else:
-                self._gdb_unwatch(owner, address)
+                self._gdb_unwatch(owner, address, _KINDS[kind])
 
     def _gdb_break(self, owner: str, address: int, hardware: bool) -> None:
         dbg = self.dbg
@@ -208,21 +209,54 @@ class GdbTools:
                 dbg.remove_breakpoint(address)
 
     def _gdb_watch(self, owner: str, address: int, length: int, kind: str) -> None:
+        """Z2/Z3/Z4。同じ番地に種類・長さの違うものが重なるなら、全部を満たす 1 つ（読みと書きなら access・長い方の長さ）
+        を置く（比較器は番地ごとに 1 つの表）。持ち主ごとに（種類・長さ）を覚え、外すときは残りで置き直す。"""
         dbg = self.dbg
-        if address not in dbg.watches:
-            dbg.watchpoint(address, length, kind)
-            self._gdb_watches.setdefault(address, set()).add(owner)
-        elif address in self._gdb_watches:
-            self._gdb_watches[address].add(owner)
+        if address in dbg.watches and address not in self._gdb_watches:
+            return                                             # AI・画面が置いたもの: 共有する（持ち主にならない）
+        wants = self._gdb_watches.setdefault(address, {})
+        wants.setdefault(owner, set()).add((kind, length))
+        try:
+            self._gdb_watch_apply(address)
+        except Exception:
+            wants[owner].discard((kind, length))
+            if not wants[owner]:
+                del wants[owner]
+            if not wants:
+                del self._gdb_watches[address]
+            else:
+                self._gdb_watch_apply(address)
+            raise
 
-    def _gdb_unwatch(self, owner: str, address: int) -> None:
-        owners = self._gdb_watches.get(address)
-        if owners is None or owner not in owners:
+    def _gdb_watch_apply(self, address: int) -> None:
+        """番地の持ち主たちの求めを満たす 1 つのウォッチポイントにする（置き直しで失敗したら外れたまま例外）。"""
+        wants = [w for entries in self._gdb_watches[address].values() for w in entries]
+        kinds = {k for k, _ in wants}
+        kind = kinds.pop() if len(kinds) == 1 else "access"
+        length = max(n for _, n in wants)
+        current = self.dbg.watches.get(address)
+        if current is not None and (current.kind, current.size) == (kind, length):
             return
-        owners.discard(owner)
-        if not owners:
-            del self._gdb_watches[address]
+        if current is not None:
             self.dbg.remove_watchpoint(address)
+        self.dbg.watchpoint(address, length, kind)
+
+    def _gdb_unwatch(self, owner: str, address: int, kind: str | None = None) -> None:
+        """kind を渡せばその種類の求めだけ外す（z2/z3/z4）。持ち主が残る求めがあれば置き直す。"""
+        wants = self._gdb_watches.get(address)
+        if wants is None or owner not in wants:
+            return
+        if kind is None:
+            del wants[owner]
+        else:
+            wants[owner] = {w for w in wants[owner] if w[0] != kind}
+            if not wants[owner]:
+                del wants[owner]
+        if wants:
+            self._gdb_watch_apply(address)
+            return
+        del self._gdb_watches[address]
+        self.dbg.remove_watchpoint(address)
 
     # --- 実行 ------------------------------------------------------------------------------------
 
@@ -382,7 +416,13 @@ class GdbTools:
             self.target                                        # 未接続ならここで失敗する
             self._require_halt_mode("Flash の書き込み")
             loader = MemoryLoader(self._debug, keep_unwritten=False)
-            for address, data in blocks:
-                loader.add_data(address, list(data))
+            fbp = self._flash_bp_active()
+            image = Image([Segment(a, bytes(d)) for a, d in blocks if d], "bin", "gdb")
+            if fbp is not None:
+                image = fbp.fold(image)                        # 書くセクタの BKPT は元の中身にして一緒に書く（flash() と同じ）
+            for segment in image.segments:
+                loader.add_data(segment.address, list(segment.data))
             loader.commit()
+            if fbp is not None:
+                fbp.forget(image)                              # 書いたセクタの BKPT の記録を捨てる（次の再開で書き直す）
             return {"bytes": sum(len(d) for _, d in blocks), "seconds": round(time.monotonic() - started, 3)}

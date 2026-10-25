@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from elftools.dwarf.callframe import CFARule, FDE, RegisterRule
@@ -119,6 +120,10 @@ class CallFrameTable:
         fdes = [e for e in entries if isinstance(e, FDE)]
         self._entries = sorted((_Entry(f["initial_location"], f["initial_location"] + f["address_range"], f)
                                 for f in fdes), key=lambda e: e.start)
+        self._starts = [e.start for e in self._entries]
+        self._reach: list[int] = []                       # 先頭からそこまでの終わりの番地の最大（find の打ち切り）
+        for e in self._entries:
+            self._reach.append(max(e.end, self._reach[-1]) if self._reach else e.end)
         self._decoded: dict[int, list] = {}
         self._parsers: dict[int, DWARFExprParser] = {}
 
@@ -134,10 +139,14 @@ class CallFrameTable:
         return len(self._entries)
 
     def find(self, pc: int) -> _Entry | None:
-        for e in self._entries:                           # FDE は関数の数だけ（数百）: 素直に探す
-            if e.start <= pc < e.end:
-                return e
-        return None
+        """pc を含む FDE。重なっていれば開始番地の小さいほう（開始番地の順に先頭から探したときと同じ）。"""
+        found = None
+        j = bisect.bisect_right(self._starts, pc) - 1    # 開始番地が pc 以下の最後
+        while j >= 0 and self._reach[j] > pc:            # それより前に pc まで届くものが無ければ打ち切る
+            if pc < self._entries[j].end:
+                found = self._entries[j]
+            j -= 1
+        return found
 
     def row_at(self, pc: int) -> tuple[dict, int, DWARFExprParser] | None:
         """(行, 戻り先のレジスタ番号, 式の字句解析器)。行は {"cfa": CFARule, 番号: RegisterRule}。"""

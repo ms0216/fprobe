@@ -3,6 +3,8 @@
 #   before        中継を止め、「fprobe の回路が載っている」印を消し、PS と PL の間のレベルシフタを無効にする
 #                 （書き直す間に PL を読まない。シフタが有効なまま書き直すと Linux が固まった。2026-10-20）
 #   after <id>    印を置き、中継を起動し直す（zynq_frame_link を持つ回路を書いたときだけ）
+#   enable        PS と PL の間のレベルシフタを有効にするだけ（中継を持たないが PS が AXI で触る回路 = Zynq DUT を
+#                 書いた後。PS7 を持つ回路のときだけ使う。持たない回路で有効にすると Linux が固まった）
 set -e
 case "$1" in
   before)
@@ -14,6 +16,8 @@ case "$1" in
     mkdir -p /run/fprobe
     echo "$2" > /run/fprobe/pl-design
     systemctl restart fprobe-relay ;;
+  enable)
+    /usr/local/bin/fprobe-relay --enable ;;
   *)
-    echo "usage: fprobe-pl before | after <id>" >&2; exit 2 ;;
+    echo "usage: fprobe-pl before | after <id> | enable" >&2; exit 2 ;;
 esac

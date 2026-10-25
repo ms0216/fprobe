@@ -55,6 +55,13 @@ PYNQ_Z2 = Board(
         "sync": (Pin("sync_in", "B19", pull="DOWN"), Pin("sync_out", "A20", drive=8)),
         "obs_jtag": tuple(Pin(port, loc, pull=pull, drive=8) if port != "obs_tdo" else Pin(port, loc, pull=pull)
                           for port, loc, pull in _OBS_JTAG),
+        # Zynq DUT 回路の注目信号（PMOD JB の 1〜4・7〜8 番 = la_in と同じ 6 つの位置。DUT 回路が出力する。プルは引き下げ）
+        "dut_dbg": tuple(Pin(f"dut_dbg[{i}]", loc, pull="DOWN", drive=8)
+                         for i, loc in enumerate("W14 Y14 T11 T10 V16 W16".split())),
+        # Zynq DUT のピン診断（RPi ヘッダの GPIO12〜27 の 16 本を、PS から出力・入力に切り替えて読み戻す）。添字 i = GPIO(12 + i) =
+        # ヘッダ 32・33・8・10・36・11・12・35・38・40・15・16・18・22・37・13 番（出典は上の base.xdc）。GPIO8〜11（ヘッダ 24・21・19・23 番）は
+        # PS の PJTAG の素通しが使うので入れない。プルは付けない（診断の間、端子が浮いているかを読み戻しで見る）
+        "dut_rpi": tuple(Pin(f"rpi_pin[{i}]", loc, drive=8) for i, loc in enumerate("B20 W8 V6 Y6 B19 U7 C20 Y8 A20 Y9 U8 W6 Y7 F20 W9 V7".split())),
         "ps_pjtag": (*(Pin(port, loc, pull=pull) for port, loc, pull in _PS_PJTAG), Pin("ps_pjtag_tdo", "V10", drive=8)),
     },
     input_clock_port="sys_clk_in",

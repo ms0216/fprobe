@@ -389,7 +389,7 @@ def test_names_label_the_watches_and_the_sample_rows(probe):
 def test_names_stay_with_the_recording(probe, tmp_path, monkeypatch):
     # 記録中に付けた名前は記録の情報に残り、観測を止めた後・後から開いた記録でも段の名前になる
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
-    monkeypatch.setattr("fprobe.mcp_server.Collector", lambda *a, **k: SimpleNamespace(
+    monkeypatch.setattr("fprobe.probe_recording.Collector", lambda *a, **k: SimpleNamespace(
         start=lambda: None, stop=lambda: None, poll=lambda: None, obs=None, lost=0))
     probe._symbols = None
     probe.session.device.capabilities = lambda: SimpleNamespace(sampler=True, sys_clock_hz=100_000_000,
@@ -454,3 +454,31 @@ def test_watch_measure_reads_the_live_values(probe):
         probe.watch_measure(0, 1, source="capture")
     with pytest.raises(KeyError):
         probe.watch_measure(0, 1, names=["nothing"])
+
+
+def test_series_keeps_time_increasing_across_the_48_bit_wrap(probe):
+    """イベントの時刻は 48 ビット。折り返しをまたぐ並びで、時刻がタイムベース（64 ビット）で単調に増える（以前は戻って、
+    時刻順を前提にする窓・内挿・取得が壊れた）"""
+    probe.watch_set(["0x20000000"], rate_hz=1000)
+    wrap = 1 << 48
+    probe.session.device.time = lambda: 3 * wrap + 300
+    FakeEventLog.events = [sample(wrap - 200, 0x20000000, 0), sample(wrap - 100, 0x20000000, 1),
+                           sample(0, 0x20000000, 2), sample(100, 0x20000000, 3)]
+    got = probe.watch_series("0x20000000")["samples"]
+    times = [s["time_us"] for s in got]
+    assert [s["value"] for s in got] == ints(0, 1, 2, 3)
+    assert times == sorted(times) and times[2] - times[1] == pytest.approx(1.0, abs=0.01)   # 100 刻み = 1 µs
+
+
+def test_trigger_drain_does_not_drop_events_after_the_48_bit_wrap(live):
+    """条件つきの取得: 折り返しの後のイベントを「もう見た時刻」として捨てない（skip_until が 48 ビットのままだった）"""
+    probe, _ = live
+    probe.watch_set(["0x20000400"])
+    wrap = 1 << 48
+    probe.session.device.ticks = 3 * wrap + 300
+    RingLog.events = [sample(wrap - 200, 0x20000400, 0), sample(wrap - 100, 0x20000400, 1)]
+    probe.watch_trigger(pre_s=1.0)                                  # プリトリガ: ここまでの 2 件を補う
+    RingLog.events += [sample(0, 0x20000400, 2), sample(100, 0x20000400, 3)]      # 折り返しの後
+    probe.watch_capture(wait_s=0.3)
+    got = [s["value"] for s in probe.watch_capture()["samples"]["0x20000400"]]
+    assert got == ints(0, 1, 2, 3)

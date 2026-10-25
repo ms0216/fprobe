@@ -1,7 +1,7 @@
 """Probe の道具: 接続の手順の上書きとロック解除（U30）。J-Link Script Files・LinkServer のスクリプト・pyOCD の user script、
 STM32CubeProgrammer のオプションバイト、保護の解除に当たる。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・target_disconnect と、LowLevelTools の
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・target_disconnect と、LowLevelTools の
 _raw_dp（未接続の DP）を使う。機器に触るのは必ず _lock の中。
 
 - 接続の手順: target_connect の script（"builtin:<名前>" かファイル）を pyOCD の user_script に渡す。ここでは

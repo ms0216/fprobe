@@ -1,6 +1,6 @@
 """Probe の道具: 記録の stream "rtos" から、タスクの表・CPU 負荷の推移・割り込みの統計（記録だけがあるとき）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。記録（_reading）だけを読み、機器には触らない。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。記録（_reading）だけを読み、機器には触らない。
 
 取っている最中・止めた後の時間軸（rtos_timeline_get / rtos_timeline_load）と同じ定義・同じ形で返す（画面・AI が
 記録から自分で数えないように。行の上限で黙って欠けない: 記録の行を全部読む）。

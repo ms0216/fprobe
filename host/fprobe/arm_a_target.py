@@ -43,6 +43,8 @@ ARM_A_PARTS = (
     # BCM2836: 4 コアのデバッグ 0x80010000 + 0x2000 × n（OpenOCD の target/bcm2836.cfg と同じ。実機で未確認）
     ArmAPart("bcm2836", "v7", 0x0BA00477, (0x80010000, 0x80012000, 0x80014000, 0x80016000),
              "Raspberry Pi 2 Model B（BCM2836、Cortex-A7 × 4）"),
+    # Zynq-7000: 2 コアのデバッグ 0x80090000 + 0x2000 × n（OpenOCD の target/zynq_7000.cfg と同じ。実機で未確認。ROM テーブルが読めればそちらが先）
+    ArmAPart("zynq7000", "v7", 0x0BA00477, (0x80090000, 0x80092000), "Zynq-7000（Cortex-A9 × 2。PS の DAP は PJTAG / independent の起動）"),
     ArmAPart("arm11", "arm11", 0x07B7617F, description="ARM1176JZF-S（ARM11 の TAP）"),
     ArmAPart("bcm2835", "arm11", 0x07B7617F, description="Raspberry Pi Zero / 1（BCM2835、ARM1176JZF-S）"),
 )
@@ -88,7 +90,20 @@ class ArmATarget:
         self.core.resume()
 
     def step(self, disable_interrupts: bool = True, start: int = 0, end: int = 0, hook_cb=None) -> None:
-        self.core.step(mask_interrupts=disable_interrupts)
+        # 現在の PC に一致のブレークポイントが有効なままだと、再開と同時に成立して 1 命令も進まない（ARMv7 の外部デバッグ。
+        # OpenOCD の cortex_a_step も同じく外す）。進めている間だけ外し、終わったら置き直す。
+        pc = self.read_core_register("pc")
+        index = self.breakpoints.get(pc)
+        if index is None:
+            self.core.step(mask_interrupts=disable_interrupts)
+            return
+        with self._halted():
+            self.core.clear_breakpoint(index)
+        try:
+            self.core.step(mask_interrupts=disable_interrupts)
+        finally:
+            with self._halted():
+                self.core.set_breakpoint(index, pc)
 
     def get_halt_reason(self):
         return _REASONS.get(self.core.halt_cause())                  # 表に無い理由は None（分からない）

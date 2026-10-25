@@ -1,7 +1,7 @@
 """Probe の道具: タスクの時間軸の解析（U09）。窓ごとの CPU 負荷・ジョブの指標・横取りを除いた区間・スタックとヒープの
 推移・スレッドと割り込みの合成・優先度の逆転。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。RtosTools の時間軸（_current_timeline: 取っている最中ならいままでの分、
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。RtosTools の時間軸（_current_timeline: 取っている最中ならいままでの分、
 止めた後なら最後の結果）と、記録（_reading。2 点の組を取る）を使う。計算はすべて fprobe.rtos.analysis。
 機器には触らない（一覧に無い TCB の名前を読むのは RtosTools の _learn_names が _lock の中で）。
 

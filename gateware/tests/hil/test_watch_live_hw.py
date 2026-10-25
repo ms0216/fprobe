@@ -7,6 +7,7 @@
 
 import time
 from pathlib import Path
+from tests.hil.values import num
 
 import pytest
 
@@ -47,7 +48,7 @@ def test_the_sampler_reads_as_fast_as_it_can_when_asked_for_100_khz(probe):
     assert status["errors"] == 0, status
     assert mean < 1.2 * min(gaps) + 5, (min(gaps), mean)                        # 周期を飛ばさない（揃った間隔）
     assert 1e6 / mean > 22_000, mean                                            # B17: 計算で約 27 kHz（従来 8.4 kHz）
-    assert samples[-1]["value"] > samples[0]["value"]                           # 走っている
+    assert num(samples[-1]["value"]) > num(samples[0]["value"])                           # 走っている
     probe.watch_stop()
 
 
@@ -66,28 +67,28 @@ def test_host_reads_while_the_sampler_holds_the_line(probe):
     samples = probe.watch_series(f"0x{visits:08X}", last=4096)["samples"]
     print("\nホストの読み 50 回の間:", status)
     assert status["errors"] == 0, status
-    assert samples[-1]["value"] > samples[0]["value"]
+    assert num(samples[-1]["value"]) > num(samples[0]["value"])
     probe.watch_stop()
 
 
 def test_writes_while_running_do_not_stop_the_target(probe):
     done = probe.watch_write("sensors[1].scale", 3.5)
-    assert done["value"] == 3.5 and probe.target_status()["state"] == "RUNNING", done
+    assert num(done["value"]) == 3.5 and probe.target_status()["state"] == "RUNNING", done
     bits = probe.watch_write("sensors[1].flags.level", -2)
-    assert bits["value"] == -2 and not bits["atomic"]
+    assert num(bits["value"]) == -2 and not bits["atomic"]
     probe.watch_set(["sensors[1].scale"], rate_hz=1000)
     time.sleep(0.1)
-    assert probe.watch_values()["values"][0]["value"] == 3.5
+    assert num(probe.watch_values()["values"][0]["value"]) == 3.5
     probe.watch_stop()
 
 
 def test_pointer_expressions_follow_a_new_target(probe):
     probe.watch_set(["head->pos.x"], chase_rate_hz=200)
     time.sleep(0.3)
-    assert probe.watch_values()["values"][0]["value"] == 10                    # sensors[0]
+    assert num(probe.watch_values()["values"][0]["value"]) == 10                    # sensors[0]
     probe.watch_write("head", probe._symbols.variable("sensors").address + probe._watch_target("sensors[0]").size)
     time.sleep(0.3)
-    assert probe.watch_values()["values"][0]["value"] == -1                    # sensors[1]
+    assert num(probe.watch_values()["values"][0]["value"]) == -1                    # sensors[1]
     series = probe.watch_series("head->pos.x")["samples"]
     gaps = [b["time_us"] - a["time_us"] for a, b in zip(series, series[1:])]
     print("chase", len(series), sum(gaps) / len(gaps))
@@ -100,7 +101,7 @@ def test_a_value_condition_starts_a_capture_with_pretrigger(probe):
     name = f"0x{visits:08X}"
     probe.watch_set([name], rate_hz=10_000)
     time.sleep(0.05)
-    now = probe.watch_values()["values"][0]["value"]
+    now = num(probe.watch_values()["values"][0]["value"])
     probe.watch_trigger(start={"variable": name, "op": ">=", "value": now + 50_000}, pre_s=0.001, post_s=0.002)
     result = probe.watch_capture(wait_s=10)
     assert result["state"] == "done" and result["reason"] == "post", result

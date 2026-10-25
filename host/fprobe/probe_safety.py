@@ -1,6 +1,6 @@
 """Probe の道具: 止める前の手がかりと、走らせたままの見張り（止まらずに回り続けている状態）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・_symbols・_monitor を使う。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・_symbols・_monitor を使う。
 
 - halt_risk: ELF だけで、使う側が halt_risk_set で明示した名前・正規表現に合うシンボルがあるか（fprobe.halt_risk）と、
   ELF に止めずにデバッグするモニタ（target.debug_mode の monitor）があるか。機器には触らない。既定の名前の表は
@@ -109,7 +109,7 @@ class SafetyTools:
     def _fatal_state(self, state: str) -> dict | None:
         """走っているコアが致命的エラーで回り続けていれば、その様子（_lock の中で。target_status から）。読めなければ
         None（見張りは状態の読みを妨げない）。"""
-        if state not in ("RUNNING", "LOCKUP") or getattr(self, "_monitor", None) is not None \
+        if state not in ("RUNNING", "LOCKUP") or self._monitor is not None \
                 or getattr(self.target, "debug_architecture", None) in NOT_CORTEX_M:     # DHCSR・DWT は Cortex-M だけ
             self._liveness.reset()
             return None

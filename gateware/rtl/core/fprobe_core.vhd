@@ -61,6 +61,9 @@ entity fprobe_core is
                                            -- FEATURES の LA_STREAM_EVENTS と一致させる。外部メモリのある構成で）
     -- 外部メモリの無い構成のイベント記録の件数（2 のべき。0 = 無し。外部メモリのある構成では使わない）
     EVENT_RING_BITS : natural := 0;
+    -- リセットの扇出の分割（タイミングの余裕のため。false = 全部 rst をそのまま使う = 従来と同じ回路。true = 回路の塊ごと
+    -- に rst を 1 周期遅らせた別のレジスタを使う: 解除もアサートも全塊で同じだけ 1 周期遅れる）
+    RESET_SPLIT   : boolean := false;
     INJECTOR      : boolean := true        -- 故障注入 = 割り込み書き込み（swd_injector。XTRIG の一部。無ければ
                                            -- xtrig の inject_status.result = 3、route.to_inject は何もしない）
   );
@@ -178,6 +181,9 @@ entity fprobe_core is
 end entity;
 
 architecture rtl of fprobe_core is
+  -- 塊ごとのリセット: 0 = バス・CSR、1 = DAP・デバッグポート・サンプラ、2 = SWO・UART・補助・同期・観測、3 = ロジアナ・
+  -- トリガ・クロストリガ、4 = イベント記録・外部メモリ
+  signal rst_g : std_logic_vector(0 to 4);
   signal wait_retry : unsigned(15 downto 0);                -- DAP_TransferConfigure の WAIT の再試行（サンプラ・割り込み書き込みも）
   signal bus_req, bus_we, bus_ack, bus_err : std_logic;
   signal bus_addr  : csr_addr_t;
@@ -253,28 +259,19 @@ architecture rtl of fprobe_core is
   signal events_written, events_lost, events_capacity : std_logic_vector(31 downto 0) := (others => '0');
   signal event_valid : std_logic := '0';
   signal event_data : std_logic_vector(127 downto 0) := (others => '0');
-  -- UART・SWO のバイトのイベント（0 = UART 受信、1 = UART 送信、2 = SWO）
-  type byte_array_t is array (0 to 2) of std_logic_vector(7 downto 0);
-  type time_array_t is array (0 to 2) of std_logic_vector(47 downto 0);
-  signal byte_fire, byte_held : std_logic_vector(2 downto 0) := (others => '0');
-  signal byte_in, byte_data : byte_array_t := (others => (others => '0'));
-  signal byte_time : time_array_t := (others => (others => '0'));
   signal byte_lost : unsigned(31 downto 0) := (others => '0');
   -- 補助マイコンの計測値（イベント 6 として 1 件保持）
-  signal aux_valid, aux_held : std_logic := '0';
+  signal aux_valid : std_logic := '0';
   signal aux_ch : natural range 0 to 3;
   signal aux_value : unsigned(13 downto 0);
-  signal aux_word : std_logic_vector(31 downto 0) := (others => '0');
-  signal aux_time : std_logic_vector(47 downto 0) := (others => '0');
   -- 対象の FPGA の観測（イベント 8・9 として 1 件保持）
-  signal obs_valid, obs_sync, obs_held, obs_held_sync : std_logic := '0';
-  signal obs_data, obs_addr, obs_word, obs_word_addr : std_logic_vector(31 downto 0) := (others => '0');
-  signal obs_time, obs_word_time : std_logic_vector(47 downto 0) := (others => '0');
+  signal obs_valid, obs_sync : std_logic := '0';
+  signal obs_data, obs_addr : std_logic_vector(31 downto 0) := (others => '0');
+  signal obs_time : std_logic_vector(47 downto 0) := (others => '0');
   -- ボードの間の時刻の同期の組（イベント 10 として 1 件保持）
-  signal sync_valid, sync_held : std_logic := '0';
-  signal sync_local, sync_word_time : std_logic_vector(47 downto 0) := (others => '0');
-  signal sync_parent, sync_word : std_logic_vector(63 downto 0) := (others => '0');
-  signal events_enable_prev : std_logic := '0';
+  signal sync_valid : std_logic := '0';
+  signal sync_local : std_logic_vector(47 downto 0) := (others => '0');
+  signal sync_parent : std_logic_vector(63 downto 0) := (others => '0');
   signal mem_base, mem_count, mem_seed : std_logic_vector(31 downto 0);
   signal mem_errors, mem_first, mem_wc, mem_rc : std_logic_vector(31 downto 0) := (others => '0');
   -- 割り込み・モニタ・クロストリガ
@@ -286,6 +283,7 @@ architecture rtl of fprobe_core is
   signal select_shadow : std_logic_vector(31 downto 0);
   signal csw_shadow, tar_shadow : std_logic_vector(31 downto 0);
   signal shadow_valid : std_logic;
+  signal shadow_ap : std_logic_vector(7 downto 0);
   -- DAP サンプラ（swd_injector と debug_port の間）
   signal port_cmd_valid, port_cmd_ready, up_rsp_valid, up_busy : std_logic;
   signal port_cmd_op : std_logic_vector(1 downto 0);
@@ -295,10 +293,6 @@ architecture rtl of fprobe_core is
   signal smp_valid, smp_busy, smp_run : std_logic := '0';
   signal smp_addr, smp_data : std_logic_vector(31 downto 0) := (others => '0');
   signal smp_ack, smp_last_ack : std_logic_vector(2 downto 0) := (others => '0');
-  signal smp_held : std_logic := '0';
-  signal smp_word, smp_word_data : std_logic_vector(31 downto 0) := (others => '0');
-  signal smp_word_ack : std_logic_vector(2 downto 0) := (others => '0');
-  signal smp_time : std_logic_vector(47 downto 0) := (others => '0');
   signal inj_ap : std_logic_vector(7 downto 0);
   signal inj_addr, inj_value : std_logic_vector(31 downto 0);
   signal inj_busy, inj_written : std_logic;
@@ -340,14 +334,23 @@ architecture rtl of fprobe_core is
   signal dap_div_req, dap_div_done, uart_div_req, uart_div_done : std_logic;
   signal dap_div_num, dap_div_den, uart_div_num, uart_div_den, div_quot : unsigned(31 downto 0);
 begin
+  split_reset_g : if RESET_SPLIT generate
+    reset_fanout_i : entity work.reset_fanout
+      generic map (COUNT => 5)
+      port map (clk => clk, rst => rst, rst_out => rst_g);
+  end generate;
+  single_reset_g : if not RESET_SPLIT generate
+    rst_g <= (others => rst);
+  end generate;
+
   ctrl_slice_i : entity work.stream_slice
     generic map (WIDTH => 9)
-    port map (clk => clk, rst => rst, in_valid => ctrl_in_valid, in_ready => ctrl_in_ready,
+    port map (clk => clk, rst => rst_g(0), in_valid => ctrl_in_valid, in_ready => ctrl_in_ready,
               in_data => ctrl_in_last & ctrl_in_data, out_valid => ctrl_s_valid, out_ready => ctrl_s_ready,
               out_data => ctrl_s);
 
   control_i : entity work.control_plane
-    port map (clk => clk, rst => rst,
+    port map (clk => clk, rst => rst_g(0),
               in_valid => ctrl_s_valid, in_ready => ctrl_s_ready, in_data => ctrl_s(7 downto 0),
               in_last => ctrl_s(8), out_valid => ctrl_out_valid, out_ready => ctrl_out_ready,
               out_data => ctrl_out_data, out_last => ctrl_out_last,
@@ -356,29 +359,29 @@ begin
 
   decoder_i : entity work.csr_decoder
     generic map (WINDOWS => CSR_WINDOWS)
-    port map (clk => clk, rst => rst, bus_req => bus_req, bus_addr => bus_addr,
+    port map (clk => clk, rst => rst_g(0), bus_req => bus_req, bus_addr => bus_addr,
               bus_ack => bus_ack, bus_err => bus_err, bus_rdata => bus_rdata,
               s_req => s_req, s_ack => s_ack, s_err => s_err, s_rdata => s_rdata);
 
   system_i : entity work.csr_system
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SYSTEM), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_SYSTEM), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SYSTEM),
               bus_err => s_err(CSR_WIN_SYSTEM), bus_rdata => s_rdata(CSR_WIN_SYSTEM),
               scratch => open);
 
   timebase_i : entity work.timebase
-    port map (clk => clk, rst => rst, count => time_count, hold => time_read, held_hi => time_hi);
+    port map (clk => clk, rst => rst_g(0), count => time_count, hold => time_read, held_hi => time_hi);
 
   time_lo <= std_logic_vector(time_count(31 downto 0));
 
   timebase_csr_i : entity work.csr_timebase
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_TIMEBASE), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_TIMEBASE), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_TIMEBASE),
               bus_err => s_err(CSR_WIN_TIMEBASE), bus_rdata => s_rdata(CSR_WIN_TIMEBASE),
               time_lo => time_lo, time_lo_read => time_read, time_hi => time_hi);
 
   gpio_i : entity work.csr_gpio
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_GPIO), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_GPIO), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_GPIO),
               bus_err => s_err(CSR_WIN_GPIO), bus_rdata => s_rdata(CSR_WIN_GPIO),
               drive => gpio_drive, enable => gpio_enable, level => level_s, io => level_s);
@@ -393,14 +396,14 @@ begin
 
   dap_slice_i : entity work.stream_slice
     generic map (WIDTH => 9)
-    port map (clk => clk, rst => rst, in_valid => dap_in_valid, in_ready => dap_in_ready,
+    port map (clk => clk, rst => rst_g(1), in_valid => dap_in_valid, in_ready => dap_in_ready,
               in_data => dap_in_last & dap_in_data, out_valid => dap_s_valid, out_ready => dap_s_ready,
               out_data => dap_s);
 
   dap_i : entity work.dap_processor
     generic map (CLK_HZ => CLK_HZ, HAS_JTAG => HAS_JTAG, HAS_SWO_MANCHESTER => HAS_SWO_MANCHESTER,
                  SHARED_DIVIDER => true)
-    port map (clk => clk, rst => rst, packet_size => packet_size,
+    port map (clk => clk, rst => rst_g(1), packet_size => packet_size,
               in_valid => dap_s_valid, in_ready => dap_s_ready, in_data => dap_s(7 downto 0),
               in_last => dap_s(8), out_valid => dap_out_valid, out_ready => dap_out_ready,
               out_data => dap_out_data, out_last => dap_out_last,
@@ -422,22 +425,22 @@ begin
   -- 割り算器は 1 つを DAP（優先）と UART ブリッジで共有する（どちらもまれ: SWJ_Clock・SWO・ボーレートの変更）
   divider_i : entity work.udiv_shared
     generic map (WIDTH => 32)
-    port map (clk => clk, rst => rst,
+    port map (clk => clk, rst => rst_g(1),
               p0_req => dap_div_req, p0_num => dap_div_num, p0_den => dap_div_den, p0_done => dap_div_done,
               p1_req => uart_div_req, p1_num => uart_div_num, p1_den => uart_div_den, p1_done => uart_div_done,
               quotient => div_quot);
 
   swo_i_rx : entity work.swo_receiver
     generic map (HAS_MANCHESTER => HAS_SWO_MANCHESTER)
-    port map (clk => clk, rst => rst, run => swo_run, manchester => swo_manchester, divisor => swo_divisor, swo => swo_i,
+    port map (clk => clk, rst => rst_g(2), run => swo_run, manchester => swo_manchester, divisor => swo_divisor, swo => swo_i,
               out_valid => swo_out_valid, out_ready => swo_out_ready, out_data => swo_out_data,
               flush => swo_flush, error => swo_error, overrun => swo_overrun);
 
   xtrig_inject : if XTRIG and INJECTOR generate
   inject_i : entity work.swd_injector
-    port map (clk => clk, rst => rst, wait_retry => wait_retry, request => inj_request, enable => swd_enable, dap_busy => dap_busy,
+    port map (clk => clk, rst => rst_g(1), wait_retry => wait_retry, request => inj_request, enable => swd_enable, dap_busy => dap_busy,
               select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
-              shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
+              shadow_valid => shadow_valid, shadow_ap => shadow_ap, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy, written => inj_written, result => inj_result, last_ack => inj_ack,
               count => inj_count, transfers => inj_transfers,
               dap_cmd_valid => swd_cmd_valid, dap_cmd_ready => swd_cmd_ready, dap_cmd_op => swd_cmd_op,
@@ -480,13 +483,13 @@ begin
   begin
     up_busy <= dap_busy or inj_busy;
     smp_i : entity work.dap_sampler
-      port map (clk => clk, rst => rst, wait_retry => wait_retry, run => smp_run, period => unsigned(period),
+      port map (clk => clk, rst => rst_g(1), wait_retry => wait_retry, run => smp_run, period => unsigned(period),
                 jitter => to_integer(unsigned(jitter)), ap => ap,
                 tbl_write => tbl_write, tbl_index => to_integer(unsigned(tbl_index)), tbl_addr => tbl_addr,
                 tbl_enable => tbl_enable, tbl_words => tbl_words,
                 enable => swd_enable, up_busy => up_busy,
                 select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
-                shadow_valid => shadow_valid,
+                shadow_valid => shadow_valid, shadow_ap => shadow_ap,
                 sample_valid => smp_valid, sample_addr => smp_addr, sample_data => smp_data, sample_ack => smp_ack,
                 busy => smp_busy, held => held, rounds => rounds, errors => errors, overruns => overruns,
                 restores => open, last_ack => smp_last_ack,     -- restores は試験用（数えない）
@@ -498,7 +501,7 @@ begin
                 phy_rsp_valid => swd_rsp_valid, phy_rsp_ack => swd_rsp_ack,
                 phy_rsp_data => swd_rsp_data(31 downto 0), phy_rsp_par => swd_rsp_parity);
     csr_sampler_i : entity work.csr_sampler
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SAMPLER), bus_we => bus_we, bus_addr => bus_addr,
+      port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_SAMPLER), bus_we => bus_we, bus_addr => bus_addr,
                 bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SAMPLER), bus_err => s_err(CSR_WIN_SAMPLER),
                 bus_rdata => s_rdata(CSR_WIN_SAMPLER),
                 control_run => smp_run, control_ap => ap, control_jitter => jitter, period => period,
@@ -517,13 +520,13 @@ begin
     signal m_time, m_prev : unsigned(47 downto 0);
   begin
     smp_match_i : entity work.sampler_match
-      port map (clk => clk, rst => rst, time_count => time_count, enable => m_enable,
+      port map (clk => clk, rst => rst_g(1), time_count => time_count, enable => m_enable,
                 match_addr => m_addr, match_mask => m_mask, match_value => m_value,
                 sample_valid => smp_valid, sample_addr => smp_addr, sample_data => smp_data, sample_ack => smp_ack,
                 fire => smp_match, matched => m_matched, seen_any => m_any, seen => m_seen, count => m_count,
                 fire_time => m_time, prev_time => m_prev);
     csr_smatch_i : entity work.csr_sampler_match
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SAMPLER_MATCH), bus_we => bus_we, bus_addr => bus_addr,
+      port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_SAMPLER_MATCH), bus_we => bus_we, bus_addr => bus_addr,
                 bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SAMPLER_MATCH), bus_err => s_err(CSR_WIN_SAMPLER_MATCH),
                 bus_rdata => s_rdata(CSR_WIN_SAMPLER_MATCH),
                 addr => m_addr, mask => m_mask, value => m_value, control_enable => m_enable,
@@ -560,19 +563,19 @@ begin
   dap_fire <= swd_cmd_valid and swd_cmd_ready;
   host_kind <= x"01" when ev_addr_known = '1' else x"0C";
   monitor_i : entity work.dap_monitor
-    port map (clk => clk, rst => rst, cmd_fire => dap_fire, cmd_op => swd_cmd_op, cmd_req => swd_cmd_request,
+    port map (clk => clk, rst => rst_g(1), enable => swd_enable, cmd_fire => dap_fire, cmd_op => swd_cmd_op, cmd_req => swd_cmd_request,
               cmd_data => swd_cmd_data(31 downto 0), rsp_valid => dap_rsp_valid, rsp_ack => swd_rsp_ack,
               rsp_data => swd_rsp_data(31 downto 0), rsp_parity => swd_rsp_parity,
               match_addr => match_addr, addr_mask => match_addr_mask, match_data => match_data,
               data_mask => match_data_mask, on_write => match_on_write, on_read => match_on_read,
               select_shadow => select_shadow, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
-              shadow_valid => shadow_valid, match => match, ev_valid => ev_valid, ev_request => ev_request,
+              shadow_valid => shadow_valid, shadow_ap => shadow_ap, match => match, ev_valid => ev_valid, ev_request => ev_request,
               ev_ack => ev_ack, ev_parity => ev_parity, ev_addr => ev_addr, ev_addr_known => ev_addr_known,
               ev_data => ev_data);
 
   port_i : entity work.debug_port
     generic map (HAS_JTAG => HAS_JTAG)
-    port map (clk => clk, rst => rst, enable => swd_enable, jtag => jtag, half_period => swd_half_period,
+    port map (clk => clk, rst => rst_g(1), enable => swd_enable, jtag => jtag, half_period => swd_half_period,
               turnaround => swd_turnaround, data_phase => swd_data_phase, idle_cycles => swd_idle_cycles,
               sample_delay => to_integer(unsigned(swd_sample_delay)),
               jtag_sample_delay => to_integer(unsigned(jtag_sample_delay)),
@@ -588,7 +591,7 @@ begin
 
   uart_slice_i : entity work.stream_slice
     generic map (WIDTH => 8)
-    port map (clk => clk, rst => rst, in_valid => uart_in_valid, in_ready => uart_in_ready, in_data => uart_in_data,
+    port map (clk => clk, rst => rst_g(2), in_valid => uart_in_valid, in_ready => uart_in_ready, in_data => uart_in_data,
               out_valid => uart_s_valid, out_ready => uart_s_ready, out_data => uart_s);
 
   host_rts_sync_i : entity work.sync_bit
@@ -598,7 +601,7 @@ begin
 
   uart_i : entity work.uart_bridge
     generic map (CLK_HZ => CLK_HZ, SHARED_DIVIDER => true, FLOW => UART_FLOW)
-    port map (clk => clk, rst => rst, baud => uart_baud, baud_load => uart_baud_load,
+    port map (clk => clk, rst => rst_g(2), baud => uart_baud, baud_load => uart_baud_load,
               in_valid => uart_s_valid, in_ready => uart_s_ready, in_data => uart_s,
               out_valid => uart_out_valid, out_ready => uart_out_ready, out_data => uart_out_data,
               rx => uart_rx, tx => uart_tx, brk => host_break_s, flow_auto => flow_auto, rts_host => host_rts_s,
@@ -620,7 +623,7 @@ begin
   uart_tx_enable : process (clk)
   begin
     if rising_edge(clk) then
-      if rst = '1' then
+      if rst_g(2) = '1' then
         uart_tx_used <= '0';
       elsif (uart_s_valid = '1' and uart_s_ready = '1') or host_break_s = '1' then
         uart_tx_used <= '1';
@@ -630,7 +633,7 @@ begin
   uart_tx_oe <= uart_tx_used;
 
   uart_csr_i : entity work.csr_uart
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_UART), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_UART), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_UART),
               bus_err => s_err(CSR_WIN_UART), bus_rdata => s_rdata(CSR_WIN_UART),
               baud => std_logic_vector(uart_baud_now), frame_errors => std_logic_vector(uart_frame_errors),
@@ -658,7 +661,7 @@ begin
   filter_g : if LA_FILTER generate
     filter_i : entity work.la_filter
       generic map (WIDTH => EXT_COUNT, LEN_BITS => 8)
-      port map (clk => clk, rst => rst, d => ext_raw, mask => ext_mask,
+      port map (clk => clk, rst => rst_g(3), d => ext_raw, mask => ext_mask,
                 cycles => unsigned(filter_cycles), q => ext_f);
   end generate;
   no_filter_g : if not LA_FILTER generate
@@ -669,7 +672,7 @@ begin
   pulse_g : if LA_PULSE generate
     pulse_i : entity work.la_pulse
       generic map (WIDTH => LA_WIDTH, COUNT_BITS => 32)
-      port map (clk => clk, rst => rst, probes => la_probes, mode => pulse_mode,
+      port map (clk => clk, rst => rst_g(3), probes => la_probes, mode => pulse_mode,
                 channel => unsigned(pulse_channel), level => pulse_level,
                 min_cycles => unsigned(pulse_min), max_cycles => unsigned(pulse_max), event => pw_event);
     pw_enable <= pulse_mode(0) xor pulse_mode(1);           -- mode 1・2（3 は何もしない: la_pulse と同じ）
@@ -694,7 +697,7 @@ begin
   internal_la : if LA_INTERNAL generate
   la_i : entity work.la_capture
     generic map (WIDTH => LA_WIDTH, DEPTH => 2 ** LA_ADDR_BITS)
-    port map (clk => clk, rst => rst, probes => la_probes, time => time_count, ext_trigger => la_ext,
+    port map (clk => clk, rst => rst_g(3), probes => la_probes, time => time_count, ext_trigger => la_ext,
               run => la_run, rate => unsigned(la_rate), pretrigger => unsigned(la_pretrigger),
               trig_mask => la_mask, trig_value => la_value, trig_rise => la_rise, trig_fall => la_fall,
               pw_enable => pw_enable, pw_event => pw_event,
@@ -706,7 +709,7 @@ begin
 
   la_mem_i : entity work.la_mem_csr
     generic map (WIDTH => LA_WIDTH, ADDR_BITS => LA_ADDR_BITS)
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_LA_MEM), bus_addr => bus_addr,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_LA_MEM), bus_addr => bus_addr,
               bus_ack => s_ack(CSR_WIN_LA_MEM), bus_rdata => s_rdata(CSR_WIN_LA_MEM),
               rd_addr => la_rd_addr, rd_data => la_rd_data);
   s_err(CSR_WIN_LA_MEM) <= '0';                            -- バッファの窓は範囲外も 0 で答える（エラーにしない）
@@ -734,7 +737,7 @@ begin
   end generate;
 
   la_csr_i : entity work.csr_la
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_LA), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(3), bus_req => s_req(CSR_WIN_LA), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_LA),
               bus_err => s_err(CSR_WIN_LA), bus_rdata => s_rdata(CSR_WIN_LA),
               control_run => la_run, rate => la_rate, pretrigger => la_pretrigger,
@@ -749,14 +752,14 @@ begin
 
   caps_i : entity work.caps_rom
     generic map (CONTENT => CAPS, WINDOW_SIZE => CSR_WINDOWS(CSR_WIN_CAPS).size)
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_CAPS), bus_addr => bus_addr,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_CAPS), bus_addr => bus_addr,
               bus_ack => s_ack(CSR_WIN_CAPS), bus_rdata => s_rdata(CSR_WIN_CAPS));
   s_err(CSR_WIN_CAPS) <= '0';                              -- ROM は範囲外も 0 で答える（エラーにしない）
   -- 多段トリガ: パターン A / B（ロジアナと同じピン）・番地一致・ホストの指令を段ごとの条件で数える
   trig_seq_g : if TRIG_SEQ generate
   seq_i : entity work.trig_seq
     generic map (WIDTH => 16)
-    port map (clk => clk, rst => rst, probes => la_probes, match => match, host => host_fire,
+    port map (clk => clk, rst => rst_g(3), probes => la_probes, match => match, host => host_fire,
               enable => seq_enable, stages => unsigned(seq_stages),
               a_mask => seq_a_mask, a_value => seq_a_value, a_rise => seq_a_rise, a_fall => seq_a_fall,
               b_mask => seq_b_mask, b_value => seq_b_value, b_rise => seq_b_rise, b_fall => seq_b_fall,
@@ -775,7 +778,7 @@ begin
   end process;
 
   trigseq_csr_i : entity work.csr_trigseq
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_TRIGSEQ), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(3), bus_req => s_req(CSR_WIN_TRIGSEQ), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_TRIGSEQ),
               bus_err => s_err(CSR_WIN_TRIGSEQ), bus_rdata => s_rdata(CSR_WIN_TRIGSEQ),
               control_enable => seq_enable, control_stages => seq_stages,
@@ -809,7 +812,7 @@ begin
       deep_triggered_prev <= deep_triggered;
       la_ext      <= or (sources and route_to_la);
       inj_request <= or (sources and route_to_inject);
-      if rst = '1' then
+      if rst_g(3) = '1' then
         match_count <= (others => '0');
       elsif match = '1' then
         match_count <= match_count + 1;
@@ -823,7 +826,7 @@ begin
 
   -- 外部メモリ: 状態とメモリ試験
   mem_csr_i : entity work.csr_mem
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_MEM), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_MEM), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_MEM),
               bus_err => s_err(CSR_WIN_MEM), bus_rdata => s_rdata(CSR_WIN_MEM),
               status_ready => mem_ready_s, status_busy => mem_busy, status_done => mem_done,
@@ -833,7 +836,7 @@ begin
               write_cycles => mem_wc, read_cycles => mem_rc);
 
   deep_csr_i : entity work.csr_la_deep
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_LA_DEEP), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_LA_DEEP), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_LA_DEEP),
               bus_err => s_err(CSR_WIN_LA_DEEP), bus_rdata => s_rdata(CSR_WIN_LA_DEEP),
               control_run => deep_run, control_rle => deep_rle, control_stream => deep_stream,
@@ -847,7 +850,7 @@ begin
               read_region => deep_region, ring_beats => deep_ring_beats);
 
   debug_csr_i : entity work.csr_debug
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_DEBUG), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_DEBUG), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_DEBUG),
               bus_err => s_err(CSR_WIN_DEBUG), bus_rdata => s_rdata(CSR_WIN_DEBUG),
               sample_delay_swd => swd_sample_delay, sample_delay_jtag => jtag_sample_delay);
@@ -859,12 +862,12 @@ begin
   begin
     aux_i : entity work.aux_link
       generic map (CLK_HZ => CLK_HZ, CHANNELS => 4)
-      port map (clk => clk, rst => rst, rx => aux_rx, sample_valid => aux_valid, sample_ch => aux_ch,
+      port map (clk => clk, rst => rst_g(2), rx => aux_rx, sample_valid => aux_valid, sample_ch => aux_ch,
                 sample_value => aux_value, errors => errors);
     process (clk)
     begin
       if rising_edge(clk) then
-        if rst = '1' then
+        if rst_g(2) = '1' then
           samples <= (others => '0');
         elsif aux_valid = '1' then
           if aux_ch = 0 then
@@ -875,7 +878,7 @@ begin
       end if;
     end process;
     aux_csr_i : entity work.csr_aux
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_AUX), bus_we => bus_we,
+      port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_AUX), bus_we => bus_we,
                 bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_AUX),
                 bus_err => s_err(CSR_WIN_AUX), bus_rdata => s_rdata(CSR_WIN_AUX),
                 target_mv => target_mv,
@@ -898,7 +901,7 @@ begin
     signal crc_errors, pairs : unsigned(15 downto 0);
   begin
     link_i : entity work.sync_link
-      port map (clk => clk, rst => rst, time_count => time_count, enable => enable, master => master,
+      port map (clk => clk, rst => rst_g(2), time_count => time_count, enable => enable, master => master,
                 period => unsigned(period), sync_in => sync_in, sync_out => sync_out, pair_valid => sync_valid,
                 pair_local => local, pair_parent => parent, crc_errors => crc_errors);
     sync_local  <= std_logic_vector(local(47 downto 0));
@@ -906,7 +909,7 @@ begin
     process (clk)
     begin
       if rising_edge(clk) then
-        if rst = '1' or enable = '0' then
+        if rst_g(2) = '1' or enable = '0' then
           pairs <= (others => '0');
         elsif sync_valid = '1' then
           pairs <= pairs + 1;
@@ -914,7 +917,7 @@ begin
       end if;
     end process;
     sync_csr_i : entity work.csr_sync
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_SYNC), bus_we => bus_we,
+      port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_SYNC), bus_we => bus_we,
                 bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_SYNC),
                 bus_err => s_err(CSR_WIN_SYNC), bus_rdata => s_rdata(CSR_WIN_SYNC),
                 control_enable => enable, control_master => master, period => period,
@@ -947,7 +950,7 @@ begin
     signal m_count : unsigned(31 downto 0);
   begin
     obs_i : entity work.obs_jtag_engine
-      port map (clk => clk, rst => rst, time_count => time_count(47 downto 0), enable => enable,
+      port map (clk => clk, rst => rst_g(2), time_count => time_count(47 downto 0), enable => enable,
                 free_pins => free_pins, half_period => unsigned(half_period),
                 sample_delay => 0, ir_len => unsigned(ir_len),   -- ponytail: 観測の口の TDO の遅れは High 相の終わり。遅れて届く対象が出たら CSR に
                 ir_before => unsigned(ir_before), ir_after => unsigned(ir_after), dr_before => unsigned(dr_before),
@@ -961,7 +964,7 @@ begin
                 id => id, ev_valid => obs_valid, ev_sync => obs_sync, ev_data => obs_data, ev_addr => obs_addr,
                 ev_time => obs_time, tck => obs_tck, tms => obs_tms, tdi => obs_tdi, tdo => obs_tdo, oe => obs_oe);
     obs_csr_i : entity work.csr_obs
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_OBS), bus_we => bus_we,
+      port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_OBS), bus_we => bus_we,
                 bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_OBS),
                 bus_err => s_err(CSR_WIN_OBS), bus_rdata => s_rdata(CSR_WIN_OBS),
                 control_enable => enable, control_release => free_pins, half_period => half_period,
@@ -992,174 +995,27 @@ begin
   end generate;
 
   events_csr_i : entity work.csr_events
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_EVENTS), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(0), bus_req => s_req(CSR_WIN_EVENTS), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_EVENTS),
               bus_err => s_err(CSR_WIN_EVENTS), bus_rdata => s_rdata(CSR_WIN_EVENTS),
               control_enable => events_enable, written => events_written, lost => events_lost,
               capacity => events_capacity);
 
-  -- イベント（1 件 128 ビット）: [47:0] 時刻、[79:48] 番地、[111:80] データ、[114:112] ACK、[118:115] 要求、
-  -- [119] パリティ異常、[127:120] 種類（1 = ホストの転送、2 = 割り込み書き込み（旧い形。今は 11）、3 = UART 受信（ターゲット → PC）、
-  -- 4 = UART 送信（PC → ターゲット）、5 = SWO、6 = 補助マイコンの計測値、7 = DAP サンプラの 1 語（番地・値・ACK）、8・9 = FPGA の観測、10 = 時刻の同期の組、
-  -- 11 = 割り込み書き込み（[119:112] = 停止の書き込みまでの転送数。R20）、12 = ホストの転送のうち DRW でメモリの番地を
-  -- 追えなかったもの（番地 = レジスタの番地。dap_monitor の ev_addr_known））。3〜5 はデータの下位 8 ビットがバイトで、
-  -- 6 はデータ = ch << 16 | 値（mV）。時刻はブリッジ / 受信器との
-  -- 受け渡しの周期。バイトは源ごとに 1 件保持し、DAP・割り込みのイベントが無い周期に出す（1 周期に 1 件）。
-  -- 保持がまだ出ていないうちに次のバイトが来たら捨てて byte_lost に数える（events.lost に足す）
-  -- 受け渡しは 1 段レジスタで受ける（時刻は 1 周期遅れる。ブリッジの ready からの経路を短くする）
-  process (clk)
-  begin
-    if rising_edge(clk) then
-      -- SWO は受けたバイトをすべて記録する（USB の SWO の口の空きに依らない: 口があふれて捨てたバイトも記録には残す。
-      -- 2026-10-18 に実機で、受け始めにホストが口を読む前にあふれ、記録からも欠けた）
-      byte_fire <= swo_out_valid & (uart_s_valid and uart_s_ready) & (uart_out_valid and uart_out_ready);
-      byte_in   <= (0 => uart_out_data, 1 => uart_s, 2 => swo_out_data);
-    end if;
-  end process;
-  process (clk)
-    variable served : boolean;
-    variable taken  : std_logic_vector(2 downto 0);
-    variable lost_n : natural range 0 to 7;               -- 同じ周期に落ちうる源の数（サンプラ・補助・観測・同期・バイト 3）
-    variable aux_taken : boolean;
-    variable obs_taken : boolean;
-    variable smp_taken : boolean;
-    variable sync_taken : boolean;
-  begin
-    if rising_edge(clk) then
-      event_valid <= '0';
-      served := false;
-      taken  := "000";
-      lost_n := 0;
-      if ev_valid = '1' then
-        event_valid <= '1';
-        event_data  <= host_kind & ev_parity & ev_request & ev_ack & ev_data & ev_addr & std_logic_vector(time_count(47 downto 0));
-        served := true;
-      elsif inj_written = '1' then
-        event_valid <= '1';
-        -- 種類 11（R20）: 要求・ACK の欄の代わりに転送数（書き込みは常に AP の DRW・OK。旧い種類 2 は転送数なし）
-        event_data  <= x"0B" & std_logic_vector(inj_transfers) & inj_value & inj_addr & std_logic_vector(time_count(47 downto 0));
-        served := true;
-      end if;
-      smp_taken := false;
-      if not served and smp_held = '1' then
-        event_valid <= '1';
-        event_data  <= x"07" & '0' & "1111" & smp_word_ack & smp_word_data & smp_word & smp_time;
-        served    := true;
-        smp_taken := true;
-      end if;
-      if smp_valid = '1' and events_enable = '1' then
-        if smp_held = '1' and not smp_taken then
-          lost_n := lost_n + 1;                                -- 前の語がまだ出ていない（語の間隔は SWD の 1 転送なので起きない想定）
-        else
-          smp_held      <= '1';
-          smp_word      <= smp_addr;
-          smp_word_data <= smp_data;
-          smp_word_ack  <= smp_ack;
-          smp_time      <= std_logic_vector(time_count(47 downto 0));
-        end if;
-      elsif smp_taken then
-        smp_held <= '0';
-      end if;
-      for k in 0 to 2 loop
-        if not served and byte_held(k) = '1' then
-          event_valid <= '1';
-          event_data  <= std_logic_vector(to_unsigned(3 + k, 8)) & x"00" & x"000000" & byte_data(k)
-                         & x"00000000" & byte_time(k);
-          taken(k) := '1';
-          served   := true;
-        end if;
-      end loop;
-      aux_taken := false;
-      if not served and aux_held = '1' then
-        event_valid <= '1';
-        event_data  <= x"06" & x"00" & aux_word & x"00000000" & aux_time;
-        served    := true;
-        aux_taken := true;
-      end if;
-      if aux_valid = '1' and events_enable = '1' then
-        if aux_held = '1' and not aux_taken then
-          lost_n := lost_n + 1;                                -- 前の計測値がまだ出ていない（間隔 1 ms なので起きない想定）
-        else
-          aux_held <= '1';
-          aux_word <= std_logic_vector(to_unsigned(aux_ch, 16)) & "00" & std_logic_vector(aux_value);
-          aux_time <= std_logic_vector(time_count(47 downto 0));
-        end if;
-      elsif aux_taken then
-        aux_held <= '0';
-      end if;
-      -- 対象の FPGA の観測（記録 8・時刻合わせ 9。時刻はエンジンが付けたもの）
-      obs_taken := false;
-      if not served and obs_held = '1' then
-        event_valid <= '1';
-        if obs_held_sync = '1' then
-          event_data <= x"09" & x"00" & obs_word & obs_word_addr & obs_word_time;
-        else
-          event_data <= x"08" & x"00" & obs_word & obs_word_addr & obs_word_time;
-        end if;
-        served    := true;
-        obs_taken := true;
-      end if;
-      if obs_valid = '1' and events_enable = '1' then
-        if obs_held = '1' and not obs_taken then
-          lost_n := lost_n + 1;                                -- 前の語がまだ出ていない（語の間隔は TCK の 32 周期）
-        else
-          obs_held      <= '1';
-          obs_held_sync <= obs_sync;
-          obs_word      <= obs_data;
-          obs_word_addr <= obs_addr;
-          obs_word_time <= obs_time;
-        end if;
-      elsif obs_taken then
-        obs_held <= '0';
-      end if;
-      -- ボードの間の時刻の同期の組（10。時刻 = 子の時刻、番地 = 親の時刻の下位 32、データ = 上位 32）
-      sync_taken := false;
-      if not served and sync_held = '1' then
-        event_valid <= '1';
-        event_data  <= x"0A" & x"00" & sync_word(63 downto 32) & sync_word(31 downto 0) & sync_word_time;
-        served     := true;
-        sync_taken := true;
-      end if;
-      if sync_valid = '1' and events_enable = '1' then
-        if sync_held = '1' and not sync_taken then
-          lost_n := lost_n + 1;                                -- 前の組がまだ出ていない（組の間隔は 730 周期以上）
-        else
-          sync_held      <= '1';
-          sync_word      <= sync_parent;
-          sync_word_time <= sync_local;
-        end if;
-      elsif sync_taken then
-        sync_held <= '0';
-      end if;
-      for k in 0 to 2 loop
-        if byte_fire(k) = '1' and events_enable = '1' then
-          if byte_held(k) = '1' and taken(k) = '0' then
-            lost_n := lost_n + 1;                               -- 前のバイトがまだ出ていない
-          else
-            byte_held(k) <= '1';
-            byte_data(k) <= byte_in(k);
-            byte_time(k) <= std_logic_vector(time_count(47 downto 0));
-          end if;
-        elsif taken(k) = '1' then
-          byte_held(k) <= '0';
-        end if;
-      end loop;
-      if rst = '1' or events_enable = '0' then
-        byte_held <= (others => '0');
-        aux_held  <= '0';
-        smp_held  <= '0';
-        obs_held  <= '0';
-        sync_held <= '0';
-      end if;
-      if rst = '1' or (events_enable = '1' and events_enable_prev = '0') then
-        byte_lost <= (others => '0');
-      else
-        byte_lost <= byte_lost + lost_n;
-      end if;
-      events_enable_prev <= events_enable;
-    end if;
-  end process;
-
+  -- イベント記録の集約（形式は event_collector.vhd の先頭と csr_events の仕様）
+  collector_i : entity work.event_collector
+    port map (clk => clk, rst => rst_g(4), time_count => time_count(47 downto 0), events_enable => events_enable,
+              ev_valid => ev_valid, host_kind => host_kind, ev_parity => ev_parity, ev_request => ev_request,
+              ev_ack => ev_ack, ev_data => ev_data, ev_addr => ev_addr,
+              inj_written => inj_written, inj_transfers => inj_transfers, inj_value => inj_value, inj_addr => inj_addr,
+              smp_valid => smp_valid, smp_addr => smp_addr, smp_data => smp_data, smp_ack => smp_ack,
+              uart_rx_fire => uart_out_valid and uart_out_ready, uart_rx_data => uart_out_data,
+              uart_tx_fire => uart_s_valid and uart_s_ready, uart_tx_data => uart_s,
+              swo_fire => swo_out_valid, swo_data => swo_out_data,
+              aux_valid => aux_valid, aux_ch => aux_ch, aux_value => aux_value,
+              obs_valid => obs_valid, obs_sync => obs_sync, obs_data => obs_data, obs_addr => obs_addr,
+              obs_time => obs_time,
+              sync_valid => sync_valid, sync_local => sync_local, sync_parent => sync_parent,
+              event_valid => event_valid, event_data => event_data, byte_lost => byte_lost);
   memory : if MEM_ADDR_BITS > 0 generate
     signal first : unsigned(MEM_ADDR_BITS - 1 downto 0);
     signal errors, wc, rc : unsigned(31 downto 0);
@@ -1171,7 +1027,7 @@ begin
     -- 深いバッファのどちらか一方）
     test_i : entity work.mem_test_sys
       generic map (ADDR_BITS => MEM_ADDR_BITS, DATA_BITS => 128, TESTER => MEM_TEST)
-      port map (clk => clk, rst => rst, start => mem_test_start,
+      port map (clk => clk, rst => rst_g(4), start => mem_test_start,
                 base => unsigned(mem_base(MEM_ADDR_BITS - 1 downto 0)),
                 count => unsigned(mem_count(MEM_ADDR_BITS downto 0)), seed => mem_seed,
                 ready => mem_ready_s, in_reset => mem_in_reset, clock_tick => mem_tick,
@@ -1207,7 +1063,7 @@ begin
     begin
     deep_i : entity work.la_deep_buffer
       generic map (WIDTH => LA_WIDTH, ADDR_BITS => MEM_ADDR_BITS, STREAM_EVENTS => LA_STREAM_EVENTS)
-      port map (clk => clk, rst => rst, probes => la_probes, ext_trigger => la_ext, time => time_count,
+      port map (clk => clk, rst => rst_g(4), probes => la_probes, ext_trigger => la_ext, time => time_count,
                 rate => unsigned(la_rate), pretrigger => unsigned(la_pretrigger),
                 trig_mask => la_mask, trig_value => la_value, trig_rise => la_rise,
                 trig_fall => la_fall, pw_enable => pw_enable, pw_event => pw_event,
@@ -1263,7 +1119,7 @@ begin
     begin
       ring_i : entity work.event_ring
         generic map (DEPTH_BITS => EVENT_RING_BITS, ADDR_BITS => EVENT_RING_BITS)
-        port map (clk => clk, rst => rst, ev_enable => events_enable, ev_valid => event_valid, ev_data => event_data,
+        port map (clk => clk, rst => rst_g(4), ev_enable => events_enable, ev_valid => event_valid, ev_data => event_data,
                   ev_written => ev_written, ev_lost => ev_lost, ev_beats => ev_beats,
                   read => deep_read, read_region => deep_region,
                   read_first => unsigned(deep_first(EVENT_RING_BITS - 1 downto 0)),
@@ -1277,7 +1133,7 @@ begin
 
   xtrig_csr_g : if XTRIG generate
   xtrig_csr_i : entity work.csr_xtrig
-    port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_XTRIG), bus_we => bus_we,
+    port map (clk => clk, rst => rst_g(3), bus_req => s_req(CSR_WIN_XTRIG), bus_we => bus_we,
               bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_XTRIG),
               bus_err => s_err(CSR_WIN_XTRIG), bus_rdata => s_rdata(CSR_WIN_XTRIG),
               route_to_la => route_to_la, route_to_inject => route_to_inject, command_fire => host_fire,
@@ -1314,7 +1170,7 @@ begin
     signal active : std_logic_vector(1 downto 0);
   begin
     xout_csr_i : entity work.csr_xtrig_out
-      port map (clk => clk, rst => rst, bus_req => s_req(CSR_WIN_XTRIG_OUT), bus_we => bus_we,
+      port map (clk => clk, rst => rst_g(3), bus_req => s_req(CSR_WIN_XTRIG_OUT), bus_we => bus_we,
                 bus_addr => bus_addr, bus_wdata => bus_wdata, bus_ack => s_ack(CSR_WIN_XTRIG_OUT),
                 bus_err => s_err(CSR_WIN_XTRIG_OUT), bus_rdata => s_rdata(CSR_WIN_XTRIG_OUT),
                 status_active => active,
@@ -1343,7 +1199,7 @@ begin
 
     xout_i : entity work.xtrig_out
       generic map (COUNT => N, WIDTH => 8)
-      port map (clk => clk, rst => rst, pins => pins8, sources => sources, time => time_count(31 downto 0),
+      port map (clk => clk, rst => rst_g(3), pins => pins8, sources => sources, time => time_count(31 downto 0),
                 enable => c_enable(N - 1 downto 0), mode => f_mode, level => c_level(N - 1 downto 0),
                 any => w_any(N - 1 downto 0), mask => f_mask, value => f_value, src => f_src,
                 length => f_length, unit => f_unit, o => out_o, oe => out_oe);

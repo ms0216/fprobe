@@ -1,7 +1,7 @@
 """Probe の道具: 長期の記録（U23）。分割・間引き・容量の上限の方針で記録を始める、分割の一覧、全体の縮図（事前計算）、
 ロジアナの流し続けを記録へ。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・_recorder・_collector・_reading・_la・_deep を
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・_recorder・_collector・_reading・_la・_deep を
 使う。機器に触るのは _lock の中（流し続けは機器の呼び出しごとに _lock を取る: fprobe.recording_stream）。
 
 仕様: docs/superpowers/specs/2026-10-18-u23-u27-long-recording-heap-design.md
@@ -51,7 +51,7 @@ class LongRecordingTools:
             if self._recorder is None:
                 raise RuntimeError("記録していない（recording_start を先に）")
             self._la_idle()
-            if self._la is not None or getattr(self, "_deep", None) is not None:
+            if self._la is not None or self._deep is not None:
                 raise RuntimeError("ロジアナの捕捉を仕掛けている（la_collect / la_deep_collect を先に）")
             device = self.session.device
             mixed = bool(getattr(device.capabilities(), "la_stream_events", False))

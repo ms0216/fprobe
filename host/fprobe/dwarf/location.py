@@ -19,6 +19,7 @@ __all__ = ["EvalContext", "MemoryPlace", "NotAvailable", "PiecesPlace", "Place",
 
 ADDRESS_BITS = 32
 MASK = (1 << ADDRESS_BITS) - 1
+WIDE_MASK = (1 << 64) - 1                  # 定数と stack_value は 64 ビット整数を持てる（番地の演算だけ ADDRESS_BITS に折り返す）
 
 
 class NotAvailable(Exception):
@@ -154,7 +155,7 @@ def _run(ops: Sequence, context: EvalContext, stack: list[int]) -> Place:
         elif name in ("DW_OP_addr", "DW_OP_const1u", "DW_OP_const2u", "DW_OP_const4u", "DW_OP_const8u",
                       "DW_OP_constu", "DW_OP_const1s", "DW_OP_const2s", "DW_OP_const4s", "DW_OP_const8s",
                       "DW_OP_consts"):
-            stack.append(args[0] & MASK)
+            stack.append(args[0] & (MASK if name == "DW_OP_addr" else WIDE_MASK))
         elif name in ("DW_OP_addrx", "DW_OP_GNU_addr_index", "DW_OP_constx", "DW_OP_GNU_const_index"):
             if context.address_of_index is None:
                 raise NotAvailable(f"{name} を解く .debug_addr が無い")
@@ -220,7 +221,8 @@ def _run(ops: Sequence, context: EvalContext, stack: list[int]) -> Place:
                 value = stack.pop() & ((1 << bits) - 1)
                 stack.append((_signed(value, bits) if signed else value) & MASK)
         elif name == "DW_OP_stack_value":
-            current = ValuePlace((stack.pop() & MASK).to_bytes(4, "little"))
+            value = stack.pop() & WIDE_MASK
+            current = ValuePlace(value.to_bytes(4 if value <= MASK else 8, "little"))   # 32 ビットに収まれば従来の 4 バイト
         elif name == "DW_OP_implicit_value":
             current = ValuePlace(bytes(args[1]) if len(args) > 1 else bytes(args[0]))
         elif name in ("DW_OP_piece", "DW_OP_bit_piece"):

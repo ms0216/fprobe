@@ -1,6 +1,6 @@
 """Probe の道具: 変数のライブ観測（F4。ターゲットを止めずに、FPGA の DAP サンプラが周期的に読む）と、その拡充（U43）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder と、DAP サンプラの
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder と、DAP サンプラの
 持ち主（WindowTools._claim_sampler）、背景の周期の仕事（ObserveTools._add_job）を使う。
 
 - watch_set で、変数の名前・C の式・番地を、ELF の DWARF で番地と大きさにし、サンプラのか所にする。値は DAP の
@@ -25,7 +25,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from .collector import MASK48
+from .collector import unwrap_events
 from .debug import Debugger, PyocdAccess
 from .dwarf.cexpr import Value, evaluate
 from .dwarf.info import FrameView
@@ -225,6 +225,7 @@ class _Buffer:
 class WatchTools:
     def _init_watch(self) -> None:
         self._watched: list[_Watched] = []
+        self._watch_running = False                        # watch_set で動き、watch_stop で false（一覧は残る）
         self._watch_rejected: list[dict] = []
         self._watch_base: dict | None = None               # watch_set の時点のサンプラの数（起点）
         self._watch_started = 0.0
@@ -277,15 +278,7 @@ class WatchTools:
         names: 式ごとの名前（値・時間軸の段の名前。番地の式に「誤り」等。記録中なら記録の情報にも残す）。
         caller: デーモンが渡す呼び出し元 {id, name, role}（引数の仕様には出ない）。watch_status・sampler_status の
         client に事実として残す。"""
-        if not 0 < chase_rate_hz <= 10_000:
-            raise ValueError("chase_rate_hz は 0 より大きく 10000 以下")
-        if names is not None and (len(names) != len(expressions) or len(set(names)) != len(names)
-                                  or not all(isinstance(n, str) and n.strip() for n in names)):
-            raise ValueError("names は式と同じ数の、重ならない空でない名前")
-        watched, rejected = self._watch_targets(expressions)
-        if names is not None:
-            label = dict(zip(expressions, (n.strip() for n in names)))
-            watched = [dataclasses.replace(w, name=label.get(w.name, w.name)) for w in watched]
+        watched, rejected = self._watch_labelled(expressions, names, chase_rate_hz)
         sampled = [w for w in watched if not w.chase]
         slots = []
         with self._lock:
@@ -310,18 +303,37 @@ class WatchTools:
             self._watch_client = dict(caller) if caller is not None else None
             if not sampled:
                 self._watch_base = None
-            self._chase_series = {w.name: collections.deque(maxlen=CHASE_LIMIT) for w in watched if w.chase}
-            self._chase_total = {name: 0 for name in self._chase_series}
-            self._chase_errors = {}
-            self._watch_stats = {w.name: ValueStats() for w in watched}
-            self._stats_cursor = cursor if sampled else None
-            self._stats_assembler = _Assembler(watched) if sampled else None
-            if sampled:
-                self._add_job("watch.stats", 0.0, self._stats_once)
-            if self._chase_series:
-                self._add_job("watch.chase", 1.0 / chase_rate_hz, self._chase_once)
+            self._start_watch_readers(watched, sampled, cursor if sampled else None, chase_rate_hz)
         return {"watches": [self._describe(w) for w in watched], "rate_hz": rate_hz, "chase_rate_hz": chase_rate_hz,
                 "slots": [{"address": f"0x{a:08X}", "words": n} for a, n in slots], "rejected": rejected}
+
+    def _watch_labelled(self, expressions: list[str], names: list[str] | None,
+                        chase_rate_hz: float) -> tuple[list[_Watched], list[dict]]:
+        """watch_set の引数を確かめ、式を読む対象にする（names があれば名前を付け替える）。"""
+        if not 0 < chase_rate_hz <= 10_000:
+            raise ValueError("chase_rate_hz は 0 より大きく 10000 以下")
+        if names is not None and (len(names) != len(expressions) or len(set(names)) != len(names)
+                                  or not all(isinstance(n, str) and n.strip() for n in names)):
+            raise ValueError("names は式と同じ数の、重ならない空でない名前")
+        watched, rejected = self._watch_targets(expressions)
+        if names is not None:
+            label = dict(zip(expressions, (n.strip() for n in names)))
+            watched = [dataclasses.replace(w, name=label.get(w.name, w.name)) for w in watched]
+        return watched, rejected
+
+    def _start_watch_readers(self, watched: list[_Watched], sampled: list[_Watched], cursor,
+                             chase_rate_hz: float) -> None:
+        """統計とポインタ追跡の状態を作り、読む仕事を足す（_lock の中で）。cursor は sampled があるときの統計の読み手。"""
+        self._chase_series = {w.name: collections.deque(maxlen=CHASE_LIMIT) for w in watched if w.chase}
+        self._chase_total = {name: 0 for name in self._chase_series}
+        self._chase_errors = {}
+        self._watch_stats = {w.name: ValueStats() for w in watched}
+        self._stats_cursor = cursor
+        self._stats_assembler = _Assembler(watched) if sampled else None
+        if sampled:
+            self._add_job("watch.stats", 0.0, self._stats_once)
+        if self._chase_series:
+            self._add_job("watch.chase", 1.0 / chase_rate_hz, self._chase_once)
 
     def _watch_targets(self, expressions: list[str]) -> tuple[list[_Watched], list[dict]]:
         """式ごとにか所にする。誤った式は rejected（{"expression", "error"}）に外す。全部が誤りなら誤り（1 つなら
@@ -386,7 +398,7 @@ class WatchTools:
         out = {"watches": [self._describe(w) for w in self._watched], "rejected": list(self._watch_rejected),
                "stats": {name: st.as_dict() for name, st in self._watch_stats.items()},
                "stats_lost_events": None if cursor is None else cursor.lost,
-                "running": bool(getattr(self, "_watch_running", False)),         # watch_stop の後は false（一覧は残る）
+                "running": self._watch_running,         # watch_stop の後は false（一覧は残る）
                 "since_start_s": time.monotonic() - self._watch_started if self._watched else None,
                 "rate_hz": self._watch_rate, "client": self._watch_client,
                 "chase_rate_hz": self._chase_rate, "chase_errors": dict(self._chase_errors),
@@ -414,12 +426,13 @@ class WatchTools:
                 written = log.counts()[0]
                 events = log.read(min(last, READ_LIMIT), end=written)
                 older = len(events) < written
+            reference = device.time()                    # 48 ビットのイベントの時刻を 64 ビットにする基準（読んだ後）
             for name, series in self._chase_series.items():
                 kept = list(series)
                 out[name] = kept[-last:]
                 if out[name] and self._chase_total.get(name, 0) > len(out[name]):
                     start[name] = out[name][0][0]
-        resolved = list(resolve(events))
+        resolved = list(resolve(unwrap_events(events, reference)))
         if older and resolved:
             for w in self._watched:
                 if not w.chase:
@@ -485,7 +498,7 @@ class WatchTools:
         info = self._watch_info()
         access = PyocdAccess(self.target)
         frame = _frame(access.read_memory)
-        t = self.session.device.time() & MASK48
+        t = self.session.device.time()
         trigger = self._watch_trigger
         for w in self._watched:
             if not w.chase:
@@ -539,7 +552,7 @@ class WatchTools:
                 log.ensure_started()
                 cursor = log.cursor()
                 if capture.pre_ticks:
-                    prefill = log.read(min(log.capacity, PREFILL_LIMIT))
+                    prefill = unwrap_events(log.read(min(log.capacity, PREFILL_LIMIT)), device.time())
             trigger = _Trigger(capture, cursor, _Assembler(self._watched), hz)
             self._prefill(trigger, prefill)
             self._watch_trigger = trigger
@@ -570,7 +583,8 @@ class WatchTools:
             self._remove_job("watch.drain")
             return
         latest = None
-        for e in trigger.cursor.take():
+        device = self.session.device
+        for e in unwrap_events(trigger.cursor.take(), device.time()):
             if e.time <= trigger.skip_until:
                 continue
             latest = e.time
@@ -579,7 +593,7 @@ class WatchTools:
                     trigger.capture.feed(e.time, name, value)
             elif e.kind in INJECT_KINDS:
                 trigger.capture.event(e.time, "xtrig")
-        trigger.capture.tick(self.session.device.time() & MASK48 if latest is None else latest)
+        trigger.capture.tick(device.time() if latest is None else latest)
 
     def _capture_dict(self, trigger: _Trigger, include_samples: bool = True) -> dict:
         c, hz = trigger.capture, trigger.hz
@@ -695,7 +709,7 @@ class WatchTools:
             return
         got = buf.ring.poll(PyocdAccess(self.target).read_memory)
         if got:
-            t = self.session.device.time() & MASK48
+            t = self.session.device.time()
             buf.samples.extend((seq, t, value) for seq, value in got)
 
     def _buffer_info(self) -> dict:

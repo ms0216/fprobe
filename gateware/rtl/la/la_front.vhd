@@ -88,6 +88,7 @@ begin
         valid_r  <= false;
         ext_seen <= false;
         pw_seen  <= false;
+        prev     <= s2;                               -- 止まっている間は現在の値を持つ（前の捕捉の値を持ち越さない）
       else
         if run_prev = '0' or tick = rate then
           tick <= (others => '0');

@@ -8,8 +8,12 @@
 -- ホスト（pyOCD 等）がキャッシュしている SELECT・CSW・TAR を元に戻すので、ホストからは割り込みが見えない。
 -- dap_monitor がホストの書いた CSW・TAR を控えていれば（shadow_valid）、読んで保存する転送（CSW・TAR・RDBUFF）を省き、
 -- 控えを戻す（停止の書き込みまで 4 転送。仕様 §5）。戻す値はホストのキャッシュそのもの。
--- WAIT は wait_retry 回（ホストが DAP_TransferConfigure で設定）まで繰り返す。FAULT・プロトコル異常・パリティ異常なら中止し、SELECT だけ戻す
--- （ponytail: FAULT 後は CSW・TAR を戻せない。スティッキーエラーはホストが次の転送で見て処理する）。
+-- 控え（shadow_valid）は、その CSW・TAR を書いた AP（shadow_ap）が注入先 ap と同じときだけ使う。違えば読んで保存する。
+-- WAIT は wait_retry 回（ホストが DAP_TransferConfigure で設定）まで繰り返す。失敗（WAIT の使い切り・FAULT・プロトコル異常・
+-- パリティ異常）なら中止し、後始末で戻す（戻しの転送の WAIT も同じく再試行する）:
+--   FAULT: ABORT（STKERRCLR）→ CSW・TAR（戻す値があるとき）→ SELECT。注入が起こしたスティッキーエラーを消す（dap_sampler と同じ）
+--   WAIT の使い切り: CSW・TAR（戻す値があるとき）→ SELECT
+--   プロトコル異常・パリティ異常（線の不調）: SELECT だけ
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -28,6 +32,7 @@ entity swd_injector is
     csw_shadow    : in  std_logic_vector(31 downto 0);
     tar_shadow    : in  std_logic_vector(31 downto 0);
     shadow_valid  : in  std_logic;
+    shadow_ap     : in  std_logic_vector(7 downto 0);    -- 控えを書いた AP。ap と違えば控えを使わず読んで保存する
     ap            : in  std_logic_vector(7 downto 0);
     addr          : in  std_logic_vector(31 downto 0);
     value         : in  std_logic_vector(31 downto 0);
@@ -64,6 +69,7 @@ architecture rtl of swd_injector is
   constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
   constant ACK_OK      : std_logic_vector(2 downto 0) := "001";
   constant ACK_WAIT    : std_logic_vector(2 downto 0) := "010";
+  constant ACK_FAULT   : std_logic_vector(2 downto 0) := "100";
   -- 転送要求（CMSIS-DAP の並び: bit3-2 A[3:2], bit1 RnW, bit0 APnDP）
   constant DP_W_SELECT : std_logic_vector(3 downto 0) := "1000";
   constant DP_R_RDBUFF : std_logic_vector(3 downto 0) := "1110";
@@ -73,12 +79,14 @@ architecture rtl of swd_injector is
   constant AP_W_TAR    : std_logic_vector(3 downto 0) := "0101";
   constant AP_W_DRW    : std_logic_vector(3 downto 0) := "1101";
   constant LAST_STEP   : natural := 9;
+  constant STEP_ABORT  : natural := 10;                   -- 後始末: ABORT ← STKERRCLR
+  constant DP_W_ABORT  : std_logic_vector(3 downto 0) := "0000";
 
-  type state_t is (S_IDLE, S_WAIT_BOUNDARY, S_ISSUE, S_RESPONSE, S_RESTORE_SELECT, S_RESTORE_RESPONSE);
+  type state_t is (S_IDLE, S_WAIT_BOUNDARY, S_ISSUE, S_RESPONSE);
   signal state       : state_t := S_IDLE;
   signal mine        : boolean := false;                 -- PHY を借りている
   signal dap_pending : boolean := false;                 -- DAP の命令が PHY に残っている
-  signal step        : natural range 0 to LAST_STEP := 0;
+  signal step        : natural range 0 to STEP_ABORT := 0;
   signal tries       : unsigned(15 downto 0) := (others => '0');
   -- 再試行の回数はいったん受けて（めったに変わらない）、比べた結果もレジスタに。WAIT の応答は数十周期ごとなので、
   -- 1 周期前の tries との比べで足りる（DAP の処理部からの長い経路と 16 ビットの比べを、応答の判定の経路から外す）
@@ -86,6 +94,8 @@ architecture rtl of swd_injector is
   signal retry_more  : std_logic := '0';
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
   signal fast        : boolean := false;                 -- 控えを使う（CSW・TAR を読まない）
+  signal saved       : boolean := false;                 -- CSW・TAR の戻す値がある（控え、または読んで保存した）
+  signal cleanup     : boolean := false;                 -- 失敗の後始末の最中
   signal req_r       : std_logic_vector(3 downto 0) := (others => '0');
   signal data_r      : std_logic_vector(31 downto 0) := (others => '0');
   signal valid_r     : std_logic := '0';
@@ -133,6 +143,7 @@ begin
         when 6 => req_r <= AP_W_DRW;    data_r <= value;
         when 7 => req_r <= AP_W_CSW;    data_r <= csw;
         when 8 => req_r <= AP_W_TAR;    data_r <= tar;
+        when STEP_ABORT => req_r <= DP_W_ABORT; data_r <= x"00000004";   -- STKERRCLR
         when others => req_r <= DP_W_SELECT; data_r <= select_shadow;
       end case;
     end procedure;
@@ -157,6 +168,9 @@ begin
         ack_r       <= "000";
         count_r     <= (others => '0');
         transfers_r <= (others => '0');
+        cleanup     <= false;
+        saved       <= false;
+        fast        <= false;
       else
         case state is
           when S_IDLE =>
@@ -177,7 +191,9 @@ begin
               issued <= (others => '0');
               step  <= 0;
               tries <= (others => '0');
-              fast  <= shadow_valid = '1';
+              fast  <= shadow_valid = '1' and shadow_ap = ap;
+              saved <= false;
+              cleanup <= false;
               csw   <= csw_shadow;
               tar   <= tar_shadow;
               state <= S_ISSUE;
@@ -195,44 +211,69 @@ begin
               ack_r <= phy_rsp_ack;
               if phy_rsp_ack = ACK_OK and phy_rsp_par = '0' then
                 tries <= (others => '0');
-                if step = 2 then
-                  csw <= phy_rsp_data;
-                elsif step = 3 then
-                  tar <= phy_rsp_data;
-                elsif step = 6 then
-                  written_r   <= '1';
-                  transfers_r <= issued;                      -- 停止の書き込みまで（この転送を含む）
-                end if;
-                if step = LAST_STEP then
-                  result_r <= "00";
-                  count_r  <= count_r + 1;
-                  mine     <= false;
-                  state    <= S_IDLE;
-                elsif fast and step = 0 then
-                  step  <= 4;                                 -- 控えがあるので CSW・TAR を読まない
-                  state <= S_ISSUE;
+                state <= S_ISSUE;
+                if cleanup then                                   -- 後始末: ABORT → CSW → TAR → SELECT の順に進む
+                  if step = STEP_ABORT then
+                    if saved then
+                      step <= 7;
+                    else
+                      step <= LAST_STEP;
+                    end if;
+                  elsif step = LAST_STEP then
+                    mine  <= false;                               -- result は失敗（1）のまま
+                    state <= S_IDLE;
+                  else
+                    step <= step + 1;
+                  end if;
                 else
-                  step  <= step + 1;
-                  state <= S_ISSUE;
+                  if step = 2 then
+                    csw <= phy_rsp_data;
+                  elsif step = 3 then
+                    tar <= phy_rsp_data;
+                    saved <= true;
+                  elsif step = 6 then
+                    written_r   <= '1';
+                    transfers_r <= issued;                        -- 停止の書き込みまで（この転送を含む）
+                  end if;
+                  if step = LAST_STEP then
+                    result_r <= "00";
+                    count_r  <= count_r + 1;
+                    mine     <= false;
+                    state    <= S_IDLE;
+                  elsif fast and step = 0 then
+                    saved <= true;
+                    step  <= 4;                                   -- 控えがあるので CSW・TAR を読まない
+                  else
+                    step  <= step + 1;
+                  end if;
                 end if;
               elsif phy_rsp_ack = ACK_WAIT and retry_more = '1' then
                 tries <= tries + 1;
                 state <= S_ISSUE;
+              elsif cleanup then                                  -- 後始末の最中にまた失敗: 先の戻しを諦めて SELECT へ（SELECT なら終える）
+                tries <= (others => '0');
+                if step = LAST_STEP then
+                  mine  <= false;
+                  state <= S_IDLE;
+                else
+                  step  <= LAST_STEP;
+                  state <= S_ISSUE;
+                end if;
               else
                 result_r <= "01";
-                state    <= S_RESTORE_SELECT;
+                cleanup  <= true;
+                tries    <= (others => '0');
+                state    <= S_ISSUE;
+                if phy_rsp_ack = ACK_FAULT then
+                  step <= STEP_ABORT;                             -- バスの誤り: スティッキーエラーを消してから戻す
+                elsif phy_rsp_ack = ACK_WAIT and saved then
+                  step <= 7;                                      -- WAIT の使い切り: CSW・TAR（戻す値がある）→ SELECT
+                else
+                  step <= LAST_STEP;                              -- 線の不調など: SELECT だけ
+                end if;
               end if;
             end if;
 
-          when S_RESTORE_SELECT =>
-            issue(LAST_STEP);
-            state <= S_RESTORE_RESPONSE;
-
-          when S_RESTORE_RESPONSE =>
-            if phy_rsp_valid = '1' then
-              mine  <= false;
-              state <= S_IDLE;
-            end if;
         end case;
       end if;
     end if;

@@ -31,10 +31,13 @@ def test_fpga_pulls_follow_the_board_resistors():
 
 
 def test_pins_are_unique_and_lvcmos33():
-    pins = [p for g in PYNQ_Z2.pin_groups.values() for p in g]
-    assert len({p.location for p in pins}) == len(pins)
-    assert len({p.port for p in pins}) == len(pins)
-    assert all(p.io_type == "LVCMOS33" for p in pins)
+    # 端子の群は構成ごとに選ぶ（la_in と dut_dbg は同じ JB の端子で、構成は片方しか持たない）ので、重なりは構成ごとに見る
+    from fprobe_gw.designs import DESIGNS
+    for design in (d for d in DESIGNS.values() if d.board is PYNQ_Z2):
+        pins = list(PYNQ_Z2.pins_for(design.pin_groups))
+        assert len({p.location for p in pins}) == len(pins), design.name
+        assert len({p.port for p in pins}) == len(pins), design.name
+    assert all(p.io_type == "LVCMOS33" for g in PYNQ_Z2.pin_groups.values() for p in g)
 
 
 def test_board_is_built_with_vivado():
@@ -81,3 +84,21 @@ def test_ps_pjtag_is_routed_to_the_raspberry_pi_header():
     tcl = (RTL_ROOT / "boards" / "pynq_z2" / "ps7_bd.tcl").read_text(encoding="utf-8")
     assert "PCW_PJTAG_PERIPHERAL_ENABLE 1" in tcl and "PCW_PJTAG_PJTAG_IO EMIO" in tcl
     assert "{tck I tms I tdi I tdo O}" in tcl and "ps/PJTAG_[string toupper $port]" in tcl
+
+
+def test_dut_dbg_pins_use_the_jb_inputs():
+    # Zynq DUT 回路の注目信号（docs/superpowers/specs/2026-10-24-zynq-dut-environment-design.md）: PMOD JB の 1〜4・7〜8 番。
+    # fprobe_la の J14（T8 P8 R8 T7 T6 P6）へ ch 10〜15 として入る
+    pins = PYNQ_Z2.pin_groups["dut_dbg"]
+    assert [p.location for p in pins] == ["W14", "Y14", "T11", "T10", "V16", "W16"]
+    assert [p.port for p in pins] == [f"dut_dbg[{i}]" for i in range(6)]
+    assert all(p.pull == "DOWN" for p in pins)
+
+
+def test_dut_rpi_pins_are_the_raspberry_pi_header_gpio12_to_27():
+    # ピン診断: 添字 i = GPIO(12 + i)。GPIO8〜11（PS の PJTAG の素通し）は入れない
+    pins = PYNQ_Z2.pin_groups["dut_rpi"]
+    assert [p.port for p in pins] == [f"rpi_pin[{i}]" for i in range(16)]
+    assert [p.location for p in pins] == "B20 W8 V6 Y6 B19 U7 C20 Y8 A20 Y9 U8 W6 Y7 F20 W9 V7".split()
+    pjtag = {p.location for p in PYNQ_Z2.pin_groups["ps_pjtag"]}
+    assert not pjtag & {p.location for p in pins}

@@ -25,7 +25,7 @@
 --     回収する）、DP の読み（RDBUFF 以外）は続けて RDBUFF をスキャンして値を返す（SWD-DP と同じ見え方）。
 --     ACK: JTAG の OK/FAULT（010）→ "001"、WAIT（001）→ "010"、それ以外 → "111"（プロトコル異常）。
 --     IDCODE・ABORT のスキャンに ACK は無いので "001"。
---     IR は前回と同じなら省く。
+--     IR は前回と同じ（値も装置の位置も）なら省く。
 --   OP_PINS     cmd_data(8/9/10) = 1 なら TCK / TMS / TDI を cmd_data(0/1/2) に。rsp_data(3..0) = TDO, TDI, TMS, TCK
 library ieee;
 use ieee.std_logic_1164.all;
@@ -89,7 +89,7 @@ architecture rtl of jtag_phy is
   signal index     : natural range 0 to 255 := 0;              -- 区間の中のビット番号
   signal length    : natural range 0 to 255 := 0;              -- シーケンスのビット数
   signal seg_len   : natural range 0 to 255 := 0;              -- 今の区間の長さ（区間に入るときに決める）
-  signal shifting  : natural range 0 to 127 := 0;              -- シフトの残りビット数（1 なら最後 = TMS 1）
+  signal shifting  : natural range 0 to 255 := 0;              -- シフトの残りビット数（1 なら最後 = TMS 1）
   signal din       : std_logic := '1';
   signal tck_r, tms_r, tdi_r : std_logic := '1';
   signal done      : std_logic := '0';
@@ -105,6 +105,10 @@ architecture rtl of jtag_phy is
   signal ir        : std_logic_vector(3 downto 0) := (others => '0');
   signal ir_valid  : boolean := false;                                   -- TAP の IR が ir_cur になっている
   signal ir_cur    : std_logic_vector(3 downto 0) := (others => '0');
+  -- IR を入れたときの装置の位置（装置が変われば同じ IR の値でも入れ直す）
+  signal cur_before : natural range 0 to 63 := 0;
+  signal cur_after  : natural range 0 to 63 := 0;
+  signal cur_len    : natural range 1 to 32 := 4;
   signal payload   : std_logic_vector(34 downto 0) := (others => '0');   -- RnW, A[3:2], データ
   signal dr_shift  : std_logic_vector(34 downto 0) := (others => '0');   -- 本体の出すビット（TDI。毎ビットずらす）
   signal dr_in     : std_logic_vector(34 downto 0) := (others => '0');   -- 本体の取った TDO（上からずらし入れる）
@@ -326,11 +330,14 @@ begin
             elsif seg = G_START then
               -- 転送の開始: IR が違えば IR スキャンから
               dr_shift <= payload;
-              if ir_valid and ir_cur = ir then
+              if ir_valid and ir_cur = ir and cur_before = ir_before and cur_after = ir_after and cur_len = ir_len then
                 enter(G_DR_HEAD);
               else
-                ir_cur   <= ir;
-                ir_valid <= true;
+                ir_cur     <= ir;
+                cur_before <= ir_before;
+                cur_after  <= ir_after;
+                cur_len    <= ir_len;
+                ir_valid   <= true;
                 enter(G_IR_HEAD);
               end if;
             elsif index = seg_len and (seg = G_SEQ or seg = G_DR_TAIL) and not drained then

@@ -21,6 +21,9 @@ class RingDevice:
         assert address == g.EVENTS_CAPACITY
         return self.capacity
 
+    def time(self):
+        return 1 << 40                  # events_read がイベントの時刻を 64 ビットに延ばす基準（イベントの時刻より後）
+
     def read(self, address, n):
         assert address == g.EVENTS_WRITTEN and n == 2
         return [self.written, 0]

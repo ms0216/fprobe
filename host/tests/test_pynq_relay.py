@@ -160,3 +160,39 @@ def test_the_deep_buffer_is_checked_against_what_the_pl_actually_uses(lib):
     assert f(IOMEM_480M, 0x1E000008, mb32, mb32) < 0                       # 16 の倍数でない
     assert f(b"00000000-1bffffff : System RAM\n", 0x1F000000, mb32, mb32) < 0   # DDR の外へはみ出す
     assert f(IOMEM_FULL, 0x1E000000, mb32, mb32) < 0                       # Linux のメモリと重なる
+
+
+def test_time_in_ns_does_not_overflow_a_32_bit_long(lib):
+    # ARM の long は 32 ビット。秒 × 10^9 を long で計算すると 2.1 秒で溢れ、経過時間の比べが狂う（待たずに CPU を使い切る）
+    lib.relay_ns.argtypes = [ctypes.c_int64, ctypes.c_int64]
+    lib.relay_ns.restype = ctypes.c_int64
+    assert lib.relay_ns(10, 5) == 10_000_000_005
+    assert lib.relay_ns(100_000, 999_999_999) == 100_000_999_999_999
+
+
+def test_payload_size_limits_are_exact(lib):
+    pl, st = PlModel(), Stats()
+    assert from_pc(lib, pl, bytes([1, 0]) + bytes(512), st) == 0 and len(pl.frames[-1]) == 513
+    assert from_pc(lib, pl, bytes([1, 0]) + bytes(513), st) < 0 and st.dropped_bad == 1
+    assert from_pc(lib, pl, b"\x01", st) < 0 and st.dropped_bad == 2         # ch だけで seq が無い
+    pl.tx = [bytes(514)]                                                       # PL が上限を超える長さを出した
+    assert to_pc(lib, pl, st) == b"" and pl.done == 1 and st.dropped_bad == 3  # 読まずに捨てて先へ進む
+    pl.tx = [bytes(513)]
+    small = ctypes.create_string_buffer(513)                                   # 出力の入れ物が足りない
+    assert lib.relay_to_pc(ctypes.byref(pl.ops), small, len(small), ctypes.byref(st)) == 0 and pl.done == 2
+
+
+def test_a_system_ram_line_after_nested_lines_is_still_seen(lib):
+    lib.relay_region_free.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32]
+    iomem = b"00000000-0fffffff : System RAM\n  00008000-00efffff : Kernel code\n10000000-1fffffff : System RAM\n"
+    assert lib.relay_region_free(iomem, 0x1E000000, 32 << 20) == 0
+
+
+def test_main_compiles_for_the_target_arm_linux(tmp_path):
+    # PYNQ の上で make する前に、同じ警告の厳しさ（-Wall -Wextra -Werror）で ARM 向けに通るか確かめる
+    zig = shutil.which("zig")
+    assert zig
+    r = subprocess.run([zig, "cc", "-target", "arm-linux-gnueabihf", "-O2", "-Wall", "-Wextra", "-Werror",
+                        "-o", str(tmp_path / "fprobe-relay"), str(SRC / "main.c"), str(SRC / "relay.c")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

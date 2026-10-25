@@ -273,7 +273,15 @@ class Rtt:
     def _read_name(self, address: int) -> str | None:
         if address == 0:
             return None
-        raw = self.memory.read_memory(address, NAME_LIMIT)
+        try:
+            raw = bytes(self.memory.read_memory(address, NAME_LIMIT))
+        except Exception:                                    # 領域の終わりの近く: 32 バイトは読めない。NUL まで 1 バイトずつ
+            raw = b""
+            while len(raw) < NAME_LIMIT and raw.find(0) < 0:
+                try:
+                    raw += bytes(self.memory.read_memory(address + len(raw), 1))
+                except Exception:
+                    break                                    # 読めた分までを名前とする（NUL が無くても open は続ける）
         return raw.split(b"\0", 1)[0].decode("utf-8", errors="replace")
 
     # --- 上り -----------------------------------------------------------------------------

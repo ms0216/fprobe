@@ -21,6 +21,7 @@ entity dap_monitor is
   port (
     clk           : in  std_logic;
     rst           : in  std_logic;
+    enable        : in  std_logic;                       -- SWD が接続中。立ち下がり（切断）で控えを捨てる
     -- 覗く（dap_processor → swd_phy）
     cmd_fire      : in  std_logic;                       -- 命令が受理された周期に 1
     cmd_op        : in  std_logic_vector(1 downto 0);
@@ -44,6 +45,7 @@ entity dap_monitor is
     csw_shadow    : out std_logic_vector(31 downto 0);
     tar_shadow    : out std_logic_vector(31 downto 0);
     shadow_valid  : out std_logic;
+    shadow_ap     : out std_logic_vector(7 downto 0);    -- 控えの CSW・TAR を書いた AP（APSEL）。使う側が自分の AP と比べる
     match         : out std_logic;
     -- イベント（転送 1 件ごと）
     ev_valid      : out std_logic;
@@ -70,6 +72,7 @@ architecture rtl of dap_monitor is
   signal csw     : std_logic_vector(31 downto 0) := (others => '0');
   signal csw_known, tar_known : boolean := false;
   signal csw_ap, tar_ap : std_logic_vector(7 downto 0) := (others => '0');   -- CSW・TAR を書いた AP（APSEL）
+  signal en_prev : std_logic := '0';
   signal match_r : std_logic := '0';
   signal ev_valid_r  : std_logic := '0';
   signal ev_request_r : std_logic_vector(3 downto 0) := (others => '0');
@@ -100,7 +103,9 @@ begin
         csw_ap  <= (others => '0');
         tar_ap  <= (others => '0');
         ev_known_r <= '1';
+        en_prev <= '0';
       else
+        en_prev <= enable;
         if cmd_fire = '1' then
           pending <= cmd_op = OP_TRANSFER;
           req     <= cmd_req;
@@ -164,6 +169,11 @@ begin
             end if;
           end if;
         end if;
+        if en_prev = '1' and enable = '0' then                     -- 切断: 線のリセットでターゲットの SELECT・CSW・TAR は初期値に戻る
+          sel       <= (others => '0');
+          csw_known <= false;
+          tar_known <= false;
+        end if;
       end if;
     end if;
   end process;
@@ -172,6 +182,7 @@ begin
   csw_shadow    <= csw;
   tar_shadow    <= std_logic_vector(tar);
   shadow_valid  <= '1' when csw_known and tar_known and csw_ap = tar_ap and inc(1) = '0' else '0';
+  shadow_ap     <= csw_ap;
   ev_valid      <= ev_valid_r;
   ev_request    <= ev_request_r;
   ev_ack        <= ev_ack_r;

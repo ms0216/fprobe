@@ -3,13 +3,15 @@
 
 from types import SimpleNamespace
 
-from fprobe import mcp_server
+import pytest
+
+from fprobe import probe_events
 from fprobe.mcp_server import Probe
 from probe_fakes import FakeDevice, use_fake_ring
 
 
 def probe_with_ring(monkeypatch, capacity):
-    use_fake_ring(monkeypatch, mcp_server)
+    use_fake_ring(monkeypatch, probe_events)
     dev = FakeDevice(ring_capacity=capacity)
     dev.ring_running = True
     p = Probe("unused")
@@ -46,3 +48,16 @@ def test_without_since_it_is_still_the_latest(monkeypatch):
         dev.sample(1000 + i, 0x20000000, i)
     r = p.events_read(last=3)
     assert values(r) == [17, 18, 19] and (r["first"], r["next"]) == (17, 20) and "skipped" not in r
+
+
+def test_event_times_keep_increasing_across_the_48_bit_wrap(monkeypatch):
+    """イベントの時刻は 48 ビット。折り返しをまたいでも time_us はタイムベース（64 ビット）で単調に増える"""
+    p, dev = probe_with_ring(monkeypatch, capacity=10)
+    wrap = 1 << 48
+    dev.ticks = 3 * wrap + 1000
+    dev.sample(wrap - 100, 0x20000000, 0)
+    dev.sample(50, 0x20000000, 1)
+    dev.ticks = 3 * wrap + 1000
+    for raw in (False, True):
+        t = [x["time_us"] for x in p.events_read(raw=raw)["items"]]
+        assert t[0] < t[1] and t[1] - t[0] == pytest.approx(1.5, abs=0.01)     # 150 刻み = 1.5 µs

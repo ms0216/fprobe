@@ -1,0 +1,26 @@
+#!/bin/sh
+# fprobe: 起動のとき、U-Boot が PL に fprobe の回路を書いていたら、印を置いて中継を起動する（/usr/local/bin/fprobe-boot。
+# systemd の fprobe-boot.service が起動時に 1 回呼ぶ）。
+#   PL が構成済みかは、PL の番地を読まずに DEVCFG の INT_STS（0xF800700C）の PCFG_DONE_INT（bit2）で見る。
+#   （構成されていない PL の番地を読むと ARM が固まるため）
+#   構成済みでなければ何もしない（印を置かない = 中継は起動しない。JTAG で書く従来の流れはそのまま使える）。
+# 印を置くだけで、中継は fprobe-relay.service が（この後に）自分で起動する。ここから systemctl restart を呼ぶと、
+# fprobe-relay.service が Before= で待っているこのサービスの完了と互いに待ち合って進まない（2026-10-25 に起きた）。
+# 印の id は /boot/fprobe.id（16 進。fprobe_gw の persist が書く）。無ければ「boot」。
+set -e
+STS=$(python3 - <<'PY'
+import mmap, os, struct
+fd = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
+m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0xF8007000)
+print((struct.unpack('<I', m[0x0C:0x10])[0] >> 2) & 1)
+PY
+)
+if [ "$STS" != "1" ]; then
+    echo "fprobe-boot: PL は未構成（PCFG_DONE_INT = $STS）。何もしない" >&2
+    exit 0
+fi
+ID=$(cat /boot/fprobe.id 2>/dev/null || echo "")
+case "$ID" in ""|*[!0-9a-f]*) ID=0 ;; esac
+echo "fprobe-boot: PL は構成済み。印 $ID を置く（中継は fprobe-relay.service が起動する）" >&2
+mkdir -p /run/fprobe
+echo "$ID" > /run/fprobe/pl-design

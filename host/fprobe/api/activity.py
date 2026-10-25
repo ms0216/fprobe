@@ -35,8 +35,13 @@ class ActivityLog:
         with self._lock:
             self._seq += 1
             entry = {"seq": self._seq, "time": datetime.now().isoformat(timespec="milliseconds"), **entry}
+            line = json.dumps(entry, ensure_ascii=False, default=str)
+            try:
+                line.encode("utf-8")
+            except UnicodeEncodeError:                  # 孤立サロゲート（JSON の "\ud800"）。\u エスケープで書けば欠けずに残る
+                line = json.dumps(entry, ensure_ascii=True, default=str)
             with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+                f.write(line + "\n")
         self._on_entry(entry)
         return entry
 

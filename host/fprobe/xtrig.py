@@ -104,6 +104,12 @@ class Pattern:
     rise: int = 0
     fall: int = 0
 
+    def __post_init__(self):
+        for name in ("mask", "value", "rise", "fall"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 0xFFFF:
+                raise ValueError(f"Pattern.{name} は 0〜0xFFFF の整数（ロジアナの ch 0〜15。ch 16 以上は指定できない）: {v!r}")
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -130,10 +136,14 @@ class TriggerSequencer:
         words, withins = [], []
         for k in range(4):
             st = stages[k] if k < len(stages) else Stage(Event(0))
+            if k < len(stages) and not int(st.when):
+                raise ValueError(f"段 {k} の条件が空（成立する条件が無く、永久に進まない）")
             if not 1 <= st.count <= 0xFFFF:
                 raise ValueError("count は 1〜65535")
             words.append(int(st.when) | st.count << 16)
             if k:
+                if st.within_s is not None and not st.within_s > 0:
+                    raise ValueError(f"within_s は正の数（制限なしは None）: {st.within_s!r}")
                 cycles = 0 if st.within_s is None else max(1, round(st.within_s * self.clock_hz))
                 if cycles >= 1 << 32:
                     raise ValueError("within_s が長すぎる")
@@ -231,6 +241,8 @@ class ActionState:
 def pulse_ticks(seconds: float, clock_hz: int) -> tuple[int, int]:
     """脈の長さ（秒）→ (length, unit)。length ≤ 255 になる最小の刻みで、長さ以上にする（unit ≥ 1 では
     最初の刻みの位置の分だけ短くなりうるので、実際は ((length − 1)·16^unit, length·16^unit] 周期）。"""
+    if not seconds > 0:
+        raise ValueError(f"脈の長さは正の数（秒）: {seconds!r}")
     cycles = max(1, round(seconds * clock_hz))
     for unit in range(MAX_PULSE_UNIT + 1):
         tick = 16 ** unit
@@ -325,7 +337,7 @@ class PinOutputs:
                 mask=_field(when, g.XTRIG_OUT_WHEN0_MASK), value=_field(when, g.XTRIG_OUT_WHEN0_VALUE),
                 any=bool(_field(when, g.XTRIG_OUT_WHEN0_ANY)), sources=Source(_field(when, g.XTRIG_OUT_WHEN0_SOURCES)),
                 high=bool(_field(ctrl, g.XTRIG_OUT_CTRL0_LEVEL)),
-                length=max(1, _field(ctrl, g.XTRIG_OUT_CTRL0_LENGTH)), unit=_field(ctrl, g.XTRIG_OUT_CTRL0_UNIT),
+                length=max(1, length_raw), unit=_field(ctrl, g.XTRIG_OUT_CTRL0_UNIT),
                 claim=bool(_field(ctrl, g.XTRIG_OUT_CTRL0_CLAIM)))
             states.append(ActionState(k, _field(ctrl, g.XTRIG_OUT_CTRL0_PIN),
                                       bool(_field(ctrl, g.XTRIG_OUT_CTRL0_ENABLE)), bool(active >> k & 1), cfg,

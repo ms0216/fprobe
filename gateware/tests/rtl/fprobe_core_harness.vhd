@@ -4,6 +4,9 @@ library ieee;
 use ieee.std_logic_1164.all;
 
 entity fprobe_core_harness is
+  generic (
+    RESET_SPLIT : boolean := false
+  );
   port (
     clk            : in  std_logic;
     rst            : in  std_logic;
@@ -68,7 +71,8 @@ begin
                  INJECTOR => work.test_caps_pkg.INJECTOR, XOUT_COUNT => work.test_caps_pkg.XOUT_COUNT,
                  LA_FILTER => work.test_caps_pkg.LA_FILTER, LA_PULSE => work.test_caps_pkg.LA_PULSE,
                  LA_INPUT_COUNT => work.test_caps_pkg.LA_INPUTS,
-                 EVENT_RING_BITS => work.test_caps_pkg.EVENT_RING_BITS, SYNC => work.test_caps_pkg.SYNC)
+                 EVENT_RING_BITS => work.test_caps_pkg.EVENT_RING_BITS, SYNC => work.test_caps_pkg.SYNC,
+                 RESET_SPLIT => RESET_SPLIT)
     port map (clk => clk, rst => rst,
               ctrl_in_valid => ctrl_in_valid, ctrl_in_ready => ctrl_in_ready,
               ctrl_in_data => ctrl_in_data, ctrl_in_last => ctrl_in_last,

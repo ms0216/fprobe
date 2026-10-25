@@ -85,6 +85,11 @@ PS（Cortex-A9）の DAP を、fprobe の汎用の JTAG の口からジャンパ
 - 出典は上の観測の口と同じ base.xdc（rpi_gpio_tri_io の GPIO8〜11）。この 4 本は実機ではまだ確かめていない。
 - independent にすると、基板の USB の JTAG（hw_server）からは PS の DAP が見えなくなる（PL の書き込みはできる）。
 
+## ボードの間の時刻の同期（Raspberry Pi のヘッダ）
+
+`gateware/fprobe_gw/boards/pynq_z2.py` の `sync` の資源グループ: 親から入る `sync_in` = GPIO16（ヘッダ 36 番、B19、引き下げ）、
+子へ出す `sync_out` = GPIO20（ヘッダ 38 番、A20）。
+
 ## PL の書き込み
 
 PYNQ の Linux 経由（`pynq.Bitstream`・fpga_manager）で書くと Linux が固まった（2026-10-19）。JTAG（Vivado の hw_server）で
@@ -96,6 +101,26 @@ PYNQ の Linux 経由（`pynq.Bitstream`・fpga_manager）で書くと Linux が
 2. JTAG で書く。
 3. fprobe の回路（PS7 と zynq_frame_link を持つ）なら `fprobe-pl after <id>`: 印を置いて中継を起動する。中継はシフタを
    0xF にし、ID（"FPLK"）と版を確かめてから受け渡しを始める。印が無ければ PL を読まずに終わる。
+
+コマンド: `python -m fprobe_gw build <構成> --program`（構成が zynq_frame_link を持つなら中継を起動、`ps_axi` なら
+シフタを有効にする）、`python -m fprobe_gw program <top.bit> --board pynq_z2 [--relay | --shifter]`。`--relay` には
+ビットストリームの隣のビルドの印 `inputs.sha256`（先頭 16 文字が `after` の id になる）が要る。`--shifter` は
+`ps_axi` の構成のビルドの置き場所（例 `build/zynq_dut/`）の top.bit にだけ使える。`--persistent`（起動時の置き換え）は未対応。
+`python -m fprobe_gw pynq install | status | reserve | unreserve`: 中継と補助の据え付け（`FPROBE_PYNQ_SUDO_PASSWORD` が要る）・
+状態・深いバッファの予約。
+
+接続先は環境変数で替える（既定は括弧内）: `FPROBE_PYNQ_HOST`（192.168.77.2）、`FPROBE_PYNQ_USER`（xilinx）、
+`FPROBE_PYNQ_KEY`（`~/.ssh/fprobe_pynq`）。ユーザー名・ホスト名は SSH と sudoers のコマンドに入るので、英数字と `._-`（ホストは `:` も）だけを
+受け付ける。`after` の id は 16 進（小文字）だけで、そうでなければ PYNQ に触れる前に断る。SSH は `BatchMode=yes`・
+`ConnectTimeout=10`（パスワードを聞かない）、既定 60 秒、Vivado は 600 秒で打ち切り、どちらも `PynqError` で報告する。
+
+**書き込みが途中で失敗したときの状態**: 手順 1 の後は中継が止まり、印が無く、シフタが無効（安全な側）。JTAG が失敗・時間切れでも
+そのままで、中継は起動し直さない（PL の状態が不明なため）。もう一度 `program` を実行すれば `before` から繰り返す。
+二重起動の排他は無い（同時に 2 つの `program` を走らせない）。
+
+中継（`fprobe-relay`）の終了コード: 2 = 印が無い、3 = PL の ID・版が違う、4 = 動作中に ID が読めなくなった（100 ms ごとに確認）。
+systemd のサービスは失敗で 2 秒後に起動し直すが、2 と 3 は起動し直さない。送り主を覚えるのは形の正しい（2〜514 バイト）
+データグラムだけで、PC → PL が詰まっている（RX_STATUS の bit0）間は 1 つだけ保留して PC からの次を読まない。PL → PC は 1 周に最大 4 フレーム。
 
 **Linux が固まった条件**（2026-10-20）: シフタ有効のまま PL を書き直した／PS7 を持たない回路でシフタを有効にした。
 PS7 を持つ回路では固まらなかった。応答の無い PL の番地を読んでも固まる（中継は印が無ければ読まない）。
@@ -110,7 +135,7 @@ PS7 を持つ回路では固まらなかった。応答の無い PL の番地を
   0x1DF00000〜 の 1 MB は Linux のアプリのデバッグのリング（docs/linux.md）。
   元に戻すには /boot/uEnv.txt を消す。
   2026-10-20 に実施: `pynq reserve` の再起動はシャットダウンの途中で止まった（DONE が点いたまま・シリアルも無反応・
-  PC の USB の LAN のリンク無し）。電源の入れ直しで起動し、予約は入っていた（mem=480M、Linux のメモリ 459 MB）。
+  PC の USB の LAN のリンク無し）。電源の入れ直しで起動し、予約は入っていた（当時は mem=480M、Linux のメモリ 459 MB。今の uEnv.txt は mem=479M で、リング用の 1 MB を足した）。
   深いバッファの実機の試験（gateware/tests/hil/test_pynq_deep_hw.py）は 4 つとも通った（RAW・RLE の取り込み、
   中継の流し続け 2.19 MB/s 溢れなし、サンプラのイベント）。
 
@@ -136,3 +161,27 @@ PS7 を持つ回路では固まらなかった。応答の無い PL の番地を
   転送で内部の ch（SWDIO 駆動・DAP 処理中）が細かく変わるのが流量の大半）。200 回/秒なら 0.7 MB/s・2 ms。
   システム解析の画面は、ピンも流すとき Ethernet ではメモリの読みを 200 回/秒にする。USB（Primer）はエンドポイントが
   別なので起きない。
+
+## Zynq DUT（Primer の fprobe が外からデバッグする側）
+
+仕様 docs/superpowers/specs/2026-10-24-zynq-dut-environment-design.md、計画 docs/superpowers/plans/2026-10-24-zynq-dut-environment.md。
+PYNQ を fprobe にせず、Primer の fprobe がデバッグされる側（DUT）として使う構成。構成名 `zynq_dut`（`python -m fprobe_gw build zynq_dut`）。
+
+- **回路**: PS7（`ps7_bd.tcl`）+ AXI-Lite（0x40000000 から 4 KB）のサンプル生成 + FIFO（`dut_stream_core`）。レジスタ表は
+  `host/pynq/dut/dut_regs.h`（VHDL と同じ語番地。`host/tests/test_dut_app.py` が照合）。注目信号 `dbg[5:0]` を PMOD JB の
+  1〜4・7〜8 番（W14 Y14 T11 T10 V16 W16）に出す。拍（生成・読み・溢れ・捨て）は 4 クロック（40 ns）に伸ばす
+  （1 クロックの脈はロジアナの標本の間に落ちて約 1 割が欠けた。実機 2026-10-25）。PS の PJTAG は RPi ヘッダへ素通し（上の節）。
+- **書き方**: `python -m fprobe_gw program gateware/build/zynq_dut/top.bit --board pynq_z2 --shifter`（JTAG で書き、書いた後に
+  `fprobe-pl enable` でレベルシフタを有効にする。PYNQ の `fprobe-pl` に `enable` を足したので、一度 `python -m fprobe_gw pynq install`
+  が要る）。fprobe の回路ではないので中継は起動しない。
+- **アプリ**: `host/pynq/dut/dut_app.c`（PYNQ の `~/dut` で `make`、`-marm`）。`sudo ./dut_app --period 100000 --seconds 5`。
+  `--delay-us <n>` で読み手を遅らせると FIFO が溢れ、`--fault <n>` で n 個に 1 個を PL が捨てる。
+  Linux のプローブは関数 `dut_consume`（引数 = 取り出した番号）に付ける。
+- **ロジアナの ch（Primer の fprobe_la、J14 の T8 P8 R8 T7 T6 P6 = ch10〜15）**: 10 = 生成の拍、11 = FIFO 満杯、12 = DATA の読み、
+  13 = 溢れの拍、14 = 不具合で捨てた拍、15 = 生成が有効。**JB の 3 番と 4 番の線が R8 と T7 で交差している**ため、
+  dbg[2]（溢れ）が ch13、dbg[3]（読み）が ch12 に出る（配線を直せば入れ替わる）。
+- **実測（2026-10-25）**: 生成 1 kHz で、生成の拍の間隔は 1.000003 ms。`--fault 7` の捨てた拍の間隔は 7.000060 ms（生成の 7 倍）。
+  遅い読み手（20 ms）では、満杯の後に溢れの拍が 1 kHz で出て、読みの拍は 20 ms 間隔。ptrace のプローブ（`dut_consume`）を付けると
+  アプリが止まって遅れ、プローブ自体が溢れを起こした（観測が対象を変える）。
+- **JTAG の 5 本（フェーズ 1）とも未確認**: JP1（MODE3）を挿した independent の起動で PS の DAP が Primer の `jtag.scan` に見えるかは、
+  利用者の立ち会い後（JP1 の位置は基板で確認してから）。

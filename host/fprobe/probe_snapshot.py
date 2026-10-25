@@ -1,6 +1,6 @@
 """Probe の道具: スナップショット（止めた状態の保存・プローブ無しでの調査・書き戻し・ELF のコアファイル）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols・_target_type・_recorder・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols・_target_type・_recorder・
 _session と、InspectTools（SVD・周辺の一括読みの守り・target_fault）、RtosTools（_kernel）を使う。
 機器に触るのは必ず _lock の中。
 
@@ -25,6 +25,7 @@ from pathlib import Path
 from pyocd.core import exceptions as pyocd_errors
 from pyocd.core.target import Target
 
+from .home import fprobe_home
 from . import fault
 from .api import NotConnected
 from .debug import _REASONS
@@ -147,7 +148,6 @@ class SnapshotTools:
 
     @staticmethod
     def _snapshots_dir() -> Path:
-        from .api.daemon import fprobe_home
         return fprobe_home() / "snapshots"
 
     # --- 保存 -------------------------------------------------------------------------------

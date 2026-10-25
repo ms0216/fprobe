@@ -153,7 +153,7 @@ def test_mcp_has_the_screen_state_tools():
     from test_api_mcp import FakeClient
 
     from fprobe.api.spec import load_spec
-    from fprobe.mcp_server import build_client_server
+    from fprobe.mcp_client import build_client_server
     tools = {t.name: t for t in asyncio.run(build_client_server(FakeClient(), load_spec()).list_tools())}
     assert {"ui_state_get", "ui_state_set"} <= set(tools)
     assert "origin" not in tools["ui_state_set"].input_schema["properties"]             # 窓の印は AI に出さない

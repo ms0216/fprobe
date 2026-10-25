@@ -3,6 +3,7 @@
 
 import time
 from pathlib import Path
+from tests.hil.values import num
 
 import pytest
 
@@ -37,6 +38,7 @@ def test_counter_is_sampled_at_10khz_while_the_host_reads_memory(probe):
     log = EventLog(dev)
     probe.target_resume()
     log.start()
+    written0 = log.counts()[0]
     s.start()
     reads = []
     t_end = time.monotonic() + 0.3
@@ -47,7 +49,10 @@ def test_counter_is_sampled_at_10khz_while_the_host_reads_memory(probe):
     log.stop()
     status = s.status()
     samples = [e for e in log.read() if e.kind == KIND_SAMPLE]
-    assert status["errors"] == 0 and len(samples) > 1000, (status, len(samples))
+    # イベントの置き場は輪（容量 log.capacity）でホストの読みのイベントも入る。0.3 秒 × 10 kHz の約 3000 件は
+    # 書き込まれた数で確かめ、輪に残った分は中身を確かめる
+    written = log.counts()[0] - written0
+    assert status["errors"] == 0 and written > 1000 and samples, (status, written, len(samples), log.capacity)
     assert all(e.address == counter.address for e in samples)
     values = [e.data for e in samples]
     assert all(b >= a for a, b in zip(values, values[1:])) and values[-1] > values[0]      # 走っているので増える
@@ -68,7 +73,7 @@ def test_watch_reads_a_variable_by_name_without_stopping(probe):
     series = probe.watch_series("counter", last=1000)["samples"]
     status = probe.watch_stop()
     assert status["errors"] == 0 and first["value"] is not None, (status, first)
-    assert len(series) > 50 and series[-1]["value"] > first["value"]                     # 走っているので増える
+    assert len(series) > 50 and num(series[-1]["value"]) > num(first["value"])                     # 走っているので増える
     gaps = [b["time_us"] - a["time_us"] for a, b in zip(series, series[1:])]
     assert sorted(gaps)[len(gaps) // 2] == pytest.approx(1000, rel=0.02)                   # 1 kHz
     assert probe.target_status()["state"] == "RUNNING"

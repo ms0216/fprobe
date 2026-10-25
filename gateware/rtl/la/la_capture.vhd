@@ -97,7 +97,11 @@ begin
           state <= S_IDLE;                                   -- 中止（完了した結果は残す）
         end if;
       elsif run_prev = '0' then
-        state  <= S_PRE;                                     -- 開始
+        if pretrigger = 0 then
+          state <= S_WAIT;                                   -- 開始（溜めるサンプルが無ければ 0 番から受け付ける）
+        else
+          state <= S_PRE;
+        end if;
         wp     <= (others => '0');
         filled <= (others => '0');
       elsif valid = '1' then

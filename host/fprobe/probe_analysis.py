@@ -1,6 +1,6 @@
 """Probe の解析の道具: 記録の SQL 問い合わせ・ロジアナの測定・記録の書き出し（Perfetto）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・_capture・_capture_info・_reading（記録中のもの、または
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_capture・_capture_info・_reading（記録中のもの、または
 開いたもの）を使う。どれも機器に触らない（ホストにある捕捉・記録を読むだけ）。
 """
 
@@ -18,6 +18,9 @@ __all__ = ["AnalysisTools"]
 
 
 class AnalysisTools:
+    def _init_analysis(self) -> None:
+        self._code_at_elf: tuple | None = None             # code_at に渡された ELF の読み込み（(印, Symbols)）
+
     # --- 記録の SQL 問い合わせ（U24） -------------------------------------------------------------
 
     def recording_query(self, sql: str, params: list | dict | None = None, limit: int = DEFAULT_LIMIT,
@@ -79,7 +82,7 @@ class AnalysisTools:
     def _code_at_symbols(self, path: str) -> Symbols:
         """渡された ELF（カーソルを動かすたびに読み直さない。ファイルが替われば読み直す）。"""
         stamp = (path, Path(path).stat().st_mtime_ns)
-        cached = getattr(self, "_code_at_elf", None)
+        cached = self._code_at_elf
         if cached is None or cached[0] != stamp:
             cached = (stamp, Symbols(path))
             self._code_at_elf = cached
@@ -113,7 +116,7 @@ class AnalysisTools:
         view = self._view
         addresses = set() if view is None else set(view.distinct("a", streams=["sample"]))
         addresses |= {DWT_PCSR, *(word for w in self._watched for word in w.words)}
-        run = getattr(self, "_rtos_run", None)
+        run = self._rtos_run
         if run is not None and run.address is not None:
             addresses.add(run.address)
         names = {a: self._sample_name(a) for a in addresses}
@@ -125,12 +128,12 @@ class AnalysisTools:
         for w in self._watched:
             if address in w.words:
                 return w.name if address == w.words[0] else f"{w.name}+{address - w.words[0]}"
-        run = getattr(self, "_rtos_run", None)
+        run = self._rtos_run
         if run is not None and run.address == address:
             return "実行中のタスク（TCB）"
         if address == DWT_PCSR:
             return "PC（DWT_PCSR）"
-        named = (getattr(getattr(self, "_view", None), "meta", None) or {}).get("sample.names") or {}
+        named = ((self._view.meta if self._view is not None else None) or {}).get("sample.names") or {}
         if f"0x{address:08X}" in named:                                    # 記録中に watch_set の names で付けた名前
             return named[f"0x{address:08X}"]
         syms = self._symbols

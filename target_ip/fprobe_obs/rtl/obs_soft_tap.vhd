@@ -70,6 +70,7 @@ architecture rtl of obs_soft_tap is
     signal tdo_next    : std_logic;
     signal tdo_oe_next : std_logic;
 begin
+    assert IDCODE(0) = '1' report "obs_soft_tap: IDCODE bit0 must be 1 (IEEE 1149.1)" severity failure;
     user_tdi <= tdi;
     user_sel <= '1' when ir = IR_USER else '0';
     user_capture <= '1' when state = S_CAP_DR else '0';

@@ -62,6 +62,8 @@ def round_estimate(slots: list[tuple[int, int]], sys_clock_hz: int, swd_hz: floa
 def swd_hz_for_rate(slots: list[tuple[int, int]], rate_hz: float, sys_clock_hz: int) -> int | None:
     """rate_hz の巡回に要る、最も遅い SWD の速さの要求（target_connect の frequency_hz に渡す値）。FPGA の最も速い
     SWCLK でも届かなければ None。"""
+    if not rate_hz > 0:
+        raise ValueError(f"rate_hz は正の数（Hz）: {rate_hz!r}")
     transfers = round_transfers(slots)
     needed = transfers * BITS_PER_TRANSFER * rate_hz             # 要る SWCLK
     half_clock, tolerated = _half_clock(sys_clock_hz)
@@ -74,6 +76,9 @@ def swd_hz_for_rate(slots: list[tuple[int, int]], rate_hz: float, sys_clock_hz: 
 def plan_slots(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """(番地, バイト数) の範囲を、語の境界の (先頭の番地, 語数) のか所にする。重なる・隣り合う範囲はまとめ、
     1 か所 16 語まで・1 KB をまたがないように分ける。8 か所に収まらなければ ValueError。"""
+    for address, size in ranges:
+        if address < 0 or address + max(size, 1) > 1 << 32:
+            raise ValueError(f"範囲 0x{address:X}+{size} が 32 ビットの番地の外")
     words = sorted({w for address, size in ranges for w in range(address // 4, (address + max(size, 1) + 3) // 4)})
     slots: list[tuple[int, int]] = []
     for w in words:
@@ -99,6 +104,8 @@ class Sampler:
 
     def configure(self, ranges: list[tuple[int, int]], period_s: float, ap: int = 0) -> list[tuple[int, int]]:
         """観測する範囲（(番地, バイト数)）と周期を設定する（止めてから）。設定したか所を返す。"""
+        if isinstance(ap, bool) or not isinstance(ap, int) or not 0 <= ap <= 255:
+            raise ValueError(f"ap は 0〜255: {ap!r}")
         slots = plan_slots(ranges)
         period = round(period_s * self.sys_clock_hz)
         if not 1 <= period < 1 << 32:

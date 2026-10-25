@@ -2,7 +2,10 @@
 -- AXI3 の 64 ビットのマスタにする（ボード非依存。Zynq の S_AXI_HP0 等）。仕様: docs/superpowers/specs/2026-10-19-pynq-z2-port-design.md §4.3
 --
 -- 1 拍 = 2 語の INCR のバースト（AxLEN = 1、AxSIZE = 3）。物理番地 = base + 拍の番号 × 16、下位 64 ビットが先の語。
--- base = 0 の間はコマンドを受けない（ready = 0。PS の DDR の 0 番地を壊さない）。
+-- base = 0、または 16 の倍数でない（下位 4 ビットが 0 でない）間はコマンドを受けない（ready = 0。PS の DDR の 0 番地を壊さない。
+-- 16 バイトのバーストが 4 KB の境界をまたぐ AXI 違反も防ぐ）。
+-- rst は PS 側の AXI を巻き戻せない: 書きの途中（AW だけ・W の一部だけ渡した後）や応答待ちの間に rst を入れると、相手に
+-- 中途の取引が残る。メモリ側の rst は起動時の 1 回だけ（相手が idle の間）とする前提で、途中の rst は支援しない（台帳 BUG-RTL-AXI-1）。
 -- 書きと読みの順: 書きの B がすべて返ってから読みを出す（AXI は書きと読みの順を保証しないため）。深いバッファを読み出し
 -- ながら書く（ストリーム）間は、読みのたびに直前の書きの B の往復を待ち、その間は書きも止まる。読みの速さは PC へのリンクで
 -- 抑えられる（数 MB/s）ので書きの余裕は大きいが、細かくするなら出しっぱなしの書きの番地との比較で待つ。読み・書きとも出しっぱなしは MAX_OUTSTANDING まで。
@@ -19,7 +22,7 @@ entity axi_mem_port is
   port (
     clk           : in  std_logic;
     rst           : in  std_logic;
-    base          : in  unsigned(31 downto 0);   -- 領域の物理番地（バイト、16 の倍数）。0 なら使えない
+    base          : in  unsigned(31 downto 0);   -- 領域の物理番地（バイト）。0 または 16 の倍数でないなら使えない（ready = 0）
     ready         : out std_logic;
     -- mem_port
     cmd_valid     : in  std_logic;
@@ -72,7 +75,7 @@ architecture rtl of axi_mem_port is
   signal can_write, can_read, enabled : std_logic;
   signal b_done, r_done : std_logic;
 begin
-  enabled <= '1' when base /= 0 else '0';
+  enabled <= '1' when base /= 0 and base(3 downto 0) = "0000" else '0';
   ready <= enabled;
   can_write <= '1' when enabled = '1' and aw_pending = '0' and w_left = 0 and wr_out < MAX_OUTSTANDING else '0';
   can_read  <= '1' when enabled = '1' and ar_pending = '0' and aw_pending = '0' and w_left = 0 and wr_out = 0
@@ -147,7 +150,9 @@ begin
           ar_pending <= '0';
         end if;
         if b_done = '1' then
-          wr_next := wr_next - 1;
+          if wr_next /= 0 then                          -- rst の後に届く古い応答で数を巻き戻さない
+            wr_next := wr_next - 1;
+          end if;
           if m_axi_bresp /= "00" then
             errs := errs + 1;
           end if;
@@ -168,7 +173,9 @@ begin
           if r_done = '1' then
             rd_valid <= '1';
             rd_data <= m_axi_rdata & r_lo;
-            rd_next := rd_next - 1;
+            if rd_next /= 0 then
+              rd_next := rd_next - 1;
+            end if;
           end if;
         end if;
         wr_out <= wr_next;

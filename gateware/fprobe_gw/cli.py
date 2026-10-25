@@ -47,6 +47,8 @@ def make_parser() -> argparse.ArgumentParser:
     g.add_argument("--persistent", action="store_true", help="SRAM ではなく外部 Flash に書き込む")
     g.add_argument("--relay", action="store_true",
                    help="PYNQ-Z2: zynq_frame_link を持つ fprobe の回路（書いた後に PS の中継を起動する）")
+    g.add_argument("--shifter", action="store_true",
+                   help="PYNQ-Z2: 中継を持たないが PS が AXI で触る回路（Zynq DUT。書いた後にレベルシフタを有効にする）")
     g.add_argument("--unverified", action="store_true",
                    help="成功したビルドの印（隣の inputs.sha256）が無いビットストリームも書く（外で作ったもの等）")
 
@@ -92,18 +94,20 @@ def _build_vivado(args) -> int:
     print(result.timing.describe())
     print(f"ビットストリーム: {result.bitstream}")
     if args.program:
-        _program_pynq(result.bitstream, relay=design.capabilities is not None)
+        _program_pynq(result.bitstream, relay=design.capabilities is not None, shifter=design.ps_axi)
     return 0
 
 
-def _program_pynq(bitstream: Path, *, relay: bool) -> None:
+def _program_pynq(bitstream: Path, *, relay: bool, shifter: bool = False) -> None:
     stamp = bitstream.parent / INPUTS_STAMP
     if relay and not stamp.is_file():
         # 中継の印の id はビルドの印から取る。無いと書いた後に fprobe-pl が拒むので、書く前に断る
         raise BuildError(f"中継を起動するには {bitstream} の隣にビルドの印 {INPUTS_STAMP} が要る")
     PynqLoader(VivadoToolchain.locate()).program(
-        bitstream, relay=relay, design_id=stamp.read_text(encoding="utf-8")[:16] if stamp.is_file() else "")
-    print(f"書き込み完了（PYNQ-Z2、JTAG。中継: {'起動' if relay else '止めたまま'}）")
+        bitstream, relay=relay, shifter=shifter,
+        design_id=stamp.read_text(encoding="utf-8")[:16] if stamp.is_file() else "")
+    print(f"書き込み完了（PYNQ-Z2、JTAG。中継: {'起動' if relay else '止めたまま'}"
+          f"{'、レベルシフタ: 有効' if shifter else ''}）")
 
 
 def _resources(design, build_dir: Path, depth: int) -> None:
@@ -185,7 +189,12 @@ def main(argv=None) -> int:
         if board.toolchain == "vivado":
             if args.persistent:
                 raise BuildError("PYNQ-Z2 の起動時の回路の置き換えは未対応（JTAG で SRAM に書くだけ）")
-            _program_pynq(bitstream, relay=args.relay)
+            if args.shifter and not getattr(DESIGNS.get(bitstream.resolve().parent.name), "ps_axi", False):
+                # PS7 を持たない回路でレベルシフタを有効にすると Linux が固まった（2026-10-20）。PS7 の有無は PS からは分からないので、
+                # ビルドの置き場所（build/<構成>/）が ps_axi の構成のときだけ許す
+                raise BuildError("--shifter は PS が AXI で触る構成（ps_axi。例 zynq_dut）のビルドの置き場所の top.bit にだけ使える"
+                                 f"（{bitstream} の親の名前は構成として登録されていないか、ps_axi ではない）")
+            _program_pynq(bitstream, relay=args.relay, shifter=args.shifter)
             return 0
         if args.persistent:
             # B34: 外部 Flash への書き込みの間、書き込み器が FPGA を別の回路で動かし、J12 の端子を駆動する

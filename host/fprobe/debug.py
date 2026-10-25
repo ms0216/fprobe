@@ -25,7 +25,7 @@ from .dwarf.access import AccessError
 from .dwarf.info import DebugInfo
 from .dwarf.inspector import Inspector
 from .fault import dfsr_bits
-from .stepping import STEP_MODES, Halt, LineStepper, Runner
+from .stepping import DFSR, STEP_MODES, Halt, LineStepper, Runner, dfsr_reason
 from .symbols import Location, Symbols, is_line_location
 
 __all__ = ["Debugger", "Frame", "PyocdAccess", "RESET_KINDS", "Stop", "VECTOR_CATCH", "Watch"]
@@ -121,6 +121,7 @@ class Debugger:
     symbols: Symbols | None = None
     breakpoints: dict[int, str] = field(default_factory=dict)    # 番地 → 指定した場所の名前
     watches: dict[int, Watch] = field(default_factory=dict)
+    last_dfsr: int = 0            # 最後の 1 命令のステップで読んだ DFSR
 
     # --- 場所 ------------------------------------------------------------------------
 
@@ -176,7 +177,12 @@ class Debugger:
             size = self.symbols.variable(location).size
         if kind not in _WATCH_KINDS:
             raise ValueError(f"kind は {', '.join(_WATCH_KINDS)} のどれか")
+        previous = self.watches.get(address)
+        if previous is not None:                      # 帳簿は番地ごとに 1 つ: 前の比較器を先に外す（残すと clear でも外れない）
+            self.target.remove_watchpoint(address, previous.size, _WATCH_KINDS[previous.kind])
         if not self.target.set_watchpoint(address, size, _WATCH_KINDS[kind]):
+            if previous is not None:                  # 置けなければ前のを戻す（帳簿と機器を一致させる）
+                self.target.set_watchpoint(address, previous.size, _WATCH_KINDS[previous.kind])
             raise RuntimeError(f"0x{address:08X} にウォッチポイントを置けない（比較器が足りない・大きさが不正）")
         watch = Watch(address, size, kind)
         self.watches[address] = watch
@@ -198,16 +204,29 @@ class Debugger:
     # --- 実行 ------------------------------------------------------------------------
 
     def resume(self) -> None:
-        """再開する。いまの PC にブレークポイントがあれば、まず 1 命令踏み越える（ソフトの BKPT で止まり直さない）。"""
+        """再開する。いまの PC にブレークポイントがあれば、まず 1 命令踏み越える（ソフトの BKPT で止まり直さない）。
+        踏み越えた 1 命令で DFSR に通常のステップ以外の理由（ベクタキャッチ・ウォッチポイント・BKPT・外部の停止）が
+        立てば、再開せずその停止を残す。"""
         if self.target.get_state() == Target.State.HALTED:
             pc = self.target.read_core_register("pc")
-            if pc in self.breakpoints:
-                self.target.remove_breakpoint(pc)
-                self.target.step()
-                self.target.set_breakpoint(pc, Target.BreakpointType.AUTO)
-                if self.target.get_halt_reason() == Target.HaltReason.WATCHPOINT:
-                    return                              # 踏み越えた 1 命令でウォッチポイントが成立: その停止を残す
+            if pc in self.breakpoints and self._step_instruction() is not None:
+                return
         self.target.resume()
+
+    def _step_instruction(self) -> str | None:
+        """1 命令進め、止まった理由を DFSR（機器の事実）で返す（通常のステップだけなら None）。いまの PC に置いた
+        ブレークポイントは進める間だけ外し、失敗しても必ず置き直す（帳簿と機器を一致させる）。"""
+        pc = self.target.read_core_register("pc")
+        lifted = pc in self.breakpoints
+        if lifted:
+            self.target.remove_breakpoint(pc)
+        try:
+            self.target.step()
+        finally:
+            if lifted:
+                self.target.set_breakpoint(pc, Target.BreakpointType.AUTO)
+        self.last_dfsr = self.target.read32(DFSR)
+        return dfsr_reason(self.last_dfsr, stepping=True)
 
     def run_until_halt(self, timeout_s: float = 5.0, poll_s: float = 0.005,
                        lock: contextlib.AbstractContextManager | None = None) -> Stop:
@@ -223,13 +242,26 @@ class Debugger:
                     return self._stop(start, _REASONS.get(self.target.get_halt_reason(), "unknown"))
             time.sleep(poll_s)
         with lock:
+            if self.target.get_state() == Target.State.HALTED:      # 最後の確認の後に自分で止まっていた: 理由を失わない
+                return self._stop(start, _REASONS.get(self.target.get_halt_reason(), "unknown"))
             self.target.halt()
             return self._stop(start, "timeout")
 
     def step(self) -> Stop:
+        """1 命令進める。reason は step か、その命令で止まった理由（DFSR。vector_catch / watchpoint / breakpoint / external）。"""
         start = time.monotonic()
-        self.target.step()
-        return self._stop(start, "step")
+        reason = self._step_instruction()
+        return replace(self._stop(start, reason or "step"), halt_bits=dfsr_bits(self.last_dfsr))
+
+    def step_instructions(self, count: int) -> int:
+        """1 命令ずつ count 回進める。通常のステップ以外の理由で止まったらそこで打ち切る。実行した回数を返す
+        （止まった理由は DFSR / target_status で読む）。"""
+        done = 0
+        while done < count:
+            done += 1
+            if self._step_instruction() is not None:
+                break
+        return done
 
     def step_line(self, mode: str = "over", location: str | int | None = None, timeout_s: float = 5.0,
                   mask_interrupts: bool = True, lock: contextlib.AbstractContextManager | None = None,

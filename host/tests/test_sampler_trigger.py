@@ -44,6 +44,7 @@ def test_status_is_the_register_facts(probe):
     dev.csr[g.SAMPLER_MATCH_SEEN], dev.csr[g.SAMPLER_MATCH_COUNT] = 40, 2
     dev.csr[g.SAMPLER_MATCH_TIME_LO], dev.csr[g.SAMPLER_MATCH_TIME_HI] = 5, 1
     dev.csr[g.SAMPLER_MATCH_PREV_LO], dev.csr[g.SAMPLER_MATCH_PREV_HI] = 3, 1
+    dev.ticks = 1 << 40                                    # いまのタイムベース（回路の 48 ビットの時刻はこれより前）
     st = probe.sampler_trigger_status()
     assert st == {"enabled": True, "address": DHCSR, "mask": S_HALT, "value": S_HALT, "halt": True, "la": True,
                   "matched": True, "seen_any": True, "seen": 40, "count": 2,
@@ -102,3 +103,18 @@ def test_routing_a_source_the_design_lacks_is_refused(probe):
         probe.xtrig_route(to_la=["sampler_match"])
     with pytest.raises(RuntimeError, match="obs_match"):
         probe.xtrig_route(to_inject=["obs_match"])
+
+
+def test_status_times_follow_the_timebase_across_the_48_bit_wrap(probe):
+    """回路の時刻は 48 ビット。タイムベース（64 ビット）が折り返しを過ぎても、LA のトリガ時刻などと比べられる時刻で返す"""
+    dev = probe.session.device
+    wrap = 1 << 48
+    probe.sampler_trigger_set(address=DHCSR, mask=S_HALT, value=S_HALT, halt=True, la=False)
+    dev.csr[g.SAMPLER_MATCH_CONTROL] = 1 | 1 << 8 | 1 << 9
+    dev.csr[g.SAMPLER_MATCH_SEEN], dev.csr[g.SAMPLER_MATCH_COUNT] = 40, 1
+    dev.csr[g.SAMPLER_MATCH_TIME_LO], dev.csr[g.SAMPLER_MATCH_TIME_HI] = 50 & 0xFFFFFFFF, 0           # 折り返しの後
+    dev.csr[g.SAMPLER_MATCH_PREV_LO], dev.csr[g.SAMPLER_MATCH_PREV_HI] = (wrap - 50) & 0xFFFFFFFF, (wrap - 50) >> 32   # 前
+    dev.ticks = 3 * wrap + 1000
+    st = probe.sampler_trigger_status()
+    assert st["time"] == 3 * wrap + 50 and st["prev_time"] == 2 * wrap + (wrap - 50)
+    assert st["prev_time"] < st["time"]

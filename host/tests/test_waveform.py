@@ -35,9 +35,9 @@ def test_the_view_is_clamped_to_the_capture():
 def test_a_million_transitions_are_summarized_quickly():
     n = 1_000_000
     w = Waveform(tr([i & 0xFFFF for i in range(n)], range(0, 2 * n, 2), 2 * n, channels=16))
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     levels = w.view(0, 2 * n, 2000)
-    assert time.perf_counter() - t0 < 0.5
+    assert time.process_time() - t0 < 0.5
     assert levels[0] == "x" * 2000 and len(levels) == 16
     assert levels[15][:65] == "0" * 65 and levels[15][65] == "x"             # ch15 は 65536 サンプルごとに変わる
 
@@ -65,13 +65,14 @@ def test_pixel_bounds_are_exact_integers():
 def test_the_edge_tables_are_built_only_when_the_screen_asks(monkeypatch):
     # 捕捉のたびに作ると、画面を使わない AI の操作まで遅くなる（深いバッファの数千万変化点）
     import fprobe.mcp_server as m
+    import fprobe.probe_la as la_module
     built = []
 
     class Counting(Waveform):
         def __init__(self, t):
             built.append(t)
             super().__init__(t)
-    monkeypatch.setattr(m, "Waveform", Counting)
+    monkeypatch.setattr(la_module, "Waveform", Counting)
     p = m.Probe("unused")
     p._keep_capture(tr([0, 1], [0, 3], 6, channels=1), "la.capture")
     assert built == []

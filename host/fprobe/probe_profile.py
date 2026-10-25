@@ -1,6 +1,6 @@
 """Probe の道具: 性能解析（F5）。PC サンプリングのプロファイル・割り込みの時間・近似のカバレッジ・記録の 2 点間の時間。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_debug・swo_start・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_debug・swo_start・
 _reading と、ObserveTools（SWO の受信 `_swo_receive` とパケットの受け取り `_swo_listen`）、InspectTools
 （ELF の逆アセンブラ）、WindowTools（DAP サンプラの持ち主・出来事の窓・write_registers）を使う。
 機器に触るのは必ず _lock の中。
@@ -92,7 +92,7 @@ class ProfileTools:
         with self._lock:
             if self._profile_run is not None:
                 raise RuntimeError("プロファイルを取っている（profile_stop を先に）")
-            swo = getattr(self, "_swo_run", None)
+            swo = self._swo_run
             if method == "itm" and swo is not None and swo.running:
                 raise RuntimeError("swo_configure が DWT・ITM を設定している（swo_unconfigure を先に）")
             if self._symbols is None:

@@ -4,6 +4,7 @@
 
 import time
 from pathlib import Path
+from tests.hil.values import num
 
 import pytest
 
@@ -65,17 +66,17 @@ def test_restore_puts_ram_and_registers_back_and_the_firmware_keeps_running(prob
     probe.target_halt()
     path = probe.snapshot_save(name="rtt")["path"]
     saved = Snapshot.load(path)
-    ticks = probe.evaluate("ticks")["value"]
+    ticks = num(probe.evaluate("ticks")["value"])
     probe.target_resume()
     time.sleep(0.3)
     probe.target_halt()
-    assert probe.evaluate("ticks")["value"] > ticks + 100
+    assert num(probe.evaluate("ticks")["value"]) > ticks + 100
     restored = probe.snapshot_restore(path)
     assert restored["code_checked"] and restored["state"] == "HALTED"
-    assert probe.evaluate("ticks")["value"] == ticks
+    assert num(probe.evaluate("ticks")["value"]) == ticks
     assert probe.read_registers(["pc"])["pc"] == saved.registers["pc"]
     assert "VTOR" in restored["system"] and "SYST_CSR" in restored["system"]
     probe.target_resume()
     time.sleep(0.3)
     probe.target_halt()
-    assert probe.evaluate("ticks")["value"] > ticks + 100                     # SysTick も戻って走り続ける
+    assert num(probe.evaluate("ticks")["value"]) > ticks + 100                     # SysTick も戻って走り続ける

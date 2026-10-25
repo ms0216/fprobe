@@ -1,6 +1,6 @@
 """Probe の道具: デバッグの出来事のフック（U44）の登録・一覧・実行の記録・保存と読み込み。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。登録簿（hook_table）を持つだけで、実行はデーモン
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。登録簿（hook_table）を持つだけで、実行はデーモン
 （fprobe.api.daemon）が行う（AI・画面・GDB のどの操作でも同じフックが走る）。機器には触らない。
 仕様: docs/superpowers/specs/2026-10-18-u25-u44-rules-hooks-design.md の 3 節。
 """

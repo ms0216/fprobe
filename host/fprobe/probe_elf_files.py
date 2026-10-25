@@ -1,16 +1,16 @@
 """Probe の道具: 画面からの ELF・書き込むファイル。ブラウザで選んだファイルをデーモンへ送って読む・置く（遠隔の画面でも使える）、同梱のデモの
 ELF を読む（機器・ELF が無くても各パネルの働きが見える）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の elf_load を使う。機器には触らない。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の elf_load を使う。機器には触らない。
 仕様: docs/superpowers/specs/2026-10-18-ui-layout-design.md §4
 """
 
 import base64
 import binascii
-import os
 import re
 from pathlib import Path
 
+from .home import fprobe_home
 from .flash import image_format
 
 __all__ = ["DEMO_ELF", "ElfFileTools", "UPLOAD_LIMIT"]
@@ -21,8 +21,7 @@ _BAD = re.compile(r'[<>:"|?*\x00-\x1f]')
 
 
 def _uploads() -> Path:
-    # FPROBE_HOME はデーモン（fprobe.api.daemon.fprobe_home）と同じ
-    return Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe")) / "uploads"
+    return fprobe_home() / "uploads"
 
 
 class ElfFileTools:

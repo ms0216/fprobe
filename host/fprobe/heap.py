@@ -290,13 +290,13 @@ class _FreeRTOS:
             block = Block(a, size, used, a + BLOCK_HEADER if used else None)
             if used and mem.u32(a):
                 out.issue("bad_link", a, "使用中のブロックの次のポインタが NULL でない（heap_4 の使用中のブロックは NULL）",
-                          previous_used=last_used.pointer if last_used else None)
+                          previous_used=_pointer_of(last_used))
             out.blocks.append(block)
             last_used = block if used else last_used
             a += size
         if mem.u32(stop + 4) & ~HEAP_ALLOCATED_BIT:
             out.issue("bad_end", stop, "領域の終わりの印の大きさが 0 でない",
-                      previous_used=last_used.pointer if last_used else None)
+                      previous_used=_pointer_of(last_used))
 
     def _cross_check(self, out: HeapScan, listed: list[tuple[int, int]]) -> None:
         listed_set = {a for a, s in listed if s}
@@ -308,9 +308,7 @@ class _FreeRTOS:
         for a in listed_set - physical:
             if out.complete:
                 out.issue("listed_not_free", a, "空きのリストの項目がブロックの境に無い")
-        for x, y in zip(out.blocks, out.blocks[1:]):
-            if not x.used and not y.used and x.address + x.size == y.address:
-                out.issue("unmerged_free", y.address, "隣り合う空きが繋がれていない（heap_4/5 は解放のときに繋ぐ）")
+        _unmerged(out, out.blocks, "隣り合う空きが繋がれていない（heap_4/5 は解放のときに繋ぐ）")
         if out.complete:
             free = sum(b.size for b in free_blocks)
             if free != out.counters["free_bytes"]:
@@ -323,12 +321,24 @@ class _FreeRTOS:
                     out.issue("counter_mismatch", None, f"確保 − 解放の回数 {live} が使用中のブロック {used} と合わない")
 
 
+def _pointer_of(block: Block | None) -> int | None:
+    """直前の使用中のブロックのアプリへの番地（壊した者は推定しない。手がかりとして事実だけ）。"""
+    return block.pointer if block else None
+
+
+def _unmerged(out: HeapScan, blocks: list[Block], why: str, adjacent_only: bool = True) -> None:
+    """隣り合う空きのブロック（番地が続くものだけ。adjacent_only=False なら並びが隣のもの）。"""
+    for x, y in zip(blocks, blocks[1:]):
+        if not x.used and not y.used and (not adjacent_only or x.address + x.size == y.address):
+            out.issue("unmerged_free", y.address, why)
+
+
 def _bad_size(out: HeapScan, address: int, raw: int, last_used: Block | None) -> None:
     out.complete = False
     detail = f"ブロックの大きさ 0x{raw:08X} が不正（ここから先は辿れない）"
     if last_used is not None:
         detail += f"。直前の使用中のブロックは 0x{last_used.pointer:08X}"
-    out.issue("bad_size", address, detail, previous_used=last_used.pointer if last_used else None)
+    out.issue("bad_size", address, detail, previous_used=_pointer_of(last_used))
 
 
 # --- newlib-nano -------------------------------------------------------------------------------------
@@ -391,7 +401,7 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
             pad = pointer - (a + NANO_CHUNK_OFFSET)
             if _signed(mem.u32(a + pad)) != -pad:
                 out.issue("bad_padding", a, "揃えの詰め物の印（ptr − 4 の負の位置）が壊れている（free が誤る）",
-                          previous_used=last_used.pointer if last_used else None)
+                          previous_used=_pointer_of(last_used))
         block = Block(a, size, used, pointer)
         out.blocks.append(block)
         last_used = block if used else last_used
@@ -401,9 +411,7 @@ def _scan_nano(mem: Memory, sym: HeapSymbols, end: int | None) -> HeapScan:
     for node in free_set - {b.address for b in out.blocks}:
         if out.complete:
             out.issue("listed_not_free", node, "空きのリストの項目がかたまりの境に無い")
-    for x, y in zip(out.blocks, out.blocks[1:]):
-        if not x.used and not y.used and x.address + x.size == y.address:
-            out.issue("unmerged_free", y.address, "隣り合う空きが繋がれていない（nano の free は繋ぐ）")
+    _unmerged(out, out.blocks, "隣り合う空きが繋がれていない（nano の free は繋ぐ）")
     return out
 
 
@@ -464,10 +472,10 @@ def _scan_dlmalloc(mem: Memory, sym: HeapSymbols) -> HeapScan:
                 links_ok = False
             if not links_ok:
                 out.issue("bad_links", a, "空きのかたまりの fd / bk が壊れている（双方向のリストが合わない）",
-                          previous_used=last_used.pointer if last_used else None)
+                          previous_used=_pointer_of(last_used))
             if mem.u32(a + size) != size:
                 out.issue("bad_footer", a, "空きのかたまりの足（次の prev_size）が大きさと合わない",
-                          previous_used=last_used.pointer if last_used else None)
+                          previous_used=_pointer_of(last_used))
         out.blocks.append(block)
         last_used = block if used else last_used
         a += size
@@ -475,9 +483,7 @@ def _scan_dlmalloc(mem: Memory, sym: HeapSymbols) -> HeapScan:
         out.blocks.append(Block(top, top_size, False))
     elif out.complete:
         out.complete = False
-    for x, y in zip(out.blocks, out.blocks[1:]):
-        if not x.used and not y.used:
-            out.issue("unmerged_free", y.address, "隣り合う空きが繋がれていない（dlmalloc は解放のときに繋ぐ）")
+    _unmerged(out, out.blocks, "隣り合う空きが繋がれていない（dlmalloc は解放のときに繋ぐ）", adjacent_only=False)
     return out
 
 

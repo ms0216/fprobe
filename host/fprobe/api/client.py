@@ -6,6 +6,7 @@
 
 import itertools
 import json
+import logging
 import threading
 from contextlib import ExitStack
 from concurrent.futures import Future
@@ -69,11 +70,15 @@ class DaemonClient:
             message = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
             if source is not None:
                 message["source"] = source
-            self._ws.send(json.dumps(message))
+            self._ws.send(json.dumps(message, allow_nan=False))
         except ConnectionClosed as e:
             with self._lock:
                 self._pending.pop(rid, None)
             raise ConnectionError("デーモンとの接続が切れている") from e
+        except ValueError:                                   # NaN・±Infinity は JSON に無い（送らない）。登録した待ちを残さない
+            with self._lock:
+                self._pending.pop(rid, None)
+            raise
         return future.result()
 
     def call(self, method: str, /, **params: Any) -> Any:          # /: 引数の名前 method（rtos.timeline.start 等）とぶつからない
@@ -114,7 +119,10 @@ class DaemonClient:
                 else:
                     for topics, callback in self._listeners:
                         if message["method"] in topics:
-                            callback(message["method"], message["params"])
+                            try:
+                                callback(message["method"], message["params"])
+                            except Exception:          # 購読側の不具合で受信を止めない（止めると以後の呼び出しが全部失敗する）
+                                logging.getLogger(__name__).exception("購読の関数が例外を投げた: %s", message["method"])
         except BaseException as e:
             self._lost = e
         finally:

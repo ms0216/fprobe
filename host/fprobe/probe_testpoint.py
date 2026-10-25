@@ -1,7 +1,7 @@
 """Probe の道具: テストポイント（F7、DT+ 方式）。ソースへの挿入、ロジアナ（GPIO）・SWO（ITM）・RTT での受け取り、
 関数の時間・呼び出しの木・遷移・カバレッジ（C0 / C1）・異常の解析、共通の時間軸の記録への書き出し。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・session・target・_debug・_recorder・_collector・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_debug・_recorder・_collector・
 _swo_baud・swo_start・_keep_capture と、ObserveTools（RTT の受信 `rtt_start`・`_rtt_listen`）、WindowTools（SWO の
 バイトのデバイスの時刻の窓・write_registers）を使う。機器に触るのは必ず _lock の中。
 

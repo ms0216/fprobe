@@ -1,7 +1,7 @@
 """Probe の道具: RTOS の認識（F6）。止まったターゲットのタスクの一覧・タスクごとの呼び出し履歴と C の式、
 止めずに見るタスクの時間軸。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_debug・_recorder・
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_debug・_recorder・
 _swo_baud・swo_start と、WindowTools（DAP サンプラの持ち主・出来事の窓・write_registers）を使う。
 機器に触るのは必ず _lock の中。
 
@@ -122,6 +122,26 @@ class _TimelineResult:
     def objects(self) -> dict[int, dict]:
         """オブジェクトの表（始めの一覧 + object_create の出来事）。"""
         return object_table(self.kernel, self.run.objects) if self.kernel is not None else dict(self.run.objects)
+
+
+def _mutex_tasks(watches: list[MutexWatch], samples: list[tuple[int, int, int]]) -> set[int]:
+    """ミューテックスの語のサンプルに現れたタスクの TCB: 持ち主の語の値と、待ちの先頭の語の値から待ちの項目の差を引いたもの
+    （空の印と 0 は除く）。サンプル 1 回の走査で（ミューテックスの数 × サンプル数の二重の走査にしない）。"""
+    if not watches:
+        return set()
+    heads: dict[int, list[MutexWatch]] = {}
+    holders: set[int] = set()
+    for w in watches:
+        heads.setdefault(w.head_word, []).append(w)
+        holders.add(w.holder_word)
+    tasks: set[int] = set()
+    for _, address, value in samples:
+        for w in heads.get(address, ()):
+            if value not in (0, w.empty):
+                tasks.add(value - w.delta)
+        if value and address in holders:
+            tasks.add(value)
+    return tasks
 
 
 class RtosTools:
@@ -475,16 +495,21 @@ class RtosTools:
         self._rtos_last = result
         rec = self._recorder
         if rec is not None:
-            write_timeline(rec, result.timeline, result.run.idle)
-            if result.events is not None:
-                write_task_events(rec, result.events, run.names)
-            if result.activations:
-                names = self._exception_names(result.run)
-                rec.add_many((STREAM, "isr", a.start, a.number, 0, {"name": exception_name(a.number, names)}, a.end)
-                             for a in result.activations)
-            if result.has_kernel:
-                self._record_kernel(rec, result)
+            self._record_timeline(rec, result)
         return self._timeline_dict(result, 0, 0, recorded=rec is not None)
+
+    def _record_timeline(self, rec, result: _TimelineResult) -> None:
+        """時間軸（run・switch・gap、itm なら生の出来事・割り込みの区間・カーネルの出来事）を記録の stream rtos に。"""
+        run = result.run
+        write_timeline(rec, result.timeline, run.idle)
+        if result.events is not None:
+            write_task_events(rec, result.events, run.names)
+        if result.activations:
+            names = self._exception_names(run)
+            rec.add_many((STREAM, "isr", a.start, a.number, 0, {"name": exception_name(a.number, names)}, a.end)
+                         for a in result.activations)
+        if result.has_kernel:
+            self._record_kernel(rec, result)
 
     def _record_kernel(self, rec, result: _TimelineResult) -> None:
         """カーネルの出来事（kind = 出来事、a = オブジェクトか対象のタスク、b = 行為者のタスク）、待ちの区間 blocked、
@@ -523,8 +548,7 @@ class RtosTools:
 
     def _exception_names(self, run: _TimelineRun) -> dict[int, str]:
         """割り込みの名前（rtos_timeline_start に渡したベクタ表から。無ければ番号の名前）。"""
-        names = getattr(self, "_vector_names", None)
-        return names(run.vector_table) if names is not None else {}
+        return self._vector_names(run.vector_table)
 
     def _timeline_state(self) -> dict | None:
         run = self._rtos_run
@@ -549,9 +573,7 @@ class RtosTools:
         words = run.words
         sampled = self._window_events(run.window, "sample") if run.sampler else []
         extra = [(t, a, v) for t, a, v in sampled if a in words]
-        mutex_tasks = {v - w.delta for w in run.mutexes for _, a, v in extra
-                       if a == w.head_word and v not in (0, w.empty)}
-        mutex_tasks |= {v for w in run.mutexes for _, a, v in extra if a == w.holder_word and v}
+        mutex_tasks = _mutex_tasks(run.mutexes, extra)
         if run.method == "sampled":
             samples = [(t, v) for t, a, v in sampled if a == run.address]
             self._learn_names(run, {v for _, v in samples} | mutex_tasks)
@@ -620,9 +642,8 @@ class RtosTools:
                     f"ITM のあふれが {result.exception_issues['overflows']} 回: 例外の出入りが続くと SWO が追いつかず、"
                     "パケットが欠ける（割り込みの回数・時間は下限）。swo_baud を上げるか kernel=false で帯域を空ける")
         if result.kernel is not None:
-            out["kernel"] = {"events": sum(1 for op in result.kernel.ops if op.kind != "lost"),
-                             "lost_records": result.kernel.lost,
-                             "gaps": sum(1 for op in result.kernel.ops if op.kind == "lost")}
+            gaps = sum(1 for op in result.kernel.ops if op.kind == "lost")
+            out["kernel"] = {"events": len(result.kernel.ops) - gaps, "lost_records": result.kernel.lost, "gaps": gaps}
         if run.slots or run.mutexes:
             out["words_samples"] = len(result.samples)
         return out

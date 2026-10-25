@@ -147,8 +147,8 @@ def test_a_hundred_thousand_bytes_decode_quickly():
     w = wave(rate=BAUD * 8)
     end = uart(w, 5, data, T0, baud=BAUD, **F8N1)
     t = w.build(end_s=end)
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     d = decode_uart(t, 5, baud=BAUD, **F8N1)
-    elapsed = time.perf_counter() - t0
+    elapsed = time.process_time() - t0
     assert bytes(data_of(d)) == data
     assert elapsed < 5.0, elapsed                     # 手元で約 2 秒（送るのにかかる 8.7 秒より速い）

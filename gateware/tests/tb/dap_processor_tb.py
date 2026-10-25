@@ -5,7 +5,7 @@ import random
 import struct
 
 import cocotb
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
 from fprobe_gw import dap_info
 from tests.models.swd_target import (AP_IDR, CDBGPWRUPACK, CDBGPWRUPREQ, CSYSPWRUPREQ, DPIDR, STICKYERR,
@@ -253,3 +253,144 @@ async def multidrop_targetsel_selects_one_dp(dut):
     assert await dap.command(bytes([0x12, 51]) + ones) == bytes([0x12, 0])
     assert await dap.command(targetsel_command(0x12345678)) == bytes([0x1D, 0, 0x1F])
     assert (await dap.transfer((DP_IDCODE_R, None)))[:2] == (0, 7)
+
+
+@cocotb.test()
+async def random_transfers_match_a_sequential_memory_model(dut):
+    """TAR 書き・DRW 読み書き（自動増加）のランダムな並びを Transfer で送り、読んだ値・処理数が「要求を順に実行した
+    メモリ」と一致する（ポスティングの連鎖・書き込みの前の回収・最後の読み出しの回収を含む）。"""
+    dap, model = await setup(dut, seed=9)
+    await dap.connect()
+    await dap.mem_setup()
+    rng = random.Random(77)
+    mem = {}
+    for batch in range(25):
+        base = 0x20000000 + 0x400 * rng.randrange(0, 4)
+        tar = base + 4 * rng.randrange(0, 64)
+        requests, expected, ops = [(AP_TAR_W, tar)], [], 0
+        for _ in range(rng.choice([1, 2, 3, 8, 20])):
+            kind = rng.choice(["r", "r", "w", "t"])
+            if kind == "t":
+                tar = base + 4 * rng.randrange(0, 64)
+                requests.append((AP_TAR_W, tar))
+            elif kind == "w":
+                value = rng.getrandbits(32)
+                requests.append((AP_DRW_W, value))
+                mem[tar] = value
+                tar += 4
+            else:
+                requests.append((AP_DRW_R, None))
+                expected.append(mem.get(tar, 0))
+                tar += 4
+        count, resp, data = await dap.transfer(*requests)
+        assert (count, resp) == (len(requests), OK), (batch, count, resp)
+        assert data == expected, (batch, requests)
+
+
+class PinTrace:
+    """SWCLK の立ち上がりごとの SWDIO の値を記録する（ピンに出たビット列を見る）。"""
+
+    def __init__(self, dut):
+        self.dut, self.bits = dut, []
+        cocotb.start_soon(self._run())
+
+    async def _run(self):
+        while True:
+            await RisingEdge(self.dut.swclk)
+            await ReadOnly()
+            self.bits.append(str(self.dut.swdio.value))
+
+
+def bits_of(value: int, n: int) -> list[str]:
+    return [str(value >> i & 1) for i in range(n)]
+
+
+@cocotb.test()
+async def random_sequences_drive_exactly_the_requested_bits(dut):
+    """SWJ_Sequence / SWD_Sequence を境界の長さ（1・63・64・65・128・255・256 ビット、バイト境界）とランダムな長さで送り、
+    ピンに出たビット列（順序・個数）と入力の応答を、要求から決めた期待値と突き合わせる。"""
+    # ターゲットモデルは起動しない（ランダムなビットを開始ビットと見て SWDIO を駆動し、衝突するため）。線はプルアップ
+    dut.packet_size.value = 512
+    dut.nreset_ext.value = "Z"
+    dut.target_swdio.value = "Z"
+    dap = Dap(dut, ControlPort(dut, request="in", response="out", rng=random.Random(21), gap=0.2, stall=0.2))
+    await start_clock_and_reset(dut)
+    assert await dap.command(bytes([0x02, 1])) == bytes([0x02, 1])
+    assert await dap.command(bytes([0x11]) + struct.pack("<I", 25_000_000)) == bytes([0x11, 0])
+    trace = PinTrace(dut)
+    rng = random.Random(1234)
+    counts = [1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 66, 127, 128, 129, 191, 192, 193, 255, 0]
+    counts += [rng.randrange(1, 257) for _ in range(20)]
+    for n in counts:
+        total = n or 256
+        value = rng.getrandbits(total)
+        trace.bits.clear()
+        r = await dap.command(bytes([0x12, n]) + value.to_bytes((total + 7) // 8, "little"))
+        assert r == bytes([0x12, 0]), (n, r.hex())
+        assert trace.bits == bits_of(value, total), (n, "".join(trace.bits))
+    for _ in range(30):
+        seqs, expect_bits, expect_resp = bytearray(), [], bytearray()
+        nseq = rng.randrange(0, 5)
+        for _ in range(nseq):
+            n = rng.choice([1, 8, 31, 32, 33, 63, 64, rng.randrange(1, 65)])
+            info = n % 64
+            if rng.random() < 0.5:
+                seqs.append(info | 0x80)                                     # 入力: 誰も駆動しない → 1
+                expect_bits += ["1"] * n
+                expect_resp += ((1 << n) - 1).to_bytes((n + 7) // 8, "little")
+            else:
+                value = rng.getrandbits(n)
+                seqs.append(info)
+                seqs += value.to_bytes((n + 7) // 8, "little")
+                expect_bits += bits_of(value, n)
+        trace.bits.clear()
+        r = await dap.command(bytes([0x1D, nseq]) + bytes(seqs))
+        assert r == bytes([0x1D, 0]) + bytes(expect_resp), (nseq, seqs.hex(), r.hex())
+        assert trace.bits == expect_bits, (seqs.hex(), "".join(trace.bits))
+
+
+@cocotb.test()
+async def truncated_and_garbage_packets_keep_the_framing(dut):
+    """全コマンド ID に、途中で切れた・余分に続く・ランダムな内容の要求を送っても、応答が 1 つ返り（先頭はコマンド ID か
+    0xFF、長さは packet_size 以下）、直後の DAP_Info が正しく返る（枠がずれない・止まらない）。"""
+    dap, _ = await setup(dut, seed=31, packet_size=64)
+    rng = random.Random(555)
+    await dap.connect()
+    await dap.mem_setup()
+    safe = {
+        0x00: lambda: bytes([rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 9, 0xF0, 0xFD, 0xFE, 0xFF, 0x42])]),
+        0x01: lambda: bytes([rng.getrandbits(2), rng.getrandbits(1)]),
+        0x02: lambda: bytes([rng.choice([0, 1, 2, 3])]),
+        0x04: lambda: bytes([rng.randrange(0, 4)]) + struct.pack("<HH", rng.randrange(0, 20), rng.randrange(0, 20)),
+        0x05: lambda: bytes([0, rng.randrange(0, 7)]) + rng.randbytes(rng.randrange(0, 30)),
+        0x06: lambda: bytes([0, rng.randrange(0, 6), 0, rng.choice([AP_DRW_R, AP_DRW_W, DP_IDCODE_R, DP_CTRL_R])])
+                      + rng.randbytes(rng.randrange(0, 30)),
+        0x08: lambda: rng.randbytes(4),
+        0x09: lambda: struct.pack("<H", rng.randrange(0, 5)),
+        0x0A: lambda: b"",
+        0x10: lambda: bytes([rng.getrandbits(8) & 0x7F, rng.getrandbits(8) & 0x7F]) + struct.pack("<I", rng.randrange(0, 3)),
+        0x11: lambda: struct.pack("<I", rng.choice([1_000_000, 10_000_000, 25_000_000])),
+        0x12: lambda: bytes([rng.randrange(0, 80)]) + rng.randbytes(rng.randrange(0, 12)),
+        0x13: lambda: bytes([rng.getrandbits(3)]),
+        0x15: lambda: bytes([rng.randrange(0, 4)]) + rng.randbytes(rng.randrange(0, 4)),
+        0x16: lambda: bytes([rng.randrange(0, 3)]),
+        0x17: lambda: bytes([rng.randrange(0, 3)]),
+        0x18: lambda: bytes([rng.randrange(0, 4)]),
+        0x19: lambda: struct.pack("<I", rng.choice([0, 115200, 1_000_000, 3_000_000])),
+        0x1A: lambda: bytes([rng.getrandbits(1)]),
+        0x1B: lambda: b"",
+        0x1C: lambda: struct.pack("<H", rng.randrange(0, 600)),
+        0x1D: lambda: bytes([rng.randrange(0, 4)]) + rng.randbytes(rng.randrange(0, 12)),
+    }
+    ids = list(safe) + [0x1E, 0x1F, 0x20, 0x7F, 0x80, 0xFE]
+    for i in range(160):
+        cmd = rng.choice(ids)
+        body = safe[cmd]() if cmd in safe else rng.randbytes(rng.randrange(0, 70))
+        if rng.random() < 0.3 and cmd in safe:
+            body = body[:rng.randrange(0, len(body) + 1)]                   # 途中で切れた要求
+        if rng.random() < 0.2:
+            body += rng.randbytes(rng.randrange(1, 40))                     # 余分に続く要求
+        packet = (bytes([cmd]) + body)[:64]
+        r = await dap.command(packet)
+        assert len(r) <= 64 and (r[0] == cmd or r == b"\xff"), (i, packet.hex(), r.hex())
+        assert await dap.command(bytes([0x00, 0xFF])) == bytes([0x00, 2, 64, 0]), (i, packet.hex())

@@ -5,7 +5,7 @@
 出力は端子のロジアナのチャンネル（channel）で指す。どの端子が使えるか（候補）と、同時に動かせる数（動作の数）は
 ケイパビリティ outputs・output_actions が申告する。端子に動作を割り当てるのはこの層（使う側は動作の番号を知らない）。
 
-Probe（fprobe.mcp_server）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
+Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
 仕様: docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md
 """
 

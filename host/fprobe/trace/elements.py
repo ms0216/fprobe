@@ -9,17 +9,12 @@ from typing import ClassVar
 
 __all__ = ["Address", "Async", "Atoms", "Context", "CycleCount", "DecodeError", "Discard", "Element", "Event",
            "ExceptionEntry", "ExceptionReturn", "FunctionReturn", "Ignore", "Overflow", "Timestamp", "TraceInfo",
-           "TraceOn", "Truncated", "exception_name"]
-
-_M_EXCEPTIONS = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault",
-                 7: "SecureFault", 11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
-
+           "TraceOn", "Truncated", "Unsynced", "exception_name"]
 
 def exception_name(number: int) -> str:
-    """M-profile の例外番号（IPSR と同じ番号）の名前。16 以上は IRQ（番号 - 16）。"""
-    if number >= 16:
-        return f"IRQ{number - 16}"
-    return _M_EXCEPTIONS.get(number, f"exception{number}")
+    """M-profile の例外番号（IPSR と同じ番号）の名前。名前の表は profile/exceptions.py の 1 か所。"""
+    from ..profile.exceptions import exception_name as name
+    return name(number)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,3 +146,9 @@ class DecodeError(Element):
 class Truncated(Element):
     """バイト列の終わりで切れたパケット。"""
     kind: ClassVar[str] = "truncated"
+
+
+@dataclass(frozen=True, kw_only=True)
+class Unsynced(Element):
+    """同期（A-sync）が来ないまま入力が終わり、読み飛ばしたバイト（offset から raw の長さ分）。"""
+    kind: ClassVar[str] = "unsynced"

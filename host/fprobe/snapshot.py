@@ -174,6 +174,8 @@ class Snapshot:
         try:
             with zipfile.ZipFile(path) as z:
                 manifest = json.loads(z.read("manifest.json"))
+                if not isinstance(manifest, dict):
+                    raise SnapshotError(f"{path}: manifest が JSON のオブジェクトでない")
                 if manifest.get("format") != FORMAT:
                     raise SnapshotError(f"スナップショットの版 {manifest.get('format')} は読めない（この fprobe は {FORMAT}）")
                 regions = [cls._region(z, entry) for entry in manifest["regions"]]
@@ -185,9 +187,9 @@ class Snapshot:
                         elf_data = z.read(e["embedded"])
                         if hashlib.sha256(elf_data).hexdigest() != elf.sha256:
                             raise SnapshotError("埋め込んだ ELF が指紋と合わない（ファイルが壊れている）")
-        except (zipfile.BadZipFile, KeyError, ValueError, TypeError) as e:
+                registers = {str(k): int(v) for k, v in manifest["registers"].items()}
+        except (zipfile.BadZipFile, KeyError, ValueError, TypeError, AttributeError) as e:
             raise SnapshotError(f"{path}: スナップショットのファイルではない・壊れている（{type(e).__name__}: {e}）") from None
-        registers = {str(k): int(v) for k, v in manifest["registers"].items()}
         return cls(registers, regions, manifest.get("info") or {}, elf, elf_data, manifest.get("created", ""))
 
     @staticmethod

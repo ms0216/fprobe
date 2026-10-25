@@ -112,17 +112,20 @@ class Symbols:
         with open(self.path, "rb") as f:
             elf = ELFFile(f)
             self.entry = elf["e_entry"] & ~1
-            self._symbols = self._read_symbols(elf)
+            self._symbols, self._same_named = self._read_symbols(elf)
             self._overloads: dict[str, list[str]] = {}
-            linked = self._name_from_source(elf)
-            rows, sources, self._prologue_ends = self._read_lines(elf)
+            dwarf = elf.get_dwarf_info() if elf.has_dwarf_info() else None     # 1 つを共有（DIE の読みを 2 度しない）
+            linked = self._name_from_source(dwarf, elf.elfclass // 8)
+            rows, sources, self._prologue_ends = self._read_lines(dwarf)
             self._set_lines(rows, sources)
             self._relocated: dict[str, dict[str, Path]] = {}
             self._relocate_sources()
             self.segments = tuple(Segment(seg["p_paddr"], seg.data()) for seg in elf.iter_segments()
                                   if seg["p_type"] == "PT_LOAD" and seg["p_filesz"] > 0)
         named = [s for name, s in self._symbols.items() if name not in linked]   # 場所の名前はソースの名前で出す
-        functions = sorted((s for s in named if s.kind == "function"), key=lambda s: s.address)
+        named += [s for name, extra in self._same_named.items() if name not in linked for s in extra]
+        # 同じ番地は大きさの順（bisect は最後を取る。大きさ 0 の別名より本体を後ろに置く）
+        functions = sorted((s for s in named if s.kind == "function"), key=lambda s: (s.address, s.size))
         self._function_starts = [s.address for s in functions]
         self._functions = functions
         self._index_all(named)
@@ -133,6 +136,8 @@ class Symbols:
         self._source_paths = {name: list(paths) for name, paths in sources.items()}
         self._sources = {name: paths[0] for name, paths in self._source_paths.items()}
         self._line_addresses = [row[0] for row in rows]
+        self._line_index: dict[tuple[Path, int], int] | None = None     # (場所, 行) → 最小の番地（初めて引くときに作る）
+        self._lines_by_file: dict[tuple[str, Path], set[int]] | None = None
 
     def _index_all(self, symbols) -> None:
         """symbol_at の索引（番地の順。同じ番地は大きいほうが先）。"""
@@ -144,8 +149,10 @@ class Symbols:
     # --- 読み込み ------------------------------------------------------------------
 
     @staticmethod
-    def _read_symbols(elf: ELFFile) -> dict[str, Symbol]:
+    def _read_symbols(elf: ELFFile) -> tuple[dict[str, Symbol], dict[str, list[Symbol]]]:
+        """名前 → 最初のシンボル と、同じ名前で別の番地・大きさのもの（別ファイルの static 等。名前 → 2 つ目以降）。"""
         out: dict[str, Symbol] = {}
+        extra: dict[str, list[Symbol]] = {}
         for section in elf.iter_sections():
             if not isinstance(section, SymbolTableSection):
                 continue
@@ -154,18 +161,21 @@ class Symbols:
                 if kind is None or not s.name:
                     continue
                 address = s["st_value"] & ~1 if kind == "function" else s["st_value"]
-                out.setdefault(s.name, Symbol(s.name, address, s["st_size"], kind))
-        return out
+                symbol = Symbol(s.name, address, s["st_size"], kind)
+                first = out.setdefault(s.name, symbol)
+                if first != symbol and symbol not in extra.setdefault(s.name, []):
+                    extra[s.name].append(symbol)
+        return out, {name: v for name, v in extra.items() if v}
 
-    def _name_from_source(self, elf: ELFFile) -> set[str]:
+    def _name_from_source(self, dwarf, address_size: int) -> set[str]:
         """C++・Rust: ELF のシンボルはマングルされた名前（リンク名）。DWARF の関数（DW_AT_linkage_name と、名前空間・
         クラスの入れ子）からソースの名前（"motor::Pid::step"）を付け、その名前でも引けるようにする。同じ名前が
         複数（多重定義）なら引数の型を添える（"motor::scale(int, int)"）。ソースの名前を付けたリンク名の集合を返す。"""
-        if not elf.has_dwarf_info():
+        if dwarf is None:
             return set()
         found: dict[str, tuple[str, str]] = {}                  # リンク名 → (修飾した名前, 引数の型)
-        types = TypeLoader(elf.elfclass // 8)
-        for cu in elf.get_dwarf_info().iter_CUs():
+        types = TypeLoader(address_size)
+        for cu in dwarf.iter_CUs():
             for die in cu.iter_DIEs():
                 if die.tag != "DW_TAG_subprogram":
                     continue
@@ -195,12 +205,11 @@ class Symbols:
         return set(found)
 
     @staticmethod
-    def _read_lines(elf: ELFFile) -> tuple[list[tuple[int, str, int, Path]], dict[str, list[Path]], list[int]]:
+    def _read_lines(dwarf) -> tuple[list[tuple[int, str, int, Path]], dict[str, list[Path]], list[int]]:
         """(番地, ファイル名, 行, 場所) を番地順に（is_stmt の行だけ = 文の始まり）と、ファイル名 → 場所（同じ名前の
         別のファイルはすべて）と、前置きの終わり（prologue_end）の番地の一覧（番地順）。"""
-        if not elf.has_dwarf_info():
+        if dwarf is None:
             return [], {}, []
-        dwarf = elf.get_dwarf_info()
         rows: list[tuple[int, str, int, Path]] = []
         sources: dict[str, list[Path]] = {}
         prologue_ends: set[int] = set()
@@ -236,7 +245,7 @@ class Symbols:
                 known = 0 <= index < len(files)
                 name = files[index].name.decode() if known else "?"
                 rows.append((state.address, PurePath(name).name, state.line, paths[index] if known else Path("?")))
-        rows.sort()
+        rows.sort(key=lambda r: r[0])     # 番地だけで並べる（安定。同じ番地は行番号プログラムでの出現順 = 最後が実効の行）
         return rows, sources, sorted(prologue_ends)
 
     # --- 引く ----------------------------------------------------------------------
@@ -285,13 +294,20 @@ class Symbols:
     def lines_of(self, file: str) -> list[int]:
         """そのファイルで命令のある行（ブレークポイントを置ける行）。"""
         path = self._sources.get(file)                                # 同じ名前の 2 つ目のファイルの行は混ぜない
-        return sorted({line for _, f, line, p in self._lines if f == file and p == path})
+        if self._lines_by_file is None:
+            self._lines_by_file = {}
+            for _, f, line, p in self._lines:
+                self._lines_by_file.setdefault((f, p), set()).add(line)
+        return sorted(self._lines_by_file.get((file, path), ()))
 
     def names(self) -> list[Symbol]:
         """すべての関数・変数のシンボル（ELF の名前。C++・Rust はソースの名前も）。"""
-        return list(self._symbols.values())
+        return [*self._symbols.values(), *(x for v in self._same_named.values() for x in v)]
 
     def symbol(self, name: str) -> Symbol:
+        if name in self._same_named:
+            found = [self._symbols[name], *self._same_named[name]]
+            raise KeyError(f"{name!r} は同じ名前が複数: " + ", ".join(f"0x{x.address:08x}" for x in found))
         try:
             return self._symbols[name]
         except KeyError:
@@ -319,10 +335,17 @@ class Symbols:
 
     def _line_address(self, file: str, line: int) -> int:
         path = self._source_for(file)
-        hits = [address for address, _, n, p in self._lines if n == line and p == path]
-        if not hits:
+        if self._line_index is None:
+            index: dict[tuple[Path, int], int] = {}
+            for address, _, n, p in self._lines:
+                key = (p, n)
+                if key not in index or address < index[key]:
+                    index[key] = address
+            self._line_index = index
+        address = self._line_index.get((path, line))
+        if address is None:
             raise KeyError(f"{file}:{line} に対応する命令が無い（最適化で消えたか、行が違う）")
-        return min(hits)
+        return address
 
     def after_prologue(self, address: int) -> int:
         """関数の先頭なら、前置き（スタックの用意）の後の番地。引数・ローカル変数が読める最初の場所（関数名の

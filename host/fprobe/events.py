@@ -184,7 +184,8 @@ class EventLog:
         written = self.counts()[0] if end is None else end
         available = min(written, self.capacity)
         n = available if last is None else min(last, available)
-        if n == 0:
+        self.overwritten = 0
+        if n <= 0:
             return []
         self.dev.write32(g.LA_DEEP_READ_REGION, 1)
         self.dev.write(g.LA_DEEP_READ_FIRST, [(written - n) % self.capacity, n])

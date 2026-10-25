@@ -96,6 +96,22 @@ def test_pynq_relay_without_a_build_stamp_is_refused_before_writing(monkeypatch,
     assert calls == [] and "inputs.sha256" in capsys.readouterr().err
 
 
+def test_shifter_is_refused_for_a_bitstream_that_is_not_a_ps_axi_design(monkeypatch, tmp_path, capsys):
+    # レビューの指摘: PS7 の無い回路でシフタを有効にすると Linux が固まった。--shifter は ps_axi の構成のビルドの置き場所のときだけ
+    for directory in ("blinky_elsewhere", "pynq_blinky", "zynq_dut"):
+        bit = tmp_path / directory / "top.bit"
+        bit.parent.mkdir()
+        bit.write_bytes(b"bit")
+    calls = []
+    monkeypatch.setattr(cli, "PynqLoader", lambda *a, **k: calls.append("loader") or type("L", (), {"program": lambda *a, **k: calls.append(k)})())
+    for refused in ("blinky_elsewhere", "pynq_blinky"):
+        assert cli.main(["program", str(tmp_path / refused / "top.bit"), "--board", "pynq_z2", "--shifter", "--unverified"]) == 1
+        assert "--shifter" in capsys.readouterr().err
+    assert calls == []
+    assert cli.main(["program", str(tmp_path / "zynq_dut" / "top.bit"), "--board", "pynq_z2", "--shifter", "--unverified"]) == 0
+    assert calls[-1]["shifter"] is True
+
+
 def test_detect_on_a_board_without_gowin_jtag_is_an_error_message(capsys):
     assert cli.main(["detect", "--board", "pynq_z2"]) == 1
     assert "1234-TUL" in capsys.readouterr().err

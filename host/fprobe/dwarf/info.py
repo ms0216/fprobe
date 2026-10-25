@@ -171,6 +171,7 @@ class DebugInfo:
         self._locations = LocationParser(self.dwarf.location_lists())
         self._parsers: dict[int, DWARFExprParser] = {}
         self._indexed = False
+        self._file_name_cache: dict[int, dict[int, str]] = {}
         self._functions: list[Function] = []
         self._starts: list[int] = []
         self._globals: dict[str, list[Variable]] = {}
@@ -275,11 +276,18 @@ class DebugInfo:
         return name, line.value if line is not None else None
 
     def _file_names(self, cu) -> dict[int, str]:
-        program = self.dwarf.line_program_for_CU(cu)
-        if program is None:
-            return {}
-        base = 1 if program.header["version"] < 5 else 0
-        return {i + base: Path(_text(e.name)).name for i, e in enumerate(program["file_entry"])}
+        """CU のファイル番号 → ファイル名。CU ごとに 1 回だけ作る（scope_at が関数ごとに引くため）。
+        返す辞書は共有なので呼び出し側は書き換えない。"""
+        names = self._file_name_cache.get(cu.cu_offset)
+        if names is None:
+            program = self.dwarf.line_program_for_CU(cu)
+            if program is None:
+                names = {}
+            else:
+                base = 1 if program.header["version"] < 5 else 0
+                names = {i + base: Path(_text(e.name)).name for i, e in enumerate(program["file_entry"])}
+            self._file_name_cache[cu.cu_offset] = names
+        return names
 
     # --- 番地の範囲 -------------------------------------------------------------------------
 

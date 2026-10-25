@@ -32,7 +32,7 @@ architecture rtl of uart_tx is
   signal bit_end   : boolean;
   signal ready     : std_logic;
 begin
-  bit_end <= timer = divisor - 1;
+  bit_end <= timer >= divisor - 1;     -- 送信中に divisor を小さくされても通り過ぎない（= だと 2^N 周期止まる）
   ready   <= '1' when bits_left = 0 or (bits_left = 1 and bit_end) else '0';
 
   process (clk)

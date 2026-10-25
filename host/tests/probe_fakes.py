@@ -74,6 +74,7 @@ class FakeRing:
     def __init__(self, dev: FakeDevice):
         self.dev = dev
         self.capacity = dev.ring_capacity
+        self.overwritten = 0                                       # 本物の EventLog と同じ（この偽物は読む間に追い越されない）
 
     def start(self):
         self.dev.ring, self.dev.ring_written, self.dev.ring_running = [], 0, True

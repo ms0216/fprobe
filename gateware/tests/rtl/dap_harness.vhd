@@ -94,6 +94,7 @@ architecture rtl of dap_harness is
   signal sel : std_logic_vector(31 downto 0);
   signal csw_shadow, tar_shadow : std_logic_vector(31 downto 0);
   signal shadow_valid : std_logic;
+  signal shadow_ap : std_logic_vector(7 downto 0);
   signal fire : std_logic;
   signal jtag : std_logic;
   signal dr_before, dr_after : natural range 0 to 7;
@@ -138,7 +139,7 @@ begin
   inj_i : entity work.swd_injector
     port map (clk => clk, rst => rst, wait_retry => wait_retry, request => inj_request, enable => enable, dap_busy => busy,
               select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
-              shadow_valid => shadow_valid, ap => inj_ap, addr => inj_addr, value => inj_value,
+              shadow_valid => shadow_valid, shadow_ap => shadow_ap, ap => inj_ap, addr => inj_addr, value => inj_value,
               busy => inj_busy_i, written => inj_written, result => inj_result, last_ack => open,
               count => inj_count, transfers => inj_transfers,
               dap_cmd_valid => cmd_valid, dap_cmd_ready => cmd_ready, dap_cmd_op => cmd_op,
@@ -156,7 +157,7 @@ begin
               tbl_write => smp_write, tbl_index => smp_index, tbl_addr => smp_addr, tbl_enable => smp_enable,
               tbl_words => smp_words,
               enable => enable, up_busy => up_busy,
-              select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow, shadow_valid => shadow_valid,
+              select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow, shadow_valid => shadow_valid, shadow_ap => shadow_ap,
               sample_valid => smp_valid, sample_addr => smp_sample_addr, sample_data => smp_data, sample_ack => smp_ack,
               busy => smp_busy, rounds => smp_rounds, errors => smp_errors, overruns => smp_overruns,
               restores => smp_restores, held => smp_held, last_ack => open,
@@ -169,13 +170,13 @@ begin
 
   fire <= cmd_valid and cmd_ready;
   mon_i : entity work.dap_monitor
-    port map (clk => clk, rst => rst, cmd_fire => fire, cmd_op => cmd_op, cmd_req => cmd_request,
+    port map (clk => clk, rst => rst, enable => enable, cmd_fire => fire, cmd_op => cmd_op, cmd_req => cmd_request,
               cmd_data => cmd_data(31 downto 0), rsp_valid => d_rsp_valid, rsp_ack => rsp_ack,
               rsp_data => rsp_data(31 downto 0), rsp_parity => rsp_parity,
               match_addr => match_addr, addr_mask => addr_mask, match_data => match_data,
               data_mask => data_mask, on_write => on_write, on_read => on_read,
               select_shadow => sel, csw_shadow => csw_shadow, tar_shadow => tar_shadow,
-              shadow_valid => shadow_valid, match => match, ev_valid => ev_valid, ev_request => ev_request,
+              shadow_valid => shadow_valid, shadow_ap => shadow_ap, match => match, ev_valid => ev_valid, ev_request => ev_request,
               ev_ack => ev_ack, ev_parity => open, ev_addr => ev_addr, ev_data => ev_data);
 
   phy_i : entity work.debug_port

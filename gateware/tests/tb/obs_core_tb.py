@@ -5,7 +5,7 @@ import random
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, Timer
+from cocotb.triggers import ClockCycles, Edge, FallingEdge, RisingEdge, Timer
 from cocotb.utils import get_sim_time
 
 OP_NOP, OP_WRITE, OP_READ, OP_SYNC = 0, 1, 2, 3
@@ -123,6 +123,8 @@ async def setup(dut, probes=0) -> Target:
     await ClockCycles(dut.clk, 5)
     dut.rst.value = 0
     await ClockCycles(dut.clk, 5)
+    await target.drain()                               # 前の試験の記録（リセットでは FIFO を捨てない）を捨てる
+    target.records.clear()
     return target
 
 
@@ -405,7 +407,10 @@ async def recording_resumes_after_the_target_clock_domain_is_reset(dut):
     dut.probes.value = 0x0020
     await ClockCycles(dut.clk, 20)
     rec = await tg.drain()
-    assert is_group(rec[0], 0) and rec[1] == 0x0010                   # delta 0 = 鎖の始め
+    rec = rec[max(i for i, w in enumerate(rec) if is_group(w)):]       # リセットの前に書いた記録（刻み）は残る。明けの鎖から
+    # リセットの間の変化は数えられないので、再開は溢れの記録（lost = 0。連続性が切れた印）を挟む（BUG-E2E-001）
+    assert is_group(rec[0], 0) and kind(rec[1]) == T_OVERFLOW and rec[1] & 0xFFFF == 0
+    assert kind(rec[2]) == T_VALUE and delta_of(rec[2]) == 0 and rec[2] & 0xFFFF == 0x0010     # delta 0 = 鎖の始め
     assert [v for _, v in values(rec)] == [0x0010, 0x0020]
 
 
@@ -539,4 +544,117 @@ async def select_takes_effect_even_if_the_old_group_changes_every_cycle(dut):
         await ClockCycles(dut.clk, 50)
     task.cancel()
     assert 1 in [v for _, kd, v in chains(rec) if kd == "group"]
+
+
+
+async def _every_cycle_counter(dut, base=0x0010_0000):
+    v = 0
+    while True:
+        await FallingEdge(dut.clk)
+        v = (v + 1) & 0xFFFF
+        dut.probes.value = base | v
+
+
+@cocotb.test()
+async def stop_while_the_state_machine_is_moving_really_stops(dut):
+    # レビュー指摘 1: 停止（CONTROL = 0）の周期に状態の遷移が重なると、IDLE への代入が case の後ろの代入に負けて止まらない。
+    # 組が毎周期変わると、溢れの立て直しで遷移が続く。止めた後に記録が増え続けてはならない
+    tg = await setup(dut, probes=0x0010_0000)
+    await tg.start()
+    task = cocotb.start_soon(_every_cycle_counter(dut))
+    await ClockCycles(dut.clk, 400)
+    await tg.write_reg(REG_CONTROL, 0)
+    await ClockCycles(dut.clk, 60)
+    await tg.drain()
+    await ClockCycles(dut.clk, 400)
+    after = await tg.drain()
+    task.cancel()
+    assert after == [], f"停止の後に記録が {len(after)} 語増えた"
+    r = await tg.dr.scan(0, 0)
+    assert r[0] >> 17 & 1 == 0                                    # 見出しの「記録中」が 0
+
+
+@cocotb.test()
+async def random_changes_are_recorded_exactly_when_the_reader_keeps_up(dut):
+    """ランダムな間隔・値で変えて、こまめに吸い出す: 値の並びと変化の間の周期数が入力と一致する（溢れは出ない）。"""
+    rng = random.Random(7)
+    tg = await setup(dut, probes=0x0100)
+    await tg.start()
+    await ClockCycles(dut.clk, 20)
+    driven = [0x0100]
+    stamps = []                                              # 変えた clk の辺の番号（吸い出しの間も時間は進む）
+    for i in range(120):
+        wait = rng.randint(2, 60)
+        v = rng.randrange(0x10000)
+        while v == driven[-1]:
+            v = rng.randrange(0x10000)
+        await FallingEdge(dut.clk)
+        dut.probes.value = v
+        driven.append(v)
+        stamps.append(int(cycle_at(get_sim_time("ns"))))
+        await ClockCycles(dut.clk, wait)
+        if i % 4 == 3:
+            await tg.drain()
+    await tg.drain()
+    rec = tg.records
+    assert not any(kind(w) == T_OVERFLOW for w in rec)
+    got = changes(rec)
+    assert [v for _, v in got] == driven
+    assert [b[0] - a[0] for a, b in zip(got[1:], got[2:])] == [b - a for a, b in zip(stamps, stamps[1:])], "変化の間の周期数が入力と違う"
+
+
+@cocotb.test()
+async def random_bursts_lose_changes_only_with_an_overflow_report(dut):
+    """吸い出さずに速く変える: 受け取った値は入力の部分列で、最後の値は正しい。欠けたなら溢れが報告されている。"""
+    rng = random.Random(11)
+    tg = await setup(dut, probes=0)
+    await tg.start()
+    await ClockCycles(dut.clk, 10)
+    last = 0
+    for round_ in range(6):
+        driven = [last]
+        for _ in range(rng.randint(5, 60)):
+            v = rng.randrange(1, 0x10000)
+            await FallingEdge(dut.clk)
+            if driven and driven[-1] == v:
+                v ^= 1
+            dut.probes.value = v
+            driven.append(v)
+            await ClockCycles(dut.clk, rng.randint(1, 4))
+        await ClockCycles(dut.clk, 40)
+        last = driven[-1]
+        tg.records.clear()
+        rec = await tg.drain()
+        got = [v for _, k, v in chains(rec) if k == "value"]
+        it = iter(driven)
+        assert all(any(x == y for y in it) for x in got), (round_, got, driven)          # 部分列（順序を保つ）
+        assert got[-1] == driven[-1], (round_, got[-1], driven[-1])
+        overflowed = any(kind(w) == T_OVERFLOW for w in rec)
+        if len(set(got)) < len(set(driven)):
+            assert overflowed, f"変化が欠けたのに溢れの報告が無い（round {round_}）"
+
+@cocotb.test()
+async def a_target_reset_during_a_scan_does_not_corrupt_the_fifo(dut):
+    # 読み出しの途中（記録を取り除いている最中）に対象の回路がリセットされても、FIFO の位置がずれない。
+    # リセットで書きの位置を「同期した読みの位置」に合わせて空にしていたため、スキャンがその後も記録を取り除くと
+    # 読みの位置が書きの位置を追い越し、次の見出しの count が FIFO の深さを超えていた
+    tg = await setup(dut, probes=0)
+    await tg.start()
+    await ClockCycles(dut.clk, 5)
+    for v in range(1, 8):
+        await FallingEdge(dut.clk)
+        dut.probes.value = v
+        await ClockCycles(dut.clk, 6)
+    scan = cocotb.start_soon(tg.dr.scan(0, 8))
+    await Edge(dut.fifo.r_ptr)                                    # 最初の記録を取り除いた
+    await ClockCycles(dut.clk, 8)
+    dut.rst.value = 1
+    await ClockCycles(dut.clk, 3)
+    dut.rst.value = 0
+    await scan
+    await ClockCycles(dut.clk, 30)
+    r = await tg.dr.scan()
+    assert r[0] & 0xFFFF <= 16
+    rec = await tg.drain()
+    assert is_group(rec[-3], 0) and kind(rec[-2]) == T_OVERFLOW and kind(rec[-1]) == T_VALUE and delta_of(rec[-1]) == 0
 

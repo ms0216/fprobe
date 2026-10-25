@@ -4,7 +4,7 @@ import asyncio
 import inspect
 
 from fprobe.api.spec import load_spec
-from fprobe.mcp_server import build_client_server, tool_function
+from fprobe.mcp_client import build_client_server, tool_function
 
 
 class FakeClient:
@@ -55,7 +55,7 @@ def test_mcp_refuses_a_daemon_that_holds_a_different_device():
     # 既に動いているデーモンが別の機器を握っていたら、黙ってそれを操作しない（機器はシリアル番号等で必ず指定する）
     import argparse
     import pytest
-    from fprobe.mcp_server import requested_device, check_device
+    from fprobe.mcp_client import requested_device, check_device
     args = argparse.Namespace(serial="0001", port=None, baud=2_000_000, eth=None)
     assert requested_device(args) == {"link": "usb", "address": "0001"}
     check_device(requested_device(args), {"link": "usb", "address": "0001"})
@@ -67,7 +67,7 @@ def test_a_lost_daemon_connection_is_reopened_on_the_next_call():
     # デーモンが再起動・切断しても、AI の側（MCP）を起動し直さずに次の呼び出しでつなぎ直す。切れた呼び出し自体は
     # 二重に実行しないよう、やり直さずに誤りを返す
     import pytest
-    from fprobe.mcp_server import ReconnectingClient
+    from fprobe.mcp_client import ReconnectingClient
 
     class Flaky:
         def __init__(self, n):
@@ -96,7 +96,7 @@ def test_a_lost_daemon_connection_is_reopened_on_the_next_call():
 
 def test_the_spawned_daemon_logs_to_a_file(tmp_path, monkeypatch):
     import argparse
-    import fprobe.mcp_server as m
+    import fprobe.mcp_client as m
     started = {}
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
     monkeypatch.setattr(m, "_listening", lambda port: bool(started))
@@ -111,7 +111,7 @@ def test_tool_names_in_the_instructions_and_summaries_exist():
     # AI は案内文に書かれた道具の名前で呼ぶ。名前は仕様から生成するので、案内文の `名前` がすべて実在すること
     import asyncio
     import re
-    from fprobe.mcp_server import INSTRUCTIONS
+    from fprobe.mcp_instructions import INSTRUCTIONS
     spec = load_spec()
     tools = {t.name for t in asyncio.run(build_client_server(FakeClient(), spec).list_tools())}
     texts = [INSTRUCTIONS] + [m.summary for m in spec.methods.values()]
@@ -122,14 +122,14 @@ def test_tool_names_in_the_instructions_and_summaries_exist():
 
 def test_a_type_list_with_null_becomes_optional():
     import typing
-    from fprobe.mcp_server import _annotation
+    from fprobe.mcp_client import _annotation
     assert _annotation({"type": ["integer", "null"]}) == typing.Optional[int]
     assert _annotation({"type": ["string"]}) is str
 
 
 def test_alternative_types_and_enums_keep_every_form():
     # 「整数か "semihosting"」「整数・小数・文字列」「8 / 16 / 32」を MCP が 1 つの型に狭めて断らない
-    from fprobe.mcp_server import _annotation
+    from fprobe.mcp_client import _annotation
     assert _annotation({"anyOf": [{"type": "integer"}, {"enum": ["semihosting"]}]}) == int | str
     assert _annotation({"type": ["integer", "number", "string"]}) == int | float | str
     assert _annotation({"enum": [8, 16, 32]}) is int and _annotation({"enum": ["a", "b"]}) is str

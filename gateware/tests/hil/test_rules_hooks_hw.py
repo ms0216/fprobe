@@ -12,6 +12,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from tests.hil.values import num
 
 import pytest
 import uvicorn
@@ -120,7 +121,7 @@ def test_hooks_run_on_breakpoint_stops_and_guard_a_reset(daemon_url):
     log = ai.call("hooks.log")["entries"]
     halt = [e for e in log if e["event"] == "halt"]
     assert len(halt) == 1 and halt[0]["results"][0]["ok"], log
-    assert halt[0]["results"][0]["value"]["value"] % 256 == 0                  # reached_milestone の時の counter
+    assert num(halt[0]["results"][0]["value"]) % 256 == 0                  # reached_milestone の時の counter
     assert "reached_milestone" in halt[0]["results"][1]["value"]
     ai.call("debug.breakpoint.clear", location="reached_milestone")
     ai.call("target.reset", halt=True)

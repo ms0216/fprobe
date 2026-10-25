@@ -19,7 +19,7 @@ def test_counts_where_the_terms_hold_against_the_previous_value_and_reports_the_
     out = count_condition(items, "restart changed and state=BUSY")
     # 200 と 500（450 の切れ目の後も直前の値と比べる。切れ目は数と失った変化の数で示す）
     assert out == {"condition": "restart changed and state=BUSY", "count": 2, "values": 7,
-                   "t0_us": 0, "t1_us": 1_000_000, "span_s": 1.0, "gaps": 1, "lost": 3, "untimed": 0, "unnamed": 0}
+                   "t0_us": 0, "t1_us": 1_000_000, "span_s": 1.0, "gaps": 1, "hidden": 0, "lost": 3, "untimed": 0, "unnamed": 0}
 
 
 def test_values_left_out_of_the_count_are_counted():

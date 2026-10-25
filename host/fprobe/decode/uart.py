@@ -40,6 +40,10 @@ def _frames(tr, lv: ChannelLevels, p: float, data_bits: int, parity: str, stop_b
     edges, n, initial = lv.edges, len(lv.edges), lv.initial
     nbits = data_bits + (parity != "none")
     j = 0                                             # カーソル: edges[:j] は今のサンプル以前の変化点
+    if length and initial ^ invert == 0:              # 捕捉の先頭からすでに開始ビットの極性: 始まりは捕捉の前。事実として出す
+        back = edges[0] if n else length
+        out.append(Annotation(0, max(back, 1), "break", "BREAK?", error="truncated",
+                              fields={"began_before_capture": True, "ends_in_capture": bool(n)}))
     while True:
         # 開始ビットの始まり: 線が論理 0（線の上では invert）に変わる変化点。edges[j] の後の値は initial ^ (j + 1) の偶奇
         if j < n and initial ^ ((j + 1) & 1) != invert:

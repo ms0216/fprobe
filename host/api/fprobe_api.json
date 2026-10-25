@@ -616,11 +616,15 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "count": {
             "type": "integer",
-            "default": 1
+            "default": 1,
+            "minimum": 0,
+            "maximum": 65535
           }
         },
         "required": [
@@ -638,13 +642,18 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "words": {
             "type": "array",
             "items": {
-              "type": "integer"
-            }
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "maxItems": 65535
           }
         },
         "required": [
@@ -679,7 +688,8 @@
           "since": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -775,7 +785,7 @@
     },
     "target.connect": {
       "kind": "control",
-      "summary": "ターゲットに接続する。既定は SWD。jtag_chain（JTAG チェーンの IR 長、TDO 側から。例: STM32 は [4, 5]）を\n指定すると JTAG。connect_mode: halt / attach / under-reset。target=\"auto\" なら先に部品を判別して pyOCD のターゲット名を選ぶ（結果の auto に判別の内容。JTAG だけのターゲットなら jtag_chain も補う）。\nscript: 接続・リセット等の手順を上書きする pyOCD のユーザスクリプト（\"builtin:<名前>\" かファイル。target_script_check で検査できる）。\ncore: コアごとに DP を持つ複数ドロップの部品（RP2040）のコアの番号。target=\"rp2040\" と組む（pyOCD のターゲット rp2040_core0 / rp2040_core1 を選ぶ）。\nRISC-V: target=\"rp2350_riscv\" で RP2350 の Hazard3 に（pyOCD を使わず、APB-AP の向こうの Debug Module を直接）。core はハートの番号、connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（pc・x0〜x31・ABI の名前・主な CSR）・メモリ（システムバス）・ブレークポイント（トリガ）。リセット・Flash・SWO・RTOS 等は断る。\nCortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target=\"bcm2836\"（Raspberry Pi 2、Cortex-A7 × 4。core はコアの番号）/ \"cortex_a\"（ARMv7-A、コアは ROM テーブルから）/ \"bcm2835\"（Pi Zero・1、ARM1176）/ \"arm11\"。チェーンの装置は IDCODE で探す（jtag_chain で IR 長の列を与えてもよい）。connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（r0〜r15・sp・lr・pc・cpsr）・メモリ（コアを通す。番地はコアの見る番地 = MMU が有効なら仮想番地。書いた範囲はキャッシュを揃える）・ハードのブレークポイント / ウォッチポイント。止めるのは選んだコアだけ。リセット・ベクタキャッチ・Flash・SWO・RTOS 等は断る。",
+      "summary": "ターゲットに接続する。既定は SWD。jtag_chain（JTAG チェーンの IR 長、TDO 側から。例: STM32 は [4, 5]）を\n指定すると JTAG。connect_mode: halt / attach / under-reset。target=\"auto\" なら先に部品を判別して pyOCD のターゲット名を選ぶ（結果の auto に判別の内容。JTAG だけのターゲットなら jtag_chain も補う）。\nscript: 接続・リセット等の手順を上書きする pyOCD のユーザスクリプト（\"builtin:<名前>\" かファイル。target_script_check で検査できる）。\ncore: コアごとに DP を持つ複数ドロップの部品（RP2040）のコアの番号。target=\"rp2040\" と組む（pyOCD のターゲット rp2040_core0 / rp2040_core1 を選ぶ）。\nRISC-V: target=\"rp2350_riscv\" で RP2350 の Hazard3 に（pyOCD を使わず、APB-AP の向こうの Debug Module を直接）。core はハートの番号、connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（pc・x0〜x31・ABI の名前・主な CSR）・メモリ（システムバス）・ブレークポイント（トリガ）。リセット・Flash・SWO・RTOS 等は断る。\nCortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target=\"bcm2836\"（Raspberry Pi 2、Cortex-A7 × 4。core はコアの番号）/ \"cortex_a\"（ARMv7-A、コアは ROM テーブルから） / \"zynq7000\"（Zynq-7000、Cortex-A9 × 2。PS の DAP は independent の起動で PJTAG から）/ \"bcm2835\"（Pi Zero・1、ARM1176）/ \"arm11\"。チェーンの装置は IDCODE で探す（jtag_chain で IR 長の列を与えてもよい）。connect_mode は halt / attach。使えるのは状態・停止・再開・ステップ・レジスタ（r0〜r15・sp・lr・pc・cpsr）・メモリ（コアを通す。番地はコアの見る番地 = MMU が有効なら仮想番地。書いた範囲はキャッシュを揃える）・ハードのブレークポイント / ウォッチポイント。止めるのは選んだコアだけ。リセット・ベクタキャッチ・Flash・SWO・RTOS 等は断る。",
       "impl": "target_connect",
       "params": {
         "type": "object",
@@ -786,7 +796,8 @@
           },
           "frequency_hz": {
             "type": "integer",
-            "default": 4000000
+            "default": 4000000,
+            "minimum": 1
           },
           "connect_mode": {
             "type": "string",
@@ -797,7 +808,8 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "integer"
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               {
@@ -858,7 +870,8 @@
         "type": "object",
         "properties": {
           "core": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0
           },
           "connect_mode": {
             "type": "string",
@@ -936,7 +949,8 @@
         "properties": {
           "count": {
             "type": "integer",
-            "default": 1
+            "default": 1,
+            "minimum": 0
           }
         },
         "required": [],
@@ -1175,7 +1189,9 @@
             "type": "string"
           },
           "value": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           }
         },
         "required": [
@@ -1194,10 +1210,14 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "length": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967296
           }
         },
         "required": [
@@ -1217,7 +1237,9 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "data_hex": {
             "type": "string"
@@ -1242,7 +1264,9 @@
           "register": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "string"
@@ -1269,7 +1293,9 @@
           "register": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "string"
@@ -1277,7 +1303,9 @@
             ]
           },
           "value": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           }
         },
         "required": [
@@ -1334,7 +1362,9 @@
             "minimum": 0
           },
           "value": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           }
         },
         "required": [
@@ -1356,12 +1386,15 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "length": {
             "type": "integer",
             "minimum": 4,
-            "default": 65536
+            "default": 65536,
+            "maximum": 4294967296
           },
           "write": {
             "type": "boolean",
@@ -1607,7 +1640,8 @@
               {
                 "type": "array",
                 "items": {
-                  "type": "integer"
+                  "type": "integer",
+                  "minimum": 0
                 }
               },
               {
@@ -1802,7 +1836,9 @@
           "value": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -1832,7 +1868,9 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "length": {
             "type": "integer",
@@ -1887,7 +1925,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -1943,7 +1983,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -2091,7 +2132,8 @@
           },
           "ignore_count": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "log": {
             "anyOf": [
@@ -2196,11 +2238,13 @@
         "properties": {
           "since": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "limit": {
             "type": "integer",
-            "default": 200
+            "default": 200,
+            "minimum": 1
           }
         },
         "required": [],
@@ -2232,7 +2276,9 @@
           "dormant_limit": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -2243,7 +2289,9 @@
           "scratch": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -2290,7 +2338,8 @@
           "size": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -2333,7 +2382,8 @@
         "properties": {
           "timeout_s": {
             "type": "number",
-            "default": 5.0
+            "default": 5.0,
+            "minimum": 0
           }
         },
         "required": [],
@@ -2370,7 +2420,8 @@
           },
           "timeout_s": {
             "type": "number",
-            "default": 5.0
+            "default": 5.0,
+            "minimum": 0
           },
           "mask_interrupts": {
             "type": "boolean",
@@ -2441,7 +2492,8 @@
           },
           "timeout_s": {
             "type": "number",
-            "default": 2.0
+            "default": 2.0,
+            "minimum": 0
           },
           "disable_interrupts": {
             "type": "boolean",
@@ -2470,7 +2522,8 @@
           "index": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -2503,7 +2556,8 @@
           "index": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -2701,7 +2755,9 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "length": {
             "type": "integer",
@@ -2907,7 +2963,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -3029,7 +3087,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -3211,7 +3271,8 @@
           "rate_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "exclusiveMinimum": 0
               },
               {
                 "type": "null"
@@ -3221,11 +3282,13 @@
           },
           "pretrigger": {
             "type": "integer",
-            "default": 1024
+            "default": 1024,
+            "minimum": 0
           },
           "mask": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "value": {
             "type": "integer",
@@ -3233,15 +3296,18 @@
           },
           "rise": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "fall": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "timeout_s": {
             "type": "number",
-            "default": 5.0
+            "default": 5.0,
+            "minimum": 0
           },
           "vcd_path": {
             "anyOf": [
@@ -3256,11 +3322,13 @@
           },
           "filter_channels": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "filter_ns": {
             "type": "number",
-            "default": 0.0
+            "default": 0.0,
+            "minimum": 0
           },
           "pulse": {
             "anyOf": [
@@ -3294,7 +3362,8 @@
           "rate_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "exclusiveMinimum": 0
               },
               {
                 "type": "null"
@@ -3304,11 +3373,13 @@
           },
           "pretrigger": {
             "type": "integer",
-            "default": 1024
+            "default": 1024,
+            "minimum": 0
           },
           "mask": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "value": {
             "type": "integer",
@@ -3316,19 +3387,23 @@
           },
           "rise": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "fall": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "filter_channels": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "filter_ns": {
             "type": "number",
-            "default": 0.0
+            "default": 0.0,
+            "minimum": 0
           },
           "pulse": {
             "anyOf": [
@@ -3361,7 +3436,8 @@
         "properties": {
           "timeout_s": {
             "type": "number",
-            "default": 5.0
+            "default": 5.0,
+            "minimum": 0
           },
           "vcd_path": {
             "anyOf": [
@@ -3390,7 +3466,8 @@
           "rate_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "exclusiveMinimum": 0
               },
               {
                 "type": "null"
@@ -3400,7 +3477,8 @@
           },
           "mask": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "value": {
             "type": "integer",
@@ -3408,11 +3486,13 @@
           },
           "rise": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "fall": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "rle": {
             "type": "boolean",
@@ -3420,15 +3500,18 @@
           },
           "before_beats": {
             "type": "integer",
-            "default": 4096
+            "default": 4096,
+            "minimum": 0
           },
           "after_beats": {
             "type": "integer",
-            "default": 4096
+            "default": 4096,
+            "minimum": 0
           },
           "timeout_s": {
             "type": "number",
-            "default": 10.0
+            "default": 10.0,
+            "minimum": 0
           },
           "vcd_path": {
             "anyOf": [
@@ -3443,11 +3526,13 @@
           },
           "filter_channels": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "filter_ns": {
             "type": "number",
-            "default": 0.0
+            "default": 0.0,
+            "minimum": 0
           },
           "pulse": {
             "anyOf": [
@@ -3481,7 +3566,8 @@
           "rate_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "exclusiveMinimum": 0
               },
               {
                 "type": "null"
@@ -3491,7 +3577,8 @@
           },
           "mask": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "value": {
             "type": "integer",
@@ -3499,11 +3586,13 @@
           },
           "rise": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "fall": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "rle": {
             "type": "boolean",
@@ -3511,15 +3600,18 @@
           },
           "after_beats": {
             "type": "integer",
-            "default": 4096
+            "default": 4096,
+            "minimum": 0
           },
           "filter_channels": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "filter_ns": {
             "type": "number",
-            "default": 0.0
+            "default": 0.0,
+            "minimum": 0
           },
           "pulse": {
             "anyOf": [
@@ -3552,11 +3644,13 @@
         "properties": {
           "timeout_s": {
             "type": "number",
-            "default": 10.0
+            "default": 10.0,
+            "minimum": 0
           },
           "before_beats": {
             "type": "integer",
-            "default": 4096
+            "default": 4096,
+            "minimum": 0
           },
           "vcd_path": {
             "anyOf": [
@@ -3587,12 +3681,14 @@
           },
           "duration_s": {
             "type": "number",
-            "default": 1.0
+            "default": 1.0,
+            "minimum": 0
           },
           "rate_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "exclusiveMinimum": 0
               },
               {
                 "type": "null"
@@ -3775,7 +3871,8 @@
           "capture_id": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -4014,7 +4111,8 @@
           "capture_id": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -4063,7 +4161,8 @@
         "properties": {
           "last": {
             "type": "integer",
-            "default": 200
+            "default": 200,
+            "minimum": 0
           },
           "raw": {
             "type": "boolean",
@@ -4360,7 +4459,7 @@
     "fpga_obs.count": {
       "kind": "control",
       "observes": true,
-      "summary": "観測した値の最後の last 件（fpga_obs.read の窓。使う側が明示する。既定の値は無い）で、FPGA の信号の条件（restart changed and state=BUSY の形。瞬間の項 changed / rose / fell が要る）ごとに成り立った回数を数える。条件ごとに count と、数えた範囲の事実: values（数えた値の数）・t0_us / t1_us（最初と最後の値の fprobe の時刻。値が無ければ null）・span_s（その間の秒）・gaps（切れ目の数）・lost（失った変化の数）。「変化」は同じ組の直前の値と比べる。読めない条件は error に理由。",
+      "summary": "観測した値の最後の last 件（fpga_obs.read の窓。使う側が明示する。既定の値は無い）で、FPGA の信号の条件（restart changed and state=BUSY の形。瞬間の項 changed / rose / fell が要る）ごとに成り立った回数を数える。条件ごとに count と、数えた範囲の事実: values（数えた値の数）・t0_us / t1_us（最初と最後の値の fprobe の時刻。値が無ければ null）・span_s（その間の秒）・gaps（切れ目の数）・hidden（標本型の見えない変化の数）・lost（失った変化の数）。「変化」は同じ組の直前の値と比べる。読めない条件は error に理由。",
       "impl": "fpga_obs_count",
       "params": {
         "type": "object",
@@ -4462,11 +4561,13 @@
           },
           "rate_hz": {
             "type": "number",
-            "default": 1000.0
+            "default": 1000.0,
+            "exclusiveMinimum": 0
           },
           "ap": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           },
           "chase_rate_hz": {
             "type": "number",
@@ -4481,10 +4582,17 @@
             "default": 0
           },
           "names": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ],
             "default": null
           }
         },
@@ -4555,7 +4663,8 @@
           },
           "last": {
             "type": "integer",
-            "default": 1000
+            "default": 1000,
+            "minimum": 0
           }
         },
         "required": [
@@ -4583,7 +4692,8 @@
           },
           "last": {
             "type": "integer",
-            "default": 1000
+            "default": 1000,
+            "minimum": 0
           },
           "max_dt_us": {
             "type": "number",
@@ -4609,10 +4719,12 @@
         "type": "object",
         "properties": {
           "a_us": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0
           },
           "b_us": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0
           },
           "names": {
             "type": "array",
@@ -4721,7 +4833,8 @@
                 "type": "string"
               },
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               }
             ]
           },
@@ -4767,7 +4880,8 @@
                 "type": "string"
               },
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               }
             ]
           },
@@ -4906,7 +5020,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -4918,7 +5033,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 8
+                "minimum": 8,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -5351,7 +5467,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -5363,7 +5480,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 8
+                "minimum": 8,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -6064,7 +6182,8 @@
           "t0_s": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -6075,7 +6194,8 @@
           "t1_s": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -6203,15 +6323,20 @@
         "properties": {
           "address": {
             "type": "integer",
-            "default": 3758157296
+            "default": 3758157296,
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "value": {
             "type": "integer",
-            "default": 2690580483
+            "default": 2690580483,
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "ap": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0
           }
         },
         "required": [],
@@ -6227,19 +6352,27 @@
         "type": "object",
         "properties": {
           "address": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "address_mask": {
             "type": "integer",
-            "default": 4294967295
+            "default": 4294967295,
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "data": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "data_mask": {
             "type": "integer",
-            "default": 0
+            "default": 0,
+            "minimum": 0,
+            "maximum": 4294967295
           },
           "on_write": {
             "type": "boolean",
@@ -6676,7 +6809,9 @@
               2,
               3
             ],
-            "default": 0
+            "default": 0,
+            "minimum": 0,
+            "maximum": 3
           },
           "bits": {
             "type": "integer",
@@ -6729,7 +6864,8 @@
         "properties": {
           "baud": {
             "type": "integer",
-            "default": 2000000
+            "default": 2000000,
+            "minimum": 1
           },
           "mode": {
             "type": "string",
@@ -6754,7 +6890,8 @@
         "properties": {
           "timeout_s": {
             "type": "number",
-            "default": 0.5
+            "default": 0.5,
+            "minimum": 0
           }
         },
         "required": [],
@@ -7109,7 +7246,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -7124,7 +7263,9 @@
                 "items": {
                   "type": "array",
                   "items": {
-                    "type": "integer"
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
                   },
                   "minItems": 2,
                   "maxItems": 2
@@ -7503,7 +7644,8 @@
           "core_clock_hz": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -7649,7 +7791,8 @@
           "baud": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -7674,12 +7817,14 @@
         "properties": {
           "timeout_s": {
             "type": "number",
-            "default": 0.5
+            "default": 0.5,
+            "minimum": 0
           },
           "baud": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -7729,7 +7874,8 @@
           "rts_channel": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -7740,7 +7886,8 @@
           "cts_channel": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -8378,7 +8525,8 @@
           "number": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -8855,7 +9003,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -8866,7 +9016,9 @@
           "length": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967296
               },
               {
                 "type": "null"
@@ -8899,7 +9051,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -8957,7 +9111,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -8968,7 +9124,9 @@
           "length": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967296
               },
               {
                 "type": "null"
@@ -9015,7 +9173,9 @@
           "address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -9026,7 +9186,9 @@
           "size": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -9037,7 +9199,9 @@
           "ram_address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -9048,7 +9212,9 @@
           "ram_size": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -9149,17 +9315,21 @@
           "ram_length": {
             "type": "integer",
             "minimum": 0,
-            "default": 16384
+            "default": 16384,
+            "maximum": 4294967296
           },
           "read_length": {
             "type": "integer",
             "minimum": 0,
-            "default": 65536
+            "default": 65536,
+            "maximum": 4294967296
           },
           "program_address": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -9170,7 +9340,9 @@
           "program_length": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967296
               },
               {
                 "type": "null"
@@ -9793,7 +9965,8 @@
           "id": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -9922,7 +10095,9 @@
                 "items": {
                   "type": "array",
                   "items": {
-                    "type": "integer"
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
                   },
                   "minItems": 2,
                   "maxItems": 2
@@ -9937,7 +10112,9 @@
           "end": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -11277,7 +11454,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -11408,7 +11586,8 @@
           "task": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -11444,7 +11623,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -11456,7 +11636,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1
+                "minimum": 1,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -11522,7 +11703,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12409,7 +12591,9 @@
           "bottom": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12420,7 +12604,9 @@
           "top": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12448,7 +12634,9 @@
           "vector_table": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12520,7 +12708,9 @@
           "bottom": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12531,7 +12721,9 @@
           "top": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12553,7 +12745,9 @@
           "vector_table": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12884,7 +13078,9 @@
           "low": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"
@@ -12895,7 +13091,9 @@
           "high": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
               },
               {
                 "type": "null"

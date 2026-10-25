@@ -117,7 +117,7 @@ def test_a_new_recording_keeps_the_pin_names(tmp_path, monkeypatch):
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
     p = Probe("unused")
     p._session = SimpleNamespace(device=FakeDevice())
-    monkeypatch.setattr("fprobe.mcp_server.channel_names", lambda caps: {8: "SWDIO drive", 10: "in0"})
+    monkeypatch.setattr("fprobe.probe_recording.channel_names", lambda caps: {8: "SWDIO drive", 10: "in0"})
     started = p.recording_start(name="pins")
     p.recording_stop()
     import json
@@ -407,7 +407,7 @@ def test_holes_in_the_data_are_reported(tmp_path):
     assert got[("fpga_lost", None)]["t0"] == 70_000 and got[("fpga_lost", None)]["count"] == 3
     assert (got[("pins_missing", "mark")]["t0"], got[("pins_missing", "mark")]["t1"]) == (0, 35_000)
     assert got[("events_error", None)]["t0"] == 80_000
-    assert any("欠け" in w and "長さ 86.001 ms" in w for w in out["warnings"])  # 重なりは 1 回: 0〜50・99〜135.001 ms
+    assert any("欠け" in w and "長さ 87.001 ms" in w for w in out["warnings"])  # 重なりは 1 回: 0〜50・60〜61（読めなかった語の前後の読み）・99〜135.001 ms
     assert clean["gaps"] == [] and not any("欠け" in w for w in clean["warnings"])
 
 
