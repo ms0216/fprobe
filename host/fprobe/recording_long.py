@@ -21,21 +21,23 @@ from __future__ import annotations
 
 import contextlib
 import heapq
-import itertools
 import json
 import shutil
 import sqlite3
 import threading
 import time
 from array import array
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
+from operator import itemgetter
 from pathlib import Path
 from typing import Any
 
 from .la import Transitions
+from .la_wave import _np, raw_facts
 from .recording import NO_DATA, ClockMap, Event, HostEvents, Recorder, Recording, _Chunk, connect_db, in_list, write_json
 from .recording_summary import SummaryGrid, bin_counts
+from .recording_table import ROW_COLUMNS, EventTable, extent
 
 __all__ = ["DEFAULT_DECIMATE", "INDEX_LEVEL", "Policy", "SegmentedRecorder", "SegmentedRecording"]
 
@@ -105,10 +107,16 @@ def _bytes_of(directory: Path) -> int:
 
 
 def _toggles(values) -> int:
-    """値の列の中で変化したビット。あるビットが変化する = 最初の値と違う値が出る（異なる値だけ見れば足りる）。"""
-    first, out = values[0] if len(values) else 0, 0
+    """値の列の中で変化したビット。あるビットが変化する = 最初の値と違う値が出る（異なる値だけ見れば足りる）。
+    values は array・列・numpy の配列（numpy なら一括で）。"""
+    if not len(values):
+        return 0
+    first = int(values[0])
+    if _np is not None and isinstance(values, _np.ndarray):
+        return int(_np.bitwise_or.reduce(values ^ values.dtype.type(first)))
+    out = 0
     for v in set(values):
-        out |= v ^ first
+        out |= int(v) ^ first
     return out
 
 
@@ -132,7 +140,33 @@ class SegmentedRecorder(HostEvents):
         self._index = _connect(self.directory / "index.sqlite", _INDEX_SCHEMA)
         self._lock = threading.RLock()
         self._closed = False
+        self._last_ticks: int | None = None          # 時刻の基準として最後に読んだタイムベース（Recorder.observe_time）
+        self.ended: dict | None = None
+        self._rejected = 0
         self._open_segment()
+
+    def observe_time(self, ticks: int, host_s: float | None = None) -> bool:
+        """Recorder.observe_time と同じ（タイムベースが 0 に戻ったら事実の行を書いて記録を終える。分割をまたいで見る）。"""
+        with self._lock:
+            if self.ended is not None:
+                return False
+            last = self._last_ticks
+            if last is None or ticks >= last:
+                self._last_ticks = ticks
+                return True
+            self._current.add("timebase", "restart", last, body={"ticks_after": ticks, "host_s": host_s})
+            self.end("timebase_restart", last_ticks=last, ticks_after=ticks)
+            return False
+
+    def end(self, reason: str, **facts: Any) -> None:
+        """Recorder.end と同じ（以後の行は受けず、数を meta の rejected_rows に）。"""
+        if not reason:
+            raise ValueError("理由が要る")
+        with self._lock:
+            if self.ended is not None:
+                return
+            self.ended = {"reason": reason, **facts}
+            self.update_meta(ended=self.ended, rejected_rows=0)
 
     # --- Recorder と同じ口 -----------------------------------------------------------------------
 
@@ -147,24 +181,59 @@ class SegmentedRecorder(HostEvents):
     def add(self, stream: str, kind: str, t: int, a: int = 0, b: int = 0, body: Any = None,
             t_end: int | None = None, uncertainty: float | None = None) -> None:
         with self._lock:
+            if self.ended is not None:
+                self._rejected += 1
+                return
             self._current.add(stream, kind, t, a, b, body, t_end, uncertainty)
 
     def add_many(self, rows: Iterable[tuple]) -> None:
         rows = list(rows)
         with self._lock:
+            if self.ended is not None:
+                self._rejected += len(rows)
+                return
             self._current.add_many(rows)
 
     def add_waveform(self, tr: Transitions, start_ticks: int) -> str:
         tps = tr.sample_period_s * self.timebase_hz
         with self._lock:
+            if self.ended is not None:
+                self._rejected += 1
+                return ""
             name = self._current.add_waveform(tr, start_ticks)
             values = tr.values
             self._index.execute(
                 "INSERT INTO wave VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
                 (self._no, start_ticks, start_ticks + round(tr.length * tps), f"{self._path}/waveform/{name}", tps,
-                 tr.channels, tr.length, values[0] if len(values) else 0, values[-1] if len(values) else 0,
+                 tr.channels, tr.length, int(values[0]) if len(values) else 0, int(values[-1]) if len(values) else 0,
                  _toggles(values)))
             self._wave_bytes += 10 * len(values) + 64
+            return name
+
+    @property
+    def waveform_format(self) -> int:
+        """いまの分割に書き足す波形のかたまりの形式（Recorder.waveform_format。新しい分割は 2、古い分割に書き足すなら 1）。"""
+        return self._current.waveform_format
+
+    def add_raw_waveform(self, pieces: Sequence, *, rle: bool, pack: int, channels: int, period_s: float,
+                         previous: int | None, start_ticks: int, length: int,
+                         channel_skew: Sequence[float | None] = ()) -> str:
+        """Recorder.add_raw_waveform と同じ（生の拍を入れる）。索引の first / last / toggles（縮図の事実）は、変化点を作らずに
+        拍の列から求める（la_wave.raw_facts。add_waveform が変化点から求めた値と同じ）。"""
+        tps = period_s * self.timebase_hz
+        with self._lock:
+            if self.ended is not None:
+                self._rejected += 1
+                return ""
+            name = self._current.add_raw_waveform(pieces, rle=rle, pack=pack, channels=channels, period_s=period_s,
+                                                  previous=previous, start_ticks=start_ticks, length=length,
+                                                  channel_skew=channel_skew)
+            first, last, toggles = raw_facts(pieces, rle, pack)
+            self._index.execute(
+                "INSERT INTO wave VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (self._no, start_ticks, start_ticks + round(length * tps), f"{self._path}/waveform/{name}", tps,
+                 channels, length, first, last, toggles))
+            self._wave_bytes += sum(len(p) for p in pieces) + 64
             return name
 
     def flush(self) -> None:
@@ -186,6 +255,8 @@ class SegmentedRecorder(HostEvents):
             self._maintain()
             self._closed = True
             self._meta["closed"] = True
+            if self.ended is not None:
+                self._meta["rejected_rows"] = self._rejected
             self._write_meta()
             self._index.close()
 
@@ -222,7 +293,7 @@ class SegmentedRecorder(HostEvents):
         directory = self.directory / self._path
         db = _connect(directory / "recording.sqlite", _SEGMENT_SUMMARY)
         try:
-            lo, hi, count = db.execute("SELECT MIN(t), MAX(COALESCE(t_end, t)), COUNT(*) FROM events").fetchone()
+            lo, hi, count = extent(db)
             clo, chi = db.execute("SELECT MIN(t0), MAX(t1) FROM chunks").fetchone()
             t0 = min((v for v in (lo, clo) if v is not None), default=None)
             t1 = max((v for v in (hi, chi) if v is not None), default=None)
@@ -267,15 +338,16 @@ class SegmentedRecorder(HostEvents):
         try:
             db = _connect(directory / "recording.sqlite")
             try:
+                table = EventTable.open(db)
                 if streams:
-                    db.execute(f"DELETE FROM events WHERE {in_list('stream', streams)}", streams)
+                    table.delete(streams)
                 if WAVEFORM in self.policy.decimate_streams:
                     for name, in db.execute("SELECT path FROM chunks").fetchall():
                         (directory / "waveform" / name).unlink(missing_ok=True)
                     db.execute("DELETE FROM chunks")
                 db.execute("VACUUM")
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                remaining = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+                remaining = db.execute(f"SELECT COUNT(*) FROM {table.physical}").fetchone()[0]
             finally:
                 db.close()
         except (OSError, sqlite3.OperationalError):              # 読み手が開いている等: 次の機会に
@@ -373,7 +445,7 @@ class SegmentedRecording(Recording):
             if seg.state == "open":
                 db = _connect(self.directory / seg.path / "recording.sqlite")
                 try:
-                    lo, hi, n = db.execute("SELECT MIN(t), MAX(COALESCE(t_end, t)), COUNT(*) FROM events").fetchone()
+                    lo, hi, n = extent(db)
                     clo, chi = db.execute("SELECT MIN(t0), MAX(t1) FROM chunks").fetchone()
                 except sqlite3.OperationalError:                   # 作った直後で表がまだ無い
                     lo = hi = clo = chi = None
@@ -401,10 +473,9 @@ class SegmentedRecording(Recording):
 
     # --- 出来事 --------------------------------------------------------------------------------
 
-    def iter_events(self, t0: int | None = None, t1: int | None = None, streams: list[str] | None = None,
-                    kinds: list[str] | None = None, limit: int | None = None,
-                    overlapping: bool = False, a: int | None = None) -> Iterator[Event]:
-        """範囲に重なる分割だけを読み、時刻順に返す（時刻の重なる分割どうしは混ぜて並べる）。"""
+    def _rows(self, t0: int | None, t1: int | None, streams: list[str] | None, kinds: list[str] | None,
+              overlapping: bool = False, a: int | None = None, columns: str = ROW_COLUMNS) -> Iterator[tuple]:
+        """範囲に重なる分割だけを読み、時刻順に返す（時刻の重なる分割どうしは混ぜて並べる。同じ時刻は分割の順）。"""
         segs = sorted((s for s in self._live() if overlapping and t0 is not None and s.t0 is not None
                        and (t1 is None or s.t0 < t1) or s.overlaps(t0, t1)), key=lambda s: s.t0)
         groups: list[list[_Segment]] = []
@@ -414,17 +485,24 @@ class SegmentedRecording(Recording):
             else:
                 groups.append([s])
 
-        def generate() -> Iterator[Event]:
-            for group in groups:
-                readers = [Recording(self.directory / s.path) for s in group]
-                try:
-                    its = [r.iter_events(t0, t1, streams, kinds, None, overlapping, a) for r in readers]
-                    yield from heapq.merge(*its, key=lambda e: e.t)
-                finally:
-                    for r in readers:
-                        r.close()
-        it = generate()
-        return itertools.islice(it, limit) if limit is not None else it
+        for group in groups:
+            readers = [Recording(self.directory / s.path) for s in group]
+            try:
+                its = [r._rows(t0, t1, streams, kinds, overlapping, a, columns) for r in readers]
+                yield from its[0] if len(its) == 1 else heapq.merge(*its, key=itemgetter(0))
+            finally:
+                for r in readers:
+                    r.close()
+
+    def _distinct_a(self, stream: str, kind: str) -> list[int]:
+        values: set[int] = set()
+        for s in self._live():
+            r = Recording(self.directory / s.path)
+            try:
+                values.update(r._distinct_a(stream, kind))
+            finally:
+                r.close()
+        return sorted(values)
 
     def nearest(self, t: int, before: bool, stream: str, kind: str | None = None, a: int | None = None,
                 body: dict[str, Any] | None = None) -> Event | None:

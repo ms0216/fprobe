@@ -9,6 +9,7 @@ from rtos_kernel import FreeRTOSBuilder, shared
 
 from fprobe.mcp_server import Probe
 from heap_fakes import ALLOCATED
+from test_probe_recording import FakeDevice
 
 SP = 0x2000_7000
 
@@ -111,7 +112,7 @@ def setup(tmp_path, monkeypatch):
     _, symbols = shared()
     k = FreeRTOSBuilder()
     p = Probe("unused")
-    p._session = SimpleNamespace(device=None)
+    p._session = SimpleNamespace(device=FakeDevice())
     p._symbols = symbols
     p.poll_s = 0.001
 
@@ -303,16 +304,6 @@ def test_trace_events_go_to_the_recording(setup):
     p.recording_stop()
 
 
-class _Clock:
+class _Clock(FakeDevice):
     def __init__(self):
         self.ticks = 0
-
-    def time(self):
-        self.ticks += 1000
-        return self.ticks
-
-    def read32(self, address):
-        return 0
-
-    def capabilities(self):
-        return SimpleNamespace(timebase_hz=100_000_000, board="fake", design="fprobe")

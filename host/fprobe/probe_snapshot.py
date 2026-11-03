@@ -1,7 +1,7 @@
 """Probe の道具: スナップショット（止めた状態の保存・プローブ無しでの調査・書き戻し・ELF のコアファイル）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols・_target_type・_recorder・
-_session と、InspectTools（SVD・周辺の一括読みの守り・target_fault）、RtosTools（_kernel）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・_debug・target・_symbols・_target_type・_recorder・
+_session と、InspectService（SVD・周辺の一括読みの守り・target_fault）、RtosService（_kernel）を使う。
 機器に触るのは必ず _lock の中。
 
 - 保存（snapshot_save）: コアレジスタ（浮動小数点も）・RAM（ターゲットのメモリマップか ranges）・Flash（任意）・
@@ -33,8 +33,9 @@ from .dwarf.access import AccessError
 from .rtos import detect
 from .snapshot import SUFFIX, ElfPrint, Region, Snapshot, SnapshotAccess, merge_regions, write_core
 from .symbols import Symbols, is_network_path
+from .probe_service import HostView
 
-__all__ = ["SnapshotReadOnly", "SnapshotTarget", "SnapshotTools"]
+__all__ = ["SnapshotReadOnly", "SnapshotTarget", "SnapshotService"]
 
 BASE_REGISTERS = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp", "control", "primask"]
 OPTIONAL_REGISTERS = ["basepri", "faultmask", "fpscr"] + [f"s{i}" for i in range(32)]
@@ -124,27 +125,37 @@ class SnapshotTarget:
     set_breakpoint = remove_breakpoint = set_watchpoint = remove_watchpoint = _read_only
 
 
-class SnapshotTools:
-    """スナップショットの道具（Probe の mixin）。"""
+class SnapshotService:
+    """スナップショットの道具（Probe のサービス）。"""
 
-    def _init_snapshot(self) -> None:
+    API = ("snapshot_close", "snapshot_export_core", "snapshot_info", "snapshot_list", "snapshot_open",
+           "snapshot_restore", "snapshot_save")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_close_snapshot", "_live", "_offline_target")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_bulk_skip_reason", "_dbg", "_debug", "_device", "_forget_elf", "_kernel", "_lock", "_place_of",
+             "_recorder", "_rtos_debug_info", "_session", "_svd", "_svd_info", "_symbols", "_target_type",
+             "_watch_stops", "svd_load", "target_fault", "target_resume", "target_status")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._snapshot_target: SnapshotTarget | None = None
         self._snapshot_path: Path | None = None
         self._snapshot_elf: Path | None = None
 
     def _offline_target(self):
         """未接続でスナップショットを開いていれば、その読み手（Probe.target が使う）。"""
-        return self._snapshot_target if self._debug is None else None
+        return self._snapshot_target if self._host._debug is None else None
 
     def _close_snapshot(self) -> None:
         self._snapshot_target = self._snapshot_path = self._snapshot_elf = None
-        self._dbg = None
+        self._host._dbg = None
 
     def _live(self):
         """接続中のターゲット（スナップショットではない）。"""
-        if self._debug is None:
+        if self._host._debug is None:
             raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
-        return self._debug.target
+        return self._host._debug.target
 
     @staticmethod
     def _snapshots_dir() -> Path:
@@ -161,34 +172,34 @@ class SnapshotTools:
         周辺の名前（省略で SVD が分かればすべて、[] で読まない）。読むと状態が変わる周辺レジスタ（SVD の
         readAction）は読まない。readAction の無いレジスタは名前から推さずに読む: ほかに読まないものは skip_registers
         （"周辺.レジスタ" の glob。target_peripheral_read の skip と同じ）で渡す。"""
-        with self._lock:
+        with self._host._lock:
             target = self._live()
             if target.get_state() != Target.State.HALTED:
                 if not halt:
                     raise RuntimeError("ターゲットが動いている: 止めてから（target_halt）か halt=True")
                 target.halt()
-                self._watch_stops(False)
+                self._host._watch_stops(False)
             ticks = self._device_time()
             registers = self._capture_registers(target)
             skipped: list[dict] = []
             regions = self._capture_memory(target, ranges, flash, skipped)
             regions += self._capture_system(target, "fpscr" in registers, regions, skipped)
             regions += self._capture_peripherals(target, peripherals, regions, skipped, tuple(skip_registers or ()))
-            info = {"target": self._target_type, "halt": self._halt_info(target, registers["pc"]),
-                    "elf_path": str(self._symbols.path) if self._symbols else None,
-                    "svd": self._svd_info, "rtos": self._capture_rtos(), "fault": self._capture_fault(),
+            info = {"target": self._host._target_type, "halt": self._halt_info(target, registers["pc"]),
+                    "elf_path": str(self._host._symbols.path) if self._host._symbols else None,
+                    "svd": self._host._svd_info, "rtos": self._capture_rtos(), "fault": self._capture_fault(),
                     "recording": None, "note": note, "skipped": skipped}
-            if self._recorder is not None:
-                info["recording"] = {"name": self._recorder.directory.name, "time": ticks}
-            elf = ElfPrint.of(self._symbols.path) if self._symbols else None
+            if self._host._recorder is not None:
+                info["recording"] = {"name": self._host._recorder.directory.name, "time": ticks}
+            elf = ElfPrint.of(self._host._symbols.path) if self._host._symbols else None
             snap = Snapshot(registers, regions, info, elf,
-                            self._symbols.path.read_bytes() if self._symbols and embed_elf else None)
+                            self._host._symbols.path.read_bytes() if self._host._symbols and embed_elf else None)
             out_path = Path(path) if path else self._snapshots_dir() / self._file_name(name)
             if is_network_path(out_path):
                 raise ValueError(f"外の共有には書かない: {out_path}")
             snap.save(out_path)
-            if self._recorder is not None and ticks is not None:
-                self._recorder.add("snapshot", "save", ticks, body={"path": str(out_path), "pc": registers["pc"]})
+            if self._host._recorder is not None and ticks is not None:
+                self._host._recorder.add("snapshot", "save", ticks, body={"path": str(out_path), "pc": registers["pc"]})
             return {"path": str(out_path), **snap.summary(), "skipped": skipped}
 
     @staticmethod
@@ -199,7 +210,7 @@ class SnapshotTools:
 
     def _device_time(self) -> int | None:
         try:
-            return int(self._session.device.time()) if self._session is not None else None
+            return int(self._host._session.device.time()) if self._host._session is not None else None
         except Exception:                                         # タイムベースの無い構成
             return None
 
@@ -218,7 +229,7 @@ class SnapshotTools:
 
     def _halt_info(self, target, pc: int) -> dict:
         reason = _REASONS.get(target.get_halt_reason(), "unknown")
-        return {"reason": reason, "pc": pc, **self._place_of(pc)}
+        return {"reason": reason, "pc": pc, **self._host._place_of(pc)}
 
     @staticmethod
     def _read_region(target, address: int, length: int, kind: str, name: str, skipped: list) -> list[Region]:
@@ -275,7 +286,7 @@ class SnapshotTools:
         if names is not None and not names:
             return []
         try:
-            device = self._device()
+            device = self._host._device()
         except Exception:
             if names:
                 raise                                             # 名前を挙げたのに SVD が無い
@@ -284,7 +295,7 @@ class SnapshotTools:
         regions: list[Region] = []
         for p in peripherals:
             for r in p.registers:
-                reason = self._bulk_skip_reason(r, False, skip)
+                reason = self._host._bulk_skip_reason(r, False, skip)
                 size = max(1, r.size // 8)
                 if reason is None and _overlaps(r.address, size, taken + regions):
                     continue                                      # SVD の SCB・NVIC 等（システムとして取った）
@@ -300,19 +311,19 @@ class SnapshotTools:
         return regions
 
     def _capture_rtos(self) -> dict | None:
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
         try:
-            info = self._rtos_debug_info()
+            info = self._host._rtos_debug_info()
             if detect(info) is None:
                 return None
-            return self._kernel().snapshot()
+            return self._host._kernel().snapshot()
         except Exception as e:                                    # DWARF が無い・リストが壊れている
             return {"error": f"{type(e).__name__}: {e}"}
 
     def _capture_fault(self) -> dict | None:
         try:
-            return self.target_fault()
+            return self._host.target_fault()
         except Exception as e:
             return {"error": f"{type(e).__name__}: {e}"}
 
@@ -322,17 +333,17 @@ class SnapshotTools:
         """スナップショットを開く（未接続のとき）。以後、呼び出し履歴・C の式・RTOS・周辺レジスタ・故障の解析・メモリの
         読みがスナップショットに対して働く（書き込み・実行はできない）。ELF は elf、無ければ埋め込んだもの、それも無ければ
         保存した時の場所（指紋が合うときだけ）。target_connect で閉じる。"""
-        with self._lock:
-            if self._debug is not None:
+        with self._host._lock:
+            if self._host._debug is not None:
                 raise RuntimeError("接続中は開けない（target_disconnect してから。接続中の状態は snapshot_save で保存）")
             snap = Snapshot.load(path)
             elf_path, warnings = self._snapshot_elf_path(snap, elf)
             self._close_snapshot()
             self._snapshot_target = SnapshotTarget(snap)
             self._snapshot_path, self._snapshot_elf = Path(path), elf_path
-            self._symbols = Symbols(elf_path) if elf_path is not None else None
-            self._forget_elf()
-            self._target_type = snap.info.get("target") or self._target_type
+            self._host._symbols = Symbols(elf_path) if elf_path is not None else None
+            self._host._forget_elf()
+            self._host._target_type = snap.info.get("target") or self._host._target_type
             self._restore_svd(snap.info.get("svd"), warnings)
             return {"path": str(path), **snap.summary(), "elf_path": str(elf_path) if elf_path else None,
                     "warnings": warnings}
@@ -362,15 +373,15 @@ class SnapshotTools:
     def _restore_svd(self, svd: dict | None, warnings: list[str]) -> None:
         if svd and svd.get("origin") == "file" and not is_network_path(svd["source"]) and Path(svd["source"]).is_file():
             try:
-                self.svd_load(path=svd["source"])
+                self._host.svd_load(path=svd["source"])
                 return
             except Exception as e:
                 warnings.append(f"SVD（{svd['source']}）が読めない: {e}")
-        self._svd = self._svd_info = None                         # ターゲット名から探し直す
+        self._host._svd = self._host._svd_info = None                         # ターゲット名から探し直す
 
     def snapshot_close(self) -> dict:
         """開いたスナップショットを閉じる（Probe は未接続に戻る）。"""
-        with self._lock:
+        with self._host._lock:
             was = self._snapshot_target is not None
             if was:
                 self._close_snapshot()
@@ -379,7 +390,7 @@ class SnapshotTools:
     def snapshot_info(self, path: str | None = None) -> dict:
         """スナップショットの中身の説明（path 省略で開いているもの）: 作った時刻・停止の理由と場所・区画・ELF の指紋・
         記録の参照と、保存した時の RTOS のタスクの一覧と故障の解析。"""
-        with self._lock:
+        with self._host._lock:
             if path is None:
                 if self._snapshot_target is None:
                     return {"open": False}
@@ -409,7 +420,7 @@ class SnapshotTools:
     def snapshot_export_core(self, path: str | None = None, out: str | None = None) -> dict:
         """スナップショット（path 省略で開いているもの）を ELF のコアファイルに書き出す（GDB の core-file で読める。
         out 省略で同じ場所に拡張子 .core）。"""
-        with self._lock:
+        with self._host._lock:
             if path is None:
                 if self._snapshot_target is None:
                     raise RuntimeError("スナップショットを開いていない（path を指定する）")
@@ -432,11 +443,11 @@ class SnapshotTools:
         区画）が同じかを確かめ（force で省く）、RAM・システムのレジスタ・peripherals に挙げた周辺・コアレジスタを書く。
         resume なら再開する。Flash は書かない（違えば先に target_flash で同じ ELF を書く）。"""
         snap = Snapshot.load(path)
-        with self._lock:
+        with self._host._lock:
             target = self._live()
             if target.get_state() != Target.State.HALTED:
                 target.halt()
-            self._watch_stops(False)
+            self._host._watch_stops(False)
             code_checked = self._check_code(target, snap, force)
             ram = [r for r in snap.regions if r.kind == "ram"]
             for r in ram:
@@ -451,13 +462,13 @@ class SnapshotTools:
                     target.write_core_register_raw(name, snap.registers[name])
                     restored.append(name)
             target.flush()
-            self._dbg = None
+            self._host._dbg = None
             out = {"path": str(path), "ram_bytes": sum(len(r.data) for r in ram), "system": system,
                    "peripherals": written, "registers": len(restored), "code_checked": code_checked}
             if resume:
-                out.update(self.target_resume())
+                out.update(self._host.target_resume())
             else:
-                out.update(self.target_status())
+                out.update(self._host.target_status())
             return out
 
     def _check_code(self, target, snap: Snapshot, force: bool) -> bool:
@@ -485,7 +496,7 @@ class SnapshotTools:
     def _restore_peripherals(self, target, snap: Snapshot, names: list[str]) -> list[str]:
         if not names:
             return []
-        device = self._device()
+        device = self._host._device()
         written = []
         for name in names:
             p = device.peripheral(name)

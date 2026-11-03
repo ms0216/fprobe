@@ -13,7 +13,8 @@ use ieee.numeric_std.all;
 entity event_ring is
   generic (
     DEPTH_BITS : positive := 10;             -- 件数 = 2**DEPTH_BITS（1 件 128 ビット）
-    ADDR_BITS  : positive := 10              -- read_first・read_count の幅（DEPTH_BITS 以上。余りは件数で折り返す）
+    ADDR_BITS  : positive := 10;             -- read_first・read_count の幅（DEPTH_BITS 以上。余りは件数で折り返す）
+    COUNT_START_BELOW_4G : natural := 0      -- 試験用: 0 以外なら書いた数を 2**32 のこの数だけ手前から数える（既定 0 = 0 から）
   );
   port (
     clk         : in  std_logic;
@@ -21,7 +22,7 @@ entity event_ring is
     ev_enable   : in  std_logic;
     ev_valid    : in  std_logic;
     ev_data     : in  std_logic_vector(127 downto 0);
-    ev_written  : out unsigned(31 downto 0);
+    ev_written  : out unsigned(63 downto 0);
     ev_lost     : out unsigned(31 downto 0);
     ev_beats    : out unsigned(31 downto 0);
     read        : in  std_logic;
@@ -43,7 +44,14 @@ architecture rtl of event_ring is
 
   signal we, enable_prev : std_logic;
   signal wptr, raddr, waddr : unsigned(DEPTH_BITS - 1 downto 0);
-  signal written : unsigned(31 downto 0);
+  function count_start return unsigned is
+  begin
+    if COUNT_START_BELOW_4G = 0 then
+      return to_unsigned(0, 64);
+    end if;
+    return shift_left(to_unsigned(1, 64), 32) - to_unsigned(COUNT_START_BELOW_4G, 64);
+  end function;
+  signal written : unsigned(63 downto 0);
   signal rdata, beat : std_logic_vector(127 downto 0);
   signal remaining : unsigned(ADDR_BITS downto 0);
   signal byte_index : unsigned(3 downto 0);
@@ -68,7 +76,7 @@ begin
       if rst = '1' then
         enable_prev <= '0';
         wptr <= (others => '0');
-        written <= (others => '0');
+        written <= count_start;
         state <= S_IDLE;
         raddr <= (others => '0');
         beat <= (others => '0');
@@ -80,10 +88,10 @@ begin
         if ev_enable = '1' and enable_prev = '0' then
           if ev_valid = '1' then
             wptr <= to_unsigned(1, DEPTH_BITS);
-            written <= to_unsigned(1, 32);
+            written <= count_start + 1;
           else
             wptr <= (others => '0');
-            written <= (others => '0');
+            written <= count_start;
           end if;
         elsif we = '1' then
           wptr <= wptr + 1;

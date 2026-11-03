@@ -1,9 +1,9 @@
 """Probe の道具: タスクの時間軸の解析（U09）。窓ごとの CPU 負荷・ジョブの指標・横取りを除いた区間・スタックとヒープの
 推移・スレッドと割り込みの合成・優先度の逆転。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。RtosTools の時間軸（_current_timeline: 取っている最中ならいままでの分、
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。RtosService の時間軸（_current_timeline: 取っている最中ならいままでの分、
 止めた後なら最後の結果）と、記録（_reading。2 点の組を取る）を使う。計算はすべて fprobe.rtos.analysis。
-機器には触らない（一覧に無い TCB の名前を読むのは RtosTools の _learn_names が _lock の中で）。
+機器には触らない（一覧に無い TCB の名前を読むのは RtosService の _learn_names が _lock の中で）。
 
 カーネルの出来事（U10。方法 itm で fprobe_trace.h の記録があるとき）: 出来事の一覧・Communication Flow・ブロック時間・
 キュー使用率・フックの負荷。出来事があれば、ジョブは ready / block で区切り（応答時間）、逆転は出来事から正確に、
@@ -17,8 +17,9 @@ from .rtos.analysis import (Intervals, execution_profile, find_jobs, inversion_e
                             memory_series, run_time_in)
 from .rtos.flow import (blocking, communication_flow, inversions_from_ops, isr_activations, isr_pairing, job_events,
                         overhead, queue_usage)
+from .probe_service import HostView
 
-__all__ = ["RtosAnalysisTools", "task_handle"]
+__all__ = ["RtosAnalysisService", "task_handle"]
 
 WINDOWS_LIMIT = 1000                     # rtos_timeline_load が返す窓の数の既定の上限
 _SAMPLED_ISR = "方法 sampled では割り込みは見えない（タスクの時間に含まれる）。方法 itm の exceptions=true で分かる"
@@ -46,14 +47,25 @@ def task_handle(names: dict[int, str], task: str) -> int:
     return handles[0]
 
 
-class RtosAnalysisTools:
-    """時間軸の解析（Probe の mixin）。"""
+class RtosAnalysisService:
+    """時間軸の解析（Probe のサービス）。"""
+
+    API = ("rtos_timeline_blocking", "rtos_timeline_events", "rtos_timeline_flow", "rtos_timeline_interval",
+           "rtos_timeline_inversions", "rtos_timeline_jobs", "rtos_timeline_load", "rtos_timeline_memory",
+           "rtos_timeline_overhead", "rtos_timeline_profile", "rtos_timeline_queues")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_kernel_base",)
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_current_timeline", "_exception_names", "_reading")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     def _analysis_base(self, result) -> dict:
         tl, run = result.timeline, result.run
         hz = run.timebase_hz
         out = {"running": run.window.t1 is None, "method": tl.method, "timebase_hz": hz, "t0": tl.t0, "t1": tl.t1,
-               "resolution_us": tl.resolution * 1e6 / hz, "notes": []}
+               "resolution_us": tl.resolution * 1e6 / hz if tl.resolution is not None else None, "notes": []}
         if tl.lower_bound:
             out["notes"].append("方法 sampled: 周期より短い実行は見えないことがある（回数は下限、区間の端は ± 周期の半分）")
         return out
@@ -89,7 +101,7 @@ class RtosAnalysisTools:
         情報の無い時間（抜け）は除く。窓が limit を超えたら先頭の limit 個（windows_total に全体の数）。"""
         if window_us <= 0:
             raise ValueError("window_us は正")
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         out = self._analysis_base(result)
         hz = result.run.timebase_hz
         window = max(1, round(window_us * hz / 1e6))
@@ -108,7 +120,7 @@ class RtosAnalysisTools:
         （横取り・割り込みを除く）・経過時間・周期・応答時間の分布と最悪の回。出来事の無いタスクは入らない。
         runs: タスクごとの区間（続けて動いた間）の回数・時間・周期・次に動いたタスク（run_summary。いつも出す）。
         task を渡すと、そのタスクのジョブ（jobs）と区間（task_runs）の一覧も（自分の時間の長い順に limit 件）。"""
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         run = result.run
         out = self._analysis_base(result)
         events = job_events(result.kernel, result.events or ()) if result.has_kernel else None
@@ -138,9 +150,9 @@ class RtosAnalysisTools:
         タスク（省けば開始の時刻に動いていたタスク）が実際に CPU を使った時間（ほかのタスク・割り込みを除く）と
         経過時間の分布。時間軸と記録は同じタイムベース。task は名前か TCB の番地 "0x..."（同じ名前が複数なら誤り:
         task_handle）。"""
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         out = self._analysis_base(result)
-        pairs = self._reading().intervals(start, end)["intervals"]
+        pairs = self._host._reading().intervals(start, end)["intervals"]
         handle = None if task is None else task_handle(result.run.names, task)
         measured = run_time_in(result.timeline, pairs, handle, self._isr(result), result.run.timebase_hz)
         self._isr_note(result, out)
@@ -153,7 +165,7 @@ class RtosAnalysisTools:
     def rtos_timeline_memory(self, points: int = 200) -> dict:
         """タスクごとのスタックの使用量（保存された SP から: 切り替えのたびの深さ）とヒープの残量の推移
         （rtos_timeline_start の memory=true）。points 個の窓ごとに最悪の値（スタックは最大、ヒープは最小）。"""
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         run = result.run
         if not run.slots:
             raise RuntimeError("スタック・ヒープの語を読んでいない（rtos_timeline_start の memory=true）")
@@ -166,9 +178,9 @@ class RtosAnalysisTools:
     def rtos_timeline_profile(self) -> dict:
         """情報のある時間に対する、スレッド（タスクごと。割り込みの時間を除く）・割り込み（例外ごとの回数と自分の時間）・
         アイドル・どれでもない時間の割合（実行のプロファイル）。割り込みは方法 itm の exceptions=true のとき。"""
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         out = self._analysis_base(result)
-        names = self._exception_names(result.run)
+        names = self._host._exception_names(result.run)
         out.update(execution_profile(result.timeline, self._activations(result), result.run.idle, names,
                                      result.run.timebase_hz))
         if result.exception_issues is not None:
@@ -182,7 +194,7 @@ class RtosAnalysisTools:
         """優先度の逆転の区間（rtos_timeline_start の mutexes で読んだ持ち主・待ちの先頭から）: 持ち主の元の優先度より
         高いタスクが待っていた区間、その間に動いた中間の優先度のタスクの時間（正なら際限の無い逆転）、持ち主が動いた時間。
         ミューテックスを読んでいなければ available=false（推測しない）。"""
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         run = result.run
         out = self._analysis_base(result)
         if run.order is None:
@@ -207,7 +219,7 @@ class RtosAnalysisTools:
     # --- カーネルの出来事（U10） ----------------------------------------------------------------------
 
     def _kernel_result(self):
-        result = self._current_timeline()
+        result = self._host._current_timeline()
         if not result.has_kernel:
             raise RuntimeError(_NO_KERNEL)
         return result
@@ -228,7 +240,7 @@ class RtosAnalysisTools:
         準備完了（ready）・delay・suspend・優先度（prio_*）・通知・イベントグループ・ストリームバッファ・割り込みの出入り。
         kinds・task（行為者か対象のタスクの名前）・object（オブジェクトの名前）で絞り、offset から limit 件。"""
         result = self._kernel_result()
-        run, objects, isr_names = result.run, result.objects(), self._exception_names(result.run)
+        run, objects, isr_names = result.run, result.objects(), self._host._exception_names(result.run)
         rows = [op.to_dict(run.names, objects, isr_names) for op in result.kernel.ops if op.kind != "lost"]
         selected = [r for r in rows if (kinds is None or r["kind"] in kinds)
                     and (task is None or task in (r.get("actor"), r.get("task")))
@@ -244,7 +256,7 @@ class RtosAnalysisTools:
         result = self._kernel_result()
         out = self._kernel_base(result)
         out.update(communication_flow(result.kernel, result.run.names, result.objects(),
-                                      self._exception_names(result.run)))
+                                      self._host._exception_names(result.run)))
         return out
 
     def rtos_timeline_blocking(self, task: str | None = None, limit: int = 200) -> dict:

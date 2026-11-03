@@ -11,6 +11,7 @@ import { FakeConn } from "./fake-conn";
 // 探す名前・正規表現は使う側が debug.halt_risk.set で渡したもの。画面は種類（無線・RTOS 等）を決めず、合った事実を描く
 const RISK: HaltRisk = {
   elf: "/x/zmk.elf", names: ["_kernel"], patterns: ["^ll_"], matched: true, monitor_in_elf: false,
+  debug_mode: "halt", confirm_before_halt: true,
   matches: [{ query: "_kernel", by: "name", count: 1, symbols: [{ name: "_kernel", kind: "object", address: 0x20000000 }] },
             { query: "^ll_", by: "pattern", count: 12,
               symbols: [{ name: "ll_adv_enable", kind: "function", address: 0x1000 },
@@ -29,10 +30,12 @@ function setup(risk: HaltRisk | null, answer = true) {
 
 describe("止める前の警告", () => {
   it("渡した名前が ELF に合い、モニタ方式でなければ警告する", () => {
-    expect(needsWarning(RISK, { state: "RUNNING" })).toBe(true);
-    expect(needsWarning(RISK, { state: "HALTED", debug_mode: "monitor" })).toBe(false);
-    expect(needsWarning({ ...RISK, matched: false, matches: [] }, { state: "RUNNING" })).toBe(false);
-    expect(needsWarning(null, { state: "RUNNING" })).toBe(false);
+    // 確かめるかはデーモンが決める（confirm_before_halt）。画面は状態の debug_mode・matched を組み合わせない
+    expect(needsWarning(RISK)).toBe(true);
+    expect(needsWarning({ ...RISK, debug_mode: "monitor", confirm_before_halt: false })).toBe(false);
+    expect(needsWarning({ ...RISK, matched: false, matches: [], confirm_before_halt: false })).toBe(false);
+    expect(needsWarning({ ...RISK, confirm_before_halt: false })).toBe(false);
+    expect(needsWarning(null)).toBe(false);
   });
 
   it("理由は渡した条件と合ったシンボルと数（種類の名前は付けない）で、止めずに調べる方法へ案内する", () => {
@@ -66,7 +69,11 @@ describe("止める前の警告", () => {
     await tick();
     conn.emit("target.state", { state: "RUNNING" });
     expect(await safety.confirmHalt("halt", t)).toBe(false);
+    // 方式が変わったら（状態の debug_mode）debug.halt_risk を読み直し、デーモンの答えに従う
+    conn.responders["debug.halt_risk"] = { ...RISK, debug_mode: "monitor", confirm_before_halt: false };
     conn.emit("target.state", { state: "RUNNING", debug_mode: "monitor" });
+    await tick();
+    expect(safety.snapshot.risk?.debug_mode).toBe("monitor");
     expect(await safety.confirmHalt("halt", t)).toBe(true);
     expect(asked.length).toBe(1);
   });
@@ -97,14 +104,15 @@ describe("止める前の警告", () => {
 });
 
 describe("走らせたままの致命的エラー", () => {
-  it("ティックが変わっていないだけ（tick_stopped）は致命的エラーと言わない。ロックアップと、使う側が渡した関数の中（pc_in）は言う", () => {
-    expect(isFatal({ kind: "tick_stopped", since: 1, evidence: [] } as any)).toBe(false);
-    for (const kind of ["lockup", "pc_in"]) expect(isFatal({ kind, since: 1, evidence: [] } as any)).toBe(true);
+  it("致命的エラーの色はデーモンの alert で決める（種類の名前で決めない）", () => {
+    expect(isFatal({ kind: "tick_stopped", alert: false, since: 1, evidence: [] })).toBe(false);
+    for (const kind of ["lockup", "pc_in"] as const) expect(isFatal({ kind, alert: true, since: 1, evidence: [] })).toBe(true);
+    expect(isFatal({ kind: "pc_in", alert: false, since: 1, evidence: [] })).toBe(false);
   });
 
   it("target.state の fatal を受け取り、見出しと手がかりを言葉にする", () => {
     const { conn, safety } = setup(null);
-    const fatal = { kind: "pc_in", function: "arch_system_halt", since: 1700000000,
+    const fatal = { kind: "pc_in", alert: true, function: "arch_system_halt", since: 1700000000,
                     evidence: [{ clue: "pc_in", function: "arch_system_halt", valid: 4, pc_samples: 4 },
                                { clue: "tick_stopped", tick: 1234 }] };
     conn.emit("target.state", { state: "RUNNING", fatal });
@@ -119,8 +127,8 @@ describe("走らせたままの致命的エラー", () => {
 
 describe("プローブの USB のつなぎ直し（B28: target.state の link_lost）", () => {
   it("機能が変わっていれば、変わったものを前 → 後で並べる", () => {
-    expect(linkText({ at: 1, changed: {} }, t)).toBe(t("safety.linkLost"));
-    const text = linkText({ at: 1, changed: { jtag: [false, true], sampler: [true, false] } }, t);
+    expect(linkText({ at: 1, changed: {}, version: null }, t)).toBe(t("safety.linkLost"));
+    const text = linkText({ at: 1, changed: { jtag: [false, true], sampler: [true, false] }, version: null }, t);
     expect(text).toContain(t("safety.linkLost"));
     expect(text).toContain("jtag: false → true, sampler: true → false");
   });
@@ -128,7 +136,7 @@ describe("プローブの USB のつなぎ直し（B28: target.state の link_lo
   it("版が分かれば、版が変わったかを確実に言う（U49）", () => {
     const version = (changed: boolean | null, latest_build: boolean | null) =>
       ({ before: "aaaa", after: "bbbb", changed, latest_build });
-    const changedFeatures = { jtag: [false, true] as [unknown, unknown] };
+    const changedFeatures = { jtag: [false, true] as [boolean, boolean] };
     expect(linkText({ at: 1, changed: changedFeatures, version: version(false, null) }, t)).toBe(t("safety.linkLost"));
     const flashed = linkText({ at: 1, changed: {}, version: version(true, false) }, t);
     expect(flashed).toContain(t("safety.linkVersion", { before: "aaaa", after: "bbbb" }));
@@ -152,9 +160,9 @@ describe("止める前の警告・走らせたままの見張りの条件の欄�
   });
 
   it("今の見張りの条件（target.liveness.get）を欄に描く。PC の数が無ければ空（既定の数を画面に持たない）", () => {
-    expect(livenessForm({ functions: ["arch_system_halt"], patterns: ["Fault"], pc_samples: 4 }))
+    expect(livenessForm({ functions: ["arch_system_halt"], patterns: ["Fault"], pc_samples: 4, tick_variable: null }))
       .toEqual({ functions: "arch_system_halt", patterns: "Fault", pcSamples: "4" });
-    expect(livenessForm({ functions: [], patterns: [], pc_samples: null }))
+    expect(livenessForm({ functions: [], patterns: [], pc_samples: null, tick_variable: null }))
       .toEqual({ functions: "", patterns: "", pcSamples: "" });
     expect(livenessForm(null)).toBeNull();
   });

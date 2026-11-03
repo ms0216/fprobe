@@ -975,7 +975,7 @@ class RealRig:
 
     def connect(self):
         from fprobe.mcp_server import Probe
-        self.probe = Probe(eth=self.host)
+        self.probe = Probe(eth=self.host, link_up_wait_s=15.0)   # リンクの確立を待つ秒数（この道具の値）
         self.session = self.probe.session
         if not self.session.device.capabilities().fpga_obs:
             raise RuntimeError("この構成には FPGA の観測が無い")

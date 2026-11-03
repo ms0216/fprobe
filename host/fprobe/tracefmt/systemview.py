@@ -6,9 +6,13 @@ ESP-IDF の espytrace/sysview.py、UM08027。
 ペイロード、最後に前のパケットからの時刻の差（LEB128）。引数の整数は LEB128、文字列は長さ 1 バイト（255 以上は
 FF・上位・下位）+ バイト列。タスク・タイマ・資源の ID は (値 << ID_SHIFT) + RAMBase で番地に戻す（INIT が送る）。
 
-時刻: START で LastTxTimeStamp が 0 になり、TRACE_START・INIT の差は意味を持たない（3.58 では古い差が付く）。
-絶対の時刻は SYSTIME_CYCLES の値で決め、以後は差を足す（その前の出来事は 0 から）。周期的な SYSTIME で
-32 ビットの桁あふれを直す。
+時刻: ts は最初に読んだパケットからの差の和（ターゲットのサイクル。基準を途中で変えない）。START で
+LastTxTimeStamp が 0 になり、TRACE_START・INIT の差は意味を持たない（3.58 では古い差が付く）ので、その前に出来事が
+あれば時刻の区切りを変える（2 回目の START: 止めていた時間は流れに無い）。解読の誤りで次の sync まで読み飛ばした所も
+区切り（読み飛ばしたパケットの差を失う）。SYSTIME_CYCLES はその時の 32 ビットの絶対の値: 区切りの最初の SYSTIME で
+差の和との対応（offset）を決め、以後の SYSTIME が差の和と合わなければ（差の 32 ビットのあふれ・失ったパケット）、
+食い違いの量と前の SYSTIME の ts を事実として残して区切る（どこで食い違ったかは前の SYSTIME からその SYSTIME までの
+間としか分からない）。
 
 同期: 流れの途中から読むとき（ポストモーテム・途中から受けた RTT）は、0x00 が 10 個続く所（sync）を探し、そこから
 読む。sync は NOP（ID 0・差 0）の並びとしても読めるので、同期した後は特別扱いしない。
@@ -158,7 +162,7 @@ class SystemViewDecoder:
         self.synced = synced
         self._buf = bytearray()
         self._ts = 0
-        self._ts_known = False
+        self._systime: tuple[int, int, int] | None = None   # (区切り, offset = SYSTIME − 差の和 の下位 32 ビット, その ts)
         self._ram_base = 0
         self._shift = 0
         self._current: int | None = None
@@ -197,6 +201,7 @@ class SystemViewDecoder:
             except SystemViewError as e:                  # 形が崩れた: 次の sync を探す
                 self.trace.errors += 1
                 self.trace.notes.append(f"パケットを解読できない（{e}）: 次の sync まで読み飛ばした")
+                self.trace.new_segment("resync")                 # 読み飛ばしたパケットの差を失う
                 self.synced = False
                 pos += 1
                 del self._buf[:pos]
@@ -226,23 +231,35 @@ class SystemViewDecoder:
         return self._long(event_id, body, delta)
 
     def _advance(self, delta: int, event_id: int) -> int:
-        if event_id in (10, 24):                         # TRACE_START・INIT: 差は意味を持たない
+        if event_id in (10, 24):                         # TRACE_START・INIT: 差は意味を持たない（前とつながらない）
+            self.trace.new_segment("trace_start" if event_id == 10 else "init")
             return self._ts
         self._ts += delta
         return self._ts
 
     def _event(self, ts: int, kind: str, name: str, task: int | None = None, args: dict | None = None,
                text: str | None = None) -> TraceEvent:
-        return TraceEvent(ts, kind, name, task, args or {}, text)
+        return TraceEvent(ts, kind, name, task, args or {}, text, self.trace.segment)
+
+    def _check_systime(self, cycles: int, ts: int) -> None:
+        """SYSTIME_CYCLES（32 ビットの絶対の値）と差の和を照らす。区切りの最初の 1 回で対応を決め、合わなければ区切る。"""
+        mask = 0xFFFF_FFFF
+        if self._systime is not None and self._systime[0] == self.trace.segment:
+            mismatch = (cycles - ts - self._systime[1]) & mask
+            if not mismatch:
+                self._systime = (self.trace.segment, self._systime[1], ts)
+                return
+            self.trace.notes.append(f"SYSTIME_CYCLES が差の和と {mismatch} サイクル（32 ビットで）合わない: "
+                                    f"ts {self._systime[2]} から {ts} の間で時刻のつながりが切れた")
+            self.trace.new_segment("systime_mismatch", mismatch=mismatch, since_ts=self._systime[2])
+        self._systime = (self.trace.segment, (cycles - ts) & mask, ts)
 
     def _fixed(self, event_id: int, args: list, delta: int) -> TraceEvent | None:
         name = _NAMES[event_id]
-        if event_id == 12:                               # SYSTIME_CYCLES: 絶対の時刻
-            if not self._ts_known:                       # 最初の 1 回で絶対の時刻に合わせる（以後は差を足す）
-                self._ts, self._ts_known = args[0], True
-            else:
-                self._ts += delta
-            return self._event(self._ts, "info", name, args={"cycles": args[0]})
+        if event_id == 12:                               # SYSTIME_CYCLES: 絶対の時刻（差の和と照らす）
+            ts = self._advance(delta, event_id)
+            self._check_systime(args[0], ts)
+            return self._event(ts, "info", name, args={"cycles": args[0]})
         ts = self._advance(delta, event_id)
         if event_id == 0:
             return None
@@ -456,6 +473,4 @@ def decode_systemview(data: bytes, description: str | None = None, strings=None)
         raise SyncNotFound("sync（0x00 × 10）が無い: SystemView の記録でないか、リングが短すぎる")
     if decoder.skipped:
         decoder.trace.notes.append(f"最初の sync までの {decoder.skipped} バイトを読み飛ばした（パケットの途中から始まる）")
-    if not decoder._ts_known:
-        decoder.trace.notes.append("SYSTIME_CYCLES が無い: 時刻は最初の出来事からの相対")
     return decoder.trace

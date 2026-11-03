@@ -1,6 +1,6 @@
 """実機: 道 B（リングを JTAG で読む）で、ネットワークが切れている間も出来事を読めることを Pi 2B で確かめる（R26 段階 2）。
 
-FPROBE_PI2_JTAG=1・FPROBE_PI2_HOST（例 <Pi のアドレス>）・FPROBE_PI2_USER・FPROBE_PI2_KEY。Pi の準備は docs/linux.md
+FPROBE_PI2_JTAG=1・FPROBE_PI2_HOST（例 <Pi の LAN のアドレス>）・FPROBE_PI2_USER・FPROBE_PI2_KEY。Pi の準備は docs/linux.md
 （reserved-memory 0x20000000 + 1 MB、isolcpus=3 irqaffinity=0-2、JTAG の配線）。止めるのはコア 3（何の仕事もしていないコア）。
 Pi の LAN（eth0）を 15 秒だけ落とす（Pi の上の nohup の台本が自分で戻す）。"""
 import os

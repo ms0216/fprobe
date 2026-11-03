@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,13 @@ class SshTarget:
     user: str
     port: int = 22
     key: str | None = None
+
+    def __post_init__(self) -> None:
+        # 目的地 user@host は ssh・scp の 1 つの引数。- で始まると ssh のオプション（-oProxyCommand=… は PC で命令を走らせる）に
+        # なり、空白・制御文字は引数・scp の user@host:path を割る。どちらも断る（名前の形の推定はしない: 断るのはこの 2 つだけ）
+        for what, value in (("user", self.user), ("host", self.host)):
+            if not value or value.startswith("-") or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+                raise ValueError(f"ssh の {what} {value!r} は空でなく、- で始まらず、空白・制御文字を含まない")
 
     def _options(self, port_flag: str) -> list[str]:
         out = ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={CONNECT_TIMEOUT_S}", port_flag, str(self.port)]
@@ -65,3 +73,39 @@ class SshTarget:
     def get(self, remote: str, local: Path, timeout: float = 120) -> None:
         local.parent.mkdir(parents=True, exist_ok=True)
         self._scp(f"{self.user}@{self.host}:{remote}", str(local), timeout)
+
+
+class TargetHalted(RuntimeError):
+    """対象の全コアが止まっている（linux.halt）: ssh・エージェントは答えないので叩かない。"""
+
+
+class GuardedSsh:
+    """ssh・scp・エージェントの口を開く前に、対象が止まっていないかを確かめる（止まっていれば叩かずに TargetHalted。
+    止まった対象の ssh は ConnectTimeout まで作業スレッドを塞いでから失敗する: 2026-11-03 実機）。ほかは SshTarget のまま。"""
+
+    def __init__(self, ssh: SshTarget, halted: Callable[[], str | None]):
+        self._ssh, self._halted = ssh, halted
+
+    def __getattr__(self, name: str):
+        return getattr(self._ssh, name)
+
+    def check(self) -> None:
+        reason = self._halted()
+        if reason is not None:
+            raise TargetHalted(reason)
+
+    def run(self, remote_cmd: str, input: bytes | None = None, timeout: float = 30) -> subprocess.CompletedProcess:
+        self.check()
+        return self._ssh.run(remote_cmd, input=input, timeout=timeout)
+
+    def open(self, remote_cmd: str) -> subprocess.Popen:
+        self.check()
+        return self._ssh.open(remote_cmd)
+
+    def put(self, local: Path, remote: str, timeout: float = 60) -> None:
+        self.check()
+        self._ssh.put(local, remote, timeout)
+
+    def get(self, remote: str, local: Path, timeout: float = 120) -> None:
+        self.check()
+        self._ssh.get(remote, local, timeout)

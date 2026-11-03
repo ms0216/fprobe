@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from probe_fakes import FakeDevice
+from caps_fakes import with_caps
 
 from fprobe import generated as g
 from fprobe.mcp_server import Probe
@@ -18,8 +19,8 @@ def probe(tmp_path, monkeypatch):
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
     p = Probe("unused")
     dev = FakeDevice()
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "sampler": True, "xtrig": True, "sampler_match": True})
+    dev.caps = with_caps(dev.capabilities(), sampler=True, xtrig=True, sampler_match=True)
+    dev.capabilities()                                   # 開いたときに読んだ（last_capabilities）のはこの構成
     p._session = SimpleNamespace(device=dev)
     return p
 
@@ -66,7 +67,7 @@ def test_set_needs_an_action_and_the_capability(probe):
         probe.sampler_trigger_set(address=DHCSR, mask=S_HALT, value=S_HALT, halt=False, la=False)
     dev = probe.session.device
     caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "sampler_match": False})
+    dev.caps = with_caps(caps, sampler_match=False)
     with pytest.raises(RuntimeError, match="sampler_match"):
         probe.sampler_trigger_set(address=DHCSR, mask=S_HALT, value=S_HALT, halt=True, la=False)
 
@@ -80,7 +81,7 @@ def test_halt_needs_the_injector(probe):
     # 故障注入（割り込み書き込み）の無い構成では、halt の経路を立てても MCU は止まらない: 断る（la だけなら受け付ける）
     dev = probe.session.device
     caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "inject": False})
+    dev.caps = with_caps(caps, inject=False)
     with pytest.raises(RuntimeError, match="inject"):
         probe.sampler_trigger_set(address=DHCSR, mask=S_HALT, value=S_HALT, halt=True, la=False)
     assert dev.csr.get(g.SAMPLER_MATCH_CONTROL, 0) & 1 == 0
@@ -98,7 +99,7 @@ def test_xtrig_status_reports_the_route_from_the_register(probe):
 def test_routing_a_source_the_design_lacks_is_refused(probe):
     dev = probe.session.device
     caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "sampler_match": False, "obs_match": False})
+    dev.caps = with_caps(caps, sampler_match=False, obs_match=False)
     with pytest.raises(RuntimeError, match="sampler_match"):
         probe.xtrig_route(to_la=["sampler_match"])
     with pytest.raises(RuntimeError, match="obs_match"):

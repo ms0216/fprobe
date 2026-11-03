@@ -1,0 +1,27 @@
+{
+  "fpga.signals": {
+    "groups": {
+      "0": [
+        {
+          "name": "mark",
+          "lsb": 0,
+          "width": 1
+        },
+        {
+          "name": "count",
+          "lsb": 8,
+          "width": 8
+        }
+      ],
+      "1": [
+        {
+          "name": "state",
+          "lsb": 0,
+          "width": 3
+        }
+      ]
+    }
+  },
+  "timebase_hz": 100000000.0,
+  "format": 1
+}

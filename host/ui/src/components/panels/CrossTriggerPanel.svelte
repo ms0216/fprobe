@@ -11,7 +11,7 @@
   // - 構成に無い源・行き先は隠さず、灰色にしてケイパビリティの名前と値を出す
   // ロジアナの窓（多段・番地一致・経路）・システム解析（FPGA の条件）・低レベル（出力の端子）と同じ API を呼ぶ。計算は lib/crosstrigger.ts
   import type { Snippet } from "svelte";
-  import { errorText } from "../../lib/api";
+  import { errorText, type Methods, type Result } from "../../lib/api";
   import type { FieldError, FieldValues } from "../../lib/apiform";
   import { shared } from "../../lib/context";
   import {
@@ -51,10 +51,10 @@
     return () => clearInterval(timer);
   });
 
-  async function one<T>(method: string, on: boolean, errs: Record<string, string>): Promise<T | null> {
+  async function one<M extends keyof Methods>(method: M, on: boolean, errs: Record<string, string>): Promise<Result<M> | null> {
     if (!on) return null;
     try {
-      return await conn.call(method as any, {}, { quiet: true });
+      return await conn.call(method, undefined, { quiet: true });
     } catch (e) {
       errs[method] = errorText(e);
       return null;
@@ -67,12 +67,12 @@
     try {
       const errs: Record<string, string> = {};
       [xtrig, la, sequence, obs, sampler, outputs] = await Promise.all([
-        one<XtrigStatus>("xtrig.status", srcOk.host.ok, errs),
-        one<LaTriggerStatus>("la.trigger_status", srcOk.la_trigger.ok, errs),
-        one<SequenceStatus>("xtrig.sequence_status", srcOk.sequence.ok, errs),
-        one<ObsTriggerStatus>("fpga_obs.trigger_status", srcOk.obs_match.ok, errs),
-        one<SamplerTriggerStatus>("sampler.trigger_status", srcOk.sampler_match.ok, errs),
-        one<{ outputs: OutputPin[]; actions: number; free: number }>("xtrig.output_status", actOk.outputs.ok, errs),
+        one("xtrig.status", srcOk.host.ok, errs),
+        one("la.trigger_status", srcOk.la_trigger.ok, errs),
+        one("xtrig.sequence_status", srcOk.sequence.ok, errs),
+        one("fpga_obs.trigger_status", srcOk.obs_match.ok, errs),
+        one("sampler.trigger_status", srcOk.sampler_match.ok, errs),
+        one("xtrig.output_status", actOk.outputs.ok, errs),
       ]);
       readErrors = errs;
     } finally {
@@ -396,14 +396,14 @@
                 {#if obs.condition !== null}
                   <span class="mono">{obs.condition}</span>
                   <span>halt={String(obs.halt)} la={String(obs.la)}</span>
-                  <span>{$i18n("xt.countIs", { n: obs.count ?? "—" })}</span>
+                  <span>{$i18n("xt.countIs", { n: obs.count })}</span>
                   <span class="muted small">{$i18n("xt.obsTimeUnreadable")}</span>
-                {:else if obs.orphan}
-                  <span class="error">{$i18n("xt.obsOrphan", { mask: obs.mask ?? 0, value: obs.value ?? 0, n: obs.count ?? 0 })}</span>
+                {:else if "orphan" in obs}
+                  <span class="error">{$i18n("xt.obsOrphan", { mask: obs.mask, value: obs.value, n: obs.count })}</span>
                 {:else}<span class="muted">{$i18n("xt.notSet")}</span>{/if}
               </div>
             {:else if readErrors["fpga_obs.trigger_status"]}<div class="error">{readErrors["fpga_obs.trigger_status"]}</div>{/if}
-            {#snippet obsClear()}<button type="button" disabled={!obs || (obs.condition === null && !obs.orphan)}
+            {#snippet obsClear()}<button type="button" disabled={!obs || (obs.condition === null && !("orphan" in obs))}
                                         onclick={() => void press("fpga_obs.trigger_clear")}>{$i18n("xt.clear")}</button>{/snippet}
             {@render form("fpga_obs.trigger_set", "xt.set", obsClear)}
           {/if}

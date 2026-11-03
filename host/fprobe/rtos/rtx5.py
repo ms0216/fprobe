@@ -104,6 +104,9 @@ class RTX5(KernelAwareness):
     def tick_count(self) -> int | None:
         return self._os("kernel.tick")
 
+    def tick_mask(self) -> int | None:
+        return (1 << (8 * self.os.member_size("kernel.tick"))) - 1
+
     def scheduler_state(self) -> str:
         return SCHEDULER.get(self._os("kernel.state"), "unknown")
 
@@ -196,7 +199,7 @@ class RTX5(KernelAwareness):
         wait = WaitInfo(WAITS.get(wait_type, "unknown"), kind=WAIT_KINDS.get(wait_type))
         if remaining is not None:
             wait.remaining_ticks = remaining
-            wait.wake_tick = None if tick is None else (tick + remaining) & 0xFFFF_FFFF
+            wait.wake_tick = self.wake_tick(tick, remaining)
         if wait_type == 0x20:                                 # join: 待つ相手は thread_join が自分のスレッド
             for other in self._handles:
                 if other != handle and self._field(other, "thread_join") == handle:

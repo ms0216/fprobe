@@ -1,6 +1,7 @@
 // RTOS のビュー（Threads・CPU Load）の、API の応答を描く形への写し。Svelte・DOM に依らない。
 // 材料は 2 つ: 取っている（取った）タスクの時間軸（rtos.timeline.get / load）と、記録だけがあるときの
 // recording.cpu_load（記録の stream "rtos" からデーモンが同じ定義・同じ形で数える）。画面では数えない。
+import type { Result } from "./api";
 import type { DaemonConnection } from "./api";
 import type { Series } from "./chart";
 import type { Key, Translate } from "./i18n";
@@ -15,9 +16,9 @@ export interface TaskStat {
   cpu: number;               // 情報のある時間に対する割合
   runs: number;
   total: number;
-  max: number;
-  min: number;
-  mean: number;
+  max: number | null;        // 最長・最短・平均は両端が切り替えの区間だけ（無ければ null: デーモンの値のまま）
+  min: number | null;
+  mean: number | null;
 }
 
 export interface TaskTable {
@@ -30,15 +31,7 @@ export interface TaskTable {
 }
 
 /** 窓ごとの負荷（rtos.timeline.load の windows と同じ形） */
-export interface LoadWindow {
-  t0: number;
-  t1: number;
-  covered: number;
-  load: number | null;       // 1 − アイドルの割合（割り込みは負荷に入る）。情報が無ければ null
-  isr: number | null;
-  other?: number | null;     // 負荷のうちタスクにも割り込みにも入らない分（デーモンが整数で数えたもの）
-  tasks: Record<string, number>;
-}
+export type LoadWindow = NonNullable<Result<"rtos.timeline.load">["windows"]>[number];
 
 export interface LoadSeries {
   window: number;            // 窓の幅（タイムベース）
@@ -53,7 +46,8 @@ export interface LoadSeries {
 /** rtos.timeline.get の結果 → 表（タスクはデーモンの返した順のまま。画面で使用率の順に並べない） */
 export function tableFromTimeline(r: any): TaskTable {
   const tasks: TaskStat[] = Object.entries<any>(r.stats?.tasks ?? {}).map(([task, s]) => ({
-    task, handle: s.handle, cpu: s.cpu, runs: s.runs, total: s.total, max: s.max_run, min: s.min_run, mean: s.mean_run,
+    task, handle: s.handle, cpu: s.cpu, runs: s.runs, total: s.total, max: s.max_run ?? null, min: s.min_run ?? null,
+    mean: s.mean_run ?? null,
   }));
   return { tasks, hz: r.timebase_hz, t0: r.t0, t1: r.t1,
            covered: r.stats?.covered ?? r.t1 - r.t0, lowerBound: !!r.lower_bound };

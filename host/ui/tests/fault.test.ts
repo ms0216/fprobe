@@ -5,14 +5,17 @@ import { FakeConn } from "./fake-conn";
 
 const FAULT: FaultReport = {
   architecture: "ARMv7-M / v8-M Mainline",
-  exception: { number: 3, name: "HardFault" },
+  exception: { number: 3, name: "HardFault", fault: true },
   faulted: true,
+  halt_reasons: [],
   causes: [{ bit: "FORCED", register: "HFSR", meaning: "格上げ" },
            { bit: "PRECISERR", register: "BFSR", meaning: "バスエラー", hint: "BFAR" },
            { bit: "BFARVALID", register: "BFSR", meaning: "BFAR に番地" }],
   registers: { CFSR: 0x8200, HFSR: 0x40000000, DFSR: 8, MMFAR: null, BFAR: 0x20018000, CPACR: 0xf00000 },
   fault_address: { address: 0x20018000, where: "0x20018000" },
-  frame: { stack: "MSP", sp: 0x20017fc8, exc_return: 0xfffffff9, fp_context: false, caller_sp: 0x20017fe8,
+  frame: { stack: "MSP", sp: 0x20017fc8, sp_source: "msp_now", exc_return: 0xfffffff9, fp_context: false, caller_sp: 0x20017fe8,
+           locations: Object.fromEntries(["r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"]
+             .map((r, i) => [r, { address: 0x20017fc8 + 4 * i, size: 4 }])) as NonNullable<FaultReport["frame"]>["locations"],
            registers: { r0: 0x300, r1: 0x20018000, r2: 0xff, r3: 0, r12: 0x2a, lr: 0x200000b5, pc: 0x2000004c, xpsr: 0x61000000 },
            pc: { address: 0x2000004c, where: "reached_milestone+12 (sram_demo.c:13)" },
            lr: { address: 0x200000b4, where: "reset_handler+64 (sram_demo.c:28)" } },
@@ -43,10 +46,23 @@ describe("Fault Analyzer", () => {
     app.push({ state: "HALTED", pc: 0x200, run: 2, function: "HardFault_Handler" });
     await tick();
     expect(opened).toBe(1);
-    report = { ...FAULT, faulted: false, exception: { number: 15, name: "SysTick" } };      // 割り込みで止まった
+    report = { ...FAULT, faulted: false, exception: { number: 15, name: "SysTick", fault: false } };   // 割り込みで止まった
     app.push({ state: "HALTED", pc: 0xb8, run: 3, function: "Default_Handler" });
     await tick();
     expect(opened).toBe(1);
+    // 故障の例外かは API の exception.fault だけで決める（画面は例外名の表を持たない）
+    report = { ...FAULT, faulted: false, exception: { number: 7, name: "?", fault: true } };
+    app.push({ state: "HALTED", pc: 0xc0, run: 4, function: "x" });
+    await tick();
+    expect(opened).toBe(2);
+    report = { ...FAULT, faulted: false, exception: { number: 3, name: "HardFault", fault: false } };
+    app.push({ state: "HALTED", pc: 0xb8, run: 5, function: "Default_Handler" });
+    await tick();
+    expect(opened).toBe(2);
+    report = { ...FAULT, faulted: false, exception: { number: 15, name: "SysTick", fault: false } };
+    app.push({ state: "HALTED", pc: 0xb8, run: 6, function: "Default_Handler" });
+    await tick();
+    expect(opened).toBe(2);
     expect(conn.quiet.every((m: string) => m === "target.fault")).toBe(true);
     stop();
   });
@@ -54,7 +70,9 @@ describe("Fault Analyzer", () => {
   it("結果の整理: 故障か、見出し、原因のレジスタ、コピー用の文字", () => {
     expect(isFault(FAULT)).toBe(true);
     expect(isFault({ ...FAULT, faulted: false, exception: null, causes: [] })).toBe(false);
-    expect(isFault({ ...FAULT, faulted: false, causes: [] })).toBe(true);           // v6-M: HardFault の中
+    expect(isFault({ ...FAULT, faulted: false, causes: [] })).toBe(true);           // 故障の例外の中（exception.fault）
+    expect(isFault({ ...FAULT, faulted: false, causes: [], exception: { number: 3, name: "HardFault", fault: false } }))
+      .toBe(false);                                                                  // 名前では決めない
     // 見出しは API の立っているビットを全部、API の順で（画面が「主な原因」を選ばない）
     expect(headline(FAULT)).toBe("HardFault: FORCED, PRECISERR, BFARVALID");
     expect(headline({ ...FAULT, faulted: false, exception: null })).toBeNull();

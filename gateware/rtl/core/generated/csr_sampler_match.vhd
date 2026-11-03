@@ -22,14 +22,25 @@ entity csr_sampler_match is
     mask : out std_logic_vector(31 downto 0);   -- mask（RW）
     value : out std_logic_vector(31 downto 0);   -- value（RW）
     control_enable : out std_logic;   -- control.enable（RW）
+    control_once : out std_logic;   -- control.once（RW）
+    control_after_start : out std_logic;   -- control.after_start（RW）
+    control_first_sample : out std_logic;   -- control.first_sample（RW）
     control_matched : in  std_logic;   -- control.matched（RO）
     control_seen_any : in  std_logic;   -- control.seen_any（RO）
+    control_started : in  std_logic;   -- control.started（RO）
     seen : in  std_logic_vector(31 downto 0);   -- seen（RO）
     count : in  std_logic_vector(31 downto 0);   -- count（RO）
     time_lo : in  std_logic_vector(31 downto 0);   -- time_lo（RO）
     time_hi : in  std_logic_vector(31 downto 0);   -- time_hi（RO）
     prev_lo : in  std_logic_vector(31 downto 0);   -- prev_lo（RO）
-    prev_hi : in  std_logic_vector(31 downto 0)   -- prev_hi（RO）
+    prev_hi : in  std_logic_vector(31 downto 0);   -- prev_hi（RO）
+    addr_mask : out std_logic_vector(31 downto 0);   -- addr_mask（RW）
+    fire_index : in  std_logic_vector(6 downto 0);   -- fire.index（RO）
+    fire_first : in  std_logic;   -- fire.first（RO）
+    unmatched0 : in  std_logic_vector(31 downto 0);   -- unmatched0（RO）
+    unmatched1 : in  std_logic_vector(31 downto 0);   -- unmatched1（RO）
+    unmatched2 : in  std_logic_vector(31 downto 0);   -- unmatched2（RO）
+    unmatched3 : in  std_logic_vector(31 downto 0)   -- unmatched3（RO）
   );
 end entity;
 
@@ -43,6 +54,10 @@ architecture rtl of csr_sampler_match is
   signal mask_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
   signal value_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
   signal control_enable_r : std_logic := '0';
+  signal control_once_r : std_logic := '0';
+  signal control_after_start_r : std_logic := '0';
+  signal control_first_sample_r : std_logic := '0';
+  signal addr_mask_r : std_logic_vector(31 downto 0) := "11111111111111111111111111111111";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -58,6 +73,10 @@ begin
         mask_r <= "00000000000000000000000000000000";
         value_r <= "00000000000000000000000000000000";
         control_enable_r <= '0';
+        control_once_r <= '0';
+        control_after_start_r <= '0';
+        control_first_sample_r <= '0';
+        addr_mask_r <= "11111111111111111111111111111111";
       elsif start then
         ack   <= '1';
         case index is
@@ -78,10 +97,17 @@ begin
             end if;
           when 3 =>   -- control
             rdata(0) <= control_enable_r;
+            rdata(1) <= control_once_r;
+            rdata(2) <= control_after_start_r;
+            rdata(3) <= control_first_sample_r;
             rdata(8) <= control_matched;
             rdata(9) <= control_seen_any;
+            rdata(10) <= control_started;
             if bus_we = '1' then
               control_enable_r <= bus_wdata(0);
+              control_once_r <= bus_wdata(1);
+              control_after_start_r <= bus_wdata(2);
+              control_first_sample_r <= bus_wdata(3);
             end if;
           when 4 =>   -- seen
             rdata(31 downto 0) <= seen;
@@ -95,6 +121,22 @@ begin
             rdata(31 downto 0) <= prev_lo;
           when 9 =>   -- prev_hi
             rdata(31 downto 0) <= prev_hi;
+          when 10 =>   -- addr_mask
+            rdata(31 downto 0) <= addr_mask_r;
+            if bus_we = '1' then
+              addr_mask_r <= bus_wdata(31 downto 0);
+            end if;
+          when 11 =>   -- fire
+            rdata(6 downto 0) <= fire_index;
+            rdata(8) <= fire_first;
+          when 12 =>   -- unmatched0
+            rdata(31 downto 0) <= unmatched0;
+          when 13 =>   -- unmatched1
+            rdata(31 downto 0) <= unmatched1;
+          when 14 =>   -- unmatched2
+            rdata(31 downto 0) <= unmatched2;
+          when 15 =>   -- unmatched3
+            rdata(31 downto 0) <= unmatched3;
           when others =>
             err <= '1';
         end case;
@@ -109,4 +151,8 @@ begin
   mask <= mask_r;
   value <= value_r;
   control_enable <= control_enable_r;
+  control_once <= control_once_r;
+  control_after_start <= control_after_start_r;
+  control_first_sample <= control_first_sample_r;
+  addr_mask <= addr_mask_r;
 end architecture;

@@ -17,8 +17,13 @@ CONFIGURATIONS = {
     "no_la_front": dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=False),   # U21 の前段なし
     "no_la_inputs": dataclasses.replace(TEST_CAPS, la_inputs=0),       # U22 の専用の入力なし
     "event_ring": dataclasses.replace(TEST_CAPS, event_ring_bits=6),   # 外部メモリ無しのイベント記録（64 件）
+    "event_byte_pack": dataclasses.replace(TEST_CAPS, event_ring_bits=6, event_byte_pack=True),   # バイトを詰めたイベント
     "no_sampler_match": dataclasses.replace(TEST_CAPS, sampler_match=False),   # R21 を外した構成（Primer）
     "sync": dataclasses.replace(TEST_CAPS, sync=True, event_ring_bits=6),   # ボードの間の時刻の同期（組をイベントで読む）
+    "cap_ratio3": dataclasses.replace(TEST_CAPS, cap_ratio=3),             # 内蔵ロジアナを sys の 3 倍のクロックの領域で動かす
+    # 試験用の方形波 la_testgen（ケイパビリティ）。刻むクロックは、比 1 なら sys、比 > 1 なら cap_clk
+    "testgen_same_clock": dataclasses.replace(TEST_CAPS, la_testgen=True),
+    "testgen_cap_ratio3": dataclasses.replace(TEST_CAPS, cap_ratio=3, la_testgen=True),
 }
 # リセットの扇出の分割（RESET_SPLIT = true）でも同じ試験が通ること（PYNQ と同じ構成の機能: 全部入り・同期つき）
 RESET_SPLIT_CONFIGURATIONS = ("full", "sync", "event_ring")
@@ -26,9 +31,10 @@ RESET_SPLIT_CONFIGURATIONS = ("full", "sync", "event_ring")
 
 @pytest.mark.parametrize("configuration", CONFIGURATIONS)
 @pytest.mark.parametrize("split", [False, True], ids=["single_reset", "reset_split"])
-def test_fprobe_core(tmp_path, configuration, split):
+def test_fprobe_core(tmp_path, monkeypatch, configuration, split):
     if split and configuration not in RESET_SPLIT_CONFIGURATIONS:
         pytest.skip("RESET_SPLIT は代表の構成だけ試験する")
+    monkeypatch.setenv("CORE_CAP_RATIO", str(CONFIGURATIONS[configuration].cap_ratio))
     pkg = tmp_path / "test_caps_pkg.vhd"
     pkg.write_text(caps.render_package("test_caps_pkg", CONFIGURATIONS[configuration]), encoding="utf-8")
     run_cocotb(parallel=True, toplevel="fprobe_core_harness",

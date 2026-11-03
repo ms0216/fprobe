@@ -1,11 +1,11 @@
 #!/bin/sh
-# fprobe: eth0 を固定のアドレス 192.168.0.2/24 にする（DHCP のアドレスは使わない）。/usr/local/bin/fprobe-ip。
+# fprobe: eth0 を固定のアドレス <家の LAN のアドレス>/24 にする（DHCP のアドレスは使わない）。/usr/local/bin/fprobe-ip。
 # fprobe-ip.service が起動時に 1 回呼ぶ。ifupdown の静的設定は ifup@eth0 と networking.service が競合して効かなかったので、
 # systemd から直接 ip コマンドで設定する（2026-10-25）。192.168.2.99 と 192.168.77.2 の別名は ifupdown に任せる（変えない）。
 # DHCP のアドレスが残ると、PC から固定のアドレス宛に送った UDP の応答が DHCP のアドレスから返り、受けて捨てられる。
 set -e
 IF=eth0
-ADDR=192.168.0.2/24
+ADDR=<家の LAN のアドレス>/24
 GW=192.168.0.1
 # DHCP クライアントを止め、DHCP のアドレスを外す（自分の固定アドレスは残す）
 pkill -x dhclient 2>/dev/null || true

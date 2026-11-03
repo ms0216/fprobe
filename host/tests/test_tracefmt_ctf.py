@@ -48,7 +48,7 @@ def scenario(header: str = "ts32_id8", base: int = 1_000) -> bytes:
 
 
 def test_builtin_table_decodes_threads_isrs_and_named_events():
-    trace = decode_ctf(scenario(), header="ts32_id8")
+    trace = decode_ctf(scenario(), header="ts32_id8", ts_hz=1e9)
     assert trace.ts_hz == 1e9
     assert {t.id: (t.name, t.priority, t.stack_size) for t in trace.tasks.values()} == {
         T1: ("sensor", -2, 1024), IDLE: ("idle", None, None)}
@@ -68,7 +68,7 @@ def test_other_header_forms(header):
     trace = decode_ctf(scenario(header), header=header)
     assert sum(1 for e in trace.events if e.kind == "task_in") == 2
     if header == "id16":
-        assert trace.ts_hz is None and [e.ts for e in trace.events[:3]] == [1, 2, 3]
+        assert trace.ts_hz is None and [e.ts for e in trace.events[:3]] == [1, 2, 3] and not trace.timed
 
 
 def test_32_bit_nanoseconds_wrap():
@@ -77,6 +77,16 @@ def test_32_bit_nanoseconds_wrap():
     assert [e.ts for e in trace.events] == [0xFFFF_FFF0, 0x1_0000_0010]
     # 1 周未満の前提で戻した回数を結果に出す（前提が外れると時刻が 2^32 の倍数ずれる）
     assert trace.ts_wraps == 1 and trace.summary()["ts_wraps"] == 1
+
+
+def test_an_unwrap_returns_how_little_the_raw_value_went_back_and_the_assumption():
+    # 生の値が少し戻っただけでも 1 周の前進とみなす（解読からは見分けられない）: 戻った量の最小と前提を結果に出す
+    data = rec(1_000, 0x1B) + rec(990, 0x1C) + rec(0xFFFF_0000, 0x1B) + rec(5, 0x1C)
+    trace = decode_ctf(data, header="ts32_id8")
+    s = trace.summary()
+    assert trace.ts_wraps == 2 and s["ts_wrap_min_back"] == 10
+    assert s["assumptions"] == ["ts_wrap_less_than_one_period"]
+    assert "assumptions" not in decode_ctf(rec(1, 0x1B), header="ts32_id8").summary()
 
 
 def test_real_metadata_file():
@@ -89,7 +99,7 @@ def test_real_metadata_file():
 
 def test_unknown_ids_stop_decoding_with_a_reason():
     trace = decode_ctf(rec(1, 0x1B) + rec(2, 0xF7, b"\x01\x02") + rec(3, 0x1C), header="ts32_id8")
-    assert len(trace.events) == 1 and trace.errors == 1 and "0xf7" in trace.notes[0]
+    assert len(trace.events) == 1 and trace.errors == 1 and any("0xf7" in n for n in trace.notes)
 
 
 def test_ram_backend_ends_at_zero_fill():
@@ -133,3 +143,24 @@ def test_object_events_are_zephyrs_names_not_a_name_prefix():
     trace = decode_ctf(rec(1, 1, struct.pack("<I", 7)) + rec(2, 2, struct.pack("<I", 8)), metadata=meta)
     assert [(e.name, e.kind) for e in trace.events] == [("semaphore_give_enter", "object"),
                                                         ("event_custom_counter", "other")]
+
+
+def test_the_clock_rate_is_not_assumed():
+    # 時刻の速さは TSDL の clock の freq か、使う側が明示した ts_hz（組み込みの表・clock の無い TSDL で 1e9 を決め打ちしない）
+    assert decode_ctf(scenario(), header="ts32_id8").ts_hz is None
+    assert decode_ctf(scenario(), header="ts32_id8", ts_hz=32768).ts_hz == 32768
+    real = parse_tsdl(METADATA.read_text(encoding="utf-8"))
+    assert real.clock_hz is None and decode_ctf(scenario("ts32_id16"), metadata=real).ts_hz is None
+    tsdl = "clock { name = monotonic; freq = 1000000; }; event { name = x; id = 0x1B; };"
+    meta = parse_tsdl(tsdl, header="ts32_id8")
+    assert meta.clock_hz == 1_000_000 and decode_ctf(rec(5, 0x1B), metadata=meta).ts_hz == 1e6
+    with pytest.raises(CtfError, match="clock"):
+        decode_ctf(rec(5, 0x1B), metadata=meta, ts_hz=1e9)            # TSDL の clock と食い違う値は受けない
+
+
+def test_a_trace_without_timestamps_gets_no_rate():
+    # 時刻の無い形（id16）の ts は順の番号: 使う側の ts_hz を付けると偽の時刻になるので付けない
+    from fprobe.tracefmt.stream import decode_trace
+    trace = decode_trace("ctf", scenario("id16"), ctf_header="id16", ts_hz=1e6)
+    assert not trace.timed and trace.ts_hz is None and any("時刻の無い" in n for n in trace.notes)
+    assert trace.summary()["timed"] is False and "duration_s" not in trace.summary()

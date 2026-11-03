@@ -227,7 +227,9 @@ def queue_usage(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[i
                 t1: int | None = None, points: int = POINTS) -> dict:
     """キュー・セマフォごとのメッセージ数（セマフォは数）の推移（操作の後の数）・最大・最小・時間で重みを付けた平均と、
     長さに対する割合。送り・受けの成功の回数、失敗（send_failed = 満杯、receive_failed = 空）、待ち（waits_send /
-    waits_receive）。ミューテックスは含めない（持ち主の区間は rtos.timeline.inversions）。"""
+    waits_receive）。ミューテックスは含めない（持ち主の区間は rtos.timeline.inversions）。
+    平均の終わりは t1（観測の終わり。使う側が渡す）、無ければそのオブジェクトの最後の点（最後の値をその先へ延ばさない）。
+    使った終わりを mean_t1 に返す。"""
     table = object_table(trace, objects)
     per: dict[int, dict] = {}
 
@@ -260,22 +262,22 @@ def queue_usage(trace: KernelTrace, names: Mapping[int, str], objects: Mapping[i
             row["receives"] += 1
         elif op.kind in _FAILED:
             row[op.kind] += 1
-    end = t1 if t1 is not None else (trace.ops[-1].t if trace.ops else 0)
     out = {}
     for handle, row in per.items():
         series = row.pop("series")
         if series:
+            end = t1 if t1 is not None else series[-1][0]
             values = [v for _, v in series]
             span = max(end - series[0][0], 0)
             weighted = sum(v * (max(min(nt, end), t) - t) for (t, v), (nt, _) in zip(series, series[1:] + [(end, 0)]))
             row.update(max=max(values), min=min(values), last=values[-1],
-                       mean=weighted / span if span else float(values[-1]),
+                       mean=weighted / span if span else float(values[-1]), mean_t1=end,
                        points=_downsample(series, points), points_total=len(series))
             length = row["length"]
             row["max_usage"] = row["max"] / length if length else None
             row["mean_usage"] = row["mean"] / length if length else None
         else:
-            row.update(max=None, min=None, last=None, mean=None, points=[], points_total=0, max_usage=None,
+            row.update(max=None, min=None, last=None, mean=None, mean_t1=None, points=[], points_total=0, max_usage=None,
                        mean_usage=None)
         if not row["saturated"]:
             del row["saturated"]

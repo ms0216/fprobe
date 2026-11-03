@@ -10,7 +10,10 @@
 -- 刻み = 16^unit(k) 周期（time の bit 4·8·…·28 の変化。unit ≥ 1 では最初の刻みの位置の分だけ短くなりうる）。
 -- 動いている間 oe(k) = 1・o(k) = level(k)、それ以外は oe(k) = 0（高インピーダンス）。
 -- enable(k) = 0 で状態を消す。c の前の値は enable に関係なく追う（有効にした時点で成り立つ条件は立ち上がりでない）。
--- 遅れ（条件の間）: 端子 → 同期化 2 段 → 条件のレジスタ → 出力のレジスタ = 4 周期。
+-- 遅れ（条件の間）: 端子 → 同期化 2 段 → 条件のレジスタ → 出力のレジスタ = 4 周期。源のパルスの周期 S → 出力のレジスタは S + 2。
+--   脈の長さは (length − 1)·16^unit + 1 以上 length·16^unit 以下の周期で、S から 1 つに決まる（最初の刻み = S + 2 以後で
+--   time のビット 4·unit が変わる最初の周期）。端子はボードの出力の段の後。値の正は fprobe_gw.timing の XTRIG_OUT_*（時刻の
+--   正しさ S3。tests/tb/xtrig_out_tb.py の the_output_times_match_the_timing_table）。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

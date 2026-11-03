@@ -1,6 +1,7 @@
 """obs_soft_core（obs_soft_tap + obs_core。1 クロック版は obs_tck_sampler も）。JTAG の 4 本だけで、TAP の IDCODE・
 観測の回路の ID・記録が読め、印の遅れが申告どおり。TCK 5 MHz・clk 50 MHz（1 クロック版は TCK ≤ clk / 8）。"""
 
+import os
 import random
 
 import cocotb
@@ -112,24 +113,28 @@ async def the_id_and_records_are_read_through_the_four_pins(dut):
 
 @cocotb.test()
 async def the_sync_mark_is_where_the_core_declares(dut):
-    # 印の瞬間は、TCK のピンの Update-DR を出る立ち上がりより SYNC_DELAY / 2 周期（平均）遅い。±0.5 周期
+    # 印の瞬間は、TCK のピンの Update-DR を出る立ち上がりより [SYNC_DELAY_LO, SYNC_DELAY_HI] / 2 周期遅い（レジスタ
+    # 10・11、端を含む。2 クロック版 [3, 4]、1 クロック版 [6, 7]）。TCK と clk の位相をばらばら（ps 単位）にすると、
+    # 範囲の中に全部入り、範囲の両端の近くまで出る（範囲が広すぎない）。SYNC_DELAY（7）は範囲の中点
     jtag, t0 = await setup(dut)
     await jtag.shift(bits_of(0x2, 4), ir=True)
-    await jtag.dr(command(2, 7))                             # SYNC_DELAY
-    await jtag.dr(command(2, 8))                             # SAMPLE_DELAY
+    for addr in (7, 8, 10, 11):                              # SYNC_DELAY・SAMPLE_DELAY・SYNC_DELAY_LO・SYNC_DELAY_HI
+        await jtag.dr(command(2, addr))
     await jtag.dr(command(1, 14, 1))
     await ClockCycles(dut.clk, 20)
     rec = await drain(jtag)
     regs = {w >> 16 & 0xF: w & 0xFFFF for w in rec if w >> 26 == 0b110001}
-    declared, sample = regs[7] / 2, regs[8]
+    declared, sample, lo, hi = regs[7] / 2, regs[8], regs[10] / 2, regs[11] / 2
+    assert (lo, hi) == ((6.0, 7.0) if os.environ.get("OBS_ONE_CLOCK") == "1" else (3.0, 4.0)), (lo, hi)
+    assert declared == (lo + hi) / 2, (lo, hi, declared)
     await RisingEdge(dut.clk)
     await Timer(1, "ns")
     dut.probes.value = 0x5678
     edge = round((get_sim_time("ns") - 1 - t0) / CLK_NS)
     rng = random.Random(5)
     updates = []
-    for seq in range(1, 31):
-        await Timer(rng.randrange(1, 997), "ns")
+    for seq in range(1, 61):
+        await Timer(rng.randrange(1, 997_000), "ps")
         await jtag.dr(command(3, 0, seq))
         updates.append((seq, (jtag.update_ns - t0) / CLK_NS))
         rec += await drain(jtag)
@@ -146,5 +151,7 @@ async def the_sync_mark_is_where_the_core_declares(dut):
                 marks[w >> 7 & 0xFF] = t - (w & 0x7F)
     offset = edge + sample - t_value
     lag = [marks[s] + offset - u for s, u in updates]
-    assert abs(sum(lag) / len(lag) - declared) < 0.15, (sum(lag) / len(lag), declared)
-    assert declared - 0.5 - 1e-6 <= min(lag) and max(lag) <= declared + 0.5 + 1e-6, (min(lag), max(lag), declared)
+    assert len(lag) == 60
+    dut._log.info(f"sync lag: min {min(lag):.3f} max {max(lag):.3f} declared [{lo}, {hi}]")
+    assert lo - 1e-6 <= min(lag) and max(lag) <= hi + 1e-6, (min(lag), max(lag), lo, hi)
+    assert min(lag) < lo + 0.1 and max(lag) > hi - 0.1, (min(lag), max(lag), lo, hi)

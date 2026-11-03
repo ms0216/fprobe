@@ -19,6 +19,7 @@ WRITE_ONE_TO_CLEAR = ("CFSR", "HFSR", "DFSR")   # ARMv7-M / v8-M の rc_w1（1 �
 _V6M_PARTNOS = {0xC20, 0xC21, 0xC60, 0xD20}       # Cortex-M0 / M1 / M0+ / M23（0xC24 は Cortex-M4。pyocd core_ids）（M23 は v8-M Baseline: CFSR が無い）
 EXCEPTIONS = {1: "Reset", 2: "NMI", 3: "HardFault", 4: "MemManage", 5: "BusFault", 6: "UsageFault", 7: "SecureFault",
               11: "SVCall", 12: "DebugMonitor", 14: "PendSV", 15: "SysTick"}
+FAULT_EXCEPTIONS = range(3, 8)                    # 故障の例外（IPSR 3〜7: HardFault・MemManage・BusFault・UsageFault・SecureFault）
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,8 @@ def analyze(target, symbols=None, entry_sp: int | None = None) -> dict:
     out: dict = {"architecture": "ARMv6-M / v8-M Baseline" if v6m else "ARMv7-M / v8-M Mainline",
                  "exception": None, "causes": [], "faulted": False}
     if ipsr:
-        out["exception"] = {"number": ipsr, "name": EXCEPTIONS.get(ipsr, f"IRQ{ipsr - 16}" if ipsr >= 16 else "?")}
+        out["exception"] = {"number": ipsr, "name": EXCEPTIONS.get(ipsr, f"IRQ{ipsr - 16}" if ipsr >= 16 else "?"),
+                            "fault": ipsr in FAULT_EXCEPTIONS}     # 故障の例外の中か（アーキテクチャの定義。B1.5.2）
     dfsr = target.read32(DFSR)
     out["halt_reasons"] = decode_dfsr(dfsr)
     if not v6m:

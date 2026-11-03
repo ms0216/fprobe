@@ -123,7 +123,7 @@ def test_gpio_serial_deep_capture_is_decoded_analyzed_and_recorded(probe, monkey
     # 時刻の写し: トリガのサンプルがトリガ時刻（タイムベース 100 MHz、サンプル 50 MHz）
     tr = FakeDeep.tr
     offset = tr.trigger_time - tr.trigger * 2
-    assert stopped["time_map"] == {"timebase_hz": HZ, "offset": offset, "uncertainty_ticks": 0}
+    assert stopped["time_map"] == {"timebase_hz": HZ, "offset": offset, "uncertainty_ticks": 0, "bound": None}
     calls = probe.recording_find({"stream": "testpoint", "kind": "call", "body": {"function": "work"}})
     assert calls["count"] == 5
     first_work = probe.testpoint_calls(function="work", limit=1)["calls"][0]
@@ -149,9 +149,6 @@ class StreamDevice(las.FakeStreamDevice):
     def __init__(self, source, **kw):
         super().__init__(source, **kw)
         self.ticks = 5000
-
-    def capabilities(self):
-        return SimpleNamespace(mem_bytes=128 << 20, la_channels=16, la_sample_hz=100_000_000, timebase_hz=HZ)
 
     def time(self):
         self.ticks += 2
@@ -182,7 +179,7 @@ def test_gpio_parallel_stream_runs_in_the_background_until_stopped(probe, table_
     started = probe.testpoint_start("gpio_parallel", map_path=str(table_path), data_channels=[1, 5, 6],
                                     strobe_channel=4, capture="stream", rle=False)
     assert started["capture"] == "stream" and started["time_map"] == {"timebase_hz": HZ, "offset": 5003,
-                                                                      "uncertainty_ticks": 1.0}
+                                                                      "uncertainty_ticks": 1.0, "bound": None}
     deadline = time.monotonic() + 5
     while probe.testpoint_status()["hits"] < len(records) - 1 and time.monotonic() < deadline:   # 最後は flush で
         time.sleep(0.01)
@@ -191,6 +188,10 @@ def test_gpio_parallel_stream_runs_in_the_background_until_stopped(probe, table_
     stopped = probe.testpoint_stop()
     assert stopped["hits"] == len(records) and stopped["losses"] == 0 and "error" not in stopped
     assert not dev.running and stopped["stream"]["samples"] > 0
+    # 起点は記録の連続記録と同じ決め方（recording_stream.anchor_stream。時刻の正しさ S1b の A6）: この偽の機器は起点を記録せず
+    # 段数の申告も無いので、前後の読みの範囲の中点
+    anchor = stopped["settings"]["anchor"]
+    assert anchor["method"] == "host" and anchor["ticks"] == 5003 and anchor["t_lo"] <= 5003 <= anchor["t_hi"]
     calls = probe.testpoint_calls(function="main")["calls"]
     # 時刻: 流し始め（offset）+ サンプル番号（100 MS/s = タイムベース）
     assert calls[0]["t"] == 5003 + round((records[0][0] + 50e-9) * 100e6)
@@ -259,7 +260,7 @@ def test_itm_enables_the_port_only_after_the_receiver_and_restores_it(itm_probe,
     assert log[-1] == (dwt.ITM_TER, 0x1)                                 # 元に戻す
     calls = p.testpoint_calls(function="main")["calls"]
     assert calls[0]["t"] == t0 + 1000                                    # FPGA がバイトに付けた時刻
-    assert stopped["time_map"]["uncertainty_ticks"] == pytest.approx(10 / 2e6 * HZ)
+    assert stopped["time_map"]["uncertainty_ticks"] is None and stopped["time_map"]["bound"] == "upper"   # 8N1 を仮定しない
 
 
 def test_itm_needs_a_swo_speed_and_a_valid_port(itm_probe, table_path):
@@ -355,7 +356,7 @@ def test_rtt_hits_from_the_receiver_with_a_host_clock_anchor(probe, table_path):
     assert stopped["cyccnt_wraps"] == 0                                  # CYCCNT の回り込みを仮定した回数
     assert stopped["skipped_before_sync"] >= 1                           # 受け始めの途中で捨てた項目の数（?51）
     tm = p._tp_last.live.time_map
-    assert tm.hz == 16e6 and tm.uncertainty >= p.poll_s * HZ
+    assert tm.hz == 16e6 and tm.bound == "upper" and tm.uncertainty < p.poll_s * HZ   # 読みの周期を幅に足さない（上限）
     h, ticks, _ = p._tp_last.host_clock
     last_of_first = records[1][0]                                        # 最初のかたまり（20 バイト）の最後の記録
     assert tm.offset == ticks + round((host_s - h) * HZ) - round(last_of_first * HZ / 16e6)
@@ -408,9 +409,11 @@ def test_the_api_accepts_the_usual_calls():
     assert spec.methods["testpoint.report"].observes and spec.methods["testpoint.instrument"].kind == "read"
 
 
-def test_the_mixin_does_not_shadow_other_tools():
-    # mixin の名前が他の mixin と重なると、MRO で黙って片方が隠れる（_start_itm で一度起きた）
-    own = {n for n in vars(probe_testpoint.TestpointTools) if not n.startswith("__")}
-    for base in Probe.__mro__:
-        if base not in (probe_testpoint.TestpointTools, object):
-            assert not own & set(vars(base)), (base.__name__, own & set(vars(base)))
+def test_the_testpoint_tools_are_its_own_and_hide_nothing():
+    # 名前が他の道具と重なると片方が隠れる（mixin のとき _start_itm で一度起きた）。サービスの公開の名前と共有の名前は、
+    # Probe の上でテストポイントのサービスに委ねられ、ほかの道具と重ならない（全体の重なりは test_probe_services）
+    from fprobe.probe_service import delegate
+    svc = probe_testpoint.TestpointService
+    for name in (*svc.API, *svc.SHARED):
+        d = vars(Probe)[name]
+        assert isinstance(d, delegate) and d.service is svc, name

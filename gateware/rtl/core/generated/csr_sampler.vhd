@@ -32,7 +32,9 @@ entity csr_sampler is
     overruns : in  std_logic_vector(31 downto 0);   -- overruns（RO）
     status_last_ack : in  std_logic_vector(2 downto 0);   -- status.last_ack（RO）
     status_busy : in  std_logic;   -- status.busy（RO）
-    status_held : in  std_logic   -- status.held（RO）
+    status_held : in  std_logic;   -- status.held（RO）
+    check_words : out std_logic_vector(6 downto 0);   -- check.words（RW）
+    check_max : in  std_logic_vector(6 downto 0)   -- check.max（RO）
   );
 end entity;
 
@@ -51,6 +53,7 @@ architecture rtl of csr_sampler is
   signal slot_config_enable_r : std_logic := '0';
   signal slot_config_words_r : std_logic_vector(3 downto 0) := "0000";
   signal slot_write_r : std_logic := '0';
+  signal check_words_r : std_logic_vector(6 downto 0) := "0000001";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -71,6 +74,7 @@ begin
         slot_addr_r <= "00000000000000000000000000000000";
         slot_config_enable_r <= '0';
         slot_config_words_r <= "0000";
+        check_words_r <= "0000001";
       elsif start then
         ack   <= '1';
         case index is
@@ -119,6 +123,12 @@ begin
             rdata(2 downto 0) <= status_last_ack;
             rdata(8) <= status_busy;
             rdata(9) <= status_held;
+          when 10 =>   -- check
+            rdata(6 downto 0) <= check_words_r;
+            rdata(14 downto 8) <= check_max;
+            if bus_we = '1' then
+              check_words_r <= bus_wdata(6 downto 0);
+            end if;
           when others =>
             err <= '1';
         end case;
@@ -138,4 +148,5 @@ begin
   slot_config_enable <= slot_config_enable_r;
   slot_config_words <= slot_config_words_r;
   slot_write <= slot_write_r;
+  check_words <= check_words_r;
 end architecture;

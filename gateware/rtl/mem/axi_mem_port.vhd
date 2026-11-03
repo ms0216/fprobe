@@ -17,7 +17,7 @@ use ieee.numeric_std.all;
 entity axi_mem_port is
   generic (
     ADDR_BITS       : positive := 21;         -- 拍の番号のビット数（2**ADDR_BITS × 16 バイト）
-    MAX_OUTSTANDING : positive := 8
+    MAX_OUTSTANDING : positive range 1 to 15 := 8   -- wr_pending は 4 ビット
   );
   port (
     clk           : in  std_logic;
@@ -33,6 +33,8 @@ entity axi_mem_port is
     rd_valid      : out std_logic;
     rd_data       : out std_logic_vector(127 downto 0);
     errors        : out unsigned(15 downto 0);
+    wr_pending    : out unsigned(3 downto 0);    -- 受けた書きのうち、応答（B）が返っていない数（0〜MAX_OUTSTANDING）。
+                                                 -- PS が DDR を直接読む構成は、これを引いた位置までを読めると教える
     -- AXI3 のマスタ（ID・CACHE・PROT 等の固定の値はトップかブロック設計で与える）
     m_axi_awaddr  : out std_logic_vector(31 downto 0);
     m_axi_awlen   : out std_logic_vector(3 downto 0);
@@ -99,7 +101,7 @@ begin
   m_axi_arvalid <= ar_pending;
   m_axi_rready  <= '1';
   errors <= err_count;
-
+  wr_pending <= to_unsigned(wr_out, 4);
   b_done <= m_axi_bvalid;                              -- BREADY = 1
   r_done <= m_axi_rvalid and m_axi_rlast;              -- RREADY = 1
 

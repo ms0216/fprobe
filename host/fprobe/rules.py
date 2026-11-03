@@ -356,8 +356,9 @@ def _count(ctx: _Context, p: dict) -> tuple[dict, list[dict], bool]:
         if (lo is not None and n < lo) or (hi is not None and n > hi):
             violations.append(ctx.violation(w0, "count", f"窓の件数 {n}（期待 {lo} 〜 {hi}）", n, w1))
         w0 = w1
+    # 窓は検査の範囲の始め（window_t0）から window_us ごとに区切る（窓の数え方は起点で変わるので、使った起点を返す）
     return {"count": len(events), "windows": len(counts), "min_per_window": min(counts),
-            "max_per_window": max(counts)}, violations, True
+            "max_per_window": max(counts), "window_t0": ctx.origin, "window_us": p["window_us"]}, violations, True
 
 
 def _never(ctx: _Context, p: dict) -> tuple[dict, list[dict], bool]:

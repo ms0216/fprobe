@@ -61,6 +61,20 @@ def test_memory_capabilities_round_trip():
     assert "constant MEM_TEST : boolean := true;" in caps.render_package("p", with_test)
 
 
+def test_dap_line_time_and_the_output_stage_are_declared():
+    """段階 S2（docs/superpowers/specs/2026-11-01-time-accuracy-design.md §12）: FEATURES bit16 DAP_LINE_TIME と TLV TIMING の dap_swd・dap_jtag
+    （PHY の出力の FF から端子までの段。PYNQ-Z2 は IOB の FF で 1、ほかは 0）。"""
+    import dataclasses
+
+    from fprobe.caps import parse
+    from fprobe_gw.boards.pynq_z2 import PYNQ_Z2
+    from fprobe_gw.timing import dap_output_ticks
+    parsed = parse(caps.encode(TEST_CAPS))
+    assert parsed.dap_line_time and parsed.dap_output_ticks == 0
+    pynq = parse(caps.encode(dataclasses.replace(TEST_CAPS, board=PYNQ_Z2.name)))
+    assert pynq.dap_output_ticks == dap_output_ticks(PYNQ_Z2.name) == 1
+
+
 def test_features_round_trip_and_default_to_present():
     import dataclasses
 
@@ -86,14 +100,48 @@ def test_debug_port_configuration_round_trip_and_old_devices_have_everything():
     assert "constant INJECTOR : boolean := false;" in caps.render_package("p", jtag)
     # DEBUG の TLV が無い古いデバイス（この TLV の前のビットストリーム）は JTAG も故障注入もある
     data = caps.encode(TEST_CAPS)
-    debug = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER)
+    debug = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER
+                        | caps.DEBUG_JTAG_BIT_2HP | caps.DEBUG_HALF_PERIOD_1)
     i = data.index(debug)
     old = data[:i] + data[i + len(debug):]
     old = old[:4] + struct.pack("<I", len(old)) + old[8:]
     assert (parse(old).jtag, parse(old).inject) == (True, True)
     assert parse(old).swo_manchester is False                      # Manchester は U51 から
+    assert parse(old).jtag_bit_extra_cycles == 1                   # 1 ビット = 2 × 半周期 + 1（2026-11-01 より前の jtag_phy）
+    assert (parse(old).min_half_period, parse(old).swd_sample_delay_max) == (2, 3)   # 2026-11-03 より前
     with pytest.raises(ValueError, match="クロストリガ"):
         dataclasses.replace(TEST_CAPS, xtrig=False)                 # 故障注入はクロストリガの一部
+
+
+def test_jtag_bit_length_is_declared_by_every_design():
+    # 2026-11-01 の jtag_phy: 1 ビット = 2 × 半周期（DEBUG_JTAG_BIT_2HP）。回路の版の事実なので構成に依らず申告する。
+    # DEBUG にこの bit の無い古いデバイスは 2 × 半周期 + 1
+    import dataclasses
+    from fprobe.caps import parse
+    assert parse(caps.encode(TEST_CAPS)).jtag_bit_extra_cycles == 0
+    assert parse(caps.encode(dataclasses.replace(TEST_CAPS, jtag=False))).jtag_bit_extra_cycles == 0
+    data = caps.encode(TEST_CAPS)
+    now = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER
+                      | caps.DEBUG_JTAG_BIT_2HP | caps.DEBUG_HALF_PERIOD_1)
+    before = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER)
+    assert parse(data.replace(now, before)).jtag_bit_extra_cycles == 1
+
+
+def test_sys_half_clock_is_declared_by_every_design():
+    # 2026-11-03 の swd_phy・jtag_phy・dap_cmd_config: half_period の下限 1（SWCLK / TCK = sys / 2）、SWD の取り込みの遅れ 0〜7
+    # （DEBUG_HALF_PERIOD_1）。回路の版の事実なので構成に依らず申告する。無い古いデバイスは下限 2・遅れ 0〜3
+    import dataclasses
+    from fprobe.caps import parse
+    for c in (TEST_CAPS, dataclasses.replace(TEST_CAPS, jtag=False)):
+        got = parse(caps.encode(c))
+        assert (got.min_half_period, got.swd_sample_delay_max) == (1, 7)
+    data = caps.encode(TEST_CAPS)
+    now = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER
+                      | caps.DEBUG_JTAG_BIT_2HP | caps.DEBUG_HALF_PERIOD_1)
+    before = struct.pack("<HHI", caps.TYPE_DEBUG, 4, caps.DEBUG_JTAG | caps.DEBUG_INJECT | caps.DEBUG_SWO_MANCHESTER
+                         | caps.DEBUG_JTAG_BIT_2HP)
+    assert now in data
+    assert (parse(data.replace(now, before)).min_half_period, parse(data.replace(now, before)).swd_sample_delay_max) == (2, 3)
 
 
 def test_swo_manchester_and_uart_flow_round_trip():
@@ -150,6 +198,18 @@ def test_la_filter_and_pulse_features_round_trip_and_default_to_absent():
     assert (parse(caps.encode(none)).la_filter, parse(caps.encode(none)).la_pulse) == (False, False)
     assert "constant LA_FILTER : boolean := false;" in caps.render_package("p", none)
     assert "constant LA_PULSE : boolean := true;" in caps.render_package("p", TEST_CAPS)
+
+
+def test_the_pulse_width_trigger_needs_the_glitch_filter_on_the_sys_path():
+    # 時刻の正しさ S1b の N5: sys の構成のパルス幅のトリガは、グリッチフィルタの段で同期化した値を見る。フィルタが無いと
+    # 同期化していない値を 1 段で取る（メタ安定）ので、構成で断る。取り込みの領域（cap_ratio > 1）は la_cap_domain が常に同期化する
+    import dataclasses
+
+    import pytest
+    with pytest.raises(ValueError, match="la_pulse"):
+        dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=True)
+    dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=True, la_sample_hz=3 * TEST_CAPS.sys_clock_hz, cap_ratio=3)
+    dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=True, la_channels=0, la_depth=0, la_inputs=0)
 
 
 def test_build_info_is_a_placeholder_in_the_rom_filled_from_the_build_package():
@@ -287,5 +347,51 @@ def test_la_delays_are_declared_from_the_pipeline():
     assert with_filter.la_delay_internal == caps.LA_FILTER_DELAY + caps.LA_INTERNAL_DELAY == 6
     assert with_filter.la_delay_deep == caps.LA_FILTER_DELAY + caps.LA_DEEP_DELAY == 7
     assert with_filter.la_phase_span == caps.LA_PHASE_SPAN_TICKS == 1
-    plain = parse(caps.encode(dataclasses.replace(TEST_CAPS, la_filter=False)))
+    plain = parse(caps.encode(dataclasses.replace(TEST_CAPS, la_filter=False, la_pulse=False)))
     assert (plain.la_delay_internal, plain.la_delay_deep, plain.la_phase_span) == (3, 4, 1)
+
+
+def test_la_stream_ps_feature_round_trips_and_defaults_to_absent():
+    # PS が DDR のリングを直接読むストリーム（docs/superpowers/specs/2026-10-30-la-stream-ps-direct-design.md）
+    import dataclasses
+
+    import pytest
+
+    from fprobe.caps import parse
+    assert parse(caps.encode(TEST_CAPS)).la_stream_ps is False
+    deep = dataclasses.replace(TEST_CAPS, mem_bytes=32 << 20, la_depth=0, la_stream_events=True, la_stream_ps=True)
+    assert parse(caps.encode(deep)).la_stream_ps is True
+    assert parse(caps.encode(dataclasses.replace(deep, la_stream_ps=False))).la_stream_ps is False
+    with pytest.raises(ValueError):                       # 外部メモリ（深いバッファ）が無い構成では持てない
+        dataclasses.replace(TEST_CAPS, la_stream_ps=True)
+    with pytest.raises(ValueError):                       # イベントも流す構成だけ（PS は両方のリングを読む）
+        dataclasses.replace(deep, la_stream_events=False)
+
+
+def test_la_pack_feature_round_trips_and_defaults_to_absent():
+    # 使うチャンネルだけ詰めて流す（la_deep の control.pack。外部メモリ = 深いバッファのある構成だけ）
+    import dataclasses
+
+    import pytest
+
+    from fprobe.caps import parse
+    assert parse(caps.encode(TEST_CAPS)).la_pack is False
+    deep = dataclasses.replace(TEST_CAPS, mem_bytes=32 << 20, la_depth=0, la_pack=True)
+    assert parse(caps.encode(deep)).la_pack is True
+    assert parse(caps.encode(dataclasses.replace(deep, la_pack=False))).la_pack is False
+    with pytest.raises(ValueError):                       # 外部メモリ（深いバッファ）が無い構成では持てない
+        dataclasses.replace(TEST_CAPS, la_pack=True)
+
+
+def test_la_testgen_feature_round_trips_and_defaults_to_absent():
+    # 試験用の方形波（CSR la_testgen）。FEATURES bit 13。生成パッケージの LA_TESTGEN に出る
+    import dataclasses
+
+    from fprobe import generated as g
+    from fprobe.caps import parse
+    assert caps.FEATURE_LA_TESTGEN == 1 << 13 == g.FEATURE_LA_TESTGEN
+    assert parse(caps.encode(TEST_CAPS)).la_testgen is False
+    on = dataclasses.replace(TEST_CAPS, la_testgen=True)
+    assert parse(caps.encode(on)).la_testgen is True
+    assert "constant LA_TESTGEN : boolean := true;" in caps.render_package("p", on)
+    assert "constant LA_TESTGEN : boolean := false;" in caps.render_package("p", TEST_CAPS)

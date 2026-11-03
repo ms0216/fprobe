@@ -41,7 +41,7 @@ def demux(data):
     la, events, la_beats, ev_pos = bytearray(), [], 0, None
     for seg in segments:
         n = len(seg.data) // 16
-        assert 1 <= n <= g.STREAM_SEG_MAX_BEATS
+        assert 1 <= n <= g.STREAM_PL_CHUNK_BEATS
         if seg.kind == g.STREAM_SEG_LA:
             assert seg.seq == la_beats, (seg.seq, la_beats)
             la += seg.data

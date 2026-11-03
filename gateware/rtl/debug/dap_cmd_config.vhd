@@ -62,7 +62,7 @@ end entity;
 
 architecture rtl of dap_cmd_config is
   constant CYCLES_PER_US : positive := (CLK_HZ + 500_000) / 1_000_000;
-  constant HALF_CLOCK_HZ : natural := CLK_HZ / 2;          -- SWCLK = HALF_CLOCK_HZ / half_period
+  constant HALF_CLOCK_HZ : natural := CLK_HZ / 2;          -- SWCLK = TCK = HALF_CLOCK_HZ / half_period（swd_phy・jtag_phy とも 1 ビット 2 × half_period 周期）
   -- SWJ_Clock は要求を 1% まで超えてよい（sys 100.29 MHz で 25 MHz の要求に 16.7 MHz でなく 25.07 MHz を選ぶ）
   constant HALF_CLOCK_TOL_HZ : natural := HALF_CLOCK_HZ / 101 * 100;
 
@@ -109,6 +109,11 @@ architecture rtl of dap_cmd_config is
   signal ir_prefix : ir_sums_t := (others => 0);             -- 装置 i より TDO 側の IR の合計
   signal ir_total  : natural range 0 to 255 := 4;           -- 全装置の IR の合計（構成中は積算）
   signal conf_i    : natural range 0 to JTAG_MAX_DEVICES := 0;
+  signal sel_prefix : natural range 0 to 255 := 0;           -- jtag_index の装置の値（1 段目）
+  signal sel_len    : natural range 1 to 32 := 4;
+  signal sel_index  : natural range 0 to JTAG_MAX_DEVICES - 1 := 0;
+  signal rest       : integer range -255 to 255 := 0;          -- ir_total − 選んだ装置の累積和（2 段目）
+  signal rest_len   : natural range 1 to 32 := 4;
 begin
   get_req <= get_req_r;
   get_n   <= get_n_r;
@@ -136,14 +141,24 @@ begin
     end if;
   end process;
 
+  -- 装置の位置の値は段に分けて求める: 1 段目で jtag_index の装置の IR の累積和と長さを選び、2 段目で ir_total から
+  -- 累積和を引き、3 段目で長さを引いて上下限（ir_after は 3 周期、ほかは 2 周期で決まる）。
+  -- 1 段で計算すると配列の選択 → 引き算 2 回 → 上下限が 7 段になり、sys を上げると最も遅い経路の一つだった
+  -- （2026-10-29、PYNQ を 462.5 MHz の目標で配線して）。jtag_index はコマンドの区切りでしか変わらず、PHY が使うのは
+  -- コマンドを解釈した数周期後なので、1 周期の遅れは振る舞いを変えない。
   process (clk)
   begin
     if rising_edge(clk) then
-      ir_before <= minimum(ir_prefix(jtag_index), 63);
-      ir_after  <= maximum(0, minimum(ir_total - ir_prefix(jtag_index) - irlen(jtag_index), 63));   -- 構成中は負になりうる
-      ir_len    <= irlen(jtag_index);
-      dr_before <= jtag_index;
-      dr_after  <= maximum(0, count_r - 1 - jtag_index);           -- 構成を縮めた直後は負になりうる
+      sel_prefix <= ir_prefix(jtag_index);
+      sel_len    <= irlen(jtag_index);
+      sel_index  <= jtag_index;
+      rest       <= ir_total - sel_prefix;                                   -- 3 段目の材料（構成中は負になりうる）
+      rest_len   <= sel_len;
+      ir_before <= minimum(sel_prefix, 63);
+      ir_after  <= maximum(0, minimum(rest - rest_len, 63));
+      ir_len    <= sel_len;
+      dr_before <= sel_index;
+      dr_after  <= maximum(0, count_r - 1 - sel_index);           -- 構成を縮めた直後は負になりうる
     end if;
   end process;
 
@@ -303,7 +318,8 @@ begin
               cycles <= cycles + 1;
             end if;
 
-          -- SWJ_Clock: half_period = ceil(HALF_CLOCK_HZ / (1.01 * clock))、2〜65535
+          -- SWJ_Clock: half_period = ceil(HALF_CLOCK_HZ / (1.01 * clock))、1〜65535（1 = SWCLK / TCK が sys / 2。
+          -- docs/superpowers/specs/2026-11-03-dap-line-rate-design.md §2）
           when S_CLOCK =>
             if unsigned(arg(31 downto 0)) = 0 then
               reply_status(DAP_ERROR);
@@ -320,8 +336,8 @@ begin
             end if;
 
           when S_CLOCK_DONE =>
-            if div_quot < 2 then
-              half_r <= to_unsigned(2, 16);
+            if div_quot < 1 then
+              half_r <= to_unsigned(1, 16);
             elsif div_quot > 65535 then
               half_r <= to_unsigned(65535, 16);
             else

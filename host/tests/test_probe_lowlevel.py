@@ -238,8 +238,8 @@ def test_jtag_sample_delay_scan_reports_facts_per_delay_and_restores(monkeypatch
     p, _ = make_probe(FakeTarget(swd=False, jtag_chain=FakeChain(taps)))
     dev = p.session.device
     dev.csr[g.DEBUG_SAMPLE_DELAY] = 1 | 5 << 8                          # SWD 1・JTAG 5（戻す値）
-    real = type(p)._jtag_wire
-    monkeypatch.setattr(type(p), "_jtag_wire", lambda self, f=None: LateTdo(real(self, f), dev, need=2))
+    real = p._jtag_wire
+    monkeypatch.setattr(p, "_jtag_wire", lambda f=None: LateTdo(real(f), dev, need=2))
     out = p.jtag_sample_delay_scan(frequency_hz=16_700_000, expected_idcodes=[0x4BA00477], reads=3)
     rows = {r["delay"]: r for r in out["delays"]}
     assert sorted(rows) == list(range(8))
@@ -248,7 +248,26 @@ def test_jtag_sample_delay_scan_reports_facts_per_delay_and_restores(monkeypatch
     assert all(r["applied"] for r in rows.values())
     assert dev.csr[g.DEBUG_SAMPLE_DELAY] == 1 | 5 << 8                  # 元に戻した（SWD の欄も触らない）
     assert out["frequency_hz"] == 16_700_000 and out["restored_delay"] == 5
-    assert out["half_period"] == 3 and out["tck_hz"] == 100_000_000 / 7    # 実際の TCK（1 ビット = 2 × 3 + 1 周期）
+    assert out["half_period"] == 3 and out["tck_hz"] == 100_000_000 / 6    # 実際の TCK（1 ビット = 2 × 3 周期）
+
+
+def test_jtag_sample_delay_scan_reports_the_tck_of_an_old_circuit():
+    # ケイパビリティに DEBUG_JTAG_BIT_2HP の無い古い回路は 1 ビット = 2 × 半周期 + 1 周期
+    p, _ = make_probe(FakeTarget(swd=False, jtag_chain=FakeChain([Tap(4, 0x4BA00477)])))
+    p.session.device.jtag_bit_extra_cycles = 1
+    p.session.device.min_half_period = 2
+    out = p.jtag_sample_delay_scan(frequency_hz=16_700_000, expected_idcodes=[0x4BA00477], reads=1)
+    assert out["half_period"] == 3 and out["tck_hz"] == 100_000_000 / 7
+
+
+def test_jtag_sample_delay_scan_reaches_sys_half_on_a_current_circuit():
+    # 今の回路（DEBUG_HALF_PERIOD_1）は 50 MHz（sys / 2、半周期 1）まで。古い回路（下限 2）は 25 MHz に丸める
+    p, _ = make_probe(FakeTarget(swd=False, jtag_chain=FakeChain([Tap(4, 0x4BA00477)])))
+    out = p.jtag_sample_delay_scan(frequency_hz=50_000_000, expected_idcodes=[0x4BA00477], reads=1)
+    assert out["half_period"] == 1 and out["tck_hz"] == 50_000_000
+    p.session.device.min_half_period = 2
+    out = p.jtag_sample_delay_scan(frequency_hz=50_000_000, expected_idcodes=[0x4BA00477], reads=1)
+    assert out["half_period"] == 2 and out["tck_hz"] == 25_000_000
 
 
 def test_jtag_sample_delay_set_keeps_the_swd_field_and_reports_readback():
@@ -280,6 +299,6 @@ def test_jtag_sample_delay_set_switches_to_the_jtag_design_first(monkeypatch):
     # 横断レビュー: 標準の構成（JTAG なし）で書くと、後で JTAG の構成に書き替えたときに 0 に戻る。先に切り替える
     p, _ = make_probe()
     calls = []
-    monkeypatch.setattr(type(p), "_ensure_design", lambda self, protocol: calls.append(protocol))
+    monkeypatch.setattr(p, "_ensure_design", lambda protocol: calls.append(protocol))
     p.jtag_sample_delay_set(cycles=2)
     assert calls == ["jtag"]

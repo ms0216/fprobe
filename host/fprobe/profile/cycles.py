@@ -85,8 +85,11 @@ def clock_from_two_reads(first: tuple[int, int, int], second: tuple[int, int, in
         raise ValueError("2 回目の読みが 1 回目より後でない")
     delta = (c1 - c0) % (1 << 32)
     longest, shortest = (b1 - a0) / timebase_hz, (b0 - a1) / timebase_hz
+    # 2 回の読みからは、間に CYCCNT が何周したかは分からない（仮定を黙らない）
+    warnings = [f"CYCCNT は 2 回の読みの間（{span:g} 秒）に 1 周未満と仮定した（1 周 = 2^32 サイクル。何周したかは"
+                "2 回の読みからは分からない。1 周より短い間隔で読み直すと確かめられる）"]
     return ClockEstimate(delta / span, 2, span, clock_min_hz=delta / longest,
-                         clock_max_hz=delta / shortest if shortest > 0 else None)
+                         clock_max_hz=delta / shortest if shortest > 0 else None, warnings=warnings)
 
 
 def counter_delta(start: int, end: int, overflows: int | None = None, bits: int = 8) -> tuple[int, bool]:

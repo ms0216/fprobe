@@ -32,13 +32,13 @@ def _needs_memory(address: int, length: int) -> bytes:
     raise _NeedsMemory()
 
 
-def check_expression(info, expression: str) -> dict:
+def check_expression(info, expression: str, load_bias: int = 0) -> dict:
     """C の式を型の情報（DWARF）だけで調べる（ターゲットのメモリ・レジスタは使わない）。式の誤り・名前の無い変数
     （ローカル変数なら止まっているときに読む旨を添える）・型の誤りは ExpressionError。通れば {"expression", "type"
     （ポインタをたどる式は読むまで分からないので None）, "address"?（番地の決まる式）, "live"（走らせたまま読める）,
-    "needs_memory"（番地がメモリの値で決まる）}。"""
+    "needs_memory"（番地がメモリの値で決まる）}。load_bias: 実行時の番地 − リンク時の番地（Inspector と同じ。番地に足す）。"""
     try:
-        value = evaluate(expression, info, FrameView(None, _needs_memory, _no_register))
+        value = evaluate(expression, info, FrameView(None, _needs_memory, _no_register, load_bias=load_bias))
     except _NeedsMemory:
         return {"expression": expression, "type": None, "live": True, "needs_memory": True}
     except UnknownNameError as e:
@@ -51,11 +51,15 @@ def check_expression(info, expression: str) -> dict:
 
 class Inspector:
     def __init__(self, info: DebugInfo, access: TargetAccess, symbols=None, max_frames: int = 64,
-                 assume_leaf: bool = False):
+                 assume_leaf: bool = False, load_bias: int = 0):
+        """load_bias: 実行時の番地 − リンク時の番地（PIE・共有ライブラリを読み込んだプロセス）。ELF（info・symbols）は
+        リンク時の番地のまま、関数・行・スコープ・CFI は pc − load_bias で引き、大域変数の番地に load_bias を足す。
+        応答の番地（pc・変数の番地・ポインタ）は実行時の値。既定 0（読み込み位置どおりの ELF。Cortex-M 等）。"""
         self.info = info
         self.access = access
         self.symbols = symbols                       # fprobe.symbols.Symbols（任意。ファイル:行・番地のシンボル名）
-        self.unwinder = Unwinder(CallFrameTable.from_dwarf(info.dwarf), max_frames, assume_leaf)
+        self.load_bias = load_bias
+        self.unwinder = Unwinder(CallFrameTable.from_dwarf(info.dwarf), max_frames, assume_leaf, load_bias)
         self._frames: list[FrameState] | None = None
 
     def invalidate(self) -> None:
@@ -77,19 +81,24 @@ class Inspector:
 
     def view(self, index: int) -> FrameView:
         state = self.frame(index)
-        return FrameView(state.lookup_pc, self.access.read_memory, state.registers.read, state.cfa)
+        return FrameView(state.lookup_pc - self.load_bias, self.access.read_memory, state.registers.read, state.cfa,
+                         self.load_bias)
+
+    def _global_view(self) -> FrameView:
+        return FrameView(None, self.access.read_memory, _no_register, load_bias=self.load_bias)
 
     def where(self, state: FrameState) -> dict:
         """関数名・関数の先頭からのバイト数・ファイル:行（呼び出し元は呼び出し命令の行）。"""
-        function = self.info.function_at(state.lookup_pc)
+        link_pc, link_lookup = state.pc - self.load_bias, state.lookup_pc - self.load_bias
+        function = self.info.function_at(link_lookup)
         out = {"function": function.name if function else None, "offset": None, "file": None, "line": None}
         if function is not None:
-            out["offset"] = state.pc - function.low
+            out["offset"] = link_pc - function.low
         if self.symbols is not None:
-            loc = self.symbols.describe(state.lookup_pc)
+            loc = self.symbols.describe(link_lookup)
             out["file"], out["line"] = loc.file, loc.line
             if function is None and loc.function is not None:
-                out["function"], out["offset"] = loc.function, state.pc - (loc.address - loc.offset)
+                out["function"], out["offset"] = loc.function, link_pc - (loc.address - loc.offset)
         return out
 
     def backtrace(self, variables: bool = False, max_elements: int = 64) -> list[dict]:
@@ -110,7 +119,7 @@ class Inspector:
 
     def _variables(self, index: int, max_elements: int) -> dict:
         state = self.frame(index)
-        scope = self.info.scope_at(state.lookup_pc)
+        scope = self.info.scope_at(state.lookup_pc - self.load_bias)
         if scope is None:
             return {"arguments": [], "locals": []}
         view = self.view(index)
@@ -141,7 +150,7 @@ class Inspector:
             return self.view(frame)
         except IndexError:
             if frame == 0:                               # PC が読めない（動作中等）: 大域だけで評価する
-                return FrameView(None, self.access.read_memory, _no_register)
+                return self._global_view()
             raise
 
     def read(self, expression: str, frame: int = 0, max_elements: int = 64) -> dict:
@@ -150,7 +159,7 @@ class Inspector:
 
     def read_global(self, expression: str, max_elements: int = 64) -> dict:
         """フレームを使わずに読む（走っているコア: レジスタは読まず、大域・静的の変数とメモリだけ）。形は read と同じ。"""
-        return self._read(expression, FrameView(None, self.access.read_memory, _no_register), max_elements)
+        return self._read(expression, self._global_view(), max_elements)
 
     def _read(self, expression: str, view: FrameView | None, max_elements: int) -> dict:
         value = evaluate(expression, self.info, view)
@@ -165,7 +174,7 @@ class Inspector:
         size = value.type.size if not value.is_bitfield else (value.bit_offset + value.bit_size + 7) // 8
         if size is None:
             return unavailable(f"大きさの分からない型 {type_name(value.type)}")
-        reader = view or FrameView(None, self.access.read_memory, _no_register)
+        reader = view or self._global_view()
         try:
             data = read_place(value.place, size, _context(reader))
         except NotAvailable as e:
@@ -225,7 +234,7 @@ class Inspector:
     def _describe_address(self, address: int) -> str | None:
         if self.symbols is None:
             return None
-        found = self.symbols.symbol_at(address)
+        found = self.symbols.symbol_at(address - self.load_bias)
         if found is None:
             return None
         symbol, offset = found
@@ -235,7 +244,7 @@ class Inspector:
 
 
 def _context(view: FrameView) -> EvalContext:
-    return EvalContext(view.read_memory, view.read_register, cfa=view.cfa)
+    return EvalContext(view.read_memory, view.read_register, cfa=view.cfa, load_bias=view.load_bias)
 
 
 def _no_register(number: int) -> int:

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fprobe-gateware"
+license = { text = "GPL-3.0-only" }
 version = "0.1.0"
 description = "fprobe: FPGA マルチファンクション・デバッグプローブのゲートウェア（VHDL）と開発ツール"
 requires-python = ">=3.12"   # shutil.rmtree(onexc=...) を使う
-license = { text = "GPL-3.0-only" }
 dependencies = [
     "cocotb~=2.1",
 ]

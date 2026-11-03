@@ -1,6 +1,6 @@
 """Probe の道具: 画面の状態（人の画面・別の窓・AI が共有する「いま見ているところ」）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器には触らない。変わるたびに通知 "ui.state" を送る（送り先は
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。機器には触らない。変わるたびに通知 "ui.state" を送る（送り先は
 デーモンが attach_publisher でつなぐ _publish）。誰が変えたかはデーモンの操作の記録（ui.state.set）に残る。
 
 状態:
@@ -35,12 +35,15 @@ import time
 from pathlib import Path
 
 from .fpga_signals import FpgaSignals
+from .probe_service import HostView
 
-__all__ = ["CURSORS", "UiStateTools"]
+__all__ = ["CURSORS", "UiStateService"]
 
 CURSORS = ("selection", "mouse", "reference")
 SOURCES = ("capture", "recording")
-KEYS = ("view", "cursors", "rows", "event", "frame", "sampling", "dashboard", "fpga_signals", "system")
+KEYS = ("view", "cursors", "rows", "event", "frame", "sampling", "dashboard", "fpga_signals", "system", "panel")
+# 画面のパネルの名前（host/ui/src/components/panels/registry.ts の id。仕様の enum と同じ: 画面の試験が照らす）
+PANELS = ("source", "disassembly", "registers", "watch", "locals", "callStack", "breakpoints", "memory", "peripherals", "threads", "fault", "timeline", "terminal", "log", "linux", "linuxHalt", "activity", "swoTrace", "eventLog", "recordings", "system", "dataSampling", "power", "cpuLoad", "rtosObjects", "rtosTiming", "testpoints", "heap", "profile", "interrupts", "callGraph", "logicAnalyzer", "crossTrigger", "verify", "fpgaObs", "dashboard", "flash", "lowLevel", "api", "favorites")
 LASTING = ("sampling", "dashboard", "fpga_signals", "system")   # デーモンの再起動を越えて残す（ui_state_persist）
 SYSTEM_ITEMS = 64                                              # システム解析の表・条件の数の上限
 POINTER_TTL_S = 600.0
@@ -50,13 +53,19 @@ DASHBOARD_BYTES = 65536                                        # 配置の JSON 
 
 def _default() -> dict:
     return {"view": None, "cursors": dict.fromkeys(CURSORS), "rows": None, "event": None, "frame": 0, "sampling": None,
-            "dashboard": None, "fpga_signals": None, "system": None}
+            "dashboard": None, "fpga_signals": None, "system": None, "panel": None}
 
 
-class UiStateTools:
-    """画面の状態（Probe の mixin）。"""
+class UiStateService:
+    """画面の状態（Probe のサービス）。"""
 
-    def _init_ui_state(self) -> None:
+    API = ("ui_state_client_left", "ui_state_get", "ui_state_persist", "ui_state_set")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_publish",)
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._ui_lock = threading.Lock()
         self._ui_state = _default()
         self._ui_rev = 0
@@ -104,7 +113,7 @@ class UiStateTools:
     def ui_state_set(self, view: dict | None = None, cursors: dict | None = None, rows: list[str] | None = None,
                      event: dict | None = None, frame: int | None = None, sampling: dict | None = None,
                      dashboard: dict | None = None, fpga_signals: dict | None = None, system: dict | None = None,
-                     clear: list[str] | None = None,
+                     panel: str | None = None, clear: list[str] | None = None,
                      origin: str | None = None, caller: dict | None = None) -> dict:
         """画面の状態を変える（渡したものだけ。cursors は渡したカーソルだけ、null で消す）。clear に挙げたもの
         （view / cursors / rows / event / frame / sampling / dashboard）は既定（null・すべて・0）に戻す。sampling はデータ サンプリングの
@@ -137,7 +146,12 @@ class UiStateTools:
             patch["fpga_signals"] = FpgaSignals.from_dict(fpga_signals).to_dict()
         if system is not None:
             patch["system"] = _system(system)
+        if panel is not None and panel not in PANELS:
+            raise ValueError(f"panel の {panel!r} は無い（{' / '.join(PANELS)}）")
         with self._ui_lock:
+            if panel is not None:                          # 開く・前に出す: 同じパネルでも毎回変わる（seq）
+                previous = self._ui_state.get("panel")
+                patch["panel"] = {"id": panel, "seq": (previous["seq"] + 1) if previous else 1}
             before = copy.deepcopy(self._ui_state)
             state = self._ui_state
             default = _default()
@@ -155,7 +169,7 @@ class UiStateTools:
                 self._ui_save(state)
             out = {"rev": self._ui_rev, **copy.deepcopy(state), "pointers": self._pointers()}
         if changed:
-            publish = self._publish
+            publish = self._host._publish
             if publish is not None:
                 publish("ui.state", {"rev": out["rev"], "origin": origin, "changed": changed,
                                      "state": {k: out[k] for k in KEYS}, "pointers": out["pointers"]})
@@ -184,7 +198,7 @@ class UiStateTools:
                 return False
             self._ui_rev += 1
             out = {"rev": self._ui_rev, **copy.deepcopy(self._ui_state), "pointers": self._pointers()}
-        publish = self._publish
+        publish = self._host._publish
         if publish is not None:
             publish("ui.state", {"rev": out["rev"], "origin": None, "changed": ["pointers"],
                                  "state": {k: out[k] for k in KEYS}, "pointers": out["pointers"]})

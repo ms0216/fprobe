@@ -1,7 +1,7 @@
-"""共通の時間軸の記録（recording_*・F3）の mixin: 記録の開始・停止・一覧・開く、イベント・相関・トリガ（記録を調べて動作）・
+"""共通の時間軸の記録（recording_*・F3）のサービス: 記録の開始・停止・一覧・開く、イベント・相関・トリガ（記録を調べて動作）・
 継続時間・取引・検索・密度・波形・印・書き出し・ホストのイベントの記録。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う。Probe の _lock・session・_caps・_recorder・_collector・_view・_la と、
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・_caps・_recorder・_collector・_view・_la と、
 _job / _add_job 等を使う。部品は fprobe.recording・fprobe.collector・fprobe.correlate・fprobe.export。
 """
 
@@ -16,11 +16,13 @@ import time
 from .home import fprobe_home
 from .api import NoData
 from .collector import Collector
-from .correlate import ConditionWatcher, correlate, durations, transactions
+from .correlate import ConditionWatcher, correlate, durations, parse_condition, term_dict, transactions
 from .export import write_trace
 from .fpga_signals import FpgaSignals
 from .la import channel_names
 from .recording import Recording
+from .probe_service import HostView
+from .recording import Recorder
 
 TRIGGER_PERIOD_S = 0.5                 # recording_trigger: 記録を調べる周期
 
@@ -32,14 +34,31 @@ def _channel_list(caps) -> list[str]:
     """記録の情報 pins: ピンの既定の名前（ch の順。名前の無い ch は ch<N>）。後から開いた記録でもピンを名前で指せる
     （recording_correlate）。時間軸の段の名前（channel_names。利用者の名前）とは別（画面は既定の名前を訳して見せる）。"""
     names = channel_names(caps)
-    count = max(int(getattr(caps, "la_channels", 0) or 0), max(names, default=-1) + 1)
+    count = max(caps.la_channels, max(names, default=-1) + 1)
     return [names.get(ch, f"ch{ch}") for ch in range(count)]
 
 
-class RecordingTools:
-    """Probe に混ぜる共通の時間軸の記録の道具。"""
+class RecordingService:
+    """Probe が委ねる共通の時間軸の記録の道具。"""
 
-    def _init_recording(self) -> None:
+    API = ("record_host_event", "recording_condition_parse", "recording_correlate", "recording_density", "recording_durations", "recording_events",
+           "recording_export", "recording_find", "recording_intervals", "recording_list", "recording_mark",
+           "recording_open", "recording_start", "recording_status", "recording_stop", "recording_transactions",
+           "recording_trigger_clear", "recording_trigger_set", "recording_trigger_status", "recording_waveform")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_collector", "_name_watches", "_reading", "_recorder", "_recordings_dir", "_trigger", "_trigger_poll",
+              "_view", "_view_lock")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_add_job", "_counter_names", "_la_record", "_linux_before_recording_stop", "_lock", "_make_recorder",
+             "_obs_delays", "_publish", "_remove_job", "_stop_la_record", "_symbols", "_watch_running", "_watched",
+             "session", "ui_state_get")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+        self._recorder: Recorder | None = None                 # 記録中の共通の時間軸の記録（F3）
+        self._collector: Collector | None = None
+        self._view: Recording | None = None                    # 読む対象の記録（記録中のもの、または開いたもの）
+        self._view_lock = threading.Lock()                     # _view の差し替えと前の記録を閉じるのを 1 つに
         self._trigger: dict | None = None                  # recording_trigger の設定（無ければ None）
 
     @staticmethod
@@ -53,23 +72,26 @@ class RecordingTools:
         印・（デーモン経由なら）すべての操作とターゲットの状態の変化が、1 つの時刻の上に保存される。
         長期の記録（日単位）: segment_s（分割の時間）・segment_bytes・max_bytes（容量の上限。古い分割から消す）・
         decimate_after_s（閉じてからこの秒数で decimate_streams を間引く）のどれかを指定すると分割した記録になる。"""
-        with self._lock:
+        with self._host._lock:
             if self._recorder is not None:
                 raise RuntimeError("記録中（recording_stop を先に）")
-            device = self.session.device
+            device = self._host.session.device
             caps = device.capabilities()
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             safe = re.sub(r"[^\w\-]+", "_", name).strip("_")
             directory = self._recordings_dir() / (f"{stamp}-{safe}" if safe else stamp)
-            self._recorder = self._make_recorder(
+            self._recorder = self._host._make_recorder(
                 directory, caps.timebase_hz,
                 {"name": name, "board": caps.board, "design": caps.design,
-                 "elf": str(self._symbols.path) if self._symbols else None,
-                 "fpga.signals": self.ui_state_get()["fpga_signals"], "pins": _channel_list(caps)},
+                 "elf": str(self._host._symbols.path) if self._host._symbols else None,
+                 "fpga.signals": self._host.ui_state_get()["fpga_signals"], "pins": _channel_list(caps),
+                 # 回路の時刻の申告（TLV TIMING。記録の後で時刻を直す道具が使う: merge の同期の窓など。time-accuracy §13）
+                 "timing": {name: {"point": t.point, "unit": t.unit, "delay": t.delay, "span": t.span,
+                                   "excludes": list(t.excludes)} for name, t in caps.timing.items()}},
                 segment_s, segment_bytes, max_bytes, decimate_after_s, decimate_streams)
             try:
-                self._collector = Collector(device, self._recorder, lock=self._lock)
-                for k, v in self._obs_delays.items():    # FPGA の観測を先に開いていれば同じ遅れで
+                self._collector = Collector(device, self._recorder, lock=self._host._lock)
+                for k, v in self._host._obs_delays.items():    # FPGA の観測を先に開いていれば同じ遅れで
                     setattr(self._collector.obs, k, v)
                 if not events:
                     self._collector.events = None                     # イベント記録を取り込まない
@@ -83,8 +105,8 @@ class RecordingTools:
                 recorder.close()
                 raise
             # 前から動いている watch の名前も記録の変数の名前に（watch_set を記録の後に呼び直さなくても）
-            if self._watch_running:            # 止めた watch の名前は写さない（値が入らない）
-                self._name_watches({w.address: w.name for w in self._watched
+            if self._host._watch_running:            # 止めた watch の名前は写さない（値が入らない）
+                self._name_watches({w.address: w.name for w in self._host._watched
                                     if getattr(w, "address", None) is not None and w.name})
             return {"recording": directory.name, "path": str(directory)}
 
@@ -106,10 +128,10 @@ class RecordingTools:
         collector, recorder = self._collector, self._recorder
         if recorder is None:
             raise RuntimeError("記録していない")
-        self._stop_la_record()                                    # 流し続けの残りを入れてから閉じる
-        self._linux_before_recording_stop()                       # Linux の出来事の、組を待っている分を入れる
+        self._host._stop_la_record()                                    # 流し続けの残りを入れてから閉じる
+        self._host._linux_before_recording_stop()                       # Linux の出来事の、組を待っている分を入れる
         collector.stop()                                          # ロックの外で（集める側がロックを取るため）
-        with self._lock:
+        with self._host._lock:
             recorder.close()
             self._recorder = self._collector = None
             view = self._view                                  # 記録中に別の記録を開いていれば、その件数ではない
@@ -126,8 +148,10 @@ class RecordingTools:
                 rec.flush()
             out.update(events=view.count(), span=view.span(), timebase_hz=view.meta["timebase_hz"])
         if rec is not None:
+            # 記録を終えた理由（タイムベースが 0 に戻った等。time-accuracy §14.1。以後の行は入らない。recording_stop で閉じる）
+            out["ended"] = getattr(rec, "ended", None)
             # MCU のメモリの読み（watch）が動いているか: 止まると記録に入らない（watch_set で再開。それまでは欠け）
-            out["watch_running"] = self._watch_running
+            out["watch_running"] = self._host._watch_running
             try:
                 out["clock_uncertainty_ticks"] = rec.clock.to_ticks(time.monotonic())[1]
             except RuntimeError:
@@ -137,7 +161,7 @@ class RecordingTools:
         collector = self._collector                     # イベントの読み出しの失敗（取り込みは続く。欠落は lost）
         if collector is not None and collector.errors:
             out["events_errors"] = {"count": collector.errors, "last": collector.last_error, "lost": collector.lost}
-        la_record = self._la_record                    # 別のスレッド（条件で止める等）が None にするので一度だけ読む
+        la_record = self._host._la_record                    # 別のスレッド（条件で止める等）が None にするので一度だけ読む
         if la_record is not None:
             out["la_stream"] = la_record.status()
         return out
@@ -217,6 +241,12 @@ class RecordingTools:
         読みで何回分も動いている）。"""
         return correlate(self._reading(), effect, causes, window_s, t0, t1, examples, limit, gap_s, max_coverage)
 
+    def recording_condition_parse(self, condition: str) -> dict:
+        """条件の文字（recording_correlate・recording_trigger_set・fpga_obs_count と同じ書き方）を項に分ける。記録・機器に
+        触らない（変数が記録にあるかは見ない）。読めない・瞬間の項（changed / rose / fell）が無ければ ConditionError。"""
+        parsed = parse_condition(condition)
+        return {"condition": parsed.text, "terms": [term_dict(t) for t in parsed.terms]}
+
     def recording_trigger_set(self, condition: str, action: str = "mark", post_s: float = 1.0,
                               lag_s: float = 2.0) -> dict:
         """記録中に、条件（recording_correlate と同じ書き方。MCU のメモリ・FPGA の信号・ピンをまたげる）が成り立つたびに
@@ -230,7 +260,7 @@ class RecordingTools:
             raise ValueError("post_s は 0 以上")
         if not lag_s >= 0:
             raise ValueError("lag_s は 0 以上")
-        with self._lock:
+        with self._host._lock:
             if self._recorder is None:
                 raise RuntimeError("記録していない（recording_start を先に）")
             watcher = ConditionWatcher(condition)                      # 条件の形はここで確かめる
@@ -239,7 +269,7 @@ class RecordingTools:
             self._trigger = {"condition": watcher.condition.text, "action": action, "post_s": post_s, "lag_s": lag_s,
                              "watcher": watcher, "view": Recording.open(self._recorder.directory), "checked": 0, "hits": 0, "first_t": None, "last_t": None,
                              "state": "armed", "error": None, "late": 0, "_checked_count": 0}
-            self._add_job("recording.trigger", TRIGGER_PERIOD_S, self._trigger_poll)
+            self._host._add_job("recording.trigger", TRIGGER_PERIOD_S, self._trigger_poll)
             return self.recording_trigger_status()
 
     def recording_trigger_status(self) -> dict:
@@ -253,12 +283,12 @@ class RecordingTools:
 
     def recording_trigger_clear(self) -> dict:
         """条件の見張りをやめる。"""
-        with self._lock:
+        with self._host._lock:
             self._clear_trigger()
             return {"state": "off"}
 
     def _clear_trigger(self) -> None:
-        self._remove_job("recording.trigger")
+        self._host._remove_job("recording.trigger")
         trig = self._trigger
         if trig is not None:
             trig["view"].close()
@@ -270,13 +300,13 @@ class RecordingTools:
         if trig is None or trig["state"] in ("stopped", "error"):
             return
         if self._recorder is None:                                      # 記録が止まった: 見張りも終わる
-            self._remove_job("recording.trigger")
+            self._host._remove_job("recording.trigger")
             trig["view"].close()
             trig["state"] = "stopped" if trig["state"] == "fired" else "off"
             return
         hz = self._recorder.timebase_hz
         if now is None:
-            now = self.session.device.time() - int(trig["lag_s"] * hz)
+            now = self._host.session.device.time() - int(trig["lag_s"] * hz)
         try:
             self._recorder.flush()
             view = trig["view"]
@@ -285,7 +315,7 @@ class RecordingTools:
             hits = trig["watcher"].scan(view, trig["checked"], now)
         except Exception as e:                                          # 条件の変数が記録に無い等
             trig.update(state="error", error=f"{type(e).__name__}: {e}")
-            self._remove_job("recording.trigger")
+            self._host._remove_job("recording.trigger")
             trig["view"].close()
             return
         trig["checked"] = max(trig["checked"], now)
@@ -300,7 +330,7 @@ class RecordingTools:
             trig["state"] = "fired"
         if trig["action"] == "stop" and trig["first_t"] is not None and now >= trig["first_t"] + trig["post_s"] * hz:
             trig["state"] = "stopped"
-            self._remove_job("recording.trigger")
+            self._host._remove_job("recording.trigger")
             trig["view"].close()
             # 止めるのはロックの外で（ロジアナの流れの受け取りがロックを取る。recording_la_stream_stop）
             threading.Thread(target=self._trigger_stop, args=(trig["condition"],), name="fprobe-trigger-stop",
@@ -309,7 +339,7 @@ class RecordingTools:
     def _trigger_stop(self, condition: str) -> None:
         """条件で記録を止め、誰が・なぜ止めたかを通知 recording で知らせる（デーモンを通らない止め方なので）。"""
         result = self.recording_stop()
-        publish = self._publish
+        publish = self._host._publish
         if publish is not None:
             publish("recording", {"action": "stop", "name": result.get("recording"), "reason": f"条件: {condition}",
                                   "client": {"id": None, "name": "trigger", "role": "script"}})
@@ -402,7 +432,7 @@ class RecordingTools:
         r = self._reading()
         if format == "perfetto":
             return write_trace(r, Path(path), t0=t0, t1=t1, streams=streams, waveform=waveform, channels=channels,
-                               names=self._counter_names())
+                               names=self._host._counter_names())
         if format == "vcd":
             if t0 is not None or t1 is not None or streams is not None:
                 raise ValueError("vcd は範囲・streams で絞れない（波形の全体。channels だけ）")
@@ -411,11 +441,18 @@ class RecordingTools:
             {"csv": r.export_csv, "json": r.export_json}[format](Path(path), t0=t0, t1=t1, streams=streams)
         return {"path": path}
 
-    def record_host_event(self, stream: str, kind: str, body: dict) -> None:
-        """デーモンが、操作の記録（activity）やターゲットの状態の変化を記録中の記録へ入れる口。"""
+    def record_host_event(self, stream: str, kind: str, body: dict, time_source: str = "host",
+                          started_host_s: float | None = None) -> None:
+        """デーモンが、操作の記録（activity）やターゲットの状態の変化を記録中の記録へ入れる口。時刻はいまの PC の時計
+        （time_source: "host" = PC の出来事、"host_received" = PC が読んだ対象の状態。fprobe.recording.HOST_TIME_SOURCES）。
+        started_host_s（PC の単調時計の秒）を渡せば、始まりも同じ時計の対応付けで写して本体の t_start・
+        t_start_uncertainty に入れる（操作の区間。PC の秒数に公称の速さを掛けて始まりを推定しない）。"""
         rec = self._recorder
         if rec is not None:
             try:
-                rec.add_host(stream, kind, time.monotonic(), body=body)
+                if started_host_s is not None:
+                    t_start, unc = rec.clock.to_ticks(started_host_s)
+                    body = {**body, "t_start": t_start, "t_start_uncertainty": unc}
+                rec.add_host(stream, kind, time.monotonic(), time_source=time_source, body=body)
             except RuntimeError:
                 pass                                              # 時計の対応付けの前（始めた直後）

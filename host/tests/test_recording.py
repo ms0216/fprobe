@@ -2,10 +2,10 @@
 
 import csv
 import json
-import time
 from array import array
 
 import pytest
+from perf_budget import within
 
 from fprobe.la import Transitions
 from fprobe.recording import ClockMap, Recorder, Recording
@@ -147,17 +147,25 @@ def test_export_writes_vcd_csv_and_json(rec, tmp_path):
     assert json.loads(js.read_text(encoding="utf-8"))[0]["kind"] == "rx"
 
 
-def test_a_million_events_are_written_and_summarized_quickly(rec):
+@pytest.mark.perf
+def test_a_million_events_are_written_and_summarized_quickly(tmp_path):
+    # 性能の約束（測り方は perf_budget）: 100 万件の書き込み（add_many + flush）が CPU 10 秒以内（10 万件/秒）、
+    # 2000 画素の縮図が 0.5 秒以内（画面の 1 回の描画）。2026-11-03 に手元（混んだ PC）で書き込み約 6 秒・縮図約 0.1 秒
+    # （tools/bench/recording_bench.py の write・density_stream）
     n = 1_000_000
-    t0 = time.process_time()
-    rec.add_many(("dap", "ap_read", i * 10, i, 0) for i in range(n))
-    rec.flush()
-    write_s = time.process_time() - t0
-    r = Recording.open(rec.directory)
-    t0 = time.process_time()
-    d = r.density(0, n * 10, 2000, streams=["dap"])
-    assert time.process_time() - t0 < 0.5 and sum(d) == n
-    assert write_s < 10
+    rows = [("dap", "ap_read", i * 10, i, 0) for i in range(n)]
+    dirs = iter(range(3))
+
+    def write(rec):
+        rec.add_many(rows)
+        rec.flush()
+        rec.close()
+        return rec.directory
+    _, directory = within(10.0, write, setup=lambda: Recorder(tmp_path / f"r{next(dirs)}", timebase_hz=HZ))
+    r = Recording.open(directory)
+    _, d = within(0.5, lambda: r.density(0, n * 10, 2000, streams=["dap"]))
+    assert sum(d) == n
+    r.close()
 
 
 def test_iter_events_can_include_intervals_that_began_before_the_range(tmp_path):
@@ -223,7 +231,7 @@ def test_span_and_distinct_use_the_indexes_and_follow_new_events(tmp_path):
     plans = " ".join(str(r) for r in view._db.execute(
         "EXPLAIN QUERY PLAN SELECT a, t FROM events WHERE stream = 'fpga' AND kind = 'group' AND t < 5 "
         "ORDER BY t DESC LIMIT 1"))
-    assert "events_stream_kind_t" in plans
+    assert "event_key_t" in plans and "TEMP B-TREE" not in plans        # 組の索引 (key, t) で引く（並べ直さない）
     rec.close()
 
 
@@ -245,3 +253,25 @@ def test_meta_is_replaced_whole_so_a_failed_write_keeps_the_old_one(tmp_path, mo
     monkeypatch.undo()
     assert (tmp_path / "r" / "meta.json").read_text(encoding="utf-8") == before
     assert json.loads(before)
+
+
+def test_waveform_chunks_are_the_same_file_from_arrays_numpy_and_lists(tmp_path):
+    # かたまりのファイルは array・numpy の配列を写さずに書く。どの形で渡しても同じバイト列
+    np = pytest.importorskip("numpy")
+    values, starts = [0, 3, 1, 65535], [0, 7, 9, 2 ** 40]
+    forms = {"list": (values, starts), "array": (array("H", values), array("Q", starts)),
+             "numpy": (np.array(values, dtype=np.uint16), np.array(starts, dtype=np.uint64)),
+             "numpy_strided": (np.array(values, dtype=np.uint16).repeat(2)[::2],
+                               np.array(starts, dtype=np.uint64).repeat(2)[::2]),
+             "numpy_wide": (np.array(values, dtype=np.int64), np.array(starts, dtype=np.int64))}
+    files = set()
+    for name, (v, s) in forms.items():
+        rec = Recorder(tmp_path / name, timebase_hz=HZ)
+        rec.add_waveform(Transitions(v, s, 2 ** 40 + 1, 0, 0, 1e-8, 16), 0)
+        rec.close()
+        files.add((tmp_path / name / "waveform" / "000000.bin").read_bytes())
+        r = Recording.open(tmp_path / name)
+        _, _, tr = next(r.waveforms())
+        assert list(tr.values) == values and list(tr.starts) == starts
+        r.close()
+    assert len(files) == 1

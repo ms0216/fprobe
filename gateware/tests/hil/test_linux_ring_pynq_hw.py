@@ -13,9 +13,11 @@ from fprobe.mcp_server import Probe
 
 HOST = os.environ.get("FPROBE_PYNQ_HOST")
 XSDB = os.environ.get("FPROBE_XSDB")
-pytestmark = pytest.mark.skipif(not (HOST and XSDB), reason="FPROBE_PYNQ_HOST・FPROBE_XSDB が無い")
+JTAG = os.environ.get("FPROBE_ZYNQ_JTAG")                 # 設定すると、xsdb でなく Primer の JTAG（PJTAG、linux.memap.connect_jtag）で読む
+pytestmark = pytest.mark.skipif(not (HOST and (XSDB or JTAG)), reason="FPROBE_PYNQ_HOST と、FPROBE_XSDB か FPROBE_ZYNQ_JTAG が無い")
 N = 3000
-PHYS, SIZE = 0x1DF00000, 0x100000
+PHYS = int(os.environ.get("FPROBE_RING_PHYS", "0x1DF00000"), 0)   # mem=479M で Linux から外した 1 MB。reserved-memory 方式の起動では 0x1FF00000（予約領域の最後の 1 MB。0x1DF00000 は Linux のメモリで、書くと固まる）
+SIZE = 0x100000
 APP_C = r"""
 #include <stdlib.h>
 #include <time.h>
@@ -44,7 +46,10 @@ def test_ring_is_read_without_halting_while_the_network_is_down():
         p.linux_agent_deploy(target="z")
         p.linux_agent_start(target="z")
         print("ring", p.linux_ring_open(target="z", phys=PHYS, size=SIZE, cached=False, linger=True))
-        print("memap", p.linux_memap_connect(target="z", xsdb=XSDB, cable_serial="1234-tulA", chain_idcode=0x23727093, timeout_s=30))
+        if JTAG:
+            print("memap", p.linux_memap_connect_jtag(target="z", chain_idcode=0x4BA00477, ap=0, frequency_hz=1_000_000))
+        else:
+            print("memap", p.linux_memap_connect(target="z", xsdb=XSDB, cable_serial="1234-tulA", chain_idcode=0x23727093, timeout_s=30))
         app = ssh.open(f"sh -c 'echo $$; exec nohup {APP} {N} >/dev/null 2>&1'")   # SSH が切れても続く
         pid = int(app.stdout.readline())
         p.linux_sync(target="z", count=8)

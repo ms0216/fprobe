@@ -15,6 +15,10 @@ from fprobe.serial_link import (CH_CONTROL, CH_DAP, CH_LINE_CODING, CH_STREAM, C
                                 SerialLink, cobs_decode, cobs_encode, crc16, decode_frame, encode_frame)
 from fprobe.transport import LinkTransport
 
+from fprobe.session import link_buffer_bytes
+
+BUF = link_buffer_bytes()
+
 from test_control import CAPS
 
 MEMORY = 0x8000_0000          # モデルの読み出し専用の窓（値 = アドレス）。長い応答の試験用
@@ -138,7 +142,7 @@ def model():
 
 @pytest.fixture
 def link(model):
-    with SerialLink(model) as link:
+    with SerialLink(model, buffer_bytes=BUF) as link:
         yield link
 
 
@@ -265,7 +269,7 @@ def test_uart0_line_coding_and_pacing(model, link):
 
 
 def test_close_stops_reader_and_owned_port(model):
-    link = SerialLink(model, owns_port=True)
+    link = SerialLink(model, owns_port=True, buffer_bytes=BUF)
     link.close()
     link.close()
     assert model.closed and not link._thread.is_alive()

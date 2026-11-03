@@ -24,29 +24,36 @@ package csr_map_pkg is
   constant CSR_WIN_GPIO : natural := 2;
   constant CSR_WIN_UART : natural := 3;
   constant CSR_WIN_LA : natural := 4;
-  constant CSR_WIN_XTRIG : natural := 5;
-  constant CSR_WIN_MEM : natural := 6;
-  constant CSR_WIN_LA_DEEP : natural := 7;
-  constant CSR_WIN_EVENTS : natural := 8;
-  constant CSR_WIN_DEBUG : natural := 9;
-  constant CSR_WIN_TRIGSEQ : natural := 10;
-  constant CSR_WIN_AUX : natural := 11;
-  constant CSR_WIN_SAMPLER : natural := 12;
-  constant CSR_WIN_SAMPLER_MATCH : natural := 13;
-  constant CSR_WIN_XTRIG_OUT : natural := 14;
-  constant CSR_WIN_OBS : natural := 15;
-  constant CSR_WIN_SYNC : natural := 16;
-  constant CSR_WIN_CAPS : natural := 17;
-  constant CSR_WIN_LA_MEM : natural := 18;
-  constant CSR_WINDOWS : csr_windows_t(0 to 18) := (
+  constant CSR_WIN_LA_CAP : natural := 5;
+  constant CSR_WIN_LA_TESTGEN : natural := 6;
+  constant CSR_WIN_XTRIG : natural := 7;
+  constant CSR_WIN_INJECT : natural := 8;
+  constant CSR_WIN_MEM : natural := 9;
+  constant CSR_WIN_LA_DEEP : natural := 10;
+  constant CSR_WIN_EVENTS : natural := 11;
+  constant CSR_WIN_DEBUG : natural := 12;
+  constant CSR_WIN_TRIGSEQ : natural := 13;
+  constant CSR_WIN_AUX : natural := 14;
+  constant CSR_WIN_SAMPLER : natural := 15;
+  constant CSR_WIN_SAMPLER_MATCH : natural := 16;
+  constant CSR_WIN_XTRIG_OUT : natural := 17;
+  constant CSR_WIN_OBS : natural := 18;
+  constant CSR_WIN_SYNC : natural := 19;
+  constant CSR_WIN_CAPS : natural := 20;
+  constant CSR_WIN_LA_MEM : natural := 21;
+  constant CSR_WIN_LA_LANES_MEM : natural := 22;
+  constant CSR_WINDOWS : csr_windows_t(0 to 22) := (
     CSR_WIN_SYSTEM => (base => 0, size => 16),
     CSR_WIN_TIMEBASE => (base => 64, size => 16),
     CSR_WIN_GPIO => (base => 128, size => 16),
     CSR_WIN_UART => (base => 192, size => 16),
     CSR_WIN_LA => (base => 256, size => 16),
+    CSR_WIN_LA_CAP => (base => 800, size => 16),
+    CSR_WIN_LA_TESTGEN => (base => 816, size => 16),
     CSR_WIN_XTRIG => (base => 320, size => 16),
+    CSR_WIN_INJECT => (base => 336, size => 16),
     CSR_WIN_MEM => (base => 384, size => 16),
-    CSR_WIN_LA_DEEP => (base => 448, size => 16),
+    CSR_WIN_LA_DEEP => (base => 448, size => 32),
     CSR_WIN_EVENTS => (base => 512, size => 16),
     CSR_WIN_DEBUG => (base => 576, size => 16),
     CSR_WIN_TRIGSEQ => (base => 640, size => 16),
@@ -57,7 +64,8 @@ package csr_map_pkg is
     CSR_WIN_OBS => (base => 896, size => 16),
     CSR_WIN_SYNC => (base => 960, size => 16),
     CSR_WIN_CAPS => (base => 1024, size => 1024),
-    CSR_WIN_LA_MEM => (base => 16384, size => 8192)
+    CSR_WIN_LA_MEM => (base => 16384, size => 8192),
+    CSR_WIN_LA_LANES_MEM => (base => 65536, size => 65536)
   );
 
 end package;

@@ -2,7 +2,7 @@
   // Watch: C の式を足して、止まるたびに読む（構造体・配列・ポインタは木で開く。値のダブルクリックで書く）。
   // 走っている間は、このパネルが開いていれば 1 秒ごとに走らせたまま読む（ライブ ウォッチ。Ozone・CubeIDE の Live
   // Expressions。大域・静的の式）。つないでいなければ ELF だけで式と型を調べ、誤りをその行に出す。書き込みで中断（ウォッチポイント）。
-  // 値は止まっていれば debug.write_expression、走らせたまま読んでいれば watch.write で書く（どちらかを窓の上に示す）
+  // 値は debug.write_expression で書く（止まっていればフレームで、走らせたまま読んでいれば止めずに。道はデーモンが選ぶ）
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";

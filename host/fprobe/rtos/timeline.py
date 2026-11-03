@@ -44,17 +44,34 @@ def name_of(names: Mapping[int, str], handle: int | None) -> str:
 
 @dataclass(frozen=True)
 class Run:
-    """そのタスクが CPU を使っていた区間 [t0, t1)。"""
+    """そのタスクが CPU を使っていた区間 [t0, t1)。
+
+    start_cut / end_cut: その端は切り替えでなく、観測の端・抜け（サンプルの抜け・ITM のあふれ）で切った所（本当の端は
+    分からない。観測の端なら外側）。uncertainty は切っていない端の不確かさの大きい方（タイムベース）。両端とも切った・
+    分解能が分からないなら None（0 にしない）。"""
     handle: int
     task: str
     t0: int
     t1: int
-    uncertainty: float = 0        # 区間の端の不確かさ（タイムベース）
+    uncertainty: float | None = None
     samples: int | None = None    # 方法 A: この区間に入ったサンプルの数（1 なら周期より短いかもしれない）
+    start_cut: bool = False
+    end_cut: bool = False
 
     @property
     def duration(self) -> int:
         return self.t1 - self.t0
+
+    @property
+    def cut(self) -> bool:
+        return self.start_cut or self.end_cut
+
+
+def _edge_uncertainty(start: float | None, start_cut: bool, end: float | None, end_cut: bool) -> float | None:
+    edges = [u for u, cut in ((start, start_cut), (end, end_cut)) if not cut]
+    if not edges or any(u is None for u in edges):
+        return None
+    return max(edges)
 
 
 @dataclass(frozen=True)
@@ -62,7 +79,7 @@ class Switch:
     t: int
     previous: int | None          # 前のタスクの TCB（抜けの直後で分からなければ None）
     next: int
-    uncertainty: float = 0
+    uncertainty: float | None = None      # None = 分からない（分解能が分からない）
 
 
 @dataclass(frozen=True)
@@ -78,7 +95,7 @@ class Timeline:
     method: str                   # sampled / itm
     t0: int
     t1: int
-    resolution: float             # 時刻の分解能（タイムベース）
+    resolution: float | None      # 時刻の分解能（タイムベース。None = 分からない）
     lower_bound: bool             # 回数（実行・切り替え）が下限（方法 A）
     runs: list[Run] = field(default_factory=list)
     switches: list[Switch] = field(default_factory=list)
@@ -89,18 +106,25 @@ class Timeline:
         return (self.t1 - self.t0) - sum(g.t1 - g.t0 for g in self.gaps)
 
     def stats(self) -> dict:
-        """タスクごとの合計・CPU の使用率・実行の回数・最長・最短・平均と、全体の切り替えの回数。"""
+        """タスクごとの合計・CPU の使用率・実行の回数・最長・最短・平均と、全体の切り替えの回数。
+
+        合計・使用率は観測した時間の中の事実なので全部の区間で数える。最長・最短・平均は両端が切り替えの区間だけ
+        （観測の端・抜けで切った区間は本当の長さが分からない: その数 cut_runs と、切った区間の観測した長さの最大
+        max_cut_run = その区間の長さの下限）。両端が切り替えの区間が無ければ None。"""
         covered = self.covered()
         per: dict[str, list[Run]] = {}
         for r in self.runs:
             per.setdefault(r.task, []).append(r)
         tasks = {}
         for name, runs in per.items():
-            durations = [r.duration for r in runs]
-            total = sum(durations)
+            total = sum(r.duration for r in runs)
+            whole = [r.duration for r in runs if not r.cut]
+            cut = [r.duration for r in runs if r.cut]
             tasks[name] = {"handle": runs[0].handle, "total": total, "cpu": total / covered if covered else 0.0,
-                           "runs": len(runs), "max_run": max(durations), "min_run": min(durations),
-                           "mean_run": statistics.fmean(durations),
+                           "runs": len(runs), "max_run": max(whole) if whole else None,
+                           "min_run": min(whole) if whole else None,
+                           "mean_run": statistics.fmean(whole) if whole else None,
+                           "cut_runs": len(cut), "max_cut_run": max(cut) if cut else None,
                            "short_runs": sum(1 for r in runs if r.samples == 1)}
         return {"method": self.method, "resolution": self.resolution, "lower_bound": self.lower_bound,
                 "covered": covered, "switches": len(self.switches), "gaps": len(self.gaps), "tasks": tasks}
@@ -117,39 +141,41 @@ def timeline_from_samples(samples: Iterable[tuple[int, int]], names: Mapping[int
                           gap: float | None = None) -> Timeline:
     """(時刻, pxCurrentTCB の値) の列 → 時間軸。
 
-    値が変わった 2 つのサンプルの中点を切り替えの時刻とし、不確かさは間隔の半分。分解能は period（無ければ
-    サンプルの間隔の中央値）。ただし実際の間隔の中央値が period より長ければそれ（サンプラが設定の周期に追いつかない
-    とき。SWD の速さで 1 巡回が長い）。分解能は表すだけで、判定には使わない。gap（タイムベースの刻み）を明示したときだけ、
-    間隔が gap を超えたところを抜けにする（区間を切り、切り替えに数えない。代表値の倍率で決めない）。既定では抜けに
-    しない（長い間隔は切り替えの時刻の不確かさ = 間隔の半分、として表れる）。
+    値が変わった 2 つのサンプルの中点を切り替えの時刻とし、不確かさは間隔の半分（中点は置き場所の決まりで、切り替えは
+    その間のどこか）。分解能は実際のサンプルの間隔の最大（抜けにした間隔は除く。どの切り替えの時刻もこの幅の中に
+    ある。代表値（中央値）では決めない）。サンプルが 1 つなら period（設定の周期。無ければ 0）。分解能は表すだけで、
+    判定には使わない。gap（タイムベースの刻み）を明示したときだけ、間隔が gap を超えたところを抜けにする（区間を切り、
+    切り替えに数えない。代表値の倍率で決めない）。既定では抜けにしない（長い間隔は切り替えの時刻の不確かさ = 間隔の
+    半分、として表れる）。最初・最後のサンプル、抜けの両側で閉じた端は切った端（Run.start_cut / end_cut。不確かさ
+    0 で閉じない）。分解能はサンプルが 1 つで period も無ければ None（分からない）。
     """
     points = sorted(samples)
     if not points:
-        return Timeline("sampled", 0, 0, period or 0, True)
-    diffs = [b[0] - a[0] for a, b in zip(points, points[1:])]
-    achieved = statistics.median(diffs) if diffs else 0
-    resolution = max(period, achieved) if period is not None else achieved
+        return Timeline("sampled", 0, 0, period, True)
+    diffs = [b[0] - a[0] for a, b in zip(points, points[1:]) if gap is None or b[0] - a[0] <= gap]
+    resolution = max(diffs) if diffs else period
     tl = Timeline("sampled", points[0][0], points[-1][0], resolution, True)
-    start, start_unc, value, count = points[0][0], 0.0, points[0][1], 1
+    start, start_unc, start_cut, value, count = points[0][0], None, True, points[0][1], 1
     last = points[0][0]
 
-    def close(end: int, end_unc: float) -> None:
-        tl.runs.append(Run(value, name_of(names, value), start, end, max(start_unc, end_unc), count))
+    def close(end: int, end_unc: float | None, end_cut: bool) -> None:
+        tl.runs.append(Run(value, name_of(names, value), start, end,
+                           _edge_uncertainty(start_unc, start_cut, end_unc, end_cut), count, start_cut, end_cut))
     for t, v in points[1:]:
         dt = t - last
         if gap is not None and dt > gap:
-            close(last, 0)
+            close(last, None, True)
             tl.gaps.append(Gap(last, t, "no_samples"))
-            start, start_unc, value, count = t, 0.0, v, 1
+            start, start_unc, start_cut, value, count = t, None, True, v, 1
         elif v != value:
             middle, unc = (last + t) // 2, dt / 2
-            close(middle, unc)
+            close(middle, unc, False)
             tl.switches.append(Switch(middle, value, v, unc))
-            start, start_unc, value, count = middle, unc, v, 1
+            start, start_unc, start_cut, value, count = middle, unc, False, v, 1
         else:
             count += 1
         last = t
-    close(last, 0)
+    close(last, None, True)
     return tl
 
 
@@ -168,14 +194,20 @@ def decode_trace_word(word: int) -> tuple[str, int]:
 
 
 def itm_packets(byte_events: Iterable[tuple[int, int]], synced: bool = True) -> list[tuple[int, Packet]]:
-    """時刻付きの SWO のバイト（記録の stream swo）→ (パケットの先頭のバイトの時刻, パケット)。"""
+    """時刻付きの SWO のバイト（記録の stream swo）→ (パケットの先頭のバイトの時刻, パケット)。パケットの位置が
+    バイトの外なら誤り（黙って最後のバイトの時刻にしない）。"""
     times: list[int] = []
     data = bytearray()
     for t, b in byte_events:
         times.append(t)
         data.append(b)
     decoder = ItmDecoder(synced)
-    return [(times[min(p.offset, len(times) - 1)], p) for p in decoder.feed(bytes(data))]
+    out = []
+    for p in decoder.feed(bytes(data)):
+        if not 0 <= p.offset < len(times):
+            raise ValueError(f"ITM のパケットの位置 {p.offset} がバイトの外（{len(times)} バイト）")
+        out.append((times[p.offset], p))
+    return out
 
 
 def task_events(packets: Iterable[tuple[int, Packet]], port: int = TRACE_PORT) -> list[TaskEvent]:
@@ -193,12 +225,13 @@ def task_events(packets: Iterable[tuple[int, Packet]], port: int = TRACE_PORT) -
     return out
 
 
-def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], resolution: float = 0,
+def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], resolution: float | None = None,
                          t_end: int | None = None) -> Timeline:
     """タスクの出来事 → 時間軸。task_in で区間を始め、task_out か次の task_in で閉じる。
 
     overflow / lost から次の task_in までは抜け（前のタスクが分からないので、その task_in は切り替えに数えない）。
     最後に開いている区間は t_end（観測の終わり）で閉じる。t_end が無ければ最後の出来事で閉じ、長さ 0 なら捨てる。
+    抜け・観測の終わりで閉じた端は切った端（Run.end_cut）。resolution は出来事の時刻の分解能（分からなければ None）。
     """
     items = sorted(events, key=lambda e: e.t)
     if not items:
@@ -208,11 +241,12 @@ def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], 
     previous: int | None = None                   # 最後に CPU を使っていたタスク（分からなければ None）
     gap_start: int | None = None
 
-    def close(t: int) -> None:
+    def close(t: int, cut: bool = False) -> None:
         nonlocal running, previous
         if running is not None:
             handle, start = running
-            tl.runs.append(Run(handle, name_of(names, handle), start, t, resolution))
+            tl.runs.append(Run(handle, name_of(names, handle), start, t,
+                               _edge_uncertainty(resolution, False, resolution, cut), end_cut=cut))
             previous, running = handle, None
     for e in items:
         if e.kind == "task_in":
@@ -229,13 +263,13 @@ def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], 
             if running is not None and running[0] == e.handle:
                 close(e.t)
         elif e.kind in ("overflow", "lost"):
-            close(e.t)
+            close(e.t, cut=True)
             if gap_start is None:
                 gap_start, gap_reason = e.t, e.kind
     if running is not None:
         end = tl.t1
         if end > running[1] or t_end is not None:
-            close(end)
+            close(end, cut=True)
     if gap_start is not None:
         tl.gaps.append(Gap(gap_start, tl.t1, gap_reason))
     return tl
@@ -244,8 +278,10 @@ def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], 
 # --- 記録 ------------------------------------------------------------------------------------------
 
 def samples_from_recording(recording, address: int, t0: int | None = None, t1: int | None = None) -> list[tuple[int, int]]:
-    """記録の stream sample（DAP サンプラ）から、番地 address の (時刻, 値)。"""
-    return [(e.t, e.b) for e in recording.events(t0, t1, streams=["sample"]) if e.a == address]
+    """記録の stream sample（DAP サンプラ）から、番地 address の読めた語の (時刻, 値)（読めなかった語 = 本体に ACK、
+    誤りの区間 kind error は入れない）。"""
+    return [(e.t, e.b) for e in recording.events(t0, t1, streams=["sample"], kinds=["word"])
+            if e.a == address and not (isinstance(e.body, dict) and "ack" in e.body)]
 
 
 def swo_bytes_from_recording(recording, t0: int | None = None, t1: int | None = None) -> list[tuple[int, int]]:
@@ -265,10 +301,14 @@ def write_timeline(rec, timeline: Timeline, idle: Iterable[int] = ()) -> None:
             body["idle"] = True
         if r.samples is not None:
             body["samples"] = r.samples
-        rows.append((STREAM, "run", r.t0, r.handle, 0, body, r.t1, r.uncertainty or None))
+        if r.start_cut:
+            body["start_cut"] = True
+        if r.end_cut:
+            body["end_cut"] = True
+        rows.append((STREAM, "run", r.t0, r.handle, 0, body, r.t1, r.uncertainty))      # None = 分からない、0 は 0
     for s in timeline.switches:
         rows.append((STREAM, "switch", s.t, s.previous or 0, s.next,
-                     {"from": name_of(names, s.previous), "to": name_of(names, s.next)}, None, s.uncertainty or None))
+                     {"from": name_of(names, s.previous), "to": name_of(names, s.next)}, None, s.uncertainty))
     for g in timeline.gaps:
         rows.append((STREAM, "gap", g.t0, 0, 0, {"reason": g.reason}, g.t1))
     rec.add_many(rows)

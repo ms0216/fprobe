@@ -159,6 +159,9 @@ class NuttX(KernelAwareness):
     def tick_count(self) -> int | None:
         return self._variable("g_system_ticks")
 
+    def tick_mask(self) -> int | None:
+        return self._variable_mask("g_system_ticks")
+
     def scheduler_state(self) -> str:
         init = self.optional_address("g_nx_initstate")
         if init is not None:
@@ -259,10 +262,16 @@ class NuttX(KernelAwareness):
             reason, kind = WAITS.get(state_name, ("unknown", None))
             wait = WaitInfo(reason, kind=kind)
         if self.tcb.has("waitdog.func") and self._field(handle, "waitdog.func"):
-            expired = self._field(handle, "waitdog.expired", signed=True)
-            if tick is not None:
-                wait.remaining_ticks = max(expired - tick, 0)
-                wait.wake_tick = expired
+            expired = self._field(handle, "waitdog.expired")
+            wait.wake_tick = expired
+            mask = self.tick_mask()
+            if tick is not None and mask is not None:
+                # 期限との差をティックの幅で回し、符号付きで読む（負 = 期限を過ぎた。0 にしない）
+                diff = (expired - tick) & mask
+                if diff > mask >> 1:
+                    wait.overdue_ticks = mask + 1 - diff
+                else:
+                    wait.remaining_ticks = diff
         obj = self._field(handle, "waitobj") if self.tcb.has("waitobj") else 0
         if wait.kind in ("semaphore", "message_queue", "event") and obj:
             wait.object = wait.list = obj

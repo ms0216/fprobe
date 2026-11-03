@@ -1,8 +1,13 @@
 """GHDL（VHDL シミュレータ）の所在解決と、cocotb から使うための実行環境。
 
-cocotb の VPI モジュールは GHDL の libghdlvpi.dll・cocotb の DLL・Python の DLL に依存する。
+cocotb の VPI モジュールは GHDL の libghdlvpi・cocotb の共有ライブラリ・Python の DLL に依存する。
 Windows ではこれらが PATH 上に無いと「モジュールが見つからない」で失敗するため、
 ここで必要なディレクトリを PATH 先頭に揃える。
+
+置き場所（FPROBE_GHDL_HOME・既定の場所・PATH 上の ghdl から決めた GHDL の home）:
+- Windows: `<home>/bin/ghdl.exe` と `<home>/lib/libghdlvpi.dll`（winget の配置）。
+- Linux: `<home>/bin/ghdl` と `<home>/lib/libghdlvpi.so`（GHDL のリリースの配置）。lib に無ければ、ghdl 自身が答える
+  `ghdl --vpi-library-dir` の場所（Debian / Ubuntu のパッケージ: /usr/bin/ghdl は起動役、VPI は /usr/lib/ghdl/<backend>/）。
 """
 
 import os
@@ -14,31 +19,64 @@ from pathlib import Path
 
 from .gowin import ToolchainNotFound
 
-__all__ = ["DEFAULT_GHDL_HOMES", "ENV_VAR", "GhdlToolchain"]
+__all__ = ["DEFAULT_GHDL_HOMES", "ENV_VAR", "WINDOWS", "GhdlToolchain", "ghdl_name", "vpi_name"]
 
 ENV_VAR = "FPROBE_GHDL_HOME"
+
+WINDOWS = os.name == "nt"
 
 DEFAULT_GHDL_HOMES: tuple[Path, ...] = (
     Path.home() / "AppData/Local/Microsoft/WinGet/Packages"
     / "ghdl.ghdl.ucrt64.mcode_Microsoft.Winget.Source_8wekyb3d8bbwe",
-)
+) if WINDOWS else ()
+
+
+def ghdl_name() -> str:
+    """この OS の GHDL の実行ファイルの名前。"""
+    return "ghdl.exe" if WINDOWS else "ghdl"
+
+
+def vpi_name() -> str:
+    """この OS の GHDL の VPI ライブラリの名前。"""
+    return "libghdlvpi.dll" if WINDOWS else "libghdlvpi.so"
+
+
+def _reported_vpi_dir(ghdl: Path) -> Path | None:
+    """ghdl が答える VPI ライブラリの場所（`ghdl --vpi-library-dir`）。答えなければ None。"""
+    import subprocess
+    try:
+        r = subprocess.run([str(ghdl), "--vpi-library-dir"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = r.stdout.strip()
+    return Path(text) if r.returncode == 0 and text else None
 
 
 @dataclass(frozen=True)
 class GhdlToolchain:
     home: Path
+    lib_dir: Path | None = None       # VPI ライブラリの場所（None = <home>/lib）
 
     @property
     def ghdl(self) -> Path:
-        return self.home / "bin" / "ghdl.exe"
+        return self.home / "bin" / ghdl_name()
 
     @property
     def vpi_lib_dir(self) -> Path:
-        return self.home / "lib"
+        return self.home / "lib" if self.lib_dir is None else self.lib_dir
 
     def missing_files(self) -> list[Path]:
-        required = (self.ghdl, self.vpi_lib_dir / "libghdlvpi.dll")
+        required = (self.ghdl, self.vpi_lib_dir / vpi_name())
         return [p for p in required if not p.is_file()]
+
+    @classmethod
+    def at(cls, home: Path) -> "GhdlToolchain":
+        """home の GHDL。VPI ライブラリが <home>/lib に無ければ（Linux のパッケージの配置）、ghdl が答える場所を使う。"""
+        toolchain = cls(home)
+        if WINDOWS or (toolchain.vpi_lib_dir / vpi_name()).is_file() or not toolchain.ghdl.is_file():
+            return toolchain
+        reported = _reported_vpi_dir(toolchain.ghdl)
+        return toolchain if reported is None else cls(home, reported)
 
     def environment(self, base_env: Mapping[str, str] = os.environ) -> dict[str, str]:
         """GHDL + cocotb の実行に必要なディレクトリを PATH 先頭に加えた環境変数。"""
@@ -79,7 +117,7 @@ class GhdlToolchain:
                 candidates.append(Path(on_path).resolve().parent.parent)
         problems = []
         for home in candidates:
-            toolchain = cls(home)
+            toolchain = cls.at(home)
             missing = toolchain.missing_files()
             if not missing:
                 return toolchain

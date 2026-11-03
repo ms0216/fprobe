@@ -17,12 +17,13 @@
   import { onTimeline } from "../../lib/timeline/events";
   import TabBar from "./TabBar.svelte";
   import {
-    BAUDS, LINE_ENDINGS, SWO_BAUDS, TERMINAL_KEEP_CHARS, clockTime, swoConfigureParams, emptyScreen, feed, lineAtTime, lines, loadSources, plain,
-    readSource, screenKey, splitTerminals, stampAt, terminalTabs, writeCall, type LineEnding, type Screen,
+    BAUDS, LINE_ENDINGS, SWO_BAUDS, TERMINAL_KEEP_CHARS, annotateText, clockTime, swoConfigureParams, emptyScreen, feed, lineAtTime, lines, loadSources, plain,
+    placeText, readSource, screenKey, sourceLabel, splitTerminals, stampAt, terminalTabs, writeCall, type AnnotatedAddress, type LineEnding, type Screen,
     type TerminalSource,
   } from "../../lib/terminal";
+  import { hex32 } from "./format";
 
-  const { app, conn, tl, reveal } = shared();
+  const { app, conn, tl, reveal, showAddress } = shared();
   const origins = tl.origins;
   const POLL_MS = 300;
   const ROW = 18;                                    // 行の高さ（CSS の画素。見えている行だけ描く）
@@ -221,6 +222,14 @@
     picked = null;
   }
 
+  // 番地を引く（log.annotate）: 選んだ行か今の源の文字全部の 0x の数のうち、ELF の実行区画に入るものを関数・ファイル:行に
+  let annotated = $state<{ scope: "line" | "all"; addresses: AnnotatedAddress[] } | null>(null);
+  async function annotate() {
+    const scope = picked !== null ? "line" : "all";
+    const r = await app.act("log.annotate", { text: annotateText(screen, rows, picked) });
+    annotated = r === undefined ? null : { scope, addresses: r.addresses ?? [] };
+  }
+
   function pickTerminal(id: string) {
     if (!current) return;
     vtPick = { ...vtPick, [current.id]: id === "all" ? null : Number(id) };
@@ -262,7 +271,7 @@
 <div class="pane terminal">
   {#if connected && sources.length}
     <div class="pane-bar">
-      <TabBar tabs={sources.map((s) => ({ id: s.id, label: s.name, title: $i18n(KINDS[s.kind]) }))} value={current?.id}
+      <TabBar tabs={sources.map((s) => ({ id: s.id, label: sourceLabel(s), title: $i18n(KINDS[s.kind]) }))} value={current?.id}
               ariaLabel={$i18n("terminal.source")} onselect={pick} />
       {#if rtt === false}
         <button class="small" title={$i18n("terminal.notStartedHint")} disabled={rttBusy} onclick={start}>
@@ -292,6 +301,8 @@
         </select>
       </label>
       {#if lost}<span class="warn" title={$i18n("terminal.lostTip")}>{$i18n("terminal.lost", { n: lost })}</span>{/if}
+      <button class="small" onclick={() => void annotate()} title={$i18n("terminal.annotateTip")}>
+        {$i18n(picked !== null ? "terminal.annotateLine" : "terminal.annotateAll")}</button>
       <button class="small" onclick={saveLog} title={$i18n("terminal.saveTip")}>{$i18n("terminal.save")}</button>
       <button class="small" onclick={clear}>{$i18n("terminal.clear")}</button>
     </div>
@@ -343,6 +354,25 @@
         {/each}
       </div>
     </div>
+    {#if annotated}
+      <div class="annotated">
+        <div class="small muted"><span class="mono">log.annotate</span>
+          · {$i18n(annotated.scope === "line" ? "terminal.annotatedLine" : "terminal.annotatedAll", { n: annotated.addresses.length })}
+          <button class="small" onclick={() => (annotated = null)}>{$i18n("common.close")}</button></div>
+        {#if annotated.addresses.length}
+          <table class="grid mono">
+            <thead><tr><th>value</th><th>address</th><th>{$i18n("terminal.annotatePlace")}</th></tr></thead>
+            <tbody>
+              {#each annotated.addresses as a, i (i)}
+                <tr><td>{hex32(a.value)}</td>
+                  <td><button class="link" title={$i18n("terminal.annotateOpenTip")} onclick={() => showAddress(a.address)}>{hex32(a.address)}</button></td>
+                  <td>{placeText(a)}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+    {/if}
     {#if current?.writable}
       <form class="send" onsubmit={send}>
         <input class="mono" placeholder={$i18n("terminal.input")} aria-label={$i18n("terminal.input")} bind:value={input} />
@@ -387,5 +417,6 @@
   .c8 { color: var(--muted); } .c9 { color: #ff5c5c; } .c10 { color: #2da44e; } .c11 { color: #d4a72c; }
   .c12 { color: #54aeff; } .c13 { color: #c297ff; } .c14 { color: #39c5cf; } .c15 { color: var(--text); }
   .vt { padding: 0 8px; border-bottom: 1px solid var(--line); }
+  .annotated { max-height: 35%; overflow: auto; padding: 4px 8px; border-top: 1px solid var(--line); font-size: 12px; }
   .rtt-error { color: var(--bad); font-size: 12px; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

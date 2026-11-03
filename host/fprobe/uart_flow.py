@@ -35,7 +35,7 @@ class UartLines:
 class UartFlow:
     def __init__(self, dev):
         self.dev = dev
-        self.pins: tuple[int, ...] = tuple(getattr(dev.capabilities(), "uart_flow", ()))
+        self.pins: tuple[int, ...] = dev.capabilities().uart_flow
 
     def _index(self, channel: int | None, what: str) -> int | None:
         if channel is None:

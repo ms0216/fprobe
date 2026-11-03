@@ -113,9 +113,9 @@ describe("読み書きの API", () => {
     expect(r.get("bad")?.error).toBe("no symbol");
   });
 
-  it("書く: 走行中は watch.write、止まっているときは debug.write_expression（真偽は数に）", () => {
+  it("書く: debug.write_expression（道はデーモンが状態で選ぶ。真偽は数に）", () => {
     // 部品の書き込みは、ほかの窓と同じ規則（lib/valuewrite の exprWriteCall）
-    expect(exprWriteCall("RUNNING", "x", true)).toEqual({ method: "watch.write", params: { expression: "x", value: true } });
+    expect(exprWriteCall("RUNNING", "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
     expect(exprWriteCall("HALTED", "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
   });
 });

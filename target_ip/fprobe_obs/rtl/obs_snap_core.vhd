@@ -9,6 +9,9 @@
 --   23:16 = 前の Capture-DR からの値の変化の回数（255 で止める。2 以上なら標本の間に見えない変化があった）
 --   15:0  = Capture-DR の周期の probes
 -- fprobe は Capture-DR の瞬間の自分の時刻を付けて値にする（時刻合わせは要らない。標本の間隔 = スキャンの間隔）。
+-- 値を取り込む clk の辺は、端子の TCK の Capture-DR を出る立ち上がりより (2, 3] 周期後（obs_tck_sampler の 2 段と、rise を
+-- 見る次の辺。立ち上がりが辺と重なると 2 か 3）。この遅れは申告しない（レジスタが無い）。TCK ≤ clk / 8 も確かめない
+-- （obs_snap_core_tb の the_value_is_sampled_2_to_3_clk_cycles_after_the_capture_rise_on_the_pin で確かめた範囲）。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

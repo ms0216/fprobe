@@ -12,6 +12,7 @@
     programParams, programStages, sectorsText, seconds, size, speed, verifyParams, type AlgoForm,
     type FlashOptions, type Progress, type Stage,
   } from "../../lib/flash";
+  import type { Methods, Params, Result } from "../../lib/api";
   import { allowed } from "../../lib/guard";
   import { confirmer } from "../../lib/confirm";
   import { i18n, t, type Key } from "../../lib/i18n";
@@ -85,7 +86,7 @@
     clearTimeout(clearTimer);
   });
 
-  async function run(kind: string, method: Parameters<typeof app.act>[0], params: any) {
+  async function run<M extends keyof Methods>(kind: string, method: M, params: Params<M>): Promise<Result<M> | undefined> {
     if (!(await allowed(app))) return undefined;
     busy = kind;
     note = invalid = null;
@@ -181,7 +182,7 @@
     }
     const r = await run("algo", "target.flash.algo.add", params);
     if (r) {
-      note = r.pending ? `${t("flash.algoAdded", { name: r.name })} · ${t("flash.algoPending")}`
+      note = "pending" in r && r.pending ? `${t("flash.algoAdded", { name: r.name })} · ${t("flash.algoPending")}`
                        : t("flash.algoAdded", { name: r.name });
       algo = emptyAlgo();
       await loadRegions();

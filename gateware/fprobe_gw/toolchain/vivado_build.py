@@ -15,7 +15,8 @@ from pathlib import Path
 from .build import INPUTS_STAMP, BuildError, BuildResult, _force_remove, git_state
 from .project import BuildInfo
 from .timing import TimingReportError
-from .vivado import VivadoProject, VivadoToolchain, parse_vivado_timing, vivado_undriven
+from .vivado import VivadoProject, VivadoToolchain, module_constraints, parse_vivado_timing, vivado_undriven, \
+    vivado_unmatched_constraints
 
 __all__ = ["VivadoBuilder"]
 
@@ -66,6 +67,11 @@ class VivadoBuilder:
                 _force_remove(bitstream)
                 raise BuildError("駆動されない配線がある（実機では値が定まらない）。すべて明示的に駆動すること"
                                  f"（{log}）:\n  " + "\n  ".join(undriven))
+            unmatched = vivado_unmatched_constraints(out)
+            if unmatched:
+                _force_remove(bitstream)
+                raise BuildError("対象の見つからない制約がある（効いていない。名前を確かめること）"
+                                 f"（{log}）:\n  " + "\n  ".join(unmatched))
             if not bitstream.is_file():
                 raise BuildError(f"ビットストリーム {bitstream} が生成されていない（{log}）")
         report = build_dir / "timing.rpt"
@@ -109,7 +115,8 @@ def _inputs_digest(project: VivadoProject, build_dir: Path, tcl: Path) -> str:
     # ブロック設計の TCL は同じ場所の TCL を source しうる（ps7_hp_bd.tcl → ps7_bd.tcl）ので、隣の TCL も入力に含める
     siblings = sorted({t for bd in project.block_designs for t in Path(bd).parent.glob("*.tcl")})
     files = [tcl, build_dir / f"{project.name}.xdc", *siblings,
-             *sorted(Path(s) for s in project.sources if s != stamped)]
+             *sorted(Path(s) for s in project.sources if s != stamped),
+             *module_constraints(project.sources)]                  # モジュールの制約（ソースの隣の .xdc）
     for path in files:
         h.update(str(path).encode() + b"\0" + Path(path).read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()

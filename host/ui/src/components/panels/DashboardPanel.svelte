@@ -3,7 +3,7 @@
   // 棒・グラフ・ボタン・スライダ・切り替え・ランプを並べて変数を読む・書く。配置はブラウザに覚え、JSON で書き出す・
   // 読み込む（読み込みは lib/dashboard の validateLayout で検証して直す）。
   // 読み: 走行中は watch.values（Live で部品の式を観測に足す。Data Sampling と同じ観測を分け合う）、止まっているときは
-  // debug.evaluate（止まるたび・書いた後）。書き: 走行中は watch.write、止まっているときは debug.write_expression
+  // debug.evaluate（止まるたび・書いた後）。書き: debug.write_expression（走行中は止めずに、止まっているときはフレームで。道はデーモンが選ぶ）
   // （lib/valuewrite の exprWriteCall。ほかの窓と同じ規則）。ボタン・スライダ・切り替えに加え、ゲージ・数値・棒・グラフ・
   // ランプも部品のダブルクリックで同じ式に書ける。
   // 遠隔（--lan）の画面でも同じ（デーモンの API だけを使う）。配置はデーモンの画面の状態（ui.state の dashboard）で別の窓・
@@ -161,11 +161,11 @@
     await writeExpr(w.expr, writeValue(w, valueOf(w.expr), input));
   }
 
-  /** 部品の式に書く（使う API はターゲットの状態で決める）。AI の作業中は確かめる */
+  /** 部品の式に書く（debug.write_expression。道はデーモンが選ぶ）。AI の作業中は確かめる */
   async function writeExpr(expr: string, value: number | string | boolean | null) {
     const c = value === null || !expr ? null : exprWriteCall(target?.state, expr, value);
     if (!c || !(await allowed(app))) return;
-    await app.act(c.method as "watch.write", c.params as any);
+    await app.act(c.method as "debug.write_expression", c.params as any);
     await read();
   }
 

@@ -198,9 +198,11 @@ async def full_speed_packet_size_and_short_packets(dut):
 @cocotb.test()
 async def swj_clock_picks_the_fastest_not_above_request(dut):
     dap, _ = await setup(dut, seed=7)
-    # CLK_HZ = 100 MHz: SWCLK = 50 MHz / half_period。要求の 1% 増し以下で最も速い（切り上げ）、2〜65535 に制限
+    # CLK_HZ = 100 MHz: SWCLK = 50 MHz / half_period。要求の 1% 増し以下で最も速い（切り上げ）、1〜65535 に制限
+    # （half_period 1 = sys / 2 = 50 MHz。49.5 MHz 以上の要求で 1）
     for hz, half in ((10_000_000, 5), (9_000_000, 6), (1_000_000, 50), (40_000_000, 2), (500, 65535),
-                     (9_950_000, 5), (9_850_000, 6)):
+                     (9_950_000, 5), (9_850_000, 6), (50_000_000, 1), (49_504_900, 1), (49_504_899, 2),
+                     (200_000_000, 1)):
         assert await dap.command(bytes([0x11]) + struct.pack("<I", hz)) == bytes([0x11, 0])
         assert int(dut.dap_i.config_i.half_r.value) == half, hz
     assert await dap.command(bytes([0x11]) + struct.pack("<I", 0)) == bytes([0x11, 0xFF])
@@ -394,3 +396,104 @@ async def truncated_and_garbage_packets_keep_the_framing(dut):
         r = await dap.command(packet)
         assert len(r) <= 64 and (r[0] == cmd or r == b"\xff"), (i, packet.hex(), r.hex())
         assert await dap.command(bytes([0x00, 0xFF])) == bytes([0x00, 2, 64, 0]), (i, packet.hex())
+
+
+# --- 転送の間の空き（docs/superpowers/specs/2026-11-03-dap-line-rate-design.md §4。性能の約束）------------------------------
+
+class ClockTrace:
+    """sys の周期ごとの SWCLK の値。high_extra() = 区間の中の High 相の長さ − half_period の並び（0 = 空きなし）。"""
+
+    def __init__(self, dut):
+        self.dut, self.levels, self.on = dut, [], False
+        cocotb.start_soon(self._run())
+
+    async def _run(self):
+        while True:
+            await RisingEdge(self.dut.clk)
+            await ReadOnly()
+            if self.on:
+                self.levels.append(int(self.dut.swclk.value))
+
+    def runs(self) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for v in self.levels:
+            if out and out[-1][0] == v:
+                out[-1] = (v, out[-1][1] + 1)
+            else:
+                out.append((v, 1))
+        first = next(i for i, r in enumerate(out) if r[0] == 0)                 # 最初の立ち下がりから
+        last = max(i for i, r in enumerate(out) if r[0] == 0)                   # 最後の Low 相まで
+        return out[first:last + 1]
+
+
+async def block_gaps(dap, trace, hp: int, request: int, count: int, values=()):
+    """TransferBlock を 1 つ出し、その線の上の High 相の延び（half_period を超えた周期）を返す。"""
+    trace.levels.clear()
+    trace.on = True
+    result = await dap.block(request, count, values)
+    trace.on = False
+    highs = [n - hp for v, n in trace.runs() if v == 1]
+    return result, highs
+
+
+@cocotb.test()
+async def transfer_block_has_no_gap_between_transfers(dut):
+    """TransferBlock の転送の間に SWCLK の空きが無い（性能の約束）: 線の上の High 相はすべて half_period（ACK・終わりの
+    取り込みが High 相に間に合う設定: 取り込みの遅れ 0、ターゲットの遅れ 3 ns）。読み（AP: 最初のポスト + RDBUFF）・書き
+    （+ 確認の RDBUFF）・DP の読み、half_period 1（50 MHz）・2（25 MHz）・5。値・処理数・応答は参照実装と同じ。
+    前（起点 086f4e9f の作り）は転送の間に High 相が書きで 16〜19 周期、読みで 16 周期延びていた（sys 100 MHz、25 MHz・
+    10 MHz とも）。"""
+    dap, model = await setup(dut, seed=11, output_delay_ns=3)
+    await dap.connect()
+    await dap.mem_setup()
+    trace = ClockTrace(dut)
+    for hz, hp in ((50_000_000, 1), (25_000_000, 2), (10_000_000, 5)):
+        assert await dap.command(bytes([0x11]) + struct.pack("<I", hz)) == bytes([0x11, 0])
+        base = 0x20000000 + 0x100 * hp
+        values = [(hp << 24) + 0x1111 * i for i in range(24)]
+        assert (await dap.transfer((AP_TAR_W, base))) == (1, OK, [])
+        (done, resp, _), highs = await block_gaps(dap, trace, hp, AP_DRW_W, len(values), values)
+        assert (done, resp) == (len(values), OK)
+        assert highs and set(highs) == {0}, (hz, "write", sorted(set(highs)))
+        assert [model.memory[base + 4 * i] for i in range(len(values))] == values
+        assert (await dap.transfer((AP_TAR_W, base))) == (1, OK, [])
+        (done, resp, data), highs = await block_gaps(dap, trace, hp, AP_DRW_R, len(values))
+        assert (done, resp, data) == (len(values), OK, values)
+        assert set(highs) == {0}, (hz, "read", sorted(set(highs)))
+        (done, resp, data), highs = await block_gaps(dap, trace, hp, DP_IDCODE_R, 5)
+        assert (done, resp, data) == (5, OK, [DPIDR] * 5)
+        assert set(highs) == {0}, (hz, "dp read", sorted(set(highs)))
+
+
+@cocotb.test()
+async def transfer_block_stops_at_the_first_failure_without_touching_the_wire_after_it(dut):
+    """先出しでも誤りの確認の原則は同じ: 失敗（FAULT・WAIT の使い切り・パリティ異常）した転送の後の転送は線に出ない。
+    処理数は失敗の前までの数、応答は失敗の応答（参照実装と同じ）。"""
+    dap, model = await setup(dut, seed=12, output_delay_ns=3)
+    await dap.connect()
+    await dap.mem_setup()
+    assert await dap.command(bytes([0x11]) + struct.pack("<I", 50_000_000)) == bytes([0x11, 0])
+    # 書きの 4 語目で FAULT（STICKYERR は 3 語目の書きで立つ: 3 語目の番地をバスエラーに）
+    model.fault_addresses = {0x20000008}
+    assert (await dap.transfer((AP_TAR_W, 0x20000000))) == (1, OK, [])
+    n = len(model.transactions)
+    done, resp, _ = await dap.block(AP_DRW_W, 8, [0xA0 + i for i in range(8)])
+    assert (done, resp) == (3, FAULT), (done, resp)
+    assert len(model.transactions) == n + 4                           # 3 つの書き + FAULT の 1 つだけ（後ろは線に出ない）
+    assert (await dap.transfer((DP_ABORT_W, STKERRCLR))) == (1, OK, [])
+    model.fault_addresses = set()
+    # 読みの 3 語目でパリティ異常
+    assert (await dap.transfer((AP_TAR_W, 0x20000000))) == (1, OK, [])
+    n = len(model.transactions)
+    model.corrupt_parity_at = n + 3                                     # n+0: ポスト、+1 = 1 語目、+2 = 2 語目、+3 = 3 語目
+    done, resp, data = await dap.block(AP_DRW_R, 8)
+    assert (done, resp, data) == (2, 8, [0xA0, 0xA1]), (done, resp, data)    # 8 = DAP_TRANSFER_ERROR（パリティ）
+    assert len(model.transactions) == n + 4
+    # WAIT の使い切り（DAP_TransferConfigure の再試行 0 回）
+    assert await dap.command(bytes([0x04, 0]) + struct.pack("<HH", 0, 0)) == bytes([0x04, 0])
+    assert (await dap.transfer((AP_TAR_W, 0x20000000))) == (1, OK, [])
+    n = len(model.transactions)
+    model.wait_at = n + 2
+    done, resp, data = await dap.block(AP_DRW_R, 8)
+    assert (done, resp, data) == (1, WAIT, [0xA0]), (done, resp, data)
+    assert len(model.transactions) == n + 3

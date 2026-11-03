@@ -28,6 +28,21 @@ def test_halt_risk_of_the_demo_elf():
     assert r["matched"] is False and r["matches"] == [] and r["elf"].endswith("sram_demo.elf")
 
 
+def test_halt_risk_says_whether_to_confirm_before_halting():
+    """止める前に確かめるか（confirm_before_halt = 条件に合うシンボルがあり、止める操作がコアを止める方式 halt）と
+    いまの方式（debug_mode）を API が返す。画面は自分で決めない（E2）。"""
+    p = Probe("unused")
+    p._symbols = SimpleNamespace(path=Path("app.elf"), names=lambda: [Symbol("RADIO_IRQHandler", 0x100, 4, "function")])
+    r = p.halt_risk()
+    assert r["debug_mode"] == "halt" and r["confirm_before_halt"] is False          # 条件が無い
+    p.halt_risk_set(names=["RADIO_IRQHandler"])
+    r = p.halt_risk()
+    assert r["matched"] and r["debug_mode"] == "halt" and r["confirm_before_halt"] is True
+    p._monitor = object()                                                           # モニタ方式: 止めてもコアは止まらない
+    r = p.halt_risk()
+    assert r["matched"] and r["debug_mode"] == "monitor" and r["confirm_before_halt"] is False
+
+
 def test_halt_risk_has_no_default_names():
     # 既定の名前の表を持たない: 無線・RTOS らしい名前が ELF にあっても、使う側が渡さなければ何も合わない
     p = Probe("unused")

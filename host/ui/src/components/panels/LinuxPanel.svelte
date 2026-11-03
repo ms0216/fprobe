@@ -11,6 +11,7 @@
     probeParams, ringOpenParams, ringReadParams, ringWatchParams, syncParams, traceStartParams, type ConnectForm, type GdbForm, type LinuxEvent, type LogForm,
     type MemapForm, type ProbeForm, type RingForm } from "../../lib/linux";
   import { LINUX_KEEP } from "../../lib/linux";
+  import { memapJtagParams, type MemapJtagForm } from "../../lib/linuxhalt";
   import { load, save } from "../../lib/prefs";
 
   const POLL_MS = 500;
@@ -25,6 +26,7 @@
   let ring = $state<RingForm>(restore("linux.ring", { phys: "", size: "", cached: false, linger: false, address: "", access: "",
     maxRecords: "", interval: "" }));
   let memap = $state<MemapForm>(restore("linux.memap", { xsdb: "", cableSerial: "", chainIdcode: "", timeout: "" }));
+  let memapJtag = $state<MemapJtagForm>(restore("linux.memapJtag", { chainIdcode: "", ap: "", frequencyHz: "" }));
   let gdb = $state<GdbForm>(restore("linux.gdb", { commands: "", timeout: "", pid: "", core: "", binary: "", port: "" }));
   let ftrace = $state(load("linux.ftrace", ""));
   let log = $state<LogForm>(restore("linux.log", { lines: "", unit: "", cursor: "" }));
@@ -261,6 +263,13 @@
           <input class="mono num" bind:value={memap.timeout} placeholder="s" aria-label="timeout_s" title="timeout_s" />
           <button class="small" onclick={async () => { memapInfo = null; memapInfo = (await run("linux.memap.connect", memapParams(target!, memap), ["linux.memap", memap])) ?? null; }}>{$i18n("linux.connect")}</button>
           <button class="small" onclick={async () => { if ((await run("linux.memap.disconnect", { params: { target: target! } })) !== undefined) memapInfo = null; }}>{$i18n("linux.disconnect")}</button>
+        </div>
+        <div class="bar">
+          <strong>memap JTAG</strong>
+          <input class="mono short" bind:value={memapJtag.chainIdcode} placeholder="chain_idcode" aria-label="chain_idcode" title={$i18n("linux.memapJtagIdcode")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={memapJtag.ap} placeholder="ap" aria-label="ap" title={$i18n("linux.memapJtagAp")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <input class="mono short" bind:value={memapJtag.frequencyHz} placeholder="frequency_hz" aria-label="frequency_hz" aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <button class="small" title={$i18n("linux.memapJtagHint")} onclick={async () => { memapInfo = null; memapInfo = (await run("linux.memap.connect_jtag", memapJtagParams(target!, memapJtag), ["linux.memapJtag", memapJtag])) ?? null; }}>{$i18n("linux.connect")}</button>
         </div>
         {#if memapInfo}<div class="mono small">{JSON.stringify(memapInfo)}</div>{/if}
       </details>

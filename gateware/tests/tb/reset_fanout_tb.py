@@ -1,4 +1,5 @@
-"""reset_fanout（COUNT=5）のテストベンチ: 全ビットが rst を 1 周期遅らせたものになる。"""
+"""reset_fanout（COUNT=5）のテストベンチ: 全ビットが rst を 2 周期遅らせたものになる（1 段目 = 塊ごとの写し、
+2 段目 = 配線を短くする複製の段。2026-10-29）。"""
 
 import cocotb
 from cocotb.clock import Clock
@@ -9,11 +10,15 @@ ALL = (1 << COUNT) - 1
 
 
 @cocotb.test()
-async def every_copy_follows_rst_one_clock_late(dut):
+async def every_copy_follows_rst_two_clocks_late(dut):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    for bit in [1, 1, 0, 0, 0, 1, 0, 1, 1, 0]:
+    bits = [1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0]
+    seen = []
+    for bit in bits:
         dut.rst.value = bit
         await RisingEdge(dut.clk)           # このエッジで bit を取り込む
-        await ReadOnly()                    # エッジの直後: 全ビットが取り込んだ値になっている（エッジの前は 1 周期前の値）
-        assert int(dut.rst_out.value) == (ALL if bit else 0)
+        await ReadOnly()
+        seen.append(int(dut.rst_out.value))
         await Timer(1, unit="ns")           # ReadOnly の後は書けないので時間を進める
+    # エッジ k の直後の出力は、エッジ k − 1 で取り込んだ値（2 周期遅れ）。全ビットが同じ
+    assert seen[1:] == [ALL if b else 0 for b in bits[:-1]], seen

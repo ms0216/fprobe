@@ -12,6 +12,7 @@
   import type { Dock } from "./lib/dock";
   import { watchFaults } from "./lib/fault";
   import { getLang, i18n } from "./lib/i18n";
+  import { followPanelRequests } from "./lib/panelrequest";
   import { Safety } from "./lib/safety";
   import { ScreenSync } from "./lib/screen";
   import { AppState } from "./lib/state";
@@ -27,14 +28,14 @@
   import SafetyBar from "./components/shell/SafetyBar.svelte";
   import StatusLine from "./components/shell/StatusLine.svelte";
 
-  // 画面はデーモン自身が配る（開発中は Vite の代理）ので、同じ場所の /api につなぐ。トークンは #token=...
+  // 画面はデーモン自身が配る（開発中は Vite の代理）ので、同じ場所の /api につなぐ。合言葉は URL に載せず、/login で
+  // 入れた cookie（HttpOnly）をブラウザが WebSocket に添える（docs/superpowers/specs/2026-11-03-daemon-access-design.md §3）
   const hash = new URLSearchParams(location.hash.slice(1));
-  const token = hash.get("token") ?? undefined;
   // #layout=system: 開いたときにその配置にする（配置ごとの URL を残せる）
   const initialLayout = (["analysis", "debug", "system"] as const).find((n) => n === hash.get("layout")) ?? null;
   const conn = new DaemonConnection(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api`, {
-    name: "gui", role: "human", token, topics: ["activity", "control", "clients", "target.state"],
-    optionalTopics: ["ui.state", "flash.progress", "recording", "hook"],
+    name: "gui", role: "human", topics: ["activity", "control", "clients", "target.state"],
+    optionalTopics: ["ui.state", "flash.progress", "recording", "hook", "elf.changed"],
     automated: navigator.webdriver === true,        // 自動操作のブラウザ（試験・確かめ）か。操作の記録に残す
   });
   const base = new AppState(conn);
@@ -104,11 +105,18 @@
   // 時間軸のダブルクリック・Enter: 出来事の元（番地 → メモリ、PC → ソース）を開く
   // 故障で止まったら Fault Analyzer を開く（IAR の Fault exception viewer と同じ）
   const stopFaults = watchFaults((m, p, o) => conn.call(m, p, o), app, () => dock.show("fault"));
+  // AI（や別の窓）がパネルを開く・前に出すと頼んだ（ui.state.set の panel）: View メニューと同じに開く
+  const stopPanels = followPanelRequests(conn, (id) => dock.show(id));
   const stopOpen = onTimeline({ open: (d) => (d.kind === "memory" ? showMemory(d.address) : void showAddress(d.address)) });
 
+  // 合言葉が無い・違う（cookie が無い・作り直された）: 合言葉を入れる画面へ
+  conn.onLink((link, info) => {
+    if (link === "closed" && info?.data?.reason === "token") location.assign("/login");
+  });
   conn.start();
   onDestroy(() => {
     stopOpen();
+    stopPanels();
     stopFaults();
     conn.stop();
     screen.dispose();

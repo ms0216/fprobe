@@ -1,5 +1,6 @@
 // Event Log: 検索の条件 → recording.find の query、要約・CSV・印、区間の統計の棒と外れ値、印とメモの置いた者
 import { describe, expect, it } from "vitest";
+import type { Json } from "../../api/generated/fprobe_api";
 import {
   emptyCondition, eventsCsv, histogramBars, intervalsInBin, kindRows, longestMarks, notesOf,
   fieldText, measureParams, parseNumber, searchMarks, summary, toQuery, type RecEvent,
@@ -33,7 +34,7 @@ describe("検索の条件", () => {
 
 describe("結果の表示", () => {
   it("本文の要約は stream・kind ごとの読みやすい欄（本文のキーの有無で選ばない）", () => {
-    const decoded = (body: object) => ev({ stream: "annotation", kind: "uart.byte", body });
+    const decoded = (body: Json) => ev({ stream: "annotation", kind: "uart.byte", body });
     expect(summary(decoded({ text: "'A'", error: null }))).toBe("'A'");
     expect(summary(decoded({ text: "framing error", error: "framing" }))).toBe("framing error (framing)");
     expect(summary(ev({ stream: "annotation", kind: "mark", body: { text: "ここ" } }))).toBe("ここ");

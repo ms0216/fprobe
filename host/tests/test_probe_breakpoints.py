@@ -74,8 +74,9 @@ def test_the_log_says_how_many_entries_were_dropped(probe, monkeypatch):
     import collections
     setup(probe)
     probe._break_log = collections.deque(maxlen=3)
-    for seq in range(1, 7):
-        probe._break_log.append({"seq": seq})
+    for seq in range(1, 7):                  # 本物の _break_action が残す項と同じ形
+        probe._break_log.append({"seq": seq, "host_s": float(seq), "time_source": "host_received",
+                                 "address": 0x100, "where": "0x00000100", "hit": seq, "message": None, "values": {}})
     out = probe.breakpoint_log(since=1)
     assert [e["seq"] for e in out["entries"]] == [4, 5, 6] and out["lost"] == 2
 
@@ -87,9 +88,10 @@ def test_a_condition_without_a_truth_value_is_an_error_not_true():
     from fprobe.probe_breakpoints import _truth
     assert _truth(vint(0)) is False and _truth(vint(3)) is True and _truth(vfloat("nan")) is True
     assert _truth(venum(None, 0)) is False and _truth(vbool(True)) is True
-    assert _truth(vptr(0, "int")) is False and _truth(vptr(0x2000, "int")) is True
-    assert _truth(varray(ints(120, 0), string="x")) is True and _truth(varray(ints(0), string="")) is False
-    for value in (vstruct(enum=venum("A", 1), value=vint(1)), vna("optimized out"), varray(ints(1, 2))):
+    assert _truth(vptr(0, "int", deref=False)) is False and _truth(vptr(0x2000, "int", deref=True)) is True
+    assert _truth(varray(ints(120, 0), element_type="char", string="x")) is True
+    assert _truth(varray(ints(0), element_type="char", string="")) is False
+    for value in (vstruct(enum=venum("A", 1), value=vint(1)), vna("optimized out"), varray(ints(1, 2), element_type="int")):
         with pytest.raises(ValueError):
             _truth(value)                       # 構造体のメンバー名が enum・value でも構造体（キーで推さない）
 

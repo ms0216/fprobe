@@ -33,17 +33,49 @@ FPGA の中を観測する使い方は [fpga-analysis.md](fpga-analysis.md)、AI
 
 ```sh
 python -m venv .venv
-.venv/Scripts/python -m pip install -e "gateware[dev]" -e "host[dev]"
+.venv/Scripts/python -m pip install -e "gateware[dev]" -e "host[dev]"      # Linux・macOS は .venv/bin/python
 ```
+
+入口（使い方）ごとに入れる extras を選べます。`host[...]` の extras は次のとおりで、`fprobe[...]` の自己参照で積み上がります。
+
+| 入口 | 入れるもの | 中身 |
+|---|---|---|
+| ライブラリ（USB・Ethernet の `Device`、VCD） | `pip install -e host` | pyusb・libusb-package |
+| ライブラリ + デバッガ（pyOCD と同時利用） | `host[debug]` | + pyocd・capstone |
+| デーモン + 画面（`fprobe-daemon`） | `host[daemon]` | + uvicorn・starlette・websockets・jsonschema・pyyaml・pyserial・numpy |
+| AI（`fprobe-mcp`） | `host[mcp]` | `daemon` + mcp（MCP が必要ならデーモンを起こすので daemon を含む） |
+| 試験（`pytest host`） | `host[dev]` | `mcp` + `aux` + pytest・httpx |
 
 - Primer のビルド・書き込みには Gowin EDA Education 1.9.11.03（`C:\Gowin\Gowin_V1.9.11.03_Education_x64`、別の場所なら環境変数 `FPROBE_GOWIN_HOME`）。
 - PYNQ-Z2 のビルドには Vivado（環境変数 `FPROBE_VIVADO_HOME`）。
 - VHDL のシミュレーション（開発者向け）には GHDL 6（環境変数 `FPROBE_GHDL_HOME`）。
-- MCP を使うなら `pip install -e host[mcp]`、デバッガの機能（pyOCD 経由）を使うなら `pip install -e host[debug]`。
-- 画面（ブラウザ）を使うなら `cd host/ui && npm install && npm run build`（Node.js 24）。
-- 動作確認（機器不要）: `.venv/Scripts/python -m pytest host -q`。
+- 画面（ブラウザ）を使うなら `cd host/ui && npm ci && npm run build`（Node.js 24 が標準。22 でも動くことを確かめた）。
+- 動作確認（機器不要）: `cd host && ../.venv/Scripts/python -m pytest -q`（`host[dev]` が要る）。
+  速さの約束の試験（`perf`）は既定から外れているので、続けて `pytest -m perf` を走らせる（[../testing-speed.md](../testing-speed.md)）。
+- 入口ごとに、まっさらな venv で動くことを確かめる検査: `python tools/install/check_extras.py`（PyPI が要る）。
+  網の要らない静的な照合は `host/tests/test_install_extras.py`（extras と import の食い違いを見る）。
 
 インストールで入るコマンドは `fprobe`（CLI）、`fprobe-mcp`（MCP サーバ）、`fprobe-daemon`（デーモン）の 3 つです。
+
+## 3.5 機器なしで試す（偽の機器のデモ）
+
+機器が無くても、画面と MCP を偽の機器で動かせます（試験用の偽物で、値は本物ではありません）。`host[mcp]` と画面のビルド（上）だけが要ります。
+
+```sh
+python host/tests/fake_daemon.py --demo --port 7820
+```
+
+- 1 行目に `PORT 7820` が出たら、ブラウザで `http://127.0.0.1:7820/` を開く。デモの ELF を読んで接続・停止した状態で、各パネルに偽の値、
+  Timeline に偽の捕捉と記録が出る。画面が白いときは画面をビルドしていない（`cd host/ui && npm ci && npm run build`）。
+- 同じデーモンへ MCP をつなぐ（別の端末）。`fprobe-mcp` は同じポートにデーモンがいればそれを使う:
+
+```sh
+claude mcp add fprobe-demo -- <venv>/bin/fprobe-mcp --listen 7820
+```
+
+  AI に「`probe_info` を呼んで」と頼むと偽の機器のケイパビリティが返る（道具は 367 個。`fprobe-mcp` が API から作る）。
+  AI の操作は画面の活動の欄に流れる。人と AI が同じ API を見ていることを確かめられる。
+- 止めるのは Ctrl+C。
 
 ## 4. ビットストリームを書く
 
@@ -94,7 +126,7 @@ with Session.open_eth("192.168.77.2") as s:
     print(s.device.capabilities())
 ```
 
-AI から使うなら、デーモンと MCP の登録（[mcp.md](mcp.md)）をして、`probe_info` を呼ばせます。
+AI から使うなら、MCP の登録（[mcp.md](mcp.md)）をして、`probe_info` を呼ばせます。
 
 ```sh
 .venv/Scripts/fprobe-daemon.exe --eth 192.168.77.2    # 画面: http://127.0.0.1:7820/

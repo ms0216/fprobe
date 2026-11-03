@@ -58,6 +58,7 @@ class WaitInfo:
     list: int | None = None       # 待ちのリストの番地
     wake_tick: int | None = None  # 時間切れ（起きる）ティック。時間切れ無しは None
     remaining_ticks: int | None = None
+    overdue_ticks: int | None = None  # 期限を過ぎた量（読んだ時点で期限がティックより前。remaining_ticks は None）
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}

@@ -8,6 +8,7 @@ import pytest
 from fprobe import generated as g
 from fprobe.mcp_server import Probe
 from probe_fakes import FakeDevice
+from caps_fakes import with_caps
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ def test_armed_and_waiting_in_the_middle_stage(probe, device):
     out = probe.xtrig_sequence_status()
     del out["config"]                                       # 段の設定の読み戻しは test_xtrig_readback.py
     assert out == {"stage": 1, "fired": False, "time": 0, "armed": True, "stages": 3,
-                   "stage_states": ["done", "current", "waiting"]}
+                   "stage_states": ["done", "current", "waiting"], "fire_windows": []}
 
 
 def test_fired_marks_every_stage_done(probe, device):
@@ -51,3 +52,25 @@ def test_not_armed_is_idle(probe, device):
 def test_not_configured_has_no_stages(probe, device):
     out = probe.xtrig_sequence_status()
     assert out["stages"] == 0 and out["stage_states"] == []
+
+
+def test_fire_windows_list_every_event_of_the_last_stage():
+    """時刻の正しさ S1b の A2: 発火の時刻から、最後の段を進めえた事象ごとの点の範囲（TLV TIMING の seq_*）。どれが進めたかは
+    回路が記録しないので選ばない。パターンは使っている ch の種類ごと（ピンと内部の ch）。"""
+    from fprobe.caps import TimingPoint
+    from fprobe.xtrig import Event
+
+    declared = {"seq_pin": TimingPoint("seq_pin", "pin_edge", "tick", 7, 1, ("input_routing",)),
+                "seq_internal": TimingPoint("seq_internal", "internal_edge", "tick", 7, 0, ()),
+                "seq_event": TimingPoint("seq_event", "source_pulse", "tick", 2, 0, ())}
+
+    dev = FakeDevice()
+    dev.caps = with_caps(dev.capabilities(), timing=declared, la_channels=10, la_sample_hz=100_000_000)
+    dev.capabilities()                                    # 開いたときに読んだ（last_capabilities）のはこの構成
+    p = Probe("unused")
+    p._session = SimpleNamespace(device=dev)
+    put(dev, stages=1, enable=True, fired=True, time=1000)
+    dev.write(g.TRIGSEQ_STAGE0, [int(Event.PATTERN_A | Event.DAP_MATCH) | 1 << 16])
+    dev.write(g.TRIGSEQ_PATTERN_A, [0b1_0000_0001, 0])                   # mask: ch 0（ピン）と ch 8（内部）
+    got = {(w["event"], w.get("cause")): (w["t_lo"], w["t_hi"]) for w in p.xtrig_sequence_status()["fire_windows"]}
+    assert got == {("pattern_a", "internal"): (993, 993), ("pattern_a", "pin"): (993, 994), ("dap_match", None): (998, 998)}

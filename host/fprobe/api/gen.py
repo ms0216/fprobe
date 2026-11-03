@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from .spec import SPEC_PATH, Spec, load_spec
+from .typeschema import refresh_defs
 
 __all__ = ["render_markdown", "render_typescript", "write_all"]
 
@@ -13,29 +14,71 @@ MD_PATH = ROOT / "docs" / "api.md"
 HEADER = "自動生成ファイル。直接編集しないこと（python -m fprobe.api gen で再生成）。生成元: host/api/fprobe_api.json"
 
 
+def _ident(name: str) -> str:
+    return name if name.isidentifier() else json.dumps(name)
+
+
+def _union(parts) -> str:
+    """和の型（同じ項は 1 つに。integer と number はどちらも number）。"""
+    return " | ".join(dict.fromkeys(parts))
+
+
 def _ts_type(schema: dict) -> str:
+    """JSON Schema → TypeScript の型（1 行）。応答の形の約束（spec.result_schema_problems）の範囲を全部書ける。"""
+    if "$ref" in schema:
+        return schema["$ref"].removeprefix("#/$defs/")
+    if "const" in schema:
+        return json.dumps(schema["const"], ensure_ascii=False)
     if "enum" in schema:
-        return " | ".join(json.dumps(v) for v in schema["enum"])
+        return " | ".join(json.dumps(v, ensure_ascii=False) for v in schema["enum"])
     if "anyOf" in schema:
-        return " | ".join(_ts_type(s) for s in schema["anyOf"])
+        return _union(_ts_type(s) for s in schema["anyOf"])
     t = schema.get("type")
     if isinstance(t, list):
-        return " | ".join(_ts_type({"type": x}) for x in t)
+        return _union(_ts_type({**schema, "type": x}) for x in t)
     if t == "array":
-        return f"Array<{_ts_type(schema.get('items', {}))}>"
-    return {"integer": "number", "number": "number", "string": "string", "boolean": "boolean", "null": "null",
-            "object": "Record<string, unknown>"}.get(t, "unknown")
+        if "prefixItems" in schema:
+            return "[" + ", ".join(_ts_type(s) for s in schema["prefixItems"]) + "]"
+        items = schema.get("items")
+        return f"Array<{_ts_type(items) if isinstance(items, dict) else 'unknown'}>"
+    if t == "object":
+        props = schema.get("properties")
+        if props:
+            required = set(schema.get("required", []))
+            return "{ " + "; ".join(f"{_ident(k)}{'' if k in required else '?'}: {_ts_type(v)}"
+                                    for k, v in props.items()) + " }"
+        extra = schema.get("additionalProperties")
+        if isinstance(extra, dict):
+            return f"{{ [key: string]: {_ts_type(extra)} }}"
+        return "Record<string, never>" if props is not None and extra is False else "Record<string, unknown>"
+    return {"integer": "number", "number": "number", "string": "string", "boolean": "boolean",
+            "null": "null"}.get(t, "unknown")
+
+
+def _ts_params(schema: dict) -> str:
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    return "{ " + "; ".join(f"{k}{'' if k in required else '?'}: {_ts_type(v)}" for k, v in props.items()) + " }"
 
 
 def render_typescript(spec: Spec) -> str:
-    lines = [f"// {HEADER}", f"export const API_VERSION = {spec.api_version};", "", "export interface Methods {"]
+    lines = [f"// {HEADER}", f"export const API_VERSION = {spec.api_version};", "",
+             "// 応答の共通の形（仕様の $defs）"]
+    for name, schema in spec.defs.items():
+        doc = schema.get("description")
+        if doc:
+            lines.append(f"/** {doc} */")
+        lines.append(f"export type {name} = {_ts_type(schema)};")
+    lines += ["", "export interface Methods {"]
     for m in spec.methods.values():
-        props = m.params.get("properties", {})
-        required = set(m.params.get("required", []))
-        fields = "; ".join(f"{k}{'' if k in required else '?'}: {_ts_type(v)}" for k, v in props.items())
         binary = "; binary: true" if m.binary else ""
-        lines.append(f"  {json.dumps(m.name)}: {{ kind: {json.dumps(m.kind)}{binary}; params: {{ {fields} }} }};")
-    lines += ["}", "", "export type Topic = " + " | ".join(json.dumps(t) for t in spec.notifications) + ";", ""]
+        lines.append(f"  {json.dumps(m.name)}: {{ kind: {json.dumps(m.kind)}{binary}; params: {_ts_params(m.params)}; "
+                     f"result: {_ts_type(m.result)} }};")
+    lines += ["}", "",
+              "/** メソッド M の引数・応答の型 */",
+              'export type Params<M extends keyof Methods> = Methods[M]["params"];',
+              'export type Result<M extends keyof Methods> = Methods[M]["result"];', "",
+              "export type Topic = " + " | ".join(json.dumps(t) for t in spec.notifications) + ";", ""]
     return "\n".join(lines)
 
 
@@ -55,12 +98,39 @@ def render_markdown(spec: Spec) -> str:
             out += [f"| `{k}` | `{_ts_type(v)}`{'' if v.get('x-mcp', True) else '（MCP の道具には出さない）'} | "
                     f"{'○' if k in required else ''} |" for k, v in props.items()]
             out.append("")
+        out += ["応答:", "", "```ts", _ts_type(m.result), "```", ""]
+    if spec.defs:
+        out += ["## 応答の共通の形", ""]
+        for name, schema in spec.defs.items():
+            out += [f"### {name}", "", *([schema["description"], ""] if schema.get("description") else []),
+                    "```ts", _ts_type(schema), "```", ""]
     out += ["## 通知", ""] + [f"- `{k}`: {v.get('summary', '')}" for k, v in spec.notifications.items()] + [""]
     return "\n".join(out)
 
 
+def spec_text(data: dict) -> str:
+    """仕様の JSON の書き方（2 字の字下げ・日本語はそのまま・末尾に改行。$defs は api_version の次）。"""
+    ordered = {"api_version": data["api_version"], "$defs": data.get("$defs", {}),
+               **{k: v for k, v in data.items() if k not in ("api_version", "$defs")}}
+    return json.dumps(ordered, indent=2, ensure_ascii=False) + "\n"
+
+
+def refreshed_spec_text() -> str:
+    """仕様の $defs のうち実装の型から作るもの（"x-from"）を作り直した、仕様の JSON の全文。"""
+    data = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
+    data["$defs"] = refresh_defs(data.get("$defs", {}))
+    return spec_text(data)
+
+
 def write_all(check: bool = False) -> list[Path]:
-    """生成物を書く。check=True なら書かずに一致を確かめ、違えば AssertionError。"""
+    """生成物を書く（仕様の $defs の x-from・TypeScript の型・文書）。check=True なら書かずに一致を確かめ、違えば
+    AssertionError。"""
+    spec_now = refreshed_spec_text()
+    if check:
+        assert SPEC_PATH.read_text(encoding="utf-8") == spec_now, \
+            f"{SPEC_PATH} の $defs（x-from: 実装の型から作る形）が古い（python -m fprobe.api gen）"
+    else:
+        SPEC_PATH.write_text(spec_now, encoding="utf-8", newline="\n")
     spec = load_spec()
     outputs = {TS_PATH: render_typescript(spec), MD_PATH: render_markdown(spec)}
     for path, text in outputs.items():
@@ -69,4 +139,4 @@ def write_all(check: bool = False) -> list[Path]:
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8", newline="\n")
-    return list(outputs)
+    return [SPEC_PATH, *outputs]

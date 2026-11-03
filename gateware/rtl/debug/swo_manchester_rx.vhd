@@ -16,6 +16,10 @@
 --   開始ビットは休止（Low）からの立ち上がりで見つけ、その中央（立ち下がり）を最初の同期点にする。立ち上がったまま
 --   T - floor(T/4) の間 下がらなければ Manchester の開始ではない（線が High のまま = つないでいない等）: Low に戻るまで待つ。
 -- divisor は 4 以上で使う（dap_cmd_swo が制限する）。受信中に変えない。
+-- バイトの時刻（out_time。時刻の正しさの R4。docs/superpowers/specs/2026-11-01-time-accuracy-design.md §13）: そのバイトの
+--   最初（LSB）のデータビットの中央の変化を見つけた周期の time。端子の変化は out_time − SWO_MANCHESTER_BIT_DELAY（2 段の
+--   同期化）以上 + 1 刻み未満（正は fprobe_gw.timing）。ビットごとに同期し直すので、開始の辺から数えず、送り手の速さ・
+--   divisor に依らない（1 フレームの 2 バイト目以降も、そのバイトの最初のビット）。時刻を使わない使い方は time をつながない。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -29,8 +33,10 @@ entity swo_manchester_rx is
     rst         : in  std_logic;
     divisor     : in  unsigned(DIVISOR_BITS - 1 downto 0);   -- 1 ビットの clk 周期数（4 以上）
     rx          : in  std_logic;                             -- 非同期でよい
+    time        : in  unsigned(47 downto 0) := (others => '0');   -- タイムベース（バイトの時刻に使う）
     out_valid   : out std_logic;                             -- 1 周期（受け手は毎周期取り出す）
     out_data    : out std_logic_vector(7 downto 0);
+    out_time    : out unsigned(47 downto 0);                 -- out_data のバイトの最初のビットの中央の変化を見つけた周期の time
     frame_error : out std_logic                              -- 1 周期: 端数のビットでフレームが終わった
   );
 end entity;
@@ -47,6 +53,8 @@ architecture rtl of swo_manchester_rx is
   signal shreg     : std_logic_vector(7 downto 0) := (others => '0');
   signal valid_r   : std_logic := '0';
   signal error_r   : std_logic := '0';
+  signal first_t   : unsigned(47 downto 0) := (others => '0');   -- 今のバイトの最初のビットの中央の変化の time
+  signal data_t    : unsigned(47 downto 0) := (others => '0');   -- 出したバイトの時刻（out_time）
   signal edge      : boolean;
 begin
   sync_i : entity work.sync_bit
@@ -78,6 +86,8 @@ begin
         timer     <= (others => '0');
         bit_count <= (others => '0');
         shreg     <= (others => '0');
+        first_t   <= (others => '0');
+        data_t    <= (others => '0');
       else
         case state is
           when S_IDLE =>
@@ -102,8 +112,12 @@ begin
               timer     <= to_unsigned(1, timer'length);
               shreg     <= (not rx_sync) & shreg(7 downto 1);
               bit_count <= bit_count + 1;
+              if bit_count = 0 then
+                first_t <= time;                            -- バイトの最初のビットの中央（R4）
+              end if;
               if bit_count = 7 then
                 valid_r <= '1';
+                data_t  <= first_t;
               end if;
             elsif timer >= end_at then                      -- 変化が来ない: フレームの終わり
               if bit_count /= 0 then
@@ -123,5 +137,6 @@ begin
 
   out_valid   <= valid_r;
   out_data    <= shreg;
+  out_time    <= data_t;
   frame_error <= error_r;
 end architecture;

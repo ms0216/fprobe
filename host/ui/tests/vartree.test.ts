@@ -1,7 +1,8 @@
 // 変数の木: デーモンの値の形（kind を持つ object）→ 行・子・式・表示・書く値
 import { describe, expect, it } from "vitest";
-import { childrenOf, display, editable, elementType, expandable, inputText, kindOf, parseInput, pointeeType,
+import { childrenOf, display, editable, expandable, inputText, kindOf, parseInput,
          pointerChildren, scalarOf, structType, truncated, wrap, type VarNode } from "../src/lib/vartree";
+import * as vartree from "../src/lib/vartree";
 import { ints, varray, vbool, vbytes, venum, vfloat, vint, vna, vptr, vstruct } from "./value-kinds";
 
 const node = (value: unknown, expr: string | null = "s", type?: string): VarNode => ({ key: "k", name: "s", expr, type, value });
@@ -51,21 +52,24 @@ describe("変数の木", () => {
     expect(display(vbytes("x".repeat(100))).length).toBe(64);
   });
 
-  it("開けるのは構造体・配列（切った配列・文字の配列も）と、先のあるポインタ（NULL・void・関数は開かない）", () => {
+  it("開けるのは構造体・配列（切った配列・文字の配列も）と、デーモンが先を読めると返したポインタ（deref）", () => {
     expect(expandable(vstruct({ a: vint(1) }))).toBe(true);
     expect(expandable(vstruct({}))).toBe(false);
     expect(expandable(varray(ints(1)))).toBe(true);
     expect(expandable(varray([]))).toBe(false);
     expect(expandable(varray([], 9))).toBe(true);                // 1 つも読まずに切った: 続きを読める
-    expect(expandable(vptr(0x2000, "struct S"))).toBe(true);
-    expect(expandable(vptr(0, "struct S"))).toBe(false);
-    expect(expandable(vptr(0x2000, "void"))).toBe(false);
-    expect(expandable(vptr(0x2000, "int (int)"))).toBe(false);
+    expect(expandable(vptr(0x2000, "struct S", { deref: true }))).toBe(true);
+    expect(expandable(vptr(0, "struct S", { deref: false }))).toBe(false);
+    // 型の文字では決めない: "void" でもデーモンが true なら開く、"struct S" でも false なら開かない
+    expect(expandable(vptr(0x2000, "void", { deref: true }))).toBe(true);
+    expect(expandable(vptr(0x2000, "struct S", { deref: false }))).toBe(false);
+    expect(expandable(vptr(0x2000, "struct S"))).toBe(false);          // 古い値（deref が無い）は開かない
     expect(expandable(vint(5))).toBe(false);
   });
 
   it("子の式は C の式（メンバー・添字・矢印）。式で指せない無名のメンバーは null", () => {
-    const s = node(vstruct({ id: vint(1), "<anonymous@4>": vint(2), samples: varray(ints(3, 4)) }), "sensor", "struct Sensor");
+    const s = node(vstruct({ id: vint(1), "<anonymous@4>": vint(2), samples: varray(ints(3, 4), 2, { element_type: "int16_t" }) }),
+                   "sensor", "struct Sensor");
     const kids = childrenOf(s, { id: "uint8_t", samples: "int16_t[2]" });
     expect(kids.map((k) => [k.name, k.expr, k.type])).toEqual([
       ["id", "sensor.id", "uint8_t"], ["<anonymous@4>", null, undefined], ["samples", "sensor.samples", "int16_t[2]"]]);
@@ -77,18 +81,20 @@ describe("変数の木", () => {
   });
 
   it("ポインタの先: 構造体はメンバーを直接（p->x）、ほかは *p の 1 行", () => {
-    const p = { ...node(vptr(0x2000, "struct S"), "cfg", "struct S *"), name: "cfg" };
+    const p = { ...node(vptr(0x2000, "struct S", { deref: true }), "cfg", "struct S *"), name: "cfg" };
     expect(pointerChildren(p, { type: "struct S", value: vstruct({ a: vint(1) }) }, { a: "int" })
       .map((k) => [k.name, k.expr, k.type])).toEqual([["a", "cfg->a", "int"]]);
-    expect(pointerChildren(p, { value: vint(7) }).map((k) => [k.name, k.expr, k.type])).toEqual([["*cfg", "*cfg", "struct S"]]);
+    // 先の型は *p を読んだ結果の型（API）。ポインタの型の文字から剥がさない
+    expect(pointerChildren(p, { type: "int", value: vint(7) }).map((k) => [k.name, k.expr, k.type])).toEqual([["*cfg", "*cfg", "int"]]);
+    expect(pointerChildren(p, { value: vint(7) })[0].type).toBeUndefined();
   });
 
-  it("型の文字から要素・先の型、構造体の型", () => {
-    expect(elementType("uint32_t[4]")).toBe("uint32_t");
-    expect(pointeeType("struct Sensor *")).toBe("struct Sensor");
-    expect(pointeeType("char *const")).toBe("char");
-    expect(structType("struct Sensor")).toBe("struct Sensor");
-    expect(structType("uint8_t[3]")).toBeNull();
+  it("型の文字を解釈しない: メンバーの型を引くのは値が構造体（kind）のときだけ、名前は API の型のまま", () => {
+    expect("elementType" in vartree || "pointeeType" in vartree).toBe(false);
+    expect(structType(vstruct({ a: vint(1) }), "struct Sensor")).toBe("struct Sensor");
+    expect(structType(varray(ints(1), 1, { element_type: "uint8_t" }), "uint8_t[3]")).toBeNull();
+    expect(structType(vptr(0x2000, "struct S", { deref: true }), "struct S *")).toBeNull();
+    expect(structType(vstruct({}), undefined)).toBeNull();
     expect(wrap("a.b[2]")).toBe("a.b[2]");
     expect(wrap("p->x")).toBe("p->x");
     expect(wrap("*p")).toBe("(*p)");

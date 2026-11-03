@@ -1,4 +1,4 @@
-"""ETM の命令トレース（Probe の mixin）: CoreSight の設定（trace.etm.start / stop）と、取ったトレースの解読
+"""ETM の命令トレース（Probe のサービス）: CoreSight の設定（trace.etm.start / stop）と、取ったトレースの解読
 （trace.etm.decode）・パケットの一覧・命令の一覧・事後の命令履歴（U35・U36 の最小形）。
 
 トレースのバイト列の取り方はここでは決めない（チップ・配線に依る）: 16 進・ファイル・ターゲットのメモリのリング
@@ -17,8 +17,9 @@ from .trace import elements as el
 from .trace.coresight import ETM_BASE, TPIU_BASE, Etmv4, Etmv4Info, Etmv4Setup, Funnel, Tpiu, enable_trace
 from .trace.reconstruct import Flow, Reconstructor
 from .trace.tpiu import deformat
+from .probe_service import HostView
 
-__all__ = ["EtmTools", "HISTORY_NOTE"]
+__all__ = ["EtmService", "HISTORY_NOTE"]
 
 HISTORY_NOTE = ("ETM が出した命令の列（実行した命令は確実）。M-profile の ETM にはデータの値が無いので、レジスタ・"
                 "メモリの過去の値は含まない（要るならスナップショットから前へ模擬した推定になる）。")
@@ -47,10 +48,17 @@ class _EtmResult:
     flow: Flow
 
 
-class EtmTools:
-    """trace.etm.*（Probe の mixin）。"""
+class EtmService:
+    """trace.etm.*（Probe のサービス）。"""
 
-    def _init_etm(self) -> None:
+    API = ("etm_decode", "etm_history", "etm_instructions", "etm_packets", "etm_start", "etm_stop")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_etm_session",)
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_elf_image", "_lock", "_place_of", "_symbols", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._etm_session: _EtmSession | None = None
         self._etm_result: _EtmResult | None = None
 
@@ -64,8 +72,8 @@ class EtmTools:
         funnel_ports の入口を有効に）、TPIU（tpiu_base があれば port_size ビット・フォーマッタの継続モード）、ETM
         （trace_id、sync_period バイトごとに同期、全命令）。ETMv4 でなければ断る。"""
         setup = Etmv4Setup(trace_id, cycle_counting, cycle_threshold, timestamps, sync_period)
-        with self._lock:
-            regs = TargetMemory(self.target)
+        with self._host._lock:
+            regs = TargetMemory(self._host.target)
             etm = Etmv4(regs, etm_base)
             info = etm.info()
             if info.arch_major != 4:
@@ -86,8 +94,8 @@ class EtmTools:
         session = self._etm_session
         etm_base = etm_base if etm_base is not None else session.etm_base if session else ETM_BASE
         tpiu_base = tpiu_base if tpiu_base is not None else session.tpiu_base if session else None
-        with self._lock:
-            regs = TargetMemory(self.target)
+        with self._host._lock:
+            regs = TargetMemory(self._host.target)
             idle = Etmv4(regs, etm_base).disable()
             flushed = Tpiu(regs, tpiu_base).flush() if tpiu_base is not None else None
             return {"idle": idle, "flushed": flushed}
@@ -109,7 +117,7 @@ class EtmTools:
             raise ValueError("address には length（バイト数）が要る")
         if not 0 <= oldest < length:
             raise ValueError(f"oldest（最も古いバイトの位置）は 0〜{length - 1}: {oldest}")
-        ring = bytes(self.target.read_memory_block8(address, length))
+        ring = bytes(self._host.target.read_memory_block8(address, length))
         return ring[oldest:] + ring[:oldest]                         # リングを古い順に並べ直す
 
     def _etm_config(self, given: dict | None) -> tuple[Etmv4Config, str]:
@@ -126,14 +134,14 @@ class EtmTools:
 
     def _etm_code(self, from_elf: bool | None):
         """命令を読むもの: ELF があれば ELF（from_elf=False なら実機）、無ければ実機。(読み手, "elf" / "target")。"""
-        image = self._elf_image()
+        image = self._host._elf_image()
         if from_elf is None:
             from_elf = image is not None
         if from_elf:
             if image is None:
                 raise RuntimeError("ELF が無い（debug_elf_load）")
             return image, "elf"
-        return TargetMemory(self.target), "target"
+        return TargetMemory(self._host.target), "target"
 
     def etm_decode(self, data_hex: str | None = None, path: str | None = None, address: int | None = None,
                    length: int | None = None, oldest: int = 0, formatted: bool = True, align: str = "auto",
@@ -145,7 +153,7 @@ class EtmTools:
         それも無ければ、流れが 1 つだけならその ID。複数なら選ばずに断る: 量の多さで選ばない）か、ETM のバイト列そのものか。
         etm_config = {commit_opt1, vmid_bytes, cid_bytes}: ETM の構成（TRCIDR0.COMMOPT・TRCIDR2 の VMID / Context ID の
         大きさ）。渡さなければ trace.etm.start で読んだ ID レジスタの値（どちらも無ければ断る。暗黙の値で解読しない）。"""
-        with self._lock:
+        with self._host._lock:
             raw = self._etm_bytes(data_hex, path, address, length, oldest)
             out: dict = {"bytes": len(raw), "protocol": protocol}
             stream = raw
@@ -168,7 +176,7 @@ class EtmTools:
                                  "cid_bytes": config.cid_bytes, "from": origin}
             elements = decoder_for(protocol, config).decode(stream)
             memory, origin = self._etm_code(from_elf)
-            flow = Reconstructor(memory, self._symbols).run(elements)
+            flow = Reconstructor(memory, self._host._symbols).run(elements)
             self._etm_result = _EtmResult(elements, flow)
             addresses = flow.addresses()
             errors = list(flow.errors)
@@ -179,8 +187,8 @@ class EtmTools:
                 "code": origin, "packets": len(elements), "instructions": flow.count,
                 "exceptions": sum(1 for m in flow.markers if m.kind == "exception"),
                 "unresolved_atoms": flow.unresolved_atoms, **_errors(errors, errors_limit),
-                "first": {"address": addresses[0], **self._place_of(addresses[0])} if addresses else None,
-                "last": {"address": addresses[-1], **self._place_of(addresses[-1])} if addresses else None,
+                "first": {"address": addresses[0], **self._host._place_of(addresses[0])} if addresses else None,
+                "last": {"address": addresses[-1], **self._host._place_of(addresses[-1])} if addresses else None,
                 "next_address": flow.next_address,
             })
             return out
@@ -192,14 +200,14 @@ class EtmTools:
 
     def etm_packets(self, offset: int = 0, limit: int = 200, kinds: list[str] | None = None) -> dict:
         """解読したパケット（共通の要素）の一覧: kind・トレースの中の位置 offset・バイト raw・中身。kinds で絞る。"""
-        with self._lock:
+        with self._host._lock:
             items = [e for e in self._etm().elements if kinds is None or e.kind in kinds]
             return {"total": len(items), "offset": offset, "packets": [e.as_dict() for e in items[offset:offset + limit]]}
 
     def etm_instructions(self, offset: int = 0, limit: int = 200, function: str | None = None) -> dict:
         """再構成した命令の一覧（通し番号 index・番地・命令・関数・ファイル:行、分岐の最後は branch = taken /
         not_taken / exception と行き先 target）と、その範囲の出来事（例外・時刻・途切れ）。function で関数を絞る。"""
-        with self._lock:
+        with self._host._lock:
             flow = self._etm().flow
             if function is None:
                 rows, total = flow.instructions(offset, limit), flow.count
@@ -211,7 +219,7 @@ class EtmTools:
     def etm_history(self, count: int = 32, errors_limit: int = ERRORS_LIMIT) -> dict:
         """事後の命令履歴: トレースの最後（止まった所の直前）の count 命令（古い順）と、その間の出来事。解読の誤りは
         先頭 errors_limit 件（errors_total・errors_truncated・errors_limit）。"""
-        with self._lock:
+        with self._host._lock:
             flow = self._etm().flow
             rows = flow.history(count)
             return {"total": flow.count, "instructions": rows, "markers": self._etm_markers(flow, rows),

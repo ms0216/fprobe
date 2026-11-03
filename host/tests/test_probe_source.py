@@ -80,8 +80,6 @@ def test_resume_steps_over_a_breakpoint_at_the_current_pc(probe, monkeypatch):
         dbg = property(lambda self: FakeDebugger())               # スレッドが偽物を踏まないように）
         target = property(lambda self: object())
 
-        def target_status(self):
-            return {"state": "RUNNING"}
-
     monkeypatch.setattr(probe, "__class__", OnlyThisProbe)
+    monkeypatch.setattr(probe, "target_status", lambda: {"state": "RUNNING"})     # ターゲットのサービスの中にも効く
     assert probe.target_resume() == {"state": "RUNNING"} and calls == ["dbg.resume"]

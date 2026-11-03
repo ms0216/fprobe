@@ -64,3 +64,19 @@ async def reset_during_a_frame_returns_line_to_idle_high(dut):
     assert after_reset and all(level == 1 for level in after_reset), after_reset
     await ReadOnly()
     assert int(dut.busy.value) == 0
+
+
+@cocotb.test()
+async def the_start_bit_begins_on_the_edge_after_the_hand_off(dut):
+    """時刻の表（fprobe_gw.timing の UART_TX_START_DELAY = 0）の元: 受け渡しの周期の次の立ち上がりで開始ビットが出る。
+    イベントの集約（event_collector）は受け渡しを 1 段で受け、その周期の time を付けるので、時刻 = 開始ビットを出す辺。"""
+    await setup(dut)
+    await RisingEdge(dut.clk)
+    dut.in_valid.value = 1
+    dut.in_data.value = 0x5A
+    await ReadOnly()
+    assert int(dut.in_ready.value) == 1 and int(dut.tx.value) == 1     # この周期が受け渡し
+    await RisingEdge(dut.clk)
+    dut.in_valid.value = 0
+    await ReadOnly()
+    assert int(dut.tx.value) == 0                                       # 次の辺から開始ビット

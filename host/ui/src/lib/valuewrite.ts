@@ -1,7 +1,7 @@
-// 見えている値をその窓で書く（仕様 docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.6）: どの API で書くかを
-// 決める規則と、欄の文字から API の引数を組み立てる計算。Svelte に依らない。
-// 規則は事実だけで決める（ターゲットの状態・API の結果が返した番地と大きさ・target.flash.regions の領域）。推定しない:
-// 番地や大きさが結果に無い値は書けない（null）と返し、画面はそれを示す。
+// 見えている値をその窓で書く（仕様 docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.6）: 欄の文字から API の
+// 引数を組み立てる。Svelte に依らない。書く道はデーモンが決める（式は debug.write_expression が状態で道を選ぶ、命令は
+// 逆アセンブルの in_flash。仕様 2026-11-03-ui-judgments-to-api-design.md E3）。推定しない: 番地や大きさが結果に無い値は
+// 書けない（null）と返し、画面はそれを示す。
 import type { AppState } from "./state";
 import { allowed } from "./guard";
 import type { Confirmer } from "./confirm";
@@ -22,26 +22,21 @@ export const isWriteCall = (b: Built): b is ApiCall => "method" in b;
 
 // --- 式（変数）---------------------------------------------------------------------------------------
 
-export type ExprWriteMethod = "watch.write" | "debug.write_expression";
+export type ExprWriteMethod = "debug.write_expression";
 
-/** 式に書く API: 走行中（RUNNING・SLEEPING）は止めずに書く watch.write、止まっていれば debug.write_expression。
- *  それ以外（未接続・リセット中等）は書けない（null） */
+/** 式に書く API: debug.write_expression（止まっていればフレームで、走行中なら止めずに。道はデーモンがターゲットの状態で
+ *  選び、書けない状態なら誤りを返す）。ターゲットにつながっていなければ書けない（null） */
 export function exprWriteMethod(state: string | undefined): ExprWriteMethod | null {
-  if (state === "RUNNING" || state === "SLEEPING") return "watch.write";
-  if (state === "HALTED") return "debug.write_expression";
-  return null;
+  return state && state !== "DISCONNECTED" ? "debug.write_expression" : null;
 }
 
 /** 式に書く呼び出し。debug.write_expression は真偽を受けないので数に、frame は渡したときだけ付ける */
 export function exprWriteCall(state: string | undefined, expression: string, value: number | string | boolean,
                               frame?: number): ApiCall | null {
   const method = exprWriteMethod(state);
-  if (method === "watch.write") return { method, params: { expression, value } };
-  if (method === "debug.write_expression") {
-    return { method, params: { expression, value: typeof value === "boolean" ? Number(value) : value,
-                               ...(frame !== undefined ? { frame } : {}) } };
-  }
-  return null;
+  if (method === null) return null;
+  return { method, params: { expression, value: typeof value === "boolean" ? Number(value) : value,
+                             ...(frame !== undefined ? { frame } : {}) } };
 }
 
 /** 配列の要素（とそのメンバー）の式: `a[3]`・`s.items[0].value`・`(*p)[1]` */
@@ -100,18 +95,10 @@ export function writeOneToClear(result: { write_one_to_clear?: string[] } | null
 
 // --- 命令のバイト（逆アセンブル）---------------------------------------------------------------------
 
-export interface FlashRegion {
-  start: number;
-  size: number;
-}
-
-/** 命令を書く経路: Flash の領域（target.flash.regions）に掛かれば flash（target.flash が要る。ここでは書かない）、
- *  掛からなければ memory（target.memory.write）。領域を読めていなければ unknown（書かない） */
-export function instructionWriteKind(regions: FlashRegion[] | null, address: number, length: number):
-  "memory" | "flash" | "unknown" {
-  if (!regions) return "unknown";
-  const end = address + Math.max(1, length);
-  return regions.some((r) => address < r.start + r.size && r.start < end) ? "flash" : "memory";
+/** 命令を書く経路の見せ方: デーモンが返した in_flash（debug.disasm.* の命令）が true なら flash（target.flash が要る。
+ *  ここでは書かない）、false なら memory（target.memory.write）、null・無ければ unknown（書かない） */
+export function instructionWriteKind(ins: { address: number; in_flash?: boolean | null }): "memory" | "flash" | "unknown" {
+  return ins.in_flash === true ? "flash" : ins.in_flash === false ? "memory" : "unknown";
 }
 
 /** 命令のバイト（メモリの順の 16 進。空白は無視）を書く target.memory.write。長さはいまの命令と同じ */

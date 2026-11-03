@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { RpcError } from "../src/lib/api";
 import {
-  emptyScreen, feed, lineAtTime, lines, loadSources, plain, readSource, splitTerminals, stampAt, terminalTabs, writeCall,
+  emptyScreen, feed, lineAtTime, lines, loadSources, plain, readSource, sourceLabel, splitTerminals, stampAt, terminalTabs, writeCall,
   type TerminalSource,
 } from "../src/lib/terminal";
 import { FakeConn } from "./fake-conn";
@@ -54,6 +54,20 @@ describe("端末の源", () => {
     expect(writeCall(src("rtt", 1), "a\n")).toEqual({ method: "rtt.write", params: { channel: 1, text: "a\n" } });
     expect(writeCall(src("semihosting"), "b")).toEqual({ method: "rtt.write", params: { channel: "semihosting", text: "b" } });
     expect(writeCall(src("uart"), "c\r")).toEqual({ method: "uart.write", params: { data: "c\r" } });
+  });
+});
+
+describe("源のタブの名前", () => {
+  const src = (kind: any, name: string) => ({ id: "x", kind, name, writable: false });
+  it("RTT・SWO は種類を前に付ける（名前だけの「Terminal」「Log」では RTT と分からない）。UART・セミホスティングは名前が種類", () => {
+    expect(sourceLabel(src("rtt", "Terminal"))).toBe("RTT Terminal");
+    expect(sourceLabel(src("rtt", "Log"))).toBe("RTT Log");
+    expect(sourceLabel(src("swo", "ITM 0"))).toBe("SWO ITM 0");
+    expect(sourceLabel(src("uart", "UART"))).toBe("UART");
+    expect(sourceLabel(src("semihosting", "Semihosting"))).toBe("Semihosting");
+  });
+  it("名前が種類で始まっていれば重ねない", () => {
+    expect(sourceLabel(src("rtt", "RTT 0"))).toBe("RTT 0");
   });
 });
 
@@ -138,5 +152,23 @@ describe("SWO の設定の引数（swo.configure）", () => {
     expect(swoConfigureParams("0 x", "2000000", "")).toBeNull();
     expect(swoConfigureParams("0, 2 5", "2000000", "")).toEqual({ ports: [0, 2, 5], swo_baud: 2000000, core_clock_hz: null });
     expect(swoConfigureParams("1", "6000000", "72000000")).toEqual({ ports: [1], swo_baud: 6000000, core_clock_hz: 72000000 });
+  });
+});
+
+describe("番地を引く（log.annotate）", async () => {
+  const { annotateText, placeText } = await import("../src/lib/terminal");
+  it("選んだ行があればその行の文字、無ければ源の文字全部を渡す", () => {
+    const screen = feed(emptyScreen(), "boot\nPanic at PC 0x08001234\nLR 0x08000F01\n");
+    const rows = lines(screen);
+    expect(annotateText(screen, rows, 1)).toBe("Panic at PC 0x08001234");
+    expect(annotateText(screen, rows, null)).toBe(plain(screen));
+    expect(annotateText(screen, rows, 99)).toBe(plain(screen));          // 消えた行の番号は全部に
+  });
+
+  it("場所は API が返した欄だけ（関数+オフセット・ファイル:行）。無ければ where", () => {
+    expect(placeText({ value: 0x08001235, address: 0x08001234, where: "x", function: "main", offset: 4, file: "main.c", line: 12 }))
+      .toBe("main+0x4  main.c:12");
+    expect(placeText({ value: 1, address: 1, where: "main", function: "main" })).toBe("main");
+    expect(placeText({ value: 1, address: 1, where: "?" })).toBe("?");
   });
 });

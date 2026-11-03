@@ -128,6 +128,23 @@ class KernelAwareness:
         """RTOS のティック（分からなければ None）。"""
         return None
 
+    def tick_mask(self) -> int | None:
+        """ティックの数の幅のマスク（ティックの変数の型の大きさ。分からなければ None: 起きるティックを回さずに作らない）。"""
+        return None
+
+    def _variable_mask(self, name: str) -> int | None:
+        """カーネルの変数の型の幅のマスク（DWARF。無ければ None）。"""
+        try:
+            size = self.info.global_variable(name).type.size
+        except KeyError:
+            return None
+        return (1 << (8 * size)) - 1 if size else None
+
+    def wake_tick(self, tick: int | None, remaining: int) -> int | None:
+        """いまのティック + 残り を、ティックの幅で回した起きるティック（幅か今のティックが分からなければ None）。"""
+        mask = self.tick_mask()
+        return None if tick is None or mask is None else (tick + remaining) & mask
+
     def scheduler_state(self) -> str:
         """running / not_started / suspended（分からなければ unknown）。"""
         return "unknown"

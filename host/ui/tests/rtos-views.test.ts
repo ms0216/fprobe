@@ -18,6 +18,10 @@ describe("RTOS: 表と負荷の推移", () => {
     expect(t.tasks.map((x) => x.task)).toEqual(["main", "IDLE"]);
     expect(t.tasks[0]).toMatchObject({ handle: 1, runs: 3, max: 10, min: 8, mean: 9 });
     expect(t).toMatchObject({ hz: 1e7, covered: 90, lowerBound: true });
+    // 両端が切り替えの区間が無ければデーモンは null を返す（画面は 0 にしない）
+    const cut = tableFromTimeline({ timebase_hz: 1e7, t0: 0, t1: 100,
+      stats: { tasks: { main: { handle: 1, cpu: 1, runs: 1, total: 100, max_run: null, min_run: null, mean_run: null } } } });
+    expect(cut.tasks[0]).toMatchObject({ max: null, min: null, mean: null });
     expect(loadFromTimeline({ window: 10, windows: [], peak: null, mean_load: 0.2 }).meanLoad).toBe(0.2);
   });
 
@@ -88,9 +92,10 @@ describe("Code Profile", () => {
 
   it("ソースの余白: ファイル名ごとの行の当たりと、当たらなかった行", () => {
     const heat = heatOf(
-      [{ function: "tick", file: "C:/src/sram_demo.c", line: 17, samples: 30, fraction: 0.3 },
-       { function: "tick", file: "sram_demo.c", line: 18, samples: 10, fraction: 0.1 }],
-      [{ function: "tick", lines: 4, lines_hit: 2, line_fraction: 0.5, hit_lines: [["sram_demo.c", 17], ["sram_demo.c", 18]],
+      [{ function: "tick", file: "C:/src/sram_demo.c", line: 17, samples: 30, fraction: 0.3, active_fraction: 0.3 },
+       { function: "tick", file: "sram_demo.c", line: 18, samples: 10, fraction: 0.1, active_fraction: 0.1 }],
+      [{ function: "tick", address: 0x100, size: 32, instructions: 8, instructions_hit: 4, instruction_fraction: 0.5,
+         lines: 4, lines_hit: 2, line_fraction: 0.5, hit_lines: [["sram_demo.c", 17], ["sram_demo.c", 18]],
          missed_lines: [["sram_demo.c", 19], ["sram_demo.c", 21]] }]);
     expect(heat.lines.get("sram_demo.c")!.get(17)).toEqual({ fraction: 0.3, samples: 30, max: 30 });
     expect([...heat.missed.get("sram_demo.c")!]).toEqual([19, 21]);
@@ -157,13 +162,13 @@ describe("Interrupts", () => {
 
 describe("Call Graph", () => {
   const fns: StackFunction[] = [
-    { function: "reset", frame: 8, frame_source: "disasm", max: 40, bounded: true, reasons: [], unknown_from: [],
+    { function: "reset", address: 0x100, frame: 8, frame_source: "disasm", max: 40, bounded: true, reasons: [], unknown_from: [],
       path: ["reset", "a", "b"], calls: ["a", "c"] },
-    { function: "a", frame: 16, frame_source: "su", max: 32, bounded: true, reasons: [], unknown_from: [], path: ["a", "b"],
+    { function: "a", address: 0x140, frame: 16, frame_source: "su", max: 32, bounded: true, reasons: [], unknown_from: [], path: ["a", "b"],
       calls: ["b"] },
-    { function: "b", frame: 16, frame_source: "su", max: 16, bounded: true, reasons: [], unknown_from: [], path: ["b"],
+    { function: "b", address: 0x180, frame: 16, frame_source: "su", max: 16, bounded: true, reasons: [], unknown_from: [], path: ["b"],
       calls: [] },
-    { function: "c", frame: 8, frame_source: "su", max: 8, bounded: false, reasons: ["再帰: c → c"], unknown_from: [],
+    { function: "c", address: 0x1c0, frame: 8, frame_source: "su", max: 8, bounded: false, reasons: ["再帰: c → c"], unknown_from: [],
       path: ["c"], calls: ["c"] },
   ];
   const roots = rootsOf({ roots: [{ root: "reset", kind: "reset", max: 40, bounded: true, path: ["reset", "a", "b"] },

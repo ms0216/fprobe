@@ -10,6 +10,8 @@ from dwarf_stack import StackBuilder
 from test_debug_dwarf import FakeTarget as DwarfTarget
 from value_kinds import venum, vint
 
+from pyocd.core.target import Target
+
 from fprobe.mcp_server import Probe
 from fprobe.svd import Device
 from fprobe.symbols import Symbols
@@ -31,6 +33,8 @@ def connect(probe: Probe, target, symbols_path: Path | None = None, target_type:
 
 class BusTarget:
     """pyOCD の target の、メモリ・周辺レジスタの読み書きと PC だけ。中身はバイト列（番地 → 値）。"""
+
+    memory_map = None                                          # メモリの地図の無いターゲット（ARM-A・RISC-V と同じ）
 
     def __init__(self, memory: dict[int, int] | None = None, pc: int = 0):
         self.memory = dict(memory or {})
@@ -112,7 +116,23 @@ def test_evaluate_frame_variables_and_write_expression(halted):
     assert halted.evaluate("depth", frame=3)["value"] == vint(1)
     assert halted.frame_variables(0)["function"] == "probe_point"
     after = halted.write_expression("sensors[1].mode", "MODE_IDLE")
-    assert after["value"] == venum("MODE_IDLE", 0)
+    assert after["value"] == venum("MODE_IDLE", 0) and after["via"] == "halted"
+
+
+def test_write_expression_chooses_the_way_by_the_target_state(halted):
+    """書く道（止まっていればフレームで・走行中は止めずに）はホストが状態で選ぶ。画面は状態で API を選ばない（E3）。"""
+    target = halted._debug.target
+    target.state = Target.State.RUNNING
+    after = halted.write_expression("sensors[1].mode", "MODE_IDLE")
+    assert after["via"] == "running" and after["atomic"] is True and after["value"] == venum("MODE_IDLE", 0)
+    assert isinstance(after["address"], int) and after["expression"] == "sensors[1].mode"
+    target.state = Target.State.SLEEPING
+    assert halted.write_expression("sensors[1].mode", 0)["via"] == "running"
+    with pytest.raises(ValueError, match="frame"):                              # 走行中はフレームを選べない
+        halted.write_expression("depth", 1, frame=3)
+    target.state = Target.State.RESET
+    with pytest.raises(RuntimeError, match="RESET"):
+        halted.write_expression("sensors[1].mode", 0)
 
 
 def test_type_info_needs_only_the_elf(probe):
@@ -180,6 +200,27 @@ def test_data_ranges_are_given_through_the_api(probe):
         probe.disasm_range(0x100, 12, data_ranges=[{"address": 0x104}])
 
 
+def test_instructions_say_whether_they_are_in_flash(probe):
+    """命令のバイトが Flash の領域に掛かるか（in_flash）をホストが返す。画面は重なりを計算しない（E3）。
+    未接続（ELF から）・メモリの地図の無いターゲットは null。"""
+    probe.elf_load(str(SRAM_DEMO))
+    assert {i["in_flash"] for i in probe.disasm_function("tick")["instructions"]} == {None}
+    target = BusTarget.from_elf(SRAM_DEMO, pc=0x20000058)
+    connect(probe, target, SRAM_DEMO)
+    assert {i["in_flash"] for i in probe.disasm_around(before=2, after=1)["instructions"]} == {None}   # 地図が無い
+    tick = probe.disasm_function("tick")["instructions"]
+    start = tick[3]["address"]                                    # 4 つ目の命令の先頭から Flash（試験の地図）
+    target.memory_map = SimpleNamespace(iter_matching_regions=lambda **kw: iter(
+        [SimpleNamespace(start=start, length=0x1000)] if kw == {"is_flash": True} else []))
+    flags = [i["in_flash"] for i in probe.disasm_function("tick")["instructions"]]
+    assert flags[:3] == [False] * 3 and all(flags[3:])
+    end = tick[2]["address"] + len(tick[2]["bytes"]) // 2        # 3 つ目の命令の終わりの 1 バイト前まで
+    target.memory_map = SimpleNamespace(iter_matching_regions=lambda **kw: iter(
+        [SimpleNamespace(start=0, length=end - 1)]))
+    flags = [i["in_flash"] for i in probe.disasm_function("tick")["instructions"]]
+    assert flags[:3] == [True] * 3 and not any(flags[3:])         # 命令の一部でも掛かれば true
+
+
 def test_without_target_or_elf_disassembly_is_an_error(probe):
     with pytest.raises(RuntimeError):
         probe.disasm_range(0x20000000, 4)
@@ -237,13 +278,13 @@ def test_peripheral_read_decodes_fields_and_skips_side_effects(mini):
 def test_bulk_read_skips_by_svd_read_action_or_the_callers_patterns_not_by_register_names(mini):
     # 「*.DR・*.FIFO 等の名前なら読むと消費する」という名前の型の推定を本体に持たない。読むと状態が変わるのは SVD の
     # readAction（仕様の情報）で決め、それ以外に読まないものは使う側が skip（glob）で明示する
-    from fprobe.probe_inspect import InspectTools
+    from fprobe.probe_inspect import InspectService
     from fprobe.svd import Register
     import fprobe.probe_inspect as inspect_module
     assert not hasattr(inspect_module, "BULK_READ_HAZARDS")
     fifo = Register("RXFIFO", "SPI", 0x40004000, 32, "read-only", 0, 0xFFFFFFFF)
-    assert InspectTools._bulk_skip_reason(fifo, False, ()) is None                 # readAction が無ければ読む
-    assert InspectTools._bulk_skip_reason(fifo, False, ("SPI.*FIFO",)) == "skip SPI.*FIFO"
+    assert InspectService._bulk_skip_reason(fifo, False, ()) is None                 # readAction が無ければ読む
+    assert InspectService._bulk_skip_reason(fifo, False, ("SPI.*FIFO",)) == "skip SPI.*FIFO"
     probe, target = mini
     uart = probe.peripheral_read("UART", skip=["uart.sr"])                         # 大文字小文字を区別しない
     assert {s["path"]: s["reason"] for s in uart["skipped"]}["UART.SR"] == "skip uart.sr"

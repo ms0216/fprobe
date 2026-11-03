@@ -15,8 +15,14 @@ export type PanelGroup = "debug" | "trace" | "analysis" | "tools";
 export interface PanelDef {
   id: string;
   title: Key;
+  about?: Key;               // View メニューで名前に添える中身（名前だけでは何が見えるか分からないパネル）
   component: Component<any>;
   group: PanelGroup;
+}
+
+/** View メニューの項目名: 名前（中身の説明があれば括弧で添える。例: Terminal (RTT · SWO · UART · Semihosting)） */
+export function panelMenuLabel(p: Pick<PanelDef, "title" | "about">, t: (key: Key) => string): string {
+  return p.about ? `${t(p.title)} (${t(p.about)})` : t(p.title);
 }
 
 const LAYOUT_KEY = "dock.layout.v2";            // v2: 既定が解析の配置に（2026-10-24）。前の保存は使わない

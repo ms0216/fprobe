@@ -14,7 +14,7 @@ def test_events_read_reports_inject_with_its_transfer_count(tmp_path, monkeypatc
     p._session = SimpleNamespace(device=FakeDevice())
     events = [DapEvent(100, KIND_INJECT_TRANSFERS, True, False, 0xC, 1, False, 0xE000EDF0, 0xA05F0003, transfers=4),
               DapEvent(200, KIND_INJECT, True, False, 0xC, 1, False, 0xE000EDF0, 0xA05F0003)]
-    monkeypatch.setattr(type(p), "_read_events", lambda self, last, since: (2, 0, 0, events, {}))
+    monkeypatch.setattr(p, "_read_events", lambda last, since: (2, 0, 0, len(events), events, {}))
     items = p.events_read()["items"]
     assert [(i["kind"], i["transfers"]) for i in items] == [("inject", 4), ("inject", None)]
     raw = p.events_read(raw=True)["items"]

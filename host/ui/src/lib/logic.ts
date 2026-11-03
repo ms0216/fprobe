@@ -1,6 +1,7 @@
 // Logic Analyzer（Saleae Logic 2 の Analyzers・DSView のトリガ・PulseView の測定）の計算: 解読器の設定の欄 → la.decode
 // の settings、解読の注釈 → 時間軸の印、多段トリガ・番地一致・つなぎ先の欄 ↔ xtrig.* の引数、カーソル間の測定の範囲と
 // 表。Svelte・DOM に依らない。仕様: docs/reports/2026-10-18-gap-analysis.md G09
+import type { Result } from "./api";
 import type { Mark, Source } from "./timeline/state";
 import { parseNumber } from "./eventlog";
 
@@ -125,17 +126,7 @@ export function settingsOf(form: DecoderForm, decoders: DecoderInfo[]): Record<s
 }
 
 /** 解読の注釈（la.decode の annotations の 1 件） */
-export interface Annotation {
-  start: number;
-  end: number;
-  start_rel_s: number;
-  end_rel_s: number;
-  kind: string;
-  text: string;
-  value: number | null;
-  error: string | null;
-  fields: Record<string, unknown> | null;
-}
+export type Annotation = Result<"la.decode">["annotations"][number];
 
 /** 絞った種類（la.decode の kinds。既定の種類）の外で表に出ない件数と種類。counts は絞る前の種類ごとの件数 */
 export function hiddenKinds(r: { kinds?: string[] | null; counts?: Record<string, number> }): { n: number; kinds: string[] } {
@@ -220,17 +211,8 @@ export function stageLabel(s: StageForm, i: number): { events: string; detail: s
 
 export type StageState = "done" | "current" | "waiting" | "idle";
 
-/** xtrig.sequence_status の結果（レジスタの事実。段ごとの状態もデーモンが返す） */
-export interface SequenceStatus {
-  stage: number;
-  fired: boolean;
-  time: number;
-  armed: boolean;
-  stages: number;
-  stage_states: readonly StageState[];
-  /** 段とピンの条件のレジスタの読み戻し（xtrig.set_sequence の引数と同じ形。within_us は丸めた値、制限なしは null） */
-  config?: { stages: { when: string[]; count: number; within_us: number | null }[]; pattern_a: Pattern; pattern_b: Pattern };
-}
+/** xtrig.sequence_status の結果（API の応答の型。レジスタの事実。段ごとの状態もデーモンが返す） */
+export type SequenceStatus = Result<"xtrig.sequence_status">;
 
 /** 段の状態（図の色）: xtrig.sequence_status の stage_states をそのまま。読めていない・申告の無い段は idle */
 export function stageState(i: number, status: Pick<SequenceStatus, "stage_states"> | null): StageState {

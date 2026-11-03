@@ -505,13 +505,21 @@ class CounterTotals:
 
     def __init__(self):
         self.overflows = {name: 0 for name in COUNTERS}
+        # 溢れの印ごとの (時刻 = その印のパケットの先頭のバイトの時刻か None, カウンタ, その時点の合計)。feed_timed から
+        self.events: list[tuple[int | None, str, int]] = []
 
     def feed(self, packets) -> None:
-        for p in packets:
+        self.feed_timed((None, p) for p in packets)
+
+    def feed_timed(self, items) -> None:
+        """(時刻, パケット) の列。溢れの印を数え、印ごとの時刻を events に残す（最後のバイトの時刻で代えない）。"""
+        for t, p in items:
             if isinstance(p, EventCounter):
                 for name, (_, _, flag) in COUNTERS.items():
                     if p.flags & flag:
                         self.overflows[name] += 1
+                        if t is not None:
+                            self.events.append((t, name, 256 * self.overflows[name]))
 
     def as_dict(self) -> dict[str, int]:
         return {name: 256 * n for name, n in self.overflows.items()}

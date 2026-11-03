@@ -1,7 +1,7 @@
 """Probe の道具: Flash 上の無制限ブレークポイント（fprobe.flash_bp）。J-Link の Unlimited Flash Breakpoints、
 IAR の Flash ブレークポイントの相当。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Flash（書き込みアルゴリズムのある領域）を持つターゲットは、Probe.target が
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Flash（書き込みアルゴリズムのある領域）を持つターゲットは、Probe.target が
 FlashBreakpoints で包んだものを返す。ブレークポイントの道具（breakpoint_set・GDB の Z0・行単位のステップの踏み台・
 関数の呼び出し）は何も変えずに、比較器が尽きたら Flash の BKPT を使う。
 
@@ -18,8 +18,9 @@ from pyocd.core.target import Target
 from .home import fprobe_home
 from .flash import Image
 from .flash_bp import DORMANT_LIMIT, FlashBreakpoints, Journal
+from .probe_service import HostView
 
-__all__ = ["FlashBreakpointTools"]
+__all__ = ["FlashBreakpointService"]
 
 LOG = logging.getLogger(__name__)
 
@@ -34,8 +35,17 @@ def _has_flash(target) -> bool:
         return False
 
 
-class FlashBreakpointTools:
-    def _init_flash_bp(self) -> None:
+class FlashBreakpointService:
+    API = ("flash_breakpoints", "flash_breakpoints_restore")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_breakpoint_kind", "_flash_bp", "_flash_bp_active", "_flash_bp_attach", "_flash_bp_detach",
+              "_flash_bp_erased", "_flash_bp_program", "_flash_bp_wrap")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_dbg", "_debug", "_eth", "_flash_guards", "_lock", "_place_of", "_port", "_serial", "_target_type",
+             "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._flash_bp: FlashBreakpoints | None = None
         self._flash_bp_settings = {"enabled": True, "dormant_limit": DORMANT_LIMIT, "scratch": None}
 
@@ -51,22 +61,22 @@ class FlashBreakpointTools:
         settings = self._flash_bp_settings
         self._flash_bp = FlashBreakpoints(raw, journal=self._flash_bp_journal(), persistent=self._flash_bp_persistent,
                                           scratch=settings["scratch"], enabled=settings["enabled"],
-                                          dormant_limit=settings["dormant_limit"], guards=self._flash_guards())
+                                          dormant_limit=settings["dormant_limit"], guards=self._host._flash_guards())
         return self._flash_bp
 
     def _flash_bp_persistent(self, address: int) -> bool:
         """長く残るブレークポイント（利用者・GDB が置いたもの）か。ステップの踏み台は違う。"""
-        return self._dbg is not None and address in self._dbg.breakpoints
+        return self._host._dbg is not None and address in self._host._dbg.breakpoints
 
     def _flash_bp_journal(self) -> Journal:
         # プローブとターゲットの組ごと（同じ種類のターゲットを 2 台のプローブで同時に使っても記録が混ざらない）
-        probe_id = self._serial or self._port or self._eth or "default"
-        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{self._target_type or 'target'}-{probe_id}")
+        probe_id = self._host._serial or self._host._port or self._host._eth or "default"
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{self._host._target_type or 'target'}-{probe_id}")
         return Journal(fprobe_home() / "flash_breakpoints" / f"{name}.json", name)
 
     def _flash_bp_attach(self) -> dict | None:
         """接続した直後に: 前のプロセスが残した BKPT を戻す。何かあれば {"restored", "skipped"}。"""
-        target = self.target
+        target = self._host.target
         if not isinstance(target, FlashBreakpoints):
             return None
         out = target.recover()
@@ -85,7 +95,7 @@ class FlashBreakpointTools:
 
     def _flash_bp_active(self) -> FlashBreakpoints | None:
         fbp = self._flash_bp
-        return fbp if fbp is not None and self._debug is not None and fbp.target is self._debug.target else None
+        return fbp if fbp is not None and self._host._debug is not None and fbp.target is self._host._debug.target else None
 
     # --- Flash の書き込み・消去（probe_flash から） -------------------------------------------------
 
@@ -115,9 +125,9 @@ class FlashBreakpointTools:
     def _breakpoint_kind(self, address: int) -> dict:
         """breakpoint_list の各項の種類: hw（比較器）/ flash（Flash の BKPT）/ sw（RAM の BKPT）。未接続なら付けない
         （機器には触らない。どれもホストが覚えている状態）。"""
-        if self._debug is None:
+        if self._host._debug is None:
             return {}
-        target = self.target
+        target = self._host.target
         if isinstance(target, FlashBreakpoints):
             kind = target.kind_of(address)
             if kind is not None:
@@ -137,8 +147,8 @@ class FlashBreakpointTools:
         実行する RAM の番地（8 バイト。省略時は Flash の書き込みアルゴリズムの RAM の先頭）。"""
         if dormant_limit is not None and dormant_limit < 1:
             raise ValueError("dormant_limit は 1 以上")
-        with self._lock:
-            target = self.target if self._debug is not None else None
+        with self._host._lock:
+            target = self._host.target if self._host._debug is not None else None
             fbp = target if isinstance(target, FlashBreakpoints) else None
             if enabled is False and fbp is not None and fbp.status()["flash"]:
                 raise ValueError("Flash のブレークポイントが置いてある（先に debug_breakpoint_clear で外す）")
@@ -156,14 +166,14 @@ class FlashBreakpointTools:
             if scratch is not None:
                 fbp.scratch = scratch
             status = fbp.status()
-            status["flash"] = [{**e, **self._place_of(e["address"])} for e in status["flash"]]
+            status["flash"] = [{**e, **self._host._place_of(e["address"])} for e in status["flash"]]
             return {**status, "available": True}
 
     def flash_breakpoints_restore(self) -> dict:
         """いま Flash に書いてある BKPT をすべて元に戻す（ほかのツールに渡す前等）。置いたブレークポイントは残り、次の
         再開で書き直す。"""
-        with self._lock:
-            fbp = self.target
+        with self._host._lock:
+            fbp = self._host.target
             if not isinstance(fbp, FlashBreakpoints):
                 return {"restored": 0}
             return {"restored": fbp.restore_all()}

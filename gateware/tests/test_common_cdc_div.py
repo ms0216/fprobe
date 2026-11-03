@@ -12,9 +12,17 @@ def test_udiv_fuzz(tmp_path):
                generics={"WIDTH": 32}, build_dir=tmp_path)
 
 
-def test_cdc_value(tmp_path):
+def test_cdc_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("CDC_SAME_CLOCK", "0")
     run_cocotb(toplevel="cdc_value", sources=rtl("common/sync_bit.vhd", "common/cdc_value.vhd"),
                test_module="tests.tb.cdc_value_tb", generics={"WIDTH": 32}, build_dir=tmp_path)
+
+
+def test_cdc_value_same_clock(tmp_path, monkeypatch):
+    """同じクロックの構成（PYNQ の mem_clk = sys）: 同期化を使わず 1 周期で渡す。"""
+    monkeypatch.setenv("CDC_SAME_CLOCK", "1")
+    run_cocotb(toplevel="cdc_value", sources=rtl("common/sync_bit.vhd", "common/cdc_value.vhd"),
+               test_module="tests.tb.cdc_value_tb", generics={"WIDTH": 32, "SAME_CLOCK": True}, build_dir=tmp_path)
 
 
 def test_udiv_shared(tmp_path):

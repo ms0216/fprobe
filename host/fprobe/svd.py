@@ -596,9 +596,36 @@ def find_svd(device: str, *, paths: Sequence[str | Path] = ()) -> SvdSource | No
     return None
 
 
+def available_svds(paths: Sequence[str | Path] = ()) -> list[tuple[str, str, list[str] | None]]:
+    """探す場所ごとの、そこにある SVD の名前（拡張子を除く。並びは名前順）。(origin, 場所, 名前の一覧)。場所が無ければ名前は None。
+    pyOCD の内蔵は origin "pyocd"・場所 "pyOCD の内蔵"（pyocd が無ければ None）。find_svd が探す場所と同じ。"""
+    out: list[tuple[str, str, list[str] | None]] = []
+    for origin, place in _search_dirs(paths):
+        if origin == "explicit" and place.is_file():
+            out.append((origin, str(place), [place.stem]))
+        elif place.is_dir():
+            out.append((origin, str(place), sorted(Path(p.name).stem for p in place.iterdir()
+                                                    if p.is_file() and p.suffix.lower() in (".svd", ".xml"))))
+        else:
+            out.append((origin, str(place), None))
+    archive = _pyocd_zip()
+    if archive is None:
+        out.append(("pyocd", "pyOCD の内蔵", None))
+    else:
+        with zipfile.ZipFile(archive) as z:
+            out.append(("pyocd", "pyOCD の内蔵", sorted(Path(n).stem for n in z.namelist()
+                                                      if Path(n).suffix.lower() in (".svd", ".xml"))))
+    return out
+
+
 def load_device(device: str, *, paths: Sequence[str | Path] = ()) -> Device:
     source = find_svd(device, paths=paths)
     if source is None:
-        places = [str(p) for _, p in _search_dirs(paths)] + ["pyOCD の内蔵"]
-        raise FileNotFoundError(f"{device} の SVD が見つからない（探した場所: {', '.join(places)}）")
+        lines = []
+        for _, place, names in available_svds(paths):
+            lines.append(f"  {place}（無い）" if names is None
+                         else f"  {place}: {', '.join(names) if names else '（SVD は無い）'}" + (f"（{len(names)} 件）" if names else ""))
+        raise FileNotFoundError(
+            f"{device} の SVD が見つからない。選ぶのは、名前（拡張子を除く）が大文字小文字を区別せず完全に同じものだけ"
+            "（部品名の先頭に合う等では選ばない）。探した場所と、そこにある SVD の名前:\n" + "\n".join(lines))
     return Device.parse(source.read())

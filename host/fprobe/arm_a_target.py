@@ -20,7 +20,7 @@ from pyocd.core.target import Target
 
 from .arm11_debug import Arm11Port
 from .arm_debug import REGISTER_NAMES, ArmDebugCore, ArmDebugError
-from .armv7a_debug import V7DebugPort, find_apb_ap, find_debug_bases
+from .armv7a_debug import V7DebugPort, find_apb_ap, find_debug_bases, find_mem_ap
 from .jtag_chain import dap_link_wire, scan_chain
 from .raw_dap import DpPort, RawDap
 
@@ -36,15 +36,23 @@ class ArmAPart:
     idcode: int                             # チェーンで探す装置の IDCODE（版の 4 ビットは見ない）
     debug_bases: tuple[int, ...] = ()       # v7: ROM テーブルが読めないときのコアのデバッグの番地
     description: str = ""
+    jtag_idle_cycles: int | None = None     # 各スキャンの後の Run-Test/Idle のクロック数（None なら触らない = pyOCD の接続時の値）
+    ahb_debug_bases: tuple[int, ...] = ()   # v7: DAP に APB-AP が見えないとき、AHB-AP（MEM-AP）のシステムのアドレスで見えるコアのデバッグの番地
 
 
 ARM_A_PARTS = (
     ArmAPart("cortex_a", "v7", 0x0BA00477, description="ARMv7-A（JTAG-DP。コアは ROM テーブルから）"),
     # BCM2836: 4 コアのデバッグ 0x80010000 + 0x2000 × n（OpenOCD の target/bcm2836.cfg と同じ。実機で未確認）
+    # jtag_idle_cycles: 0（Idle を入れない）。fprobe_jtag の TMS の修正（d3d09a0）の後、4 MHz で Idle 0・1・2・3・4・8 のどれでも、
+    # 4 コアを止めてカーネルのコード 64 KiB を読んだ結果が一致した（2026-10-29 13:00）。0 は 8 より速い（0.20 秒と 0.24 秒）。
+    # 前の値 8 の根拠（「0〜3 では転送が壊れる」）は、TMS と TDI が同時に上がってビットが化けていたことによるもので、誤りだった。
     ArmAPart("bcm2836", "v7", 0x0BA00477, (0x80010000, 0x80012000, 0x80014000, 0x80016000),
-             "Raspberry Pi 2 Model B（BCM2836、Cortex-A7 × 4）"),
+             "Raspberry Pi 2 Model B（BCM2836、Cortex-A7 × 4）", jtag_idle_cycles=0),
     # Zynq-7000: 2 コアのデバッグ 0x80090000 + 0x2000 × n（OpenOCD の target/zynq_7000.cfg と同じ。実機で未確認。ROM テーブルが読めればそちらが先）
-    ArmAPart("zynq7000", "v7", 0x0BA00477, (0x80090000, 0x80092000), "Zynq-7000（Cortex-A9 × 2。PS の DAP は PJTAG / independent の起動）"),
+    # ahb_debug_bases: PJTAG（independent の起動）の DAP は AHB-AP だけが見え（APSEL 0〜3 は同じ AP の別名、4 以上は FAULT）、
+    # コアのデバッグは AHB-AP のシステムのアドレス 0xF8890000 + 0x2000 × n で読めた（DBGDIDR 0x35137030、DBGAUTHSTATUS 0xFF。実機 2026-10-31）。
+    ArmAPart("zynq7000", "v7", 0x0BA00477, (0x80090000, 0x80092000), "Zynq-7000（Cortex-A9 × 2。PS の DAP は PJTAG / independent の起動）",
+             ahb_debug_bases=(0xF8890000, 0xF8892000)),
     ArmAPart("arm11", "arm11", 0x07B7617F, description="ARM1176JZF-S（ARM11 の TAP）"),
     ArmAPart("bcm2835", "arm11", 0x07B7617F, description="Raspberry Pi Zero / 1（BCM2835、ARM1176JZF-S）"),
 )
@@ -285,14 +293,20 @@ def _find_tap(wire, part: ArmAPart, jtag_chain: list[int] | None) -> tuple[list[
 
 def _open_v7(dap: RawDap, wire, part: ArmAPart, core: int, frequency_hz: int, jtag_chain) -> tuple:
     chain, index = _find_tap(wire, part, jtag_chain)
-    dap.start("jtag", frequency_hz, chain, dap_index=index)
+    dap.start("jtag", frequency_hz, chain, dap_index=index, jtag_idle_cycles=part.jtag_idle_cycles)
     dap.read_dpidr()
     if not dap.power_up()["debug_power"]:
         raise ArmDebugError(f"{part.name}: DP のデバッグ電源が上がらない")
     ap = find_apb_ap(dap)
-    if ap is None:
+    if ap is None and part.ahb_debug_bases:
+        ap = find_mem_ap(dap)
+        if ap is None:
+            raise ArmDebugError(f"{part.name}: APB-AP も MEM-AP も無い（コアのデバッグレジスタに届かない）")
+        bases, discovery = list(part.ahb_debug_bases), "ahb_system_map"
+    elif ap is None:
         raise ArmDebugError(f"{part.name}: APB-AP が無い（コアのデバッグレジスタに届かない）")
-    bases, discovery = find_debug_bases(dap, ap), "rom_table"
+    else:
+        bases, discovery = find_debug_bases(dap, ap), "rom_table"
     if not bases:
         if not part.debug_bases:
             raise ArmDebugError(f"{part.name}: APB-AP の ROM テーブルからコアのデバッグが見つからない（部品の名前で"
@@ -302,7 +316,7 @@ def _open_v7(dap: RawDap, wire, part: ArmAPart, core: int, frequency_hz: int, jt
         raise ValueError(f"{part.name} の core は 0〜{len(bases) - 1}")
     port = V7DebugPort(dap, ap, bases[core])
     port.unlock()
-    details = {"cores": len(bases), "debug_base": bases[core], "apb_ap": ap, "discovery": discovery,
+    details = {"core_count": len(bases), "debug_base": bases[core], "apb_ap": ap, "discovery": discovery,
                "jtag_chain": chain, "tap": index}
     return port, details
 
@@ -316,7 +330,7 @@ def open_arm_a(link, part: ArmAPart, core: int, frequency_hz: int, connect_mode:
         raise ValueError(f"Cortex-A・ARM11 の connect_mode は halt / attach（{connect_mode!r} は使えない）")
     dap = RawDap(link)
     try:
-        dap.start("jtag", frequency_hz, jtag_chain or [4])
+        dap.start("jtag", frequency_hz, jtag_chain or [4], jtag_idle_cycles=part.jtag_idle_cycles)
         dap.switch_to_jtag()
         wire = dap_link_wire(link)
         if part.kind == "v7":
@@ -325,7 +339,7 @@ def open_arm_a(link, part: ArmAPart, core: int, frequency_hz: int, connect_mode:
             if core != 0:
                 raise ValueError(f"{part.name} はコアが 1 つ（core は 0）")
             chain, index = _find_tap(wire, part, jtag_chain)
-            port, details = Arm11Port(wire, chain, index), {"cores": 1, "jtag_chain": chain, "tap": index}
+            port, details = Arm11Port(wire, chain, index), {"core_count": 1, "jtag_chain": chain, "tap": index}
         debug = ArmDebugCore(port)
         debug.enable()
         target = ArmATarget(debug, core)

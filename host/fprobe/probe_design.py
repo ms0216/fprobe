@@ -1,6 +1,6 @@
 """Probe の道具: Primer の構成（ビットストリーム）を知る・切り替える（B22）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・close・_debug と、接続の設定（_serial・
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・close・_debug と、接続の設定（_serial・
 _port・_eth）を使う。構成の対応と書き込みは fprobe.bitstreams。
 
 - probe_design_get: 今のデザイン・線と機能の有無・切り替えられる構成（ビットストリームの場所と有無）。
@@ -25,8 +25,9 @@ from collections.abc import Callable
 import usb.core
 
 from . import bitstreams as bs
+from .probe_service import HostView
 
-__all__ = ["DesignTools", "REENUMERATE_S", "link_lost"]
+__all__ = ["DesignService", "REENUMERATE_S", "link_lost"]
 
 REENUMERATE_S = 30.0                    # 書き込みの後、USB の fprobe が現れて CONTROL が応答するまでの上限
 _POLL_S = 0.5
@@ -44,11 +45,19 @@ def link_lost(error: BaseException | None) -> bool:
     return False
 
 
-class DesignTools:
-    """構成の取得・切り替え（Probe の mixin）。"""
+class DesignService:
+    """構成の取得・切り替え（Probe のサービス）。"""
 
-    def _init_design(self, bitstreams: str | None = None, *, program: Callable = bs.program,
-                     sleep: Callable[[float], None] = time.sleep, reenumerate_s: float = REENUMERATE_S) -> None:
+    API = ("probe_design_get", "probe_design_switch", "recover_link")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_ensure_design", "_reenumerate_s", "_switch_design", "_switchable")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_eth", "_lock", "_port", "_recorder", "_release_device", "_require_dap_free",
+             "_restore_outputs", "_session", "recording_stop", "session")
+
+    def __init__(self, host, bitstreams: str | None = None, *, program: Callable = bs.program,
+                 sleep: Callable[[float], None] = time.sleep, reenumerate_s: float = REENUMERATE_S):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._bitstreams = bitstreams           # ビットストリームの置き場所（None なら FPROBE_BITSTREAMS か既定）
         self._program_bitstream = program
         self._sleep = sleep
@@ -61,13 +70,13 @@ class DesignTools:
         ロジアナの流し続けにイベントも載せる la_stream_events）の有無・切り替え
         られる構成（線・ビットストリームの場所と有無）・自動の書き替えの有無。target_connect は要る線の構成でなければ
         自動で書き替える（JTAG は jtag_chain か Cortex-A・ARM11 のターゲット）。"""
-        with self._lock:
-            caps = self.session.device.capabilities()
+        with self._host._lock:
+            caps = self._host.session.device.capabilities()
         return {
             "design": caps.design, "board": caps.board,
             "features": {"swd": True, "jtag": caps.jtag, "sampler": caps.sampler, "inject": caps.inject,
-                         "la_inputs": sum(c.kind == "input" for c in getattr(caps, "la_layout", ())),
-                         "la_stream_events": bool(getattr(caps, "la_stream_events", False))},
+                         "la_inputs": sum(c.kind == "input" for c in caps.la_layout),
+                         "la_stream_events": bool(caps.la_stream_events)},
             "switchable": self._switchable(caps),
             "auto_switch": bs.auto_switch_enabled(),
             "designs": [{"design": design, "protocols": bs.protocols_of(design),
@@ -89,10 +98,10 @@ class DesignTools:
         wanted = design if design is not None else bs.design_for(protocol)
         if wanted not in bs.SWITCHABLE:
             raise ValueError(f"切り替えられる構成は {sorted(bs.SWITCHABLE)}: {wanted!r}")
-        with self._lock:
-            if self._debug is not None:
+        with self._host._lock:
+            if self._host._debug is not None:
                 raise RuntimeError("ターゲットに接続中: target_disconnect してから書き替える")
-            caps = self.session.device.capabilities()
+            caps = self._host.session.device.capabilities()
         if caps.design == wanted:
             return {"switched": False, "design": wanted}
         if not self._switchable(caps):
@@ -103,8 +112,8 @@ class DesignTools:
 
     def _ensure_design(self, protocol: str) -> dict | None:
         """protocol の線を使えるよう、要れば構成を書き替える。書き替えたらその内容、要らなければ None。"""
-        with self._lock:
-            caps = self.session.device.capabilities()
+        with self._host._lock:
+            caps = self._host.session.device.capabilities()
         wanted = bs.wanted_design(caps, protocol)
         if wanted is None:
             return None
@@ -122,44 +131,63 @@ class DesignTools:
 
     def _switchable(self, caps) -> bool:
         """書き替えてよいか: Primer の USB の製品デザイン（組の中）で、USB でつないでいる。"""
-        return caps.design in bs.SWITCHABLE and not self._port and not self._eth
+        return caps.design in bs.SWITCHABLE and not self._host._port and not self._host._eth
 
     def _switch_design(self, before: str, design: str) -> dict:
+        self._host._require_dap_free("構成の書き替え")
         path = bs.bitstream_path(design, self._bitstreams)
         if not path.is_file():
             raise bs.DesignSwitchError(
                 f"構成 {design!r} のビットストリーム {path} が無い（python -m fprobe_gw build {design} で作る。"
                 f"置き場所は {bs.ENV_ROOT} か --bitstreams）")
         started = time.monotonic()
-        self._release_device()                            # FPGA が入れ替わる: ターゲット・ロジアナ・流れ・USB を閉じる
+        # ビットストリームを書くとタイムベースが 0 に戻る（time-accuracy §14.1）: 記録は前の時代で終える（混ぜない）
+        stopped = self._end_recording("design_switch", before=before, after=design)
+        released = self._host._release_device()                 # FPGA が入れ替わる: ターゲット・ロジアナ・流れ・USB を閉じる（失敗した段は事実として返す）
         self._program_bitstream(path)
         caps = self._reopen("書き込みの後")
         if caps.design != design:
             raise bs.DesignSwitchError(f"書き込んだが、デザインが {caps.design!r}（{design!r} のはず）: {path}")
-        outputs = self._restore_outputs()       # 出力に使っていた端子を取り戻す（B29）
+        outputs = self._host._restore_outputs()       # 出力に使っていた端子を取り戻す（B29）
         return {"before": before, "after": design, "bitstream": str(path),
-                "seconds": round(time.monotonic() - started, 1), "outputs": outputs}
+                "seconds": round(time.monotonic() - started, 1), "outputs": outputs, "recording_stopped": stopped,
+                "release_failures": released}
+
+    def _end_recording(self, reason: str, **facts) -> str | None:
+        """記録中なら理由を残して記録を止める（止めた記録の名前。記録していなければ None）。"""
+        recorder = self._host._recorder
+        if recorder is None:
+            return None
+        recorder.end(reason, **facts)
+        return self._host.recording_stop()["recording"]
 
     def recover_link(self, error: BaseException) -> dict | None:
         """error が USB の切断なら、閉じて開き直し、{"message": 説明, "changed": {機能: [前, 後]}, "version": 版の比較,
-        "outputs": 出力の端子の取り戻し（XtrigOutputTools._restore_outputs）} を返す（違えば None）。
+        "outputs": 出力の端子の取り戻し（XtrigOutputService.restore_outputs）} を返す（違えば None）。
         changed は前と変わった機能（版を除く。前が分からなければ空）。version は {"before", "after": 版の説明,
         "changed": 版が違う（どちらかの版が分からなければ None）, "latest_build": 今の版がビルド済みの最新か（分からなければ
         None）}。現れなければ DesignSwitchError。"""
-        if self._port or self._eth or not link_lost(error):
+        if self._host._port or self._host._eth or not link_lost(error):
             return None
-        before = getattr(self._session.device, "last_capabilities", None) if self._session is not None else None
-        with contextlib.suppress(Exception):   # 切れた機器へのターゲットの切断・後始末は失敗してよい
-            self._release_device()
-        if self._session is not None:          # close が途中で失敗したとき
+        before = self._host._session.device.last_capabilities if self._host._session is not None else None
+        # USB が切れた間の出来事は失われ、FPGA が立ち上がり直したか（タイムベースが 0 に戻ったか）も開き直すまで分からない:
+        # 記録はここで終える（time-accuracy §14.1）。開き直した後のタイムベースと比べた事実を応答に返す
+        recorder = self._host._recorder
+        last_ticks = getattr(recorder, "_last_ticks", None)
+        stopped = None
+        if recorder is not None:
+            with contextlib.suppress(Exception):           # 切れた機器の最後の取り込みは失敗してよい（記録は閉じる）
+                stopped = self._end_recording("link_lost", last_ticks=last_ticks)
+        self._host._release_device()                 # 切れた機器への後始末は失敗しうる（どの段も試し、失敗は返す。ここでは使わない）
+        if self._host._session is not None:          # close が途中で失敗したとき
             with contextlib.suppress(Exception):
-                self._session.close()
-            self._session = None
-        self._debug = None                     # ponytail: 切れた口の pyOCD のセッションは捨てる（閉じられない）
+                self._host._session.close()
+            self._host._session = None
+        self._host._debug = None                     # ponytail: 切れた口の pyOCD のセッションは捨てる（閉じられない）
         after = self._reopen("USB が切れた後")
         note = ("Primer の USB が切れたので、つなぎ直した。ターゲットの接続・ロジアナ・流れは"
                 "切れたので、target_connect からやり直す。")
-        outputs = self._restore_outputs()       # 端子が普段の機能でターゲットを駆動する前に取り戻す（B29）
+        outputs = self._host._restore_outputs()       # 端子が普段の機能でターゲットを駆動する前に取り戻す（B29）
         if outputs["failed"]:
             note += f" 出力に使っていた端子を取り戻せなかった（{'; '.join(outputs['failed'].values())}）: 配線を確かめる。"
         changed = _changes(before, after)
@@ -174,7 +202,17 @@ class DesignTools:
             listed = ", ".join(f"{k}: {a} → {b}" for k, (a, b) in changed.items())
             note += (f" FPGA の機能が前と変わった（{listed}）。版を読めないので、どのビットストリームかは分からない。"
                      "開発中の版なら python -m fprobe_gw program で書き直す。")
-        return {"message": note, "changed": changed, "version": version, "outputs": outputs}
+        recording = None
+        if stopped is not None:
+            restarted = None
+            with contextlib.suppress(Exception):
+                with self._host._lock:
+                    ticks = self._host.session.device.time()
+                restarted = None if last_ticks is None else ticks < last_ticks
+            recording = {"name": stopped, "timebase_restarted": restarted}
+            note += (f" 記録 {stopped} は切れた所で終えた（切れた間の出来事は無い。続けるなら recording_start で新しく）。")
+        return {"message": note, "changed": changed, "version": version, "outputs": outputs,
+                "recording_stopped": recording}
 
     def _version_change(self, before, after) -> dict:
         """版の比較（U49）。"""
@@ -190,15 +228,15 @@ class DesignTools:
         deadline = time.monotonic() + self._reenumerate_s
         while True:
             try:
-                with self._lock:
-                    return self.session.device.capabilities()
+                with self._host._lock:
+                    return self._host.session.device.capabilities()
             except Exception as e:              # まだ現れない・応答しない（libusb・タイムアウト等）
-                if self._session is not None:
+                if self._host._session is not None:
                     try:
-                        self._session.close()
+                        self._host._session.close()
                     except Exception:
                         pass
-                    self._session = None
+                    self._host._session = None
                 if time.monotonic() >= deadline:
                     raise bs.DesignSwitchError(
                         f"{after} {self._reenumerate_s:.0f} 秒たっても fprobe が USB に現れない: {e}") from e

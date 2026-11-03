@@ -241,3 +241,68 @@ async def disabled_outputs_never_drive(dut):
     await out.pulse_source(HOST)
     await ClockCycles(dut.clk, 10)
     assert all(v == 0 for v in out.history[start:])
+
+
+@cocotb.test()
+async def the_output_times_match_the_timing_table(dut):
+    """時刻の表（fprobe_gw.timing の XTRIG_OUT_*、TLV TIMING の xtrig_out・xtrig_out_pins。時刻の正しさ S3 の D2）と、ホストの
+    fprobe.timing.xtrig_out_window の式が回路と一致する: 源のパルスの周期 S → 出力の FF が S + 2 で変わり、脈の長さは
+    刻み 16^unit の最初の刻みの位置で決まる（源の時刻から 1 つに決まる）。端子の並びの辺 T の直後の変化 → T + 4。
+    （ボードの出力の段はこの部品の外。ここでは 0 段）"""
+    from types import SimpleNamespace
+    from fprobe.caps import TimingPoint
+    from fprobe.timing import xtrig_out_window
+    from fprobe_gw.timing import XTRIG_OUT_PIN_DELAY, XTRIG_OUT_SOURCE_DELAY
+    caps = SimpleNamespace(dap_output_ticks=0, timing={
+        "xtrig_out": TimingPoint("xtrig_out", "output_edge", "tick", -XTRIG_OUT_SOURCE_DELAY, 0, ("output_delay",))})
+    out = await setup(dut)
+    seen: list[tuple[int, int]] = []                       # (その周期の time, oe(0))
+
+    async def monitor():
+        while True:
+            await RisingEdge(dut.clk)
+            await ReadOnly()
+            seen.append((int(dut.time.value), out.oe(0)))
+    cocotb.start_soon(monitor())
+    for unit in (0, 1, 2):
+        for length in (1, 2, 3):
+            for phase in (0, 1, 5, 14, 15):
+                if unit == 0 and phase:                    # unit 0 は毎周期が刻み: 位置は 1 通り
+                    continue
+                await out.set(0, enable=1, mode=PULSE, src=HOST, length=length, unit=unit)
+                tick = 16 ** unit
+                # 源のパルスの周期 S を、出力の FF が変わる周期 S + 2 の刻みの中の位置が phase になるように選ぶ
+                while True:
+                    await RisingEdge(dut.clk)
+                    await ReadOnly()
+                    s = int(dut.time.value) + 1                # 次の周期の time
+                    if unit == 0 or (s + XTRIG_OUT_SOURCE_DELAY) % tick == phase:
+                        break
+                await RisingEdge(dut.clk)
+                dut.sources.value = HOST                        # 周期 s の間だけ 1
+                await RisingEdge(dut.clk)
+                dut.sources.value = 0
+                start = len(seen)
+                await ClockCycles(dut.clk, length * tick + 8)
+                high = [t for t, v in seen[start - 2:] if v]
+                want = xtrig_out_window(caps, s, mode=PULSE, length=length, unit=unit)
+                assert high and high[0] == want["t_on"] == s + XTRIG_OUT_SOURCE_DELAY, (unit, length, phase, high[:2], s)
+                assert high[-1] + 1 == want["t_off"] and len(high) == want["pulse_cycles"], (unit, length, phase, len(high))
+                assert (length - 1) * tick + 1 <= want["pulse_cycles"] <= length * tick
+                await out.set(0, enable=0)
+                await ClockCycles(dut.clk, 2)
+    # 端子の並びの条件（条件の間）: 時刻が T になる辺の直後に端子を変える → oe は T + 4 の周期から
+    await out.set(1, enable=1, mode=WHILE, mask=0b1, value=0b1, level=1)
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    t = int(dut.time.value) + 1
+    await RisingEdge(dut.clk)
+    dut.pins.value = 0b1
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if out.oe(1):
+            assert int(dut.time.value) == t + XTRIG_OUT_PIN_DELAY, (int(dut.time.value), t)
+            break
+    else:
+        raise AssertionError("oe(1) が立たない")

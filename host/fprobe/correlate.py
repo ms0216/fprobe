@@ -21,10 +21,12 @@ try:                                                      # あれば多い瞬�
 except ImportError:                                       # pragma: no cover - numpy の無い環境
     _np = None
 
-__all__ = ["Condition", "ConditionError", "ConditionWatcher", "Term", "correlate", "durations", "parse_condition"]
+__all__ = ["Condition", "ConditionError", "ConditionWatcher", "Term", "correlate", "durations", "parse_condition",
+           "term_dict"]
 
 EDGES = ("changed", "rose", "fell")
 KINDS = ("mcu", "fpga", "pin")
+UNSURE_REASONS = ("pin_skew_unknown",)   # gaps のうち値の欠けではないもの（値はあり、時刻の一部が分からない）
 EXAMPLES = 5
 AUTO_LIMIT = 20                       # 候補を自動で作ったときに返す数
 
@@ -66,6 +68,11 @@ def parse_condition(text: str, need_edge: bool = True) -> Condition:
     return Condition(text.strip(), tuple(terms))
 
 
+def term_dict(t: Term) -> dict:
+    """項の形（API）: {variable, op, value（= の項だけ）}。"""
+    return {"variable": t.name, "op": t.op, **({"value": t.value} if t.value is not None else {})}
+
+
 @dataclass
 class _Series:
     """変数の値の並び（時刻順。変わった所と最初の値だけ）。"""
@@ -74,6 +81,9 @@ class _Series:
     period: float | None = None          # 元の読みの間隔（タイムベース。MCU のメモリの読み・ピンのサンプル）
     enum: dict[str, int] | None = None
     gaps: list[dict] = field(default_factory=list)   # 値の無い区間・読めなかった語（_gaps が名前を付けて返す）
+    # 値はあるが時刻の一部が分からない区間（ピンの ch のずれが分からない等）。値の欠けではないので結果から外さず
+    # （_holes に入れない）、gaps に時刻を示すだけ
+    unsure: list[dict] = field(default_factory=list)
     reads: dict | None = None            # MCU のメモリの読みの事実（回数・間隔・いちばん長い空白）
 
     def at(self, t: int) -> int | None:
@@ -189,7 +199,14 @@ class _Variables:
         times, values, raw, failed = [], [], [], []
         runs: list[list[int]] = []                   # 続けて読めなかった読みのまとまり [前の読めた時刻, 最初の失敗, 最後の失敗, 件数]
         run_open = False
+        # DAP の時刻が線上の点の回路の語は本体に値を読んだ瞬間の範囲 {t_lo, t_hi}（time-accuracy S2）: 変化はその前の読みの
+        # t_lo より後、変わった値を読んだ語の t_hi 以前。時刻（e.t）は読みを頼んだ点。古い回路の語は範囲が無い（値が返った周期）
+        windows: list[tuple[int | None, int | None]] = []
+        line_time = False
+        prev_lo: int | None = None
         for e in self.rec.iter_events(self.t0, self.t1, ["sample"], a=address):
+            if e.kind != "word":                     # 誤りの区間（kind error。a は語の番号）は値ではない
+                continue
             if isinstance(e.body, dict) and e.body.get("ack", 1) != 1:
                 failed.append(e.t)
                 if run_open:
@@ -202,9 +219,14 @@ class _Variables:
                 runs[-1].append(e.t)                 # 次の読めた時刻（欠けの終わり）
                 run_open = False
             raw.append(e.t)
+            body = e.body if isinstance(e.body, dict) else {}
+            line_time = line_time or "t_lo" in body
             if not values or values[-1] != e.b:
+                if values:
+                    windows.append((prev_lo, body.get("t_hi")) if "t_lo" in body else (None, None))
                 times.append(e.t)
                 values.append(e.b)
+            prev_lo = body.get("t_lo")
         intervals = [b - a for a, b in zip(raw, raw[1:])]
         period = statistics.median(intervals) if intervals else None
         gaps = []
@@ -220,7 +242,8 @@ class _Variables:
             gaps.append({"reason": "read_failed", "t0": before, "t1": after[0] if after else last, "count": count})
         longest = max(zip(raw, raw[1:]), key=lambda ab: ab[1] - ab[0]) if intervals else None
         reads = {"count": len(raw), "failed": len(failed), "intervals": intervals,
-                 "longest": list(longest) if longest else None}
+                 "longest": list(longest) if longest else None,
+                 "time_point": "read_request" if line_time else "value_returned", "change_windows": windows}
         return _Series(times, values, period, gaps=gaps, reads=reads)
 
     def _group(self, group: int) -> list[tuple[int, int]]:
@@ -257,12 +280,16 @@ class _Variables:
         times, values = [], []
         period = None
         lo, hi = self.t0, self.t1
-        covered = []
+        covered, unsure = [], []
+        chunk_skew = getattr(self.rec, "chunk_skew", None)
         for chunk, present in self.rec.wave_chunks(lo, hi):
             if not present or channel >= chunk.channels:
                 continue
             wave, tps = self.rec.waveform(chunk), chunk.ticks_per_sample
             covered.append((chunk.t0, chunk.t0 + round(chunk.length * tps)))
+            skew = chunk_skew(chunk) if chunk_skew is not None else ()
+            if channel < len(skew) and skew[channel] is None:          # ずれが分からない: ずらさずに置いた（fprobe.timing）
+                unsure.append({"reason": "pin_skew_unknown", "t0": covered[-1][0], "t1": covered[-1][1]})
             period = tps
             s0 = max(0, math.floor((lo - chunk.t0) / tps))
             s1 = min(chunk.length, math.ceil((hi - chunk.t0) / tps))
@@ -289,7 +316,7 @@ class _Variables:
             at = max(at, b)
         if hi - at > (period or 0):
             gaps.append({"reason": "pins_missing", "t0": at, "t1": hi})
-        return _Series(times, values, period, gaps=gaps)
+        return _Series(times, values, period, gaps=gaps, unsure=unsure)
 
 def _target(series: _Series, text: str, name: str) -> int:
     if series.enum and text in series.enum:
@@ -408,8 +435,10 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
                     pairs.append({"effect_t": e, "cause_t": cs[i]})
         followed = _followed(cs, eff, window)
         preceded = len(delays) / len(judged) if judged else None
+        terms = [{**term_dict(t), "kind": vars_.resolve(t.name)[0]} for t in cond.terms]
         out_causes.append({
-            "condition": cond.text, "count": len(cs), "judged": len(judged), "preceded": preceded,
+            "condition": cond.text, "terms": terms, "fpga_only": all(t["kind"] == "fpga" for t in terms),
+            "count": len(cs), "judged": len(judged), "preceded": preceded,
             "coverage": _coverage(cs, window, lo, hi, holes),
             "followed": followed / len(cs) if cs else None,
             "delay_s": _quantiles(delays), "examples": pairs, "_times": tuple(cs)})
@@ -432,18 +461,24 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
     gaps = _gaps(rec, vars_, names, lo, hi)
     reads = {n: _reads_facts(vars_.series(n).reads, hz) for n in sorted(names) if vars_.series(n).reads}
     warnings = []
-    if gaps:
+    unsure = [g for g in gaps if g["reason"] in UNSURE_REASONS]
+    if unsure:
+        warnings.append("時刻の一部が分からない区間が " + str(len(unsure)) + " 件（" +
+                        "・".join(sorted({g["variable"] for g in unsure})) +
+                        "。ピンの ch のずれが分からず、ずらさずに置いた。gaps の pin_skew_unknown。結果からは外していない）")
+    missing = [g for g in gaps if g["reason"] not in UNSURE_REASONS]
+    if missing:
         span, end = 0, lo                                  # 重なった欠けは 1 回だけ数える（gaps は t0 の順）
-        for g in gaps:
+        for g in missing:
             span += max(0, g["t1"] - max(g["t0"], end))
             end = max(end, g["t1"])
         span /= hz
         per = {}                                               # 変数ごとの欠けの長さ（使った変数で合計が変わるので）
-        for g in gaps:
+        for g in missing:
             if g.get("variable"):
                 per[g["variable"]] = per.get(g["variable"], 0) + (g["t1"] - g["t0"]) / hz
         detail = "・".join(f"{n} {v * 1000:g} ms" for n, v in per.items())
-        warnings.append(f"データに欠けが {len(gaps)} 件（重なりを除いた長さ {span * 1000:g} ms。{detail}{'。' if detail else ''}gaps）。読みの空白・ピンの無い"
+        warnings.append(f"データに欠けが {len(missing)} 件（重なりを除いた長さ {span * 1000:g} ms。{detail}{'。' if detail else ''}gaps）。読みの空白・ピンの無い"
                         "区間にかかる結果は judged から外した。ほかの欠け（FPGA の欠落・取り込みの失敗等）は時刻を示すだけ"
                         + ("" if gap_s is not None else "（MCU のメモリの読みの空白は gap_s を渡したときだけ欠けにする。"
                                                        "読みの間隔は reads）"))
@@ -458,9 +493,16 @@ def correlate(rec: Any, effect: str, causes: list[str] | None, window_s: float |
 
 
 def _reads_facts(reads: dict, hz: float) -> dict:
-    """MCU のメモリの読みの事実: 回数・読めなかった回数・間隔（秒の分位）・いちばん長い空白（時刻）。"""
+    """MCU のメモリの読みの事実: 回数・読めなかった回数・間隔（秒の分位）・いちばん長い空白（時刻）。変化の時刻の意味
+    time_point（read_request = 変わった値を読みに行った転送の点（線上の点の回路）、value_returned = 値が返った周期（古い
+    回路））と、線上の点の回路では変化があった範囲（前の読みの t_lo より後〜変わった値の語の t_hi）の幅の分位
+    change_window_s と、端が分からない変化の数 change_window_unknown。相関の数え方は時刻（time_point）を使う。"""
+    windows = reads.get("change_windows") or []
+    known = [(hi - lo) / hz for lo, hi in windows if lo is not None and hi is not None]
     return {"count": reads["count"], "failed": reads["failed"],
-            "interval_s": _quantiles([i / hz for i in reads["intervals"]]), "longest": reads["longest"]}
+            "interval_s": _quantiles([i / hz for i in reads["intervals"]]), "longest": reads["longest"],
+            "time_point": reads.get("time_point", "value_returned"), "change_window_s": _quantiles(known),
+            "change_window_unknown": len(windows) - len(known)}
 
 
 def _followed(cs: list[int], eff: list[int], window: float) -> int:
@@ -535,12 +577,14 @@ def _overlaps(holes: list[tuple[int, int]], a: float, b: float) -> bool:
 
 def _gaps(rec: Any, vars_: "_Variables", names: set[str], lo: int, hi: int) -> list[dict]:
     """使った変数の欠け（MCU の読みの空白・読めなかった語・ピンの無い区間・FPGA の欠落）と、記録の取り込みの失敗・
-    長期の記録の間引き。時刻順。黙って数え落とさないため（reason は画面で訳す）。"""
+    長期の記録の間引き。時刻順。黙って数え落とさないため（reason は画面で訳す）。値はあるが時刻の一部が分からない区間
+    （pin_skew_unknown: ピンの ch のずれが分からずずらさずに置いた）も時刻を示す（結果からは外さない）。"""
     out, fpga = [], False
     for n in sorted(names):
         kind = vars_.resolve(n)[0]
         fpga |= kind == "fpga"
-        out += [{**g, "variable": n} for g in vars_.series(n).gaps]
+        series = vars_.series(n)
+        out += [{**g, "variable": n} for g in [*series.gaps, *series.unsure]]
     if fpga:
         out += vars_.fpga_lost
     out += [{"reason": "events_error", "t0": e.t, "t1": e.t, "error": (e.body or {}).get("error")}

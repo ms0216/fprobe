@@ -176,10 +176,14 @@ class Unwinder:
     仮定なので使う側が明示したときだけ使い、出したフレームの note を "lr_without_cfi" にする（関数が LR を積んで
     いれば偽の呼び出し元になる）。既定は仮定せず、そのフレームで止めて stop に "no_cfi" を書く。"""
 
-    def __init__(self, table: CallFrameTable, max_frames: int = MAX_FRAMES, assume_leaf: bool = False):
+    def __init__(self, table: CallFrameTable, max_frames: int = MAX_FRAMES, assume_leaf: bool = False,
+                 load_bias: int = 0):
+        """load_bias: 実行時の番地 − リンク時の番地（PIE・共有ライブラリ）。CFI の表は pc − load_bias で引く。フレームの
+        pc・CFA・復元したレジスタは実行時の値のまま。"""
         self.table = table
         self.max_frames = max_frames
         self.assume_leaf = assume_leaf
+        self.load_bias = load_bias
 
     def unwind(self, access: TargetAccess) -> list[FrameState]:
         """フレーム 0（いまの PC）から、呼び出し元へ巻き戻せるところまで。最後のフレームの stop に止めた理由:
@@ -221,7 +225,7 @@ class Unwinder:
     def _step(self, frame: FrameState, access: TargetAccess) -> tuple[FrameState | None, dict | None]:
         """(呼び出し元のフレーム, None) か、巻き戻せないなら (None, 止めた理由)。"""
         regs = frame.registers
-        found = self.table.row_at(frame.lookup_pc)
+        found = self.table.row_at(frame.lookup_pc - self.load_bias)
         note = ""
         try:
             if found is None:

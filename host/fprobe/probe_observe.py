@@ -1,6 +1,6 @@
 """Probe の道具: 止めずに見る（RTT・SWO の ITM の解読・セミホスティング）と、捕捉した波形の通信の解読。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_recorder・_capture・
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・dbg・_symbols・_debug・_recorder・_capture・
 _capture_info を使う。機器に触るのは必ず _lock の中。
 
 - RTT: 背景のスレッドが周期的に poll し、受信をチャンネルごとの ByteLog に貯める（GUI と AI が同時に読める）。
@@ -34,8 +34,9 @@ from .profile.exceptions import exception_name as _exception_name_of
 from .rtt import Rtt, find_control_block, rtt_address_from_elf
 from .sampler import Sampler
 from .semihosting import FileAccess, SemihostingHost, SemihostingResult
+from .probe_service import HostView
 
-__all__ = ["ByteLog", "ObserveTools", "SEMIHOSTING"]
+__all__ = ["ByteLog", "ObserveService", "SEMIHOSTING"]
 
 RTT_WAKES = ("poll", "sampler")
 RTT_RESYNC_S = 1.0                     # サンプラで起こすときも、この間隔で記述子を読み直す（安全網・位置の取り直し）
@@ -177,10 +178,25 @@ class _SamplerWake:
                 "idle": self.idle, "full_polls": self.full, "lost_events": self.cursor.lost}
 
 
-class ObserveTools:
-    """止めずに見る道具と通信の解読（Probe の mixin）。"""
+class ObserveService:
+    """止めずに見る道具と通信の解読（Probe のサービス）。"""
 
-    def _init_observe(self) -> None:
+    API = ("la_decode", "rtt_measure", "rtt_read", "rtt_start", "rtt_status", "rtt_stop", "rtt_write",
+           "semihosting_configure", "semihosting_status", "swo_decode", "swo_text")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_add_job", "_closing", "_collect", "_console", "_decodings", "_fetch", "_itm", "_job_errors", "_jobs",
+              "_logs", "_observe", "_partial", "_pump_errors", "_pumps", "_received", "_record_host", "_remove_job",
+              "_rtt", "_rtt_listen", "_rtt_listeners", "_rtt_unlisten", "_rtt_wake", "_run_until_halt", "_service",
+              "_service_in_background", "_sh_exit", "_sh_watch", "_stamp", "_stdin", "_stop_observing", "_swo_drain",
+              "_swo_listen", "_swo_listeners", "_swo_on", "_swo_receive", "_swo_reset", "_swo_unlisten", "_tap",
+              "_untap", "_watch_stops", "_with_fault", "poll_s")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_actions", "_break_action", "_break_hooks", "_capture", "_capture_info", "_claim_sampler", "_debug",
+             "_lock", "_recorder", "_release_sampler", "_stop_dict", "_symbols", "_uart_fetch", "dbg", "session",
+             "target", "target_fault")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._observe = threading.Condition()                      # 貯め場・行の読み書き（機器の _lock とは別）
         self._logs: dict[int | str, ByteLog] = {}
         self._partial: dict[int | str, bytearray] = {}             # 記録の行に組み立て中のバイト
@@ -234,8 +250,8 @@ class ObserveTools:
             self._poll_once()
 
     def _poll_once(self) -> None:
-        with self._lock:
-            if self._debug is None and (self._rtt is not None or self._sh_watch):   # 切断された
+        with self._host._lock:
+            if self._host._debug is None and (self._rtt is not None or self._sh_watch):   # 切断された
                 self._rtt_release_wake()
                 self._rtt, self._sh_watch = None, False
             if self._rtt is not None:
@@ -275,11 +291,11 @@ class ObserveTools:
         if source == "swo":
             self._swo_fetch()
         elif source == "uart":
-            self._uart_fetch()
+            self._host._uart_fetch()
 
     def _swo_fetch(self) -> None:
-        if self._swo_on and self._debug is not None:
-            chunk = self._debug.probe.swo_read()
+        if self._swo_on and self._host._debug is not None:
+            chunk = self._host._debug.probe.swo_read()
             if chunk:
                 self._received("swo", bytes(chunk), time.monotonic())
 
@@ -287,7 +303,7 @@ class ObserveTools:
         """timeout_s の間、source を読み、前回の続きから貯まった分を返す（背景で読んでいれば、その分も）。"""
         deadline = time.monotonic() + timeout_s
         while True:
-            with self._lock:
+            with self._host._lock:
                 self._fetch(source)
             if time.monotonic() >= deadline:
                 break
@@ -344,13 +360,13 @@ class ObserveTools:
             return                                                 # SWO・UART は記録・RTT の受け手の対象でない
         for listener in list(self._rtt_listeners):
             listener(key, data, host_s)
-        if self._recorder is not None:
+        if self._host._recorder is not None:
             self._record_received(key, data, host_s)
 
     def _stamp(self, host_s: float) -> tuple[float, int | None]:
         """受けた時刻（time.monotonic）→ (壁時計の秒, 記録中ならタイムベースの時刻)。機器には触らない。"""
         wall = time.time() - (time.monotonic() - host_s)
-        rec = self._recorder
+        rec = self._host._recorder
         if rec is None:
             return wall, None
         try:
@@ -374,12 +390,15 @@ class ObserveTools:
             self._record_host("rtt", "data", host_s, a=key, body={"channel": key, "hex": data.hex()})
 
     def _record_host(self, stream: str, kind: str, host_s: float, **fields) -> int | None:
-        """記録中なら出来事を入れ、記録のタイムベースに写した時刻を返す（記録していない・写せなければ None）。"""
-        rec = self._recorder
+        """記録中なら出来事を入れ、記録のタイムベースに写した時刻を返す（記録していない・写せなければ None）。
+        host_s は PC が対象の出来事を受けた・読んだ時刻（SWO の ITM パケット・RTT・セミホスティング・ヒープ・
+        トレースポイント・ログのブレークポイント）なので、本体の印は time_source = "host_received"（対象の出来事は
+        それより前。どれだけ前かは分からず、不確かさは PC の時計の写しの分だけ）。"""
+        rec = self._host._recorder
         if rec is None:
             return None
         try:
-            return rec.add_host(stream, kind, host_s, **fields)
+            return rec.add_host(stream, kind, host_s, time_source="host_received", **fields)
         except RuntimeError:
             return None                                            # 時計の対応付けの前（記録を始めた直後）
 
@@ -399,8 +418,8 @@ class ObserveTools:
             raise ValueError(f"wake は {' / '.join(RTT_WAKES)}（{wake!r}）")
         if interval_s is not None and not 0.0005 <= interval_s <= 1.0:
             raise ValueError("interval_s は 0.0005〜1 秒")
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             memory = PyocdAccess(target)
             if address is None:
                 address = self._rtt_address(memory, target, ranges)
@@ -410,10 +429,10 @@ class ObserveTools:
             rtt = Rtt(memory, address, end=region.start + region.length if region is not None else 1 << 32)
             cb = rtt.open()
             if wake == "sampler":
-                self._claim_sampler("rtt", caller)                 # ほかの道具が使っていれば、ここで誤り
+                self._host._claim_sampler("rtt", caller)                 # ほかの道具が使っていれば、ここで誤り
             self._rtt_release_wake()                               # 前の rtt_start のサンプラ
             if wake == "sampler":
-                self._claim_sampler("rtt", caller)
+                self._host._claim_sampler("rtt", caller)
                 self._rtt_wake = self._rtt_sampler_wake(rtt, sampler_rate_hz)
             if interval_s is not None:
                 self.poll_s = interval_s
@@ -431,19 +450,19 @@ class ObserveTools:
         """サンプラに上りの WrOff を見張らせる（_lock の中で。持ち主は claim 済み）。"""
         addresses = rtt.wroff_addresses()
         if not addresses:
-            self._release_sampler("rtt")
+            self._host._release_sampler("rtt")
             raise RuntimeError("使われている上りのチャンネルが無い")
-        device = self.session.device
+        device = self._host.session.device
         try:
             sampler = Sampler(device)
             sampler.configure([(a, 4) for a in addresses.values()], 1.0 / rate_hz)
             log = EventLog(device)
-            if self._recorder is None:
+            if self._host._recorder is None:
                 log.ensure_started()                               # 記録中は Collector が始めている
             cursor = log.cursor()
             sampler.start()
         except BaseException:
-            self._release_sampler("rtt")
+            self._host._release_sampler("rtt")
             raise
         return _SamplerWake(cursor, {a: ch for ch, a in addresses.items()}, rate_hz, time.monotonic())
 
@@ -453,10 +472,10 @@ class ObserveTools:
             return
         self._rtt_wake = None
         try:
-            Sampler(self.session.device).stop()
+            Sampler(self._host.session.device).stop()
         except Exception:                                          # 機器が切れた等: 持ち主だけは返す
             pass
-        self._release_sampler("rtt")
+        self._host._release_sampler("rtt")
 
     def _rtt_wake_poll(self, wake: _SamplerWake) -> dict[int, bytes]:
         """サンプラの WrOff の値を見て、変わったチャンネルだけを読む（_lock の中で）。イベントを取りこぼしたとき・
@@ -486,13 +505,13 @@ class ObserveTools:
             {**wake.describe(), "interval_s": self.poll_s}
 
     def _rtt_address(self, memory, target, ranges) -> int:
-        if ranges is None and self._symbols is not None:
+        if ranges is None and self._host._symbols is not None:
             try:
-                return rtt_address_from_elf(self._symbols.path)
+                return rtt_address_from_elf(self._host._symbols.path)
             except KeyError:
                 # 読み込んだ ELF に制御ブロックが無い = ファームは RTT を組み込んでいない。RAM の走査（数秒〜十数秒）を
                 # せずにすぐ知らせる（ELF が書いたものと違うなら ranges を渡せば探す）
-                raise RuntimeError(f"ELF（{self._symbols.path.name}）に _SEGGER_RTT が無い: ファームに RTT が組み込まれて"
+                raise RuntimeError(f"ELF（{self._host._symbols.path.name}）に _SEGGER_RTT が無い: ファームに RTT が組み込まれて"
                                    "いない（書いたファームと ELF が違うなら ranges か address を渡すと RAM を探す）") from None
         if ranges is None:
             memory_map = getattr(target, "memory_map", None) or []
@@ -552,7 +571,7 @@ class ObserveTools:
             return {"written": len(data)}
         deadline, done = time.monotonic() + timeout_s, 0
         while True:
-            with self._lock:
+            with self._host._lock:
                 if self._rtt is None:
                     raise RuntimeError("RTT を始めていない（rtt_start）")
                 done += self._rtt.write(channel, data[done:])
@@ -571,7 +590,7 @@ class ObserveTools:
 
     def rtt_stop(self) -> dict:
         """RTT の受信を止める（貯めたものは rtt_read で読める）。"""
-        with self._lock, self._observe:
+        with self._host._lock, self._observe:
             was, self._rtt = self._rtt is not None, None
             self._rtt_release_wake()
         return {"stopped": was}
@@ -635,8 +654,8 @@ class ObserveTools:
 
     def _swo_receive(self, timeout_s: float) -> tuple[int, list[dict]]:
         """timeout_s の間に届いた SWO を解読する。(バイト数, パケット)。行はポートごとに貯める。"""
-        with self._lock:
-            self.target                                            # 未接続ならここで失敗する
+        with self._host._lock:
+            self._host.target                                            # 未接続ならここで失敗する
         data = self._collect("swo", timeout_s)
         now = time.monotonic()
         packets = self._itm.feed(bytes(data))
@@ -685,7 +704,7 @@ class ObserveTools:
             self._swo_listeners.remove(listener)
 
     def _record_packet(self, p, host_s: float) -> None:
-        if self._recorder is None:
+        if self._host._recorder is None:
             return
         if isinstance(p, ExceptionTrace):
             self._record_host("swo", "exception", host_s, a=p.number,
@@ -729,7 +748,7 @@ class ObserveTools:
         """セミホスティング（BKPT 0xAB）の処理の設定。既定で有効（出力は rtt_read の channel "semihosting"）。
         ファイル操作は file_root を指定したときだけ、その下に限って許す（writable で書き込みも）。file_root を省いて
         呼ぶとファイル操作は無効に戻る（AI の道具からは file_root を指定できないので、AI が設定し直すと無効になる）。"""
-        with self._lock:
+        with self._host._lock:
             self._sh_enabled = enabled
             self._sh_files = FileAccess(file_root, writable)
             self._sh_cmdline = cmdline
@@ -764,7 +783,7 @@ class ObserveTools:
         """止まった位置が BKPT 0xAB なら要求を処理する（_lock の中で）。処理しなかったら None。"""
         if not self._sh_enabled:
             return None
-        result = self._semihosting().handle(_PyocdSemihosting(self.target))
+        result = self._semihosting().handle(_PyocdSemihosting(self._host.target))
         if not result.handled:
             return None
         self._sh_requests += 1
@@ -776,7 +795,7 @@ class ObserveTools:
     def _service_in_background(self) -> None:
         """再開した後の見張り（_lock の中で）: BKPT 0xAB（セミホスティング）か、止まらない動作のブレークポイント
         （条件が偽・無視する回数・ログ）で止まっていたら処理して再開する。ほかの理由の停止なら見張りを終える。"""
-        target = self.target
+        target = self._host.target
         if target.get_state() != Target.State.HALTED:
             return
         if target.get_halt_reason() == Target.HaltReason.BREAKPOINT:
@@ -784,14 +803,14 @@ class ObserveTools:
             if result is not None and not result.exited:
                 target.resume()                                    # BKPT 0xAB は PC を進めてある
                 return
-            if result is None and self._break_action():
-                self.dbg.resume()                                  # ブレークポイントを 1 命令踏み越えて続ける
+            if result is None and self._host._break_action():
+                self._host.dbg.resume()                                  # ブレークポイントを 1 命令踏み越えて続ける
                 return
         self._sh_watch = False
 
     def _watch_stops(self, on: bool) -> None:
         """target_resume 等の後に on、止める操作で off。"""
-        self._sh_watch = on and (self._sh_enabled or bool(self._actions) or bool(self._break_hooks))
+        self._sh_watch = on and (self._sh_enabled or bool(self._host._actions) or bool(self._host._break_hooks))
         if self._sh_watch:
             self._ensure_poller()
 
@@ -800,18 +819,18 @@ class ObserveTools:
         待つ間は機器のロックを放す（背景の RTT が読み続ける）。"""
         started = time.monotonic()
         deadline = started + timeout_s
-        with self._lock:
-            dbg = self.dbg
+        with self._host._lock:
+            dbg = self._host.dbg
             self._sh_watch = False                                 # ここで処理する（背景と取り合わない）
         while True:
-            stop = dbg.run_until_halt(max(0.0, deadline - time.monotonic()), lock=self._lock)
-            with self._lock:
+            stop = dbg.run_until_halt(max(0.0, deadline - time.monotonic()), lock=self._host._lock)
+            with self._host._lock:
                 result = self._service() if stop.reason == "breakpoint" else None
-                if result is None and stop.reason == "breakpoint" and self._break_action():
+                if result is None and stop.reason == "breakpoint" and self._host._break_action():
                     continue                                       # 止まらない動作: 踏み越えて続ける（次の run で）
             if result is None or result.exited:
                 stop = Stop(stop.reason, stop.pc, stop.where, round(time.monotonic() - started, 4))
-                out = self._stop_dict(stop)
+                out = self._host._stop_dict(stop)
                 if result is not None:
                     out.update(reason="exit", exit_code=result.exit_code)
                 elif stop.reason != "timeout":
@@ -821,8 +840,8 @@ class ObserveTools:
     def _with_fault(self, out: dict) -> dict:
         """故障のハンドラ（・ベクタキャッチ）で止まっていれば、原因の要約（target.fault の）を out に添える。"""
         try:
-            with self._lock:
-                report = self.target_fault()
+            with self._host._lock:
+                report = self._host.target_fault()
         except Exception:                                          # 故障レジスタが読めない: 要約を付けないだけ
             return out
         if report["faulted"]:
@@ -840,8 +859,8 @@ class ObserveTools:
         start / end（サンプル）・kinds・errors_only で絞り、offset から limit 件。kinds を省くと解読器の既定の種類
         （SWD は transfer、JTAG は ir・dr・reset 等。無ければ全部）。結果の kinds は絞った種類（null = 全部）、counts は
         絞る前の種類ごとの件数。"""
-        with self._lock:
-            tr, info = self._capture, self._capture_info
+        with self._host._lock:
+            tr, info = self._host._capture, self._host._capture_info
         if tr is None:
             raise NoData("捕捉が無い（la_capture / la_deep_capture を先に）")
         if capture_id is not None and capture_id != info["id"]:
@@ -887,7 +906,7 @@ class ObserveTools:
 
     def _record_decoding(self, tr, decoding: Decoding) -> None:
         """記録中なら注釈を共通の時間軸へ（捕捉のトリガのサンプルがトリガ時刻に来るように置く）。"""
-        rec = self._recorder
+        rec = self._host._recorder
         if rec is None or not decoding.annotations:
             return
         tps = tr.sample_period_s * rec.timebase_hz

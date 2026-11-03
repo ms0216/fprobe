@@ -2,6 +2,7 @@
 // その応答をソース・呼び出し履歴・ローカル変数・スレッドの窓に配る。画面は応答を描くだけ（行を推定しない・判定しない）。
 // 時刻の連動は既定で有効、窓ごとに外せる（その人のブラウザに覚える）。Svelte に依らない。
 // 仕様: docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.3・§4
+import type { Result } from "./api";
 import { errorText, type DaemonConnection } from "./api";
 import { EN, type Key, type Translate } from "./i18n";
 import { load, save } from "./prefs";
@@ -57,20 +58,7 @@ export interface CodeAtMissing {
 }
 
 /** recording.code_at の応答 */
-export interface CodeAt {
-  t: number;
-  timebase_hz: number;
-  elf: string | null;
-  recorded_elf: string | null;
-  pc_before: CodeAtSample | null;
-  pc_after: CodeAtSample | null;
-  pc_gap_s: number | null;
-  state: CodeAtTarget | null;
-  halt_before: CodeAtTarget | null;
-  halt_after: CodeAtTarget | null;
-  task: CodeAtTask | null;
-  missing: Record<string, CodeAtMissing>;
-}
+export type CodeAt = Result<"recording.code_at">;
 
 // --- 応答 → 描く値（計算はしない。どの欄をどこに出すかだけ） ---------------------------------------------
 

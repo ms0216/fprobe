@@ -359,8 +359,8 @@ export class TimelineState {
   private async readRecording(): Promise<void> {
     try {
       const status = await this.conn.call("recording.status", {}, { quiet: true });
-      const recording = status?.name && status.span && status.timebase_hz > 0
-        ? { t0: status.span[0], tickS: 1 / status.timebase_hz } : null;
+      const hz = status.timebase_hz ?? 0;
+      const recording = status.name && status.span && hz > 0 ? { t0: status.span[0], tickS: 1 / hz } : null;
       this.setOrigin("recording", recording);
     } catch {
       /* 切れた等: つながり直したら読み直す */

@@ -1,7 +1,7 @@
 """Probe の道具: 読み込んだ ELF の更新の検出と自動の再読込（U46。SEGGER Ozone の再ビルドの検出 SEG-52 に相当）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_symbols・elf_load と、ObserveTools の _record_host、
-FlashTools の _publish（デーモンの通知の送り先）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・_symbols・elf_load と、ObserveService の _record_host、
+FlashService の _publish（デーモンの通知の送り先）を使う。
 
 - elf_load のたびに、ファイルの印（更新時刻・大きさ）と、書き込む中身（PT_LOAD の区画）の要約（SHA-256）を覚える。
 - 背景のスレッドが interval_s ごとにファイルの印を見る。変わった印が次の見回りでも同じ（＝リンカが書き終えた）なら
@@ -19,8 +19,9 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from .probe_service import HostView
 
-__all__ = ["ELF_TOPIC", "ElfWatchTools", "image_digest"]
+__all__ = ["ELF_TOPIC", "ElfWatchService", "image_digest"]
 
 ELF_TOPIC = "elf.changed"
 
@@ -43,10 +44,18 @@ def _stamp(path: Path) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
-class ElfWatchTools:
-    """ELF の更新の見張り（Probe の mixin）。"""
+class ElfWatchService:
+    """ELF の更新の見張り（Probe のサービス）。"""
 
-    def _init_elf_watch(self) -> None:
+    API = ("elf_status", "elf_watch")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_elf_check", "_elf_closing", "_elf_digest", "_elf_interval", "_elf_loaded", "_elf_thread",
+              "_ensure_elf_watcher", "_image_written", "_stop_elf_watch")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_linux_view", "_lock", "_publish", "_record_host", "_symbols", "elf_load")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._elf_watching = True                          # 既定で見張る（elf_watch で切り替え）
         self._elf_auto = True
         self._elf_interval = 1.0
@@ -69,9 +78,9 @@ class ElfWatchTools:
 
     def _elf_loaded(self) -> None:
         """ELF を読み込んだ（_lock の中で）: 印と要約を覚え、見張りを動かす。"""
-        path = self._symbols.path
+        path = self._host._symbols.path
         self._elf_stamp = _stamp(path)
-        self._elf_digest = image_digest(self._symbols)
+        self._elf_digest = image_digest(self._host._symbols)
         self._elf_loaded_at = datetime.now().isoformat(timespec="milliseconds")
         self._elf_seen = self._elf_failed = None
         self._elf_error = None
@@ -116,7 +125,7 @@ class ElfWatchTools:
 
     def _elf_check(self) -> dict | None:
         """1 回の見回り。更新を扱ったらその知らせ（通知と同じ辞書）を返す。"""
-        symbols = self._symbols
+        symbols = self._host._symbols
         if symbols is None:
             return None
         stamp = _stamp(symbols.path)
@@ -137,10 +146,10 @@ class ElfWatchTools:
                   "error": None}
         try:
             if self._elf_auto:
-                with self._lock:
-                    if self._symbols is None or self._symbols.path != path:
+                with self._host._lock:
+                    if self._host._symbols is None or self._host._symbols.path != path:
                         return {**notice, "error": "読み込んでいる ELF が替わった"}
-                    self.elf_load(str(path))
+                    self._host.elf_load(str(path))
                 self._elf_reloads += 1
                 notice["reloaded"] = True
                 notice["image_changed"] = self._elf_digest != before
@@ -153,10 +162,10 @@ class ElfWatchTools:
             ("stale" if notice.get("image_changed") and self._written_digest is not None else self._target_image())
         notice["message"] = self._elf_message(notice)
         self._elf_last = notice
-        publish = self._publish
+        publish = self._host._publish
         if publish is not None:
             publish(ELF_TOPIC, notice)
-        self._record_host("host", ELF_TOPIC, time.monotonic(), body=notice)
+        self._host._record_host("host", ELF_TOPIC, time.monotonic(), body=notice)
         return notice
 
     @staticmethod
@@ -180,7 +189,7 @@ class ElfWatchTools:
             raise ValueError("interval_s は 0.05〜60 秒")
         self._elf_watching, self._elf_auto, self._elf_interval = enabled, auto_reload, interval_s
         self._elf_wake.set()                               # 間隔を変えた・止めた: 今の待ちを切り上げる
-        if enabled and self._symbols is not None:
+        if enabled and self._host._symbols is not None:
             thread = self._elf_thread
             if thread is not None and not thread.is_alive():
                 self._elf_thread = None
@@ -190,7 +199,9 @@ class ElfWatchTools:
     def elf_status(self) -> dict:
         """読み込んだ ELF と更新の見張りの様子: path・loaded_at・file_changed（読み込んだ後にファイルが変わったか）・
         target_image（current / stale = 書き直しが要る / unknown）・changes・reloads・last（最後の更新の知らせ）・error。"""
-        symbols = self._symbols
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.elf_status()
+        symbols = self._host._symbols
         path = symbols.path if symbols is not None else None
         stamp = _stamp(path) if path is not None else None
         return {"path": str(path) if path else None, "loaded_at": self._elf_loaded_at,

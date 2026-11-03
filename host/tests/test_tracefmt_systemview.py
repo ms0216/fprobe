@@ -32,8 +32,10 @@ def test_a_stream_decodes_tasks_isrs_prints_and_times():
         A: ("sensor", 3), B: ("logger", 2), IDLE: ("IDLE", 0)}
     assert not getattr(trace, "idle", set())       # 名前でアイドルを決めない（使う側が idle_tasks で渡す）
     kinds = [(e.kind, e.ts, e.task) for e in trace.events if e.kind in ("task_in", "task_out", "isr_enter", "isr_exit")]
-    assert kinds == [("task_in", 1_100, IDLE), ("isr_enter", 1_200, None), ("isr_exit", 1_260, None),
-                     ("task_in", 1_310, A), ("task_out", 1_500, A), ("task_in", 1_520, IDLE)]
+    # ts は差の和（TRACE_START・INIT の差は意味を持たないので、INIT からの区切り。scenario の時刻 1_000 が 0）
+    assert kinds == [("task_in", 100, IDLE), ("isr_enter", 200, None), ("isr_exit", 260, None),
+                     ("task_in", 310, A), ("task_out", 500, A), ("task_in", 520, IDLE)]
+    assert [b["reason"] for b in trace.breaks] == ["init"] and trace.events[0].name == "TRACE_START"
     [p] = [e for e in trace.events if e.kind == "print"]
     assert p.text == "value=-2 <str@0x00000000>" and p.args["level"] == "info"
     assert next(e for e in trace.events if e.kind == "isr_enter").args["number"] == 27
@@ -42,12 +44,14 @@ def test_a_stream_decodes_tasks_isrs_prints_and_times():
 
 def test_the_trace_becomes_a_timeline_and_isr_activations():
     trace = decode_systemview(scenario().bytes())
-    clock = TargetClock(trace.ts_hz, 100_000_000, anchor_ts=1_000, anchor_t=5_000_000)
+    seg = trace.segment
+    clock = TargetClock(trace.ts_hz, 100_000_000, anchor_ts=0, anchor_t=5_000_000, segment=seg)
     tl = timeline_from_events(task_events(trace.events, clock), trace.names())
     runs = [(r.task, r.t0, r.t1) for r in tl.runs]
-    assert runs[0][0] == "IDLE" and runs[1] == ("sensor", clock.to_timebase(1_310), clock.to_timebase(1_500))
+    assert runs[0][0] == "IDLE" and runs[1] == ("sensor", clock.to_timebase(310, seg), clock.to_timebase(500, seg))
     [act] = activations(trace.events, clock)
-    assert act.number == 27 and act.inclusive == clock.to_timebase(1_260) - clock.to_timebase(1_200)
+    assert act.number == 27 and act.inclusive == clock.to_timebase(260, seg) - clock.to_timebase(200, seg)
+    assert clock.place(trace.events[0]) is None                         # TRACE_START の区切りには対応点が無い
 
 
 def test_streaming_in_pieces_gives_the_same_events():
@@ -154,3 +158,68 @@ def test_a_print_level_the_protocol_does_not_define_is_not_named():
     w.packet(26, string("x") + varint(3) + varint(0), 10)
     [p] = [e for e in decode_systemview(w.bytes()).events if e.kind == "print"]
     assert p.args["level"] is None and p.args["options"] == 3
+
+
+
+# --- 時刻（段 H2: 基準を混ぜない・つながりの切れ目を区切りにする） -------------------------------------------------
+
+
+def test_systime_cycles_does_not_jump_the_time_base():
+    # 途中から受けた流れ: 最初の SYSTIME_CYCLES の前の出来事も後の出来事も、差を足した同じ基準（絶対の値へ跳ばない）
+    w = Writer()
+    w.out += b"\x00" * 10
+    w.packet(4, varint(1), 100).packet(17, b"", 150)
+    w.out += varint(12) + varint(5_000_000) + varint(30)              # SYSTIME_CYCLES（差 30）
+    w.last = 180
+    w.packet(5, b"", 210)
+    trace = decode_systemview(w.bytes())
+    assert [e.ts for e in trace.events] == [100, 150, 180, 210] and trace.segment == 0
+    assert trace.events[2].args["cycles"] == 5_000_000
+
+
+def test_a_second_start_begins_a_new_segment():
+    # STOP → START の間に止めていた時間は流れに無い: 2 回目の START の後は前と別の区切り（差を詰めてずらさない）
+    w = Writer().start(t=0)
+    w.packet(4, varint(w.shrink(A)), 10).packet(11, b"", 20)             # TRACE_STOP
+    w.start(t=1_000_000)                                                   # 止めた後に START（差は意味を持たない）
+    w.packet(5, b"", 1_000_050)
+    trace = decode_systemview(w.bytes())
+    starts = [e for e in trace.events if e.name == "TRACE_START"]
+    assert len(starts) == 2 and starts[1].segment > trace.events[0].segment
+    assert any(b["reason"] == "trace_start" for b in trace.breaks)
+    out = [e for e in trace.events if e.kind == "task_out"][0]
+    assert out.segment == trace.segment and out.segment != next(e for e in trace.events if e.kind == "task_in").segment
+
+
+def test_a_resynchronization_after_a_broken_packet_begins_a_new_segment():
+    head = Writer().start(t=0).packet(4, varint(1), 10).bytes()
+    broken = head + bytes([0x80] * 10 + [0x01]) + Writer().start(t=0).packet(5, b"", 5).bytes()
+    trace = decode_systemview(broken)
+    assert any(b["reason"] == "resync" for b in trace.breaks)
+    task_in = next(e for e in trace.events if e.kind == "task_in")
+    task_out = next(e for e in trace.events if e.kind == "task_out")
+    assert task_out.segment != task_in.segment
+
+
+def test_a_systime_that_disagrees_with_the_summed_deltas_is_a_fact_and_a_new_segment():
+    # SYSTIME_CYCLES は 32 ビットの絶対の値: 差の和と合わなければ（差の 32 ビットのあふれ・失ったパケット）区切る
+    w = Writer()
+    w.out += b"\x00" * 10
+    w.out += varint(12) + varint(1_000) + varint(0)
+    w.packet(4, varint(1), 100)
+    w.out += varint(12) + varint(1_000 + 100 + 50 + 7) + varint(50)        # 差の和なら 1150（7 合わない）
+    trace = decode_systemview(w.bytes())
+    [b] = trace.breaks
+    assert b["reason"] == "systime_mismatch" and b["mismatch"] == 7 and b["since_ts"] == 0
+    assert trace.events[-1].segment == 1
+
+
+def test_activations_pair_numbered_exits_by_number():
+    # 出口が番号を持てば同じ番号の入口と対にする（番号を見ずに最も内側を取り出さない。flow.isr_pairing と同じ）
+    from fprobe.tracefmt.model import TraceEvent
+    from fprobe.tracefmt.model import activations as acts
+    events = [TraceEvent(0, "isr_enter", "e", args={"number": 15}), TraceEvent(10, "isr_enter", "e", args={"number": 27}),
+              TraceEvent(30, "isr_exit", "x", args={"number": 15})]          # 27 の出口が欠けた
+    clock = TargetClock(1.0, 1.0, 0, 0)
+    [a] = acts(events, clock)
+    assert (a.number, a.start, a.end) == (15, 0, 30)

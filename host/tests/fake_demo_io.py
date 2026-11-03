@@ -14,6 +14,7 @@ DemoProbe（fake_demo.py）に混ぜる mixin。値の形は本物の Probe（pr
 import threading
 import time
 
+from fake_probe_contract import unsupported_arg
 from fprobe.api import NoData
 
 __all__ = ["DemoStreams", "IoDemo"]
@@ -22,7 +23,7 @@ __all__ = ["DemoStreams", "IoDemo"]
 class IoDemo:
     def _init_io(self) -> None:
         """DemoProbe.__init__ から（ELF を読み、接続・停止した後）。"""
-        self._streams = DemoStreams(lambda: self.counter)
+        self._streams = DemoStreams(lambda: self.counter, clock=self.running_seconds)
         self._uart_baud = 115_200
 
     def open_demo_recording(self, directory) -> None:
@@ -69,7 +70,9 @@ class IoDemo:
         self._uart_baud = baud
         return {"baud": baud}
 
-    def swo_start(self, baud=2_000_000):
+    def swo_start(self, baud=2_000_000, mode="uart"):
+        if mode != "uart":
+            raise unsupported_arg("swo_start", "mode", mode)
         self._need()
         self._streams.start_swo()
 
@@ -137,8 +140,20 @@ class IoDemo:
                 s["baud"] = self._uart_baud
         return {"sources": sources, "rtt": True, "swo": self._streams.swo_on}
 
-    def terminal_read(self, source, since=0, max_bytes=65536, timeout_s=0.0, times=False):
-        return self._streams.read(source, since, max_bytes, times)
+    def semihosting_status(self):
+        """デモのセミホスティング: 有効、ファイルの根は無し、受けた要求の数は端末の源に溜めた分。"""
+        return {"enabled": True, "file_root": None, "writable": False, "requests": self._streams.size("semihosting"),
+                "exit": None, "watching": True}
+
+    def pins_read(self):
+        """デモのデバッグコネクタのピン（SWCLK・SWDIO はアイドルで 1、nRESET は解除で 1）。"""
+        return {"swclk": 1, "swdio": 1, "nreset": 1, "not_reported": []}
+
+    def terminal_read(self, source, since=0, max_bytes=65536, timeout_s=0.0, times=False, terminals=False):
+        out = self._streams.read(source, since, max_bytes, times)
+        if terminals and source.startswith("rtt"):
+            out["terminals"] = []                    # デモの RTT の文字列には SEGGER の仮想端末の切り替えが無い（本物は RTT の源だけに付ける）
+        return out
 
 
 class DemoStreams:
@@ -151,9 +166,14 @@ class DemoStreams:
     PERIOD_S = {"rtt0": 0.5, "rtt1": 1.5, "swo0": 0.7, "swo1": 2.0, "uart": 1.0, "semihosting": 4.0}
     SWO = ("swo0", "swo1")
 
-    def __init__(self, counter):
+    PREROLL_S = 20.0           # 始めから、ここまで走ったあとの出力がある（止まったデモにも読む行がある）
+
+    def __init__(self, counter, clock=time.monotonic):
+        """clock: 出力を足す時計（秒）。偽の機器は「走っている時間」（止まっている間は進まない）を渡す。本物の止まった
+        ターゲットは出力を出さない。"""
         self._counter = counter
-        self._started = time.monotonic()
+        self._clock = clock
+        self._started = clock() - self.PREROLL_S
         self._wall0 = time.time()
         self._lock = threading.Lock()
         self._data = {
@@ -192,7 +212,7 @@ class DemoStreams:
     def start_swo(self) -> None:
         with self._lock:
             if not self.swo_on:
-                self.swo_on, self._swo_started = True, time.monotonic()
+                self.swo_on, self._swo_started = True, self._clock()
                 for s in self.SWO:
                     self._steps[s] = 0
                 self._add("swo0", b"ITM printf on port 0\n", time.time())
@@ -217,7 +237,7 @@ class DemoStreams:
             self._data[source] += data
 
     def _feed(self) -> None:
-        now = time.monotonic()
+        now = self._clock()
         for source, period in self.PERIOD_S.items():
             swo = source in self.SWO
             if swo and not self.swo_on:
@@ -227,7 +247,8 @@ class DemoStreams:
             while self._steps[source] < due:
                 self._steps[source] += 1
                 k = self._steps[source]
-                wall = self._wall0 + (origin - self._started) + k * period
+                # 始めの分（PREROLL_S）も、記録の行（_wall0 まで）の後に並べる（受け取りの時刻は単調）。SWO は始めた時刻から
+                wall = self._wall0 + ((origin - self._started - self.PREROLL_S) if swo else 0.0) + k * period
                 self._add(source, self._line(source, k).encode(), wall)
 
     def size(self, source: str) -> int:

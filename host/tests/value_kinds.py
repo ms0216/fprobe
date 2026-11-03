@@ -21,16 +21,17 @@ def venum(name: str | None, n: int) -> dict:
     return {"kind": "enum", "name": name, "value": n}
 
 
-def vptr(address: int, to: str, **more) -> dict:
-    return {"kind": "pointer", "address": address, "to": to, **more}
+def vptr(address: int, to: str, *, deref: bool, **more) -> dict:
+    return {"kind": "pointer", "address": address, "to": to, "deref": deref, **more}
 
 
 def vstruct(**members) -> dict:
     return {"kind": "struct", "members": members}
 
 
-def varray(items: list, length: int | None = None, **more) -> dict:
-    return {"kind": "array", "length": len(items) if length is None else length, "items": list(items), **more}
+def varray(items: list, length: int | None = None, *, element_type: str, **more) -> dict:
+    return {"kind": "array", "element_type": element_type, "length": len(items) if length is None else length,
+            "items": list(items), **more}
 
 
 def ints(*numbers: int) -> list[dict]:

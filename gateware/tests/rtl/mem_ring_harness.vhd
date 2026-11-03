@@ -5,7 +5,8 @@ use ieee.numeric_std.all;
 
 entity mem_ring_harness is
   generic (
-    ADDR_BITS : positive := 10
+    ADDR_BITS : positive := 10;
+    COUNT_START_BELOW_4G : natural := 0
   );
   port (
     clk          : in  std_logic;
@@ -28,7 +29,7 @@ entity mem_ring_harness is
     trigger_beat : out unsigned(ADDR_BITS - 1 downto 0);
     trigger_slot : out unsigned(2 downto 0);
     written      : out unsigned(ADDR_BITS downto 0);
-    ev_written   : out unsigned(31 downto 0);
+    ev_written   : out unsigned(63 downto 0);
     -- 読み出し
     r_start      : in  std_logic;
     region_base  : in  unsigned(ADDR_BITS - 1 downto 0);
@@ -56,7 +57,7 @@ architecture rtl of mem_ring_harness is
   signal w_data, r_data : std_logic_vector(127 downto 0);
 begin
   writer_i : entity work.la_mem_writer
-    generic map (ADDR_BITS => ADDR_BITS)
+    generic map (ADDR_BITS => ADDR_BITS, COUNT_START_BELOW_4G => COUNT_START_BELOW_4G)
     port map (clk => clk, rst => rst, start => w_start, stop => w_stop, post_beats => post_beats, stream => '0',
               ev_enable => ev_enable,
               in_valid => in_valid, in_ready => in_ready, in_data => in_data, in_kind => in_kind, in_trig => in_trig,

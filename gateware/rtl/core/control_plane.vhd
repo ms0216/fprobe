@@ -59,6 +59,11 @@ architecture rtl of control_plane is
   signal cur     : csr_addr_t := (others => '0');   -- 次にアクセスするワードのアドレス（バスへ直接）
   signal aligned : boolean;
   signal fixed   : boolean;                         -- EXCHANGE: 番地を進めない・書いた後に読む
+  -- バスの番地・書き込み値・状態（bus_we・bus_req の元）は全部の CSR の窓へ配られ、チップ全体に広がる配線が sys の
+  -- 周期を決めていた（2026-10-29、PYNQ を 462.5 MHz の目標で配線して、遅い経路の最多の種類だった）。Vivado に
+  -- 複製させて配線を短くする（max_fanout。Gowin は無視する: Primer の面積を増やさない）。
+  attribute max_fanout : integer;
+  attribute max_fanout of cur, word, state : signal is 16;
 begin
   op      <= header(0);
   count   <= unsigned(header(3)) & unsigned(header(2));

@@ -1,6 +1,6 @@
 """Probe の道具: 規則の検査・状態遷移図・証跡・故障注入の台本（U25）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。記録（_reading・_recordings_dir・_recorder）、ELF（_symbols）、
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。記録（_reading・_recordings_dir・_recorder）、ELF（_symbols）、
 ターゲット（target・target_status・evaluate・target_reset・target_resume）を使う。規則と証跡の計算は fprobe.rules、
 試行の進め方は fprobe.inject。機器に触るのは _InjectHost の各操作で、必ず _lock の中。
 
@@ -8,6 +8,7 @@ Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）�
 """
 
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,9 @@ from .inject import InjectScript, run_script
 from .recording import Recording
 from .rules import RuleError, RuleSet, check, evidence, render_report, state_machine
 from .xtrig import CrossTrigger, Event, InjectStatus, Pattern, Source, Stage, TriggerSequencer
+from .probe_service import HostView
 
-__all__ = ["RulesTools"]
+__all__ = ["RulesService", "inject_host"]
 
 _WHEN_SOURCE = {"pattern": Source.SEQUENCE, "sequence": Source.SEQUENCE, "dap_match": Source.DAP_MATCH,
                 "host": Source.HOST}
@@ -140,19 +142,35 @@ class _InjectHost:
         return time.monotonic()
 
 
-class RulesTools:
-    """規則の検査・故障注入（Probe の mixin）。"""
+def inject_host(probe) -> _InjectHost:
+    """Probe の上の故障注入の口（RulesService に渡す）。"""
+    return _InjectHost(probe)
 
-    _last_rules: dict | None = None
-    _last_inject: dict | None = None
-    _last_runs: dict[str, dict] = {}                 # "rules"・"inject" → {at（UNIX 秒）, caller}（rules_last）
+
+class RulesService:
+    """規則の検査・故障注入（Probe のサービス）。"""
+
+    API = ("inject_run", "rules_check", "rules_last", "rules_report", "rules_states")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_inject_host", "_last_inject", "_last_runs")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_reading", "_recordings_dir", "_view")
+
+    def __init__(self, host, inject_host: Callable[[], _InjectHost]):
+        """inject_host: 故障注入がホスト（Probe）を操作する口（_InjectHost。各操作で機器の錠を取る）を作る。"""
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+        self._make_inject_host = inject_host
+        # 直前の結果はこの Probe のもの（クラスの属性にすると、Probe を 2 つ作ったとき同じ表を共有する）
+        self._last_rules: dict | None = None
+        self._last_inject: dict | None = None
+        self._last_runs: dict[str, dict] = {}            # "rules"・"inject" → {at（UNIX 秒）, caller}（rules_last）
 
     def _inject_host(self) -> _InjectHost:
-        return _InjectHost(self)
+        return self._make_inject_host()
 
     def _named_recording(self, name: str) -> Recording:
-        directory = self._recordings_dir() / name
-        if directory.parent != self._recordings_dir() or not (directory / "meta.json").is_file():
+        directory = self._host._recordings_dir() / name
+        if directory.parent != self._host._recordings_dir() or not (directory / "meta.json").is_file():
             raise KeyError(f"記録 {name!r} が無い（recording_list の name）")
         return Recording.open(directory)
 
@@ -170,7 +188,7 @@ class RulesTools:
             raise ValueError(str(e)) from None
         base = self._named_recording(baseline) if baseline is not None else None
         try:
-            result = check(self._reading(), ruleset, t0=t0, t1=t1, baseline=base, mark=mark, limit=limit)
+            result = check(self._host._reading(), ruleset, t0=t0, t1=t1, baseline=base, mark=mark, limit=limit)
         finally:
             if base is not None:
                 base.close()
@@ -183,7 +201,7 @@ class RulesTools:
         """記録の出来事（event は recording_find と同じ条件）の field（a / b / kind / body.<名前>）の値を状態として、
         状態ごとの回数・滞在時間、遷移ごとの回数、Graphviz の dot（dot_path にも書く）。"""
         try:
-            sm = state_machine(self._reading(), event, field, labels, t0, t1)
+            sm = state_machine(self._host._reading(), event, field, labels, t0, t1)
         except RuleError as e:
             raise ValueError(str(e)) from None
         if dot_path:
@@ -192,7 +210,7 @@ class RulesTools:
 
     def rules_report(self, path: str, format: str = "markdown") -> dict:
         """最後の rules_check と inject_run の結果を、要件と対応づけた証跡（markdown / json）として path に書く。"""
-        recording = self._view
+        recording = self._host._view
         text = render_report(format, rules=self._last_rules, inject=self._last_inject, recording=recording)
         Path(path).write_text(text, encoding="utf-8")
         data = evidence(self._last_rules, self._last_inject, recording)

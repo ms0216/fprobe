@@ -130,3 +130,29 @@ async def block_read_with_wait_returns_every_word_in_order(dut):
     count, resp, data = await dap.transfer((AP_DRW_R, None), (AP_DRW_R, None), (DP_CTRL_R, None))
     assert (count, resp) == (3, OK) and data[:2] == words[1:3]
     assert dp.waits > 0
+
+
+@cocotb.test()
+async def injection_writes_a_list_over_jtag_and_restores_the_host_state(dut):
+    from tests.tb.swd_injector_tb import DRCR, inject, set_list
+    dap, dp = await setup(dut)
+    await dap.mem_setup()
+    await dap.transfer((AP_TAR_W, 0x20000000))
+    await set_list(dut, DRCR)
+    assert await inject(dut) == 0
+    assert all(dp.regs.memory[a] == v for a, v in DRCR) and int(dut.inj_written_words.value) == 4
+    assert (await dap.block(AP_DRW_W, 2, [5, 6]))[:2] == (2, OK)                # CSW（自動増加）・TAR が戻っている
+    assert [dp.regs.memory[0x20000000 + 4 * i] for i in range(2)] == [5, 6]
+
+
+@cocotb.test()
+async def a_write_error_over_jtag_is_found_by_ctrl_stat(dut):
+    """JTAG-DP には FAULT の応答が無い: 書き込みの誤りは CTRL/STAT の STICKYERR でしか分からない"""
+    from tests.tb.swd_injector_tb import DRCR, inject, set_list
+    dap, dp = await setup(dut, fault_addresses={DRCR[2][0]})
+    await dap.mem_setup()
+    await set_list(dut, DRCR)
+    assert await inject(dut) == 1
+    dp.regs.fault_addresses.clear()
+    count, resp, (ctrl,) = await dap.transfer((DP_CTRL_R, None))
+    assert (count, resp) == (1, OK) and not ctrl & 0x20       # 起こした STICKYERR は消してある

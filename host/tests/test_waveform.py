@@ -4,6 +4,7 @@ import time
 from array import array
 
 import pytest
+from perf_budget import within
 
 from fprobe.la import Transitions, Waveform
 
@@ -32,12 +33,11 @@ def test_the_view_is_clamped_to_the_capture():
         w.view(4, 4, 10)
 
 
+@pytest.mark.perf
 def test_a_million_transitions_are_summarized_quickly():
     n = 1_000_000
     w = Waveform(tr([i & 0xFFFF for i in range(n)], range(0, 2 * n, 2), 2 * n, channels=16))
-    t0 = time.process_time()
-    levels = w.view(0, 2 * n, 2000)
-    assert time.process_time() - t0 < 0.5
+    _, levels = within(0.5, lambda: w.view(0, 2 * n, 2000))      # 性能の約束: 画面の 1 回の描画（perf_budget）
     assert levels[0] == "x" * 2000 and len(levels) == 16
     assert levels[15][:65] == "0" * 65 and levels[15][65] == "x"             # ch15 は 65536 サンプルごとに変わる
 

@@ -135,6 +135,9 @@ class UCOS3(KernelAwareness):
     def tick_count(self) -> int | None:
         return self._variable("OSTickCtr")
 
+    def tick_mask(self) -> int | None:
+        return self._variable_mask("OSTickCtr")
+
     def scheduler_state(self) -> str:
         running = self._variable("OSRunning")
         if running is None:
@@ -239,7 +242,7 @@ class UCOS3(KernelAwareness):
         wait = WaitInfo(reason, kind=kind)
         if state_value & BIT_DLY and handle in remaining:
             wait.remaining_ticks = remaining[handle]
-            wait.wake_tick = None if tick is None else (tick + remaining[handle]) & 0xFFFF_FFFF
+            wait.wake_tick = self.wake_tick(tick, remaining[handle])
         if not state_value & BIT_PEND or kind in OWN_WAITS:
             return wait
         block = self._field(handle, "PendObjPtr")

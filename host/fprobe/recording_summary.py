@@ -95,10 +95,16 @@ class SummaryGrid:
 
 def bin_counts(db: sqlite3.Connection, grid: SummaryGrid, levels: range | None = None) -> dict[int, list[tuple[str, int, int]]]:
     """表 events の stream ごと・区間ごとの件数を、段 0 から上の段へ足し上げて作る。{段: [(stream, 番号, 件数)]}。"""
+    from .recording_table import EventTable                    # recording_table は recording を読まない（循環しない）
     base: dict[tuple[str, int], int] = {}
-    for stream, b, n in db.execute("SELECT stream, t / ?, COUNT(*) FROM events GROUP BY stream, t / ?",
-                                   (grid.w0, grid.w0)):
-        base[(stream, b)] = n
+    table = EventTable.open(db, create=False)
+    if table.version == 1:
+        rows = db.execute("SELECT stream, t / ?, COUNT(*) FROM events GROUP BY stream, t / ?", (grid.w0, grid.w0))
+    else:                                                       # 組の番号ごとに数え、stream ごとに足す（ビューを通さない）
+        rows = ((table.name_of(key)[0], b, n) for key, b, n in
+                db.execute("SELECT key, t / ?, COUNT(*) FROM event GROUP BY key, t / ?", (grid.w0, grid.w0)))
+    for stream, b, n in rows:
+        base[(stream, b)] = base.get((stream, b), 0) + n
     out: dict[int, list[tuple[str, int, int]]] = {}
     wanted = range(grid.levels) if levels is None else levels
     current = base

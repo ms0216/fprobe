@@ -36,7 +36,7 @@ def stream(rng: random.Random, n: int, ratio: float, offset: int, with_overflow:
 
 
 def decode(events, cuts):
-    d = ObsDecoder(nominal_ratio=None)
+    d = ObsDecoder(nominal_ratio=None, max_pending=None)
     out, last = [], 0
     for c in list(cuts) + [len(events)]:
         out += d.feed(events[last:c])
@@ -59,9 +59,13 @@ def test_times_follow_the_marks_and_values_keep_their_order(seed):
     rng = random.Random(1000 + seed)
     ratio, offset = rng.uniform(0.5, 4.0), rng.randint(0, 10**9)
     events, expected = stream(rng, rng.randint(30, 400), ratio, offset, False)
-    values = [s for s in decode(events, []) if s.kind == "value"]
+    # 印の fprobe の時刻はこの試験で丸めてある（± 0.5 刻み = ± 0.5 / ratio 対象の周期）: その幅を印の瞬間の窓として渡す
+    # （実機では fprobe の時刻は端子の辺そのもので、窓は観測の回路の申告 sync_delay_lo / hi）
+    half = 0.5 / ratio
+    d = ObsDecoder(nominal_ratio=None, sync_delay_lo=-half, sync_delay_hi=half, max_pending=None)
+    values = [s for s in d.feed(events) + d.flush() if s.kind == "value"]
     assert [s.value for s in values] == [v for v, _ in expected]            # 値は欠けず順番どおり
     timed = [(s, t) for s, (_, t) in zip(values, expected) if s.time_fprobe is not None]
     assert len(timed) > len(values) // 2
-    for s, t in timed:
-        assert abs(s.time_fprobe - t) <= 2 + 0.002 * ratio * 3000, (s, t)    # 印の丸めと当てはめの誤差の範囲
+    for s, t in timed:                                                       # 本当の時刻は範囲の中（段階 S3）
+        assert s.time_lo - 1e-6 <= t <= s.time_hi + 1e-6, (s, t)

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from probe_fakes import FakeDevice
+from caps_fakes import with_caps
 
 from fprobe.mcp_server import Probe
 
@@ -20,6 +21,35 @@ def probe(tmp_path, monkeypatch):
     yield p
     if p._recorder is not None:
         p.recording_stop()
+
+
+# 偽の FpgaObs が返す形は本物（fprobe.fpga_obs.FpgaObs._open の標本型・status）と同じ欄にする（応答の照合が見る）
+SNAPSHOT_DECLARED = {"id": 0x534E4150, "mode": "snapshot", "version": 2, "width": 16, "groups": 1, "fifo_depth": 0,
+                     "clock_hz": 0, "sync_delay": 0.0, "sample_delay": 0.0, "lost_bits": 8, "sync_delay_lo": None,
+                     "sync_delay_hi": None, "sample_delay_lo": None, "sample_delay_hi": None}
+
+
+def obs_status(**bits) -> dict:
+    """FpgaObs.status と同じ欄（渡さない旗は False、scans・id は 0）。"""
+    flags = ("running", "id_ok", "stuck", "cmd_pending", "overflow_seen", "cmd_dropped", "target_running", "driving",
+             "id_timeout")
+    unknown = set(bits) - set(flags)
+    assert not unknown, unknown
+    return {**{k: bool(bits.get(k, False)) for k in flags}, "scans": 0, "id": 0x534E4150}
+
+
+def opened_status() -> dict:
+    """開いて動いている観測の fpga_obs_status（本物の Probe.fpga_obs_status と同じ欄）。"""
+    return {**obs_status(running=True, id_ok=True), "mode": "snapshot", "config": None, "declared": None,
+            "auto_reopen": False, "reopened": 0, "tck_hz": None}
+
+
+def obs_item(kind: str, group: int, value: int | None, time_us: float | None, fields: dict | None = None) -> dict:
+    """fpga_obs_read の 1 項目（本物の FpgaObs.read の項目と同じ欄）。"""
+    item = {"time_us": time_us, "time_lo_us": time_us, "time_hi_us": time_us, "copy": False,
+            "time_basis": None if time_us is None else "pairs", "target_cycles": 0, "kind": kind, "group": group,
+            "value": value, "lost": 0}
+    return item if fields is None else {**item, "fields": fields}
 
 
 def meta_of(path):
@@ -66,16 +96,17 @@ def test_system_status_reports_both_sides_even_without_a_target(probe):
 def test_system_status_keeps_the_last_known_fpga_value_after_it_leaves_the_window(probe, monkeypatch):
     # MCU が長く止まると値が変わらず、イベントの窓から値が消える。止まった瞬間の FPGA こそ見たいので、最後の値を出し続ける
     device = probe.session.device
-    caps = SimpleNamespace(**vars(device.capabilities()), fpga_obs=True)
-    monkeypatch.setattr(device, "capabilities", lambda: caps)
-    monkeypatch.setattr(probe, "fpga_obs_status", lambda: {"state": "running"})
-    value = {"kind": "value", "group": 0, "value": 1, "time_us": 5.0, "fields": {"state": "BUSY"}}
-    reads = iter([[value], [{"kind": "gap", "group": 0, "value": None, "time_us": None}]])
-    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"items": next(reads)})
+    device.caps = with_caps(device.capabilities(), fpga_obs=True)
+    monkeypatch.setattr(probe, "fpga_obs_status", opened_status)
+    value = obs_item("value", 0, 1, 5.0, {"state": "BUSY"})
+    reads = iter([[value], [obs_item("gap", 0, None, None)]])
+    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"written": 1, "lost": 0, "first": 0, "next": 1,
+                                                              "items": next(reads)})
     first = probe.system_status()["fpga"]["latest"]
     assert [(v["group"], v["value"], v["time_us"]) for v in first] == [(0, 1, 5.0)]
     second = probe.system_status(fpga_last=500)["fpga"]
-    assert second["latest"] == first                                              # 窓に値が無くても最後の値
+    drop_age = lambda rows: [{k: v for k, v in r.items() if k != "age_us"} for r in rows]
+    assert drop_age(second["latest"]) == drop_age(first)                          # 窓に値が無くても最後の値
     # 見た窓（使った件数 last と、窓の中の項目の数）を返す（点検 2 回目 ?: probe_fpga_obs.py の暗黙の窓）
     assert second["window"] == {"last": 500, "items": 1}
 
@@ -111,18 +142,77 @@ def test_status_reports_the_settings_it_was_opened_with(probe, monkeypatch):
             self.dev = dev
 
         def open(self, chain, user_ir, half_period, words, sync_period, id_scans=0):
-            return {"id": 1, "mode": "snapshot", "sync_delay": 0, "sample_delay": 0, "clock_hz": 0}
+            return dict(SNAPSHOT_DECLARED)
 
         def status(self):
-            return {"running": True}
+            return obs_status(running=True)
 
     monkeypatch.setattr("fprobe.probe_fpga_obs.FpgaObs", StubObs)
     assert probe.fpga_obs_status()["config"] is None
     probe.fpga_obs_open(chain={"ir_len": 4}, user_ir=2, half_period=20, words=1, sync_period=0)
     out = probe.fpga_obs_status()
+    caps = probe._session.device.capabilities()
     assert out["config"] == {"chain": {"ir_len": 4}, "user_ir": 2, "half_period": 20, "words": 1, "sync_period": 0,
-                             "id_scans": 0}
+                             "id_scans": 0, "borrow_ratio": False}                 # そのまま fpga_obs_open に渡せる
+    assert out["tck_hz"] == caps.sys_clock_hz / (2 * 20 + caps.jtag_bit_extra_cycles)
     assert out["declared"]["mode"] == "snapshot"
+
+
+def test_reopening_with_the_actual_tck_gives_the_same_half_period():
+    """開いた設定の tck_hz（実際の TCK）を画面が MHz に書き直して開き直しても、同じ半周期になる（丸めの誤差でずれない）。"""
+    from caps_fakes import caps_for
+
+    from fprobe.probe_fpga_obs import FpgaObsService
+    for extra in (0, 1):
+        caps = caps_for(sys_clock_hz=100_000_000, jtag_bit_extra_cycles=extra)
+        for half in range(2, 300):
+            tck = caps.sys_clock_hz / (2 * half + extra)
+            assert FpgaObsService._half_period(caps, None, tck / 1e6 * 1e6) == half, (extra, half)
+
+
+def test_the_host_turns_tck_into_the_half_period_with_the_extra_cycle(probe, monkeypatch):
+    """TCK（Hz）→ 半周期の換算と実際の TCK はホストがする（観測の回路も jtag_phy: TCK = sys / (2 × 半周期 + extra)。
+    extra はデバイスの申告）。画面は換算しない（E4）。"""
+    class StubObs:
+        mode = "snapshot"
+
+        def __init__(self, dev):
+            self.dev = dev
+
+        def open(self, chain, user_ir, half_period, words, sync_period, id_scans=0):
+            return dict(SNAPSHOT_DECLARED)
+
+        def status(self):
+            return obs_status(running=True)
+
+    monkeypatch.setattr("fprobe.probe_fpga_obs.FpgaObs", StubObs)
+    dev = probe._session.device
+    dev.caps = with_caps(dev.capabilities(), sys_clock_hz=50_000_000, jtag_bit_extra_cycles=1)
+
+    assert probe.fpga_obs_status()["tck_hz"] is None                   # 開いていない
+
+    def opened(**kw):
+        probe.fpga_obs_open(user_ir=2, words=1, sync_period=0, **kw)
+        s = probe.fpga_obs_status()
+        return s["config"]["half_period"], s["tck_hz"]
+    assert opened(tck_hz=10e6) == (2, 10e6)                      # 古い回路: 50 MHz / (2 × 2 + 1)
+    assert opened(tck_hz=9.9e6) == (3, 50e6 / 7)                 # 求めた速さを超えない最も速い半周期
+    dev.caps = with_caps(dev.caps, jtag_bit_extra_cycles=0)
+    assert opened(tck_hz=10e6) == (3, 50e6 / 6)                  # 今の回路: 50 MHz / (2 × 3)。半周期の下限は 2
+    assert opened(tck_hz=1e3) == (25000, 1e3)
+    assert opened(half_period=20) == (20, 50e6 / 40)
+    assert opened() == (10, 50e6 / 20)                           # どちらも無ければ半周期 10（今までの既定）
+    with pytest.raises(ValueError, match="tck_hz"):
+        probe.fpga_obs_open(user_ir=2, tck_hz=10e6, half_period=20)
+    with pytest.raises(ValueError, match="tck_hz"):
+        probe.fpga_obs_open(user_ir=2, tck_hz=0)
+    dev.caps = with_caps(dev.caps, sys_clock_hz=None)            # システムのクロックの申告が無い: 換算できない
+    with pytest.raises(ValueError, match="sys_clock_hz"):
+        probe.fpga_obs_open(user_ir=2, tck_hz=10e6)
+    assert opened(half_period=20) == (20, None)
+    config = probe.fpga_obs_status()["config"]
+    probe.fpga_obs_open(**config)                                    # 開いた設定のままで開き直せる（tck_hz を含まない）
+    assert probe.fpga_obs_status()["config"] == config
 
 
 def test_auto_reopen_opens_again_with_the_same_settings_when_stuck(probe, monkeypatch):
@@ -143,10 +233,10 @@ def test_auto_reopen_opens_again_with_the_same_settings_when_stuck(probe, monkey
                 raise RuntimeError("no answer")
             opened.append((chain, user_ir, half_period, words, sync_period))
             StubObs.stuck = False
-            return {"id": 1, "mode": "snapshot", "sync_delay": 0, "sample_delay": 0, "clock_hz": 0}
+            return dict(SNAPSHOT_DECLARED)
 
         def status(self):
-            return {"running": not StubObs.stuck, "stuck": StubObs.stuck}
+            return obs_status(running=not StubObs.stuck, stuck=StubObs.stuck)
 
         def close(self):
             pass
@@ -171,8 +261,8 @@ def test_auto_reopen_opens_again_with_the_same_settings_when_stuck(probe, monkey
 def test_system_status_reports_how_the_target_was_connected(probe, monkeypatch):
     # 対象を書き直す・リセットすると MCU 側の SWD がはずれる（複数ドロップの選択等）。同じ設定でつなぎ直せるように、
     # 最後に成功した target_connect の引数を返す
-    monkeypatch.setattr(type(probe), "_connect_target", lambda self, *a: {"state": "RUNNING"})
-    monkeypatch.setattr(type(probe), "_ensure_design", lambda self, protocol: None)
+    monkeypatch.setattr(probe, "_connect_target", lambda *a: {"state": "RUNNING"})
+    monkeypatch.setattr(probe, "_ensure_design", lambda protocol: None)
     assert probe.system_status()["mcu"].get("connect") is None
     probe.target_connect(target="rp2040", frequency_hz=1_000_000, connect_mode="attach", core=0)
     connect = probe.system_status()["mcu"]["connect"]
@@ -186,8 +276,7 @@ def test_a_hardware_trigger_on_an_fpga_condition(probe):
     from fprobe import generated as g
     from fprobe.xtrig import Source
     dev = probe.session.device
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "fpga_obs": True, "obs_match": True, "xtrig": True})
+    dev.caps = with_caps(dev.capabilities(), fpga_obs=True, obs_match=True, xtrig=True)
     probe.fpga_obs_signals_set({"groups": {"0": [
         {"name": "state", "lsb": 0, "width": 2, "format": "enum", "enum": {"1": "BUSY"}},
         {"name": "restart", "lsb": 3, "width": 1}]}})
@@ -211,9 +300,7 @@ def test_a_hardware_trigger_on_an_fpga_condition(probe):
 def test_an_fpga_condition_cannot_halt_without_the_injector(probe):
     # 故障注入の無い構成（fprobe_core_m 等）では halt の経路を立てても MCU は止まらない: 断る
     dev = probe.session.device
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "fpga_obs": True, "obs_match": True, "xtrig": True,
-                                                  "inject": False})
+    dev.caps = with_caps(dev.capabilities(), fpga_obs=True, obs_match=True, xtrig=True, inject=False)
     probe.fpga_obs_signals_set({"groups": {"0": [{"name": "flag", "lsb": 0, "width": 1}]}})
     with pytest.raises(RuntimeError, match="inject"):
         probe.fpga_obs_trigger_set("flag rose", halt=True, la=False)
@@ -225,8 +312,7 @@ def test_a_hardware_trigger_left_armed_by_an_earlier_daemon_is_reported_and_can_
     from fprobe import generated as g
     from fprobe.xtrig import Source
     dev = probe.session.device
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "fpga_obs": True, "obs_match": True, "xtrig": True})
+    dev.caps = with_caps(dev.capabilities(), fpga_obs=True, obs_match=True, xtrig=True)
     assert probe.fpga_obs_trigger_status() == {"condition": None}
     dev.csr[g.OBS_MATCH] = 0x0003 | 0x0001 << 16
     dev.csr[g.OBS_MATCH_CHANGE] = 0x0008 | 1 << g.OBS_MATCH_CHANGE_ENABLE[0]
@@ -263,14 +349,15 @@ def test_switching_recordings_closes_the_previous_one(probe):
 def test_the_last_fpga_value_follows_the_current_definitions_and_is_forgotten_on_reopen(probe, monkeypatch):
     # 保持するのは値だけ: 信号の定義を変えたら今の名前で出す。観測を開き直す（別の回路かもしれない）・閉じると忘れる
     device = probe.session.device
-    caps = SimpleNamespace(**vars(device.capabilities()), fpga_obs=True)
-    monkeypatch.setattr(device, "capabilities", lambda: caps)
-    monkeypatch.setattr(probe, "fpga_obs_status", lambda: {"state": "running"})
-    value = {"kind": "value", "group": 0, "value": 1, "time_us": 5.0, "fields": {"mark": 1}}
-    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"items": [value]})
+    device.caps = with_caps(device.capabilities(), fpga_obs=True)
+    monkeypatch.setattr(probe, "fpga_obs_status", opened_status)
+    value = obs_item("value", 0, 1, 5.0, {"mark": 1})
+    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"written": 1, "lost": 0, "first": 0, "next": 1,
+                                                              "items": [value]})
     probe.fpga_obs_signals_set({"groups": {"0": [{"name": "mark", "lsb": 0, "width": 1}]}})
     assert probe.system_status()["fpga"]["latest"][0]["fields"] == {"mark": 1}
-    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"items": []})
+    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"written": 1, "lost": 0, "first": 1, "next": 1,
+                                                              "items": []})
     probe.fpga_obs_signals_set({"groups": {"0": [{"name": "pulse", "lsb": 0, "width": 1}]}})
     assert probe.system_status()["fpga"]["latest"][0]["fields"] == {"pulse": 1}     # 今の定義で
     monkeypatch.setattr(probe, "_obs", lambda: SimpleNamespace(close=lambda: None))
@@ -283,8 +370,7 @@ def test_the_fpga_trigger_state_follows_the_registers(probe):
     # 書く途中で失敗したら記憶を残さない。halt も la も無い条件は意味が無いので断る
     from fprobe import generated as g
     dev = probe.session.device
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "fpga_obs": True, "obs_match": True, "xtrig": True})
+    dev.caps = with_caps(dev.capabilities(), fpga_obs=True, obs_match=True, xtrig=True)
     probe.fpga_obs_signals_set({"groups": {"0": [{"name": "flag", "lsb": 0, "width": 1}]}})
     probe.fpga_obs_trigger_set("flag rose", halt=True)
     assert probe.fpga_obs_trigger_status()["condition"] == "flag rose"
@@ -298,7 +384,7 @@ def test_the_fpga_trigger_state_follows_the_registers(probe):
     with pytest.raises(OSError):
         probe.fpga_obs_trigger_set("flag rose", halt=True, la=True)
     dev.write32 = original
-    assert getattr(probe, "_obs_trigger", None) is None
+    assert probe._svc_match_trigger._obs_trigger is None
 
 
 def test_a_watch_running_before_the_recording_names_its_rows(probe):
@@ -331,8 +417,7 @@ def test_the_fpga_trigger_condition_survives_a_daemon_restart(probe, tmp_path):
     # （一致しなければ持ち主の無い条件 orphan のまま。別の道具が書き換えた等）
     from fprobe import generated as g
     dev = probe.session.device
-    caps = dev.capabilities()
-    dev.capabilities = lambda: SimpleNamespace(**{**vars(caps), "fpga_obs": True, "obs_match": True, "xtrig": True})
+    dev.caps = with_caps(dev.capabilities(), fpga_obs=True, obs_match=True, xtrig=True)
     probe.fpga_obs_signals_set({"groups": {"0": [{"name": "flag", "lsb": 0, "width": 1}]}})
     probe.fpga_obs_trigger_set("flag rose", halt=True)
     again = Probe("unused")
@@ -344,7 +429,7 @@ def test_the_fpga_trigger_condition_survives_a_daemon_restart(probe, tmp_path):
     other._session = SimpleNamespace(device=dev)
     assert other.fpga_obs_trigger_status()["orphan"] is True
     other.fpga_obs_trigger_clear()
-    assert Probe.fpga_obs_trigger_status(other)["condition"] is None
+    assert other.fpga_obs_trigger_status()["condition"] is None
 
 
 def test_a_failed_recording_start_leaves_no_half_recording(probe, monkeypatch):
@@ -385,3 +470,17 @@ def test_read_returns_raw_values_when_the_saved_definition_is_broken(probe):
         assert out["signals_error"]
     finally:
         probe._la_record = None
+
+
+def test_the_age_of_the_last_fpga_value_is_from_the_time_read_after_the_values(probe, monkeypatch):
+    # 経過（age_us）はホストが返す（画面で引き算しない）。「今」は値を読み終えた後の FPGA の時刻なので、窓の中の新しい値でも負にならない
+    device = probe.session.device
+    device.caps = with_caps(device.capabilities(), fpga_obs=True)
+    hz = device.capabilities().timebase_hz
+    ticks = iter([int(1.0 * hz), int(3.0 * hz)])                  # 状態の時刻 1 s、値を読んだ後 3 s
+    monkeypatch.setattr(device, "time", lambda: next(ticks))
+    monkeypatch.setattr(probe, "fpga_obs_status", opened_status)
+    values = [obs_item("value", 0, 1, 2.0e6, {"state": "BUSY"}), obs_item("value", 1, 2, None, {"state": "IDLE"})]
+    monkeypatch.setattr(probe, "fpga_obs_read", lambda last: {"written": 2, "lost": 0, "first": 0, "next": 2, "items": values})
+    latest = probe.system_status()["fpga"]["latest"]
+    assert [(v["group"], v["age_us"]) for v in latest] == [(0, 1.0e6), (1, None)]

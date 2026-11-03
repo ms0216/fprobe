@@ -94,14 +94,15 @@ class _Pending:
 
 
 def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: bytes, scvd: Scvd | None = None,
-                          ctx: ScvdContext | None = None, since: int | None = None,
-                          ts_previous: int | None = None) -> tuple[Trace, int]:
-    """バッファ（記録の数 × 16 バイト）→ (Trace, 次に読む通し番号)。since を渡すとその通し番号からの続きだけ。"""
+                          ctx: ScvdContext | None = None, since: int | None = None) -> tuple[Trace, int]:
+    """バッファ（記録の数 × 16 バイト）→ (Trace, 次に読む通し番号)。since を渡すとその通し番号からの続きだけ。
+    時刻は対象の ts_overflow を上位に入れた 64 ビット（`_full_times`。読みをまたいで続く）。"""
     count = info.record_count
     if len(buffer) < count * RECORD_SIZE:
         raise EventRecorderError("バッファが短い")
     trace = Trace("eventrecorder", ts_hz=float(status.ts_freq) if status.ts_freq else None)
     trace.system = {"ts_source": _TS_SOURCES.get(info.ts_source, info.ts_source), "records": count,
+                    "ts_overflow": status.ts_overflow, "init_count": status.init_count,
                     "written": status.written, "dumped": status.dumped, "running": bool(status.state),
                     "version": f"{info.version >> 8}.{info.version & 0xFF}"}
     end = status.record_index
@@ -116,8 +117,8 @@ def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: by
     pending: dict[int, _Pending] = {}
     stdout = bytearray()
     stdout_ts: int | None = None
-    ts_last = ts_previous
     torn = 0
+    records = []
     for i in range(first, end):
         ts, v1, v2, word = struct.unpack_from("<4I", buffer, (i & (count - 1)) * RECORD_SIZE)
         if not word & _VALID or word & _LOCKED or (word >> 20 & 0xF) != (i // count) & 0xF:
@@ -127,10 +128,10 @@ def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: by
         if (ts >> 31, v1 >> 31, v2 >> 31) != (tbit, tbit, tbit):
             torn += 1
             continue
-        ts = ts & 0x7FFF_FFFF | (word >> 28 & 1) << 31
-        v1 = v1 & 0x7FFF_FFFF | (word >> 29 & 1) << 31
-        v2 = v2 & 0x7FFF_FFFF | (word >> 30 & 1) << 31
-        ts_last = trace.unwrap(ts_last, ts)
+        records.append((ts & 0x7FFF_FFFF | (word >> 28 & 1) << 31, v1 & 0x7FFF_FFFF | (word >> 29 & 1) << 31,
+                        v2 & 0x7FFF_FFFF | (word >> 30 & 1) << 31, word))
+    times = _full_times(trace, status, [r[0] for r in records])
+    for ts_last, (_, v1, v2, word) in zip(times, records):
         event_id, ctx_no, irq = word & 0xFFFF, word >> 16 & 7, bool(word & _IRQ)
         first_rec, last_rec = bool(word & _FIRST), bool(word & _LAST)
         raw = struct.pack("<II", v1, v2)
@@ -185,6 +186,32 @@ def decode_event_recorder(info: RecorderInfo, status: RecorderStatus, buffer: by
     _task_lifecycle(trace)
     trace.events.sort(key=lambda e: e.ts)
     return trace, end
+
+
+def _full_times(trace: Trace, status: RecorderStatus, raw: list[int]) -> list[int]:
+    """記録の 32 ビットの時刻 → 対象が数えた桁あふれ（ts_overflow）を上位に入れた 64 ビットの時刻。
+
+    EventRecorder.c は時刻を読むたびに前に読んだ値（ts_last）より小さければ ts_overflow を進める。最後の記録は
+    ts_overflow 周目（その後の読み ts_last が最後の記録の値より小さければ、その間に 1 周したので 1 つ前の周）。
+    そこから前へ、記録の値が後の記録より大きい所で 1 周戻る（対象と同じ「続く読みの間は 1 周未満」の前提。数えた
+    回数は ts_wraps）。こうすると読みをまたいでも（間の記録が上書きされても）対象の数えた周で続く。"""
+    if not raw:
+        return []
+    cycle = status.ts_overflow - (1 if status.ts_last < raw[-1] else 0)
+    out = [0] * len(raw)
+    for k in range(len(raw) - 1, -1, -1):
+        if k < len(raw) - 1 and raw[k] > raw[k + 1]:
+            cycle -= 1
+            trace.ts_wraps += 1
+            back = raw[k] - raw[k + 1]
+            trace.ts_wrap_min_back = back if trace.ts_wrap_min_back is None else min(trace.ts_wrap_min_back, back)
+        out[k] = (cycle << 32) | raw[k]
+    if cycle < 0:
+        # 対象の数えた周より多く戻った（ts_overflow と記録の値が食い違う）: 時刻の基準が分からないので事実を残し、
+        # 前の区切りと混ぜないよう、最初の周を 0 に揃えた相対の値にする
+        trace.notes.append(f"記録の時刻の戻りが ts_overflow（{status.ts_overflow}）より多い: 時刻は最初の記録からの相対")
+        out = [t - (cycle << 32) for t in out]
+    return out
 
 
 def _task_lifecycle(trace: Trace) -> None:

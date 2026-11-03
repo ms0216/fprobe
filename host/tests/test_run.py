@@ -475,4 +475,4 @@ def test_cli_run_builds_options_and_exits_with_the_code(tmp_path, monkeypatch):
     assert o.elf == RTT_DEMO and o.target == "stm32f401xe" and o.timeout_s == 9 and o.load == "ram"
     assert o.set_values == {"semihosting_enabled": "1"} and o.rtt is True and o.swo_baud == 2_000_000
     assert o.pass_pattern == "DONE" and o.fail_pattern == "BAD" and o.junit == tmp_path / "j.xml"
-    assert seen["probe"] == {"serial": "S1", "port": None, "eth": None}
+    assert seen["probe"] == {"serial": "S1", "port": None, "eth": None, "link_up_wait_s": None}   # USB では待たない

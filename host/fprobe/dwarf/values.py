@@ -7,10 +7,10 @@
     真偽 → {"kind": "bool", "value": b}
     生のバイト（符号の種類の分からない基本型・4/8 以外の大きさの浮動小数・void） → {"kind": "bytes", "hex": "..."}
     列挙 → {"kind": "enum", "name": "MODE_RUN"（列挙子に無い値は None）, "value": 1}
-    ポインタ → {"kind": "pointer", "address": 番地, "to": "struct Sensor"}（+ "symbol"、char * は "string"。NUL の前で
+    ポインタ → {"kind": "pointer", "address": 番地, "to": "struct Sensor", "deref": 先を読めるか（0 番地・void・関数は false）}（+ "symbol"、char * は "string"。NUL の前で
                読むのをやめたら "string_end": "limit"（+ "string_limit": 使った上限のバイト数）か "unreadable"（その先が読めない））
     構造体・共用体 → {"kind": "struct", "members": {メンバー名: 値}}（無名のメンバーは外側に展開）
-    配列 → {"kind": "array", "length": 要素数, "items": [...]}（items は max_elements まで。len(items) < length なら切った）
+    配列 → {"kind": "array", "element_type": 要素の型の名前, "length": 要素数, "items": [...]}（items は max_elements まで。len(items) < length なら切った）
            文字の配列は + "string": "..."（NUL の前まで）
     読めない → {"kind": "unavailable", "reason": "理由"}
 
@@ -99,8 +99,10 @@ def _base(t: BaseType, data: bytes) -> dict:
 
 
 def _pointer(t: PointerType, address: int, context: DecodeContext) -> dict:
-    out: dict = {"kind": "pointer", "address": address, "to": type_name(t.target)}
     target = strip(t.target)
+    # deref: 先を読めるか（型の事実。番地 0・void・関数へのポインタは読まない）。使う側は型の名前を解釈しない
+    out: dict = {"kind": "pointer", "address": address, "to": type_name(t.target),
+                 "deref": bool(address) and not isinstance(target, (VoidType, FunctionType))}
     if context.describe_address and address and (isinstance(target, FunctionType) or not is_char(target)):
         symbol = context.describe_address(address)
         if symbol:
@@ -185,7 +187,7 @@ def _array(t: ArrayType, data: bytes, context: DecodeContext) -> dict:
         return unavailable(f"要素の大きさの分からない {type_name(t)}")
     length = t.length if t.length is not None else len(data) // size
     shown = min(length, context.max_elements)
-    out: dict = {"kind": "array", "length": length,
+    out: dict = {"kind": "array", "element_type": type_name(element), "length": length,
                  "items": [decode(element, data[i * size:(i + 1) * size], context) for i in range(shown)]}
     if is_char(element):
         raw = data[:length * size]

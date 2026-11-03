@@ -18,15 +18,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fprobe.api import NotConnected  # noqa: E402
 from fprobe.api.daemon import UI_DIR, create_app  # noqa: E402
 from fprobe.mcp_server import Probe  # noqa: E402
-from fprobe.probe_ui_state import UiStateTools  # noqa: E402
+from fprobe.probe_service import expose  # noqa: E402
+from fprobe.probe_ui_state import UiStateService  # noqa: E402
+from fake_probe_contract import NOT_IN_DEMO, not_in_demo, signature_problems, unsupported_arg  # noqa: E402
 
 
-class FakeProbe(UiStateTools):
-    """Probe と同じ名前・引数のメソッドを持つ偽物（画面が使うもの）。画面の状態（ui.state）は本物。"""
+@expose("_svc_ui_state", UiStateService)
+class FakeProbe:
+    """Probe と同じ名前・引数のメソッドを持つ偽物（画面が使うもの）。画面の状態（ui.state）は本物（Probe と同じサービス）。"""
+
+    def __init_subclass__(cls, **kwargs):
+        """本物の Probe と同じ名前のメソッドは同じ引数を受ける（tests/fake_probe_contract.py）。ずれていればクラスを作れない。"""
+        super().__init_subclass__(**kwargs)
+        problems = signature_problems(cls)
+        if problems:
+            raise TypeError(f"{cls.__qualname__}: " + "; ".join(problems))
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        # 走っている時間を数える（止まっている間は進まない。端末の出力はこの時計で増える）
+        now = time.monotonic()
+        if getattr(self, "_state", None) == "RUNNING":
+            self._run_acc = getattr(self, "_run_acc", 0.0) + (now - self._run_since)
+        self._state, self._run_since = value, now
+
+    def running_seconds(self) -> float:
+        """これまでにターゲットが走っていた時間（秒。止まっている間は進まない）。"""
+        acc = getattr(self, "_run_acc", 0.0)
+        return acc + (time.monotonic() - self._run_since if self._state == "RUNNING" else 0.0)
+
+    def __getattr__(self, name):
+        # 偽の機器が実装しない API のメソッド: AttributeError ではなく「偽物の不足」と分かる誤りにする
+        if name in NOT_IN_DEMO:
+            return not_in_demo(name)
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def __init__(self):
         self._publish = None
-        self._init_ui_state()
+        self._svc_ui_state = UiStateService(self)
         self.connected = False
         self.link: dict = {}                     # つないでいる先（本物の target_status と同じく状態に出す）
         self.state = "RUNNING"
@@ -51,7 +84,11 @@ class FakeProbe(UiStateTools):
         return {"volts": 3.3, "over_range": False, "live": True, "samples": 100, "samples_before": 90, "window_s": 0.01,
                 "errors": 0}
 
-    def target_connect(self, target="cortex_m", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None):
+    def target_connect(self, target="cortex_m", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None,
+                       script=None, core=None):
+        for arg, value in (("script", script), ("core", core)):
+            if value is not None:
+                raise unsupported_arg("target_connect", arg, value)
         self.connected, self.state = True, "HALTED"
         self.link = {"target": target, "frequency_hz": frequency_hz, "wire": "jtag" if jtag_chain else "swd"}
         return {"target": target, "frequency_hz": frequency_hz}
@@ -118,7 +155,11 @@ class FakeProbe(UiStateTools):
     def _address(self, location):
         return int(location, 16) if location.startswith("0x") else self._elf._symbols.resolve(location)
 
-    def breakpoint_set(self, location):
+    def breakpoint_set(self, location, condition=None, ignore_count=0, log=None, message=None):
+        for arg, value in (("condition", condition), ("ignore_count", ignore_count or None), ("log", log),
+                           ("message", message)):
+            if value is not None:
+                raise unsupported_arg("breakpoint_set", arg, value)
         address = self._address(location)
         self.bp_disabled.pop(address, None)
         self.breakpoints[address] = location
@@ -185,10 +226,14 @@ class FakeProbe(UiStateTools):
     def expression_check(self, expression):
         return self._elf.expression_check(expression)                  # ELF だけ（本物）
 
-    def backtrace(self):
+    def backtrace(self, variables=False, max_frames=64, max_elements=64, assume_leaf=False):
         self._need()
+        for arg, value in (("variables", variables or None), ("assume_leaf", assume_leaf or None)):
+            if value is not None:
+                raise unsupported_arg("backtrace", arg, value)
         return [{"pc": self.pc, "where": self._elf._where(self.pc), "note": ""},
-                {"pc": self.pc + 0x20, "where": self._elf._where(self._elf._symbols.symbol("tick").address), "note": ""}]
+                {"pc": self.pc + 0x20, "where": self._elf._where(self._elf._symbols.symbol("tick").address),
+                 "note": ""}][:max_frames]
 
     # --- ロジアナ（偽物の波形: ch0 = 1 MHz の時計、ch1 = 時計の 4 回に 1 回、ch8 = 前半だけ駆動、ch9 = 中ほどで処理中） ----
 
@@ -229,13 +274,17 @@ class FakeProbe(UiStateTools):
         self.state = "HALTED"
         return self.target_status()
 
-    def target_halt(self):
+    def target_halt(self, core=None):
+        if core is not None:
+            raise unsupported_arg("target_halt", "core", core)
         self._need()
         time.sleep(0.01)
         self.state = "HALTED"
         return self.target_status()
 
-    def target_resume(self):
+    def target_resume(self, core=None):
+        if core is not None:
+            raise unsupported_arg("target_resume", "core", core)
         self._need()
         self.state = "RUNNING"
         if self.breakpoints:
@@ -244,7 +293,9 @@ class FakeProbe(UiStateTools):
                 self.state, self.pc = "HALTED", next(iter(self.breakpoints))
             threading.Timer(0.3, hit).start()
 
-    def target_reset(self, halt=False):
+    def target_reset(self, halt=False, kind="default"):
+        if kind != "default":
+            raise unsupported_arg("target_reset", "kind", kind)
         self._need()
         self.state = "HALTED" if halt else "RUNNING"
 

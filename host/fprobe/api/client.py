@@ -18,7 +18,16 @@ from websockets.sync.client import connect
 from . import API_VERSION
 from .binary import decode_frame
 
-__all__ = ["ApiError", "DaemonClient"]
+__all__ = ["ApiError", "DaemonClient", "saved_token"]
+
+
+def saved_token() -> str | None:
+    """この利用者のデーモンの合言葉（<FPROBE_HOME>/daemon_token。fprobe.api.daemon.daemon_token が作る）。無ければ None。"""
+    from ..home import fprobe_home
+    try:
+        return (fprobe_home() / "daemon_token").read_text(encoding="ascii").strip() or None
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 class ApiError(Exception):
@@ -31,7 +40,10 @@ class DaemonClient:
     def __init__(self, url: str, name: str, role: str, token: str | None = None, api_version: int = API_VERSION,
                  _hello: bool = True, automated: bool | None = None, source: str | None = None):
         """automated: hello で自動操作かを申告する（省略で申告しない）。source: 以後の要求に付ける「どこから」
-        （操作の記録の source。省略で付けない）。"""
+        （操作の記録の source。省略で付けない）。token を省くと、この利用者の <FPROBE_HOME>/daemon_token があれば
+        それを使う（同じ PC・同じ利用者のデーモン。別の PC の --lan のデーモンには token を渡す）。"""
+        if token is None:
+            token = saved_token()
         self.source = source
         self._stack = ExitStack()                       # websockets 17 は connect を with で使う形が正
         self._ws = self._stack.enter_context(connect(url, max_size=None, ping_interval=None))

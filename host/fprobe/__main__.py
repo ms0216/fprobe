@@ -20,6 +20,11 @@ from .device import Device
 from .la import DeepAnalyzer, LogicAnalyzer, write_vcd
 
 
+# Ethernet で開くとき、リンクの確立（ボードの書き込み直後の自動ネゴシエーション等）を待つ秒数（この入口の値。識別の READ を
+# この間だけ送り直し、送り直した回数は probe.info の link_open で返す。--eth-link-up-wait で変えられる）
+ETH_LINK_UP_WAIT_S = 15.0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="fprobe")
     parser.add_argument("--serial", help="USB シリアル番号（複数台あるとき）")
@@ -54,6 +59,8 @@ def main(argv: list[str] | None = None) -> None:
     merge.add_argument("--gap-ms", type=float, help="組の間がこれを超えたら区間を分ける（省略時は分けない）")
     parser.add_argument("--port", help="UART のホストリンクの COM ポート（run のみ）")
     parser.add_argument("--eth", help="Ethernet のホストリンクの IP アドレス（run のみ）")
+    parser.add_argument("--eth-link-up-wait", type=float, default=ETH_LINK_UP_WAIT_S, metavar="SECONDS",
+                        help=f"--eth で開くとき、リンクの確立を待つ秒数（識別の READ をこの間だけ送り直す。既定 {ETH_LINK_UP_WAIT_S:g}）")
     args = parser.parse_args(argv)
     try:
         probe_names.apply_to_args(args)
@@ -115,7 +122,7 @@ def _name_set(args) -> int:
     """つないでいる機器を開いて実際の番地（シリアル番号を省いたときも）を確かめてから名前を付ける。"""
     from .session import Session
     if args.eth:
-        session = Session.open_eth(args.eth)
+        session = Session.open_eth(args.eth, link_up_wait_s=args.eth_link_up_wait)
     elif args.port:
         session = Session.open_serial(args.port)
     else:
@@ -190,7 +197,8 @@ def _run(args) -> int:
     def echo(text: str) -> None:
         sys.stdout.write(text)
         sys.stdout.flush()
-    result = run_mod.run_firmware(options, {"serial": args.serial, "port": args.port, "eth": args.eth}, echo)
+    result = run_mod.run_firmware(options, {"serial": args.serial, "port": args.port, "eth": args.eth,
+                                             "link_up_wait_s": args.eth_link_up_wait if args.eth else None}, echo)
     summary = getattr(result, "reason", "")
     if summary:
         print(f"\n[fprobe run] {result.outcome}: {summary}（終了コード {result.exit_code}）", file=sys.stderr)

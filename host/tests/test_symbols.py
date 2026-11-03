@@ -1,5 +1,6 @@
 """fprobe.symbols: 試験用ファームウェア（host/firmware/sram_demo、zig cc で Cortex-M4 向け）の ELF を読む。"""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -153,15 +154,30 @@ def test_cxx_functions_have_their_source_names():
     assert [n for n, _ in signature_of(info, syms, "motor::Pid::step").parameters] == ["this", "error"]   # this は r0
 
 
+def test_a_windows_absolute_source_directory_is_not_rebased_onto_the_compile_directory_on_any_host():
+    """Windows で作った ELF の行表のディレクトリ（C:/…）は、Linux でも絶対として扱う（pathlib の POSIX 版は相対と見て、
+    コンパイルした場所を前に連結し、`C:/a/C:/a/x.c` になった）。相対なら今までどおりコンパイルした場所の下。"""
+    from fprobe.symbols import source_path
+    assert source_path("C:/proj/src", "x.c", "C:/proj/build") == Path(os.path.normpath("C:/proj/src/x.c"))
+    assert source_path("C:\\proj\\src", "x.c", "D:/other") == Path(os.path.normpath("C:\\proj\\src/x.c"))
+    assert source_path("src", "x.c", "/work/build") == Path(os.path.normpath("/work/build/src/x.c"))
+    assert source_path("/abs", "x.c", "/work/build") == Path(os.path.normpath("/abs/x.c"))
+    assert source_path("src", "x.c", None) == Path("src/x.c")
+
+
 def test_sources_moved_with_the_elf_are_found_next_to_it(tmp_path, monkeypatch):
     """ビルドした場所に無いソースは、ELF の隣にあればそれを使う（リポジトリを別の場所に置いたとき、同梱のデモの
     ソースが見つからず画面に出なかった。2026-10-19、公開の準備で発見）。ビルドした場所にあればそちらが先。"""
     import shutil
     shutil.copy(ELF, tmp_path / ELF.name)
     shutil.copy(ELF.parent / "sram_demo.c", tmp_path / "sram_demo.c")
-    built = Symbols(ELF).sources()["sram_demo.c"]
-    assert Symbols(tmp_path / ELF.name).sources()["sram_demo.c"] == built      # ビルドした場所にあればそのまま
     real_exists = Path.exists
+    # ELF に記録されたビルドした場所は作った PC のパス（同梱の ELF は Windows の C:/Users/…）。この PC に無くても
+    # 「ある」場合の挙動を確かめるため、その場所だけ存在することにしてから、無い場合へ切り替える
+    recorded = next(iter(Symbols(ELF).relocated().values()))["built"] if Symbols(ELF).relocated() else None
+    built = recorded or Symbols(ELF).sources()["sram_demo.c"]
+    monkeypatch.setattr(Path, "exists", lambda self: True if self == built else real_exists(self))
+    assert Symbols(tmp_path / ELF.name).sources()["sram_demo.c"] == built      # ビルドした場所にあればそのまま
     monkeypatch.setattr(Path, "exists", lambda self: False if self == built else real_exists(self))
     moved = Symbols(tmp_path / ELF.name)
     assert moved.sources()["sram_demo.c"] == tmp_path / "sram_demo.c"

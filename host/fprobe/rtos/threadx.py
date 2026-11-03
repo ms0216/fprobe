@@ -126,6 +126,9 @@ class ThreadX(KernelAwareness):
     def tick_count(self) -> int | None:
         return self._variable("_tx_timer_system_clock")
 
+    def tick_mask(self) -> int | None:
+        return self._variable_mask("_tx_timer_system_clock")
+
     def scheduler_state(self) -> str:
         state = self._variable("_tx_thread_system_state")
         if state is None:
@@ -238,7 +241,7 @@ class ThreadX(KernelAwareness):
         remaining = self.timer_remaining(handle + self.thread.offset("tx_thread_timer"))
         if remaining is not None:
             wait.remaining_ticks = remaining
-            wait.wake_tick = None if tick is None else (tick + remaining) & 0xFFFF_FFFF
+            wait.wake_tick = self.wake_tick(tick, remaining)
         if state_value == SLEEP:
             return wait
         block = self._field(handle, "tx_thread_suspend_control_block")

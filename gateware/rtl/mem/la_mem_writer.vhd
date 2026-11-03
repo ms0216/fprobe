@@ -6,8 +6,12 @@
 --   written は書いた拍の総数（LA_BEATS で飽和）。stream = '1'（start の周期に取り込む）ならトリガで止まらず
 --   stop まで書き続ける（ストリーミング。仕様: 2026-10-16-m8c-la-streaming-design.md）。total は書いた拍の総数
 --   （32 ビット、折り返す。ストリームの読み出し側が未読を求める）。
+--   la_pos はロジアナのリングの次の書き位置（start で 0、LA_BEATS で折り返す。total は 2^32 で折り返すので、
+--   2^32 拍の後は total mod LA_BEATS と一致しない。リングの位置を知りたい読み手はこれを使う）。
 -- リング B（イベント）: 番地 LA_BEATS から EV_BEATS 拍（容量の 1/16）。ev_enable の 0→1 で先頭から書き始め、
---   有効な間ずっと書く（折り返す）。ev_written は書いた総数（32 ビットで飽和）。
+--   有効な間ずっと書く（折り返す）。ev_written は書いた総数（64 ビット。2**64 で飽和するが、実際には届かない）。
+--   ev_keep = '1' の間（イベントのリングを読み続ける流れがある間）は、ev_enable の 0→1 でも先頭に戻さない（位置と総数を
+--   続ける。読み手の読み位置と書き位置の関係を壊さない。C3）。
 -- in_kind = '0' はロジアナの拍、'1' はイベント。書かない拍（止まっている側の拍）は読み捨てる（上流を詰まらせない）。
 library ieee;
 use ieee.std_logic_1164.all;
@@ -15,7 +19,9 @@ use ieee.numeric_std.all;
 
 entity la_mem_writer is
   generic (
-    ADDR_BITS : positive := 23
+    ADDR_BITS : positive := 23;
+    COUNT_START_BELOW_4G : natural := 0;     -- 試験用: 0 以外ならイベントの書いた数を 2**32 のこの数だけ手前から数える（既定 0 = 0 から）
+    TOTAL_START_BELOW_4G : natural := 0      -- 試験用: 0 以外ならロジアナの拍の総数 total を start で 2**32 のこの数だけ手前にする
   );
   port (
     clk          : in  std_logic;
@@ -25,6 +31,7 @@ entity la_mem_writer is
     post_beats   : in  unsigned(ADDR_BITS - 1 downto 0);     -- start の周期に取り込む
     stream       : in  std_logic;                            -- start の周期に取り込む
     ev_enable    : in  std_logic;
+    ev_keep      : in  std_logic := '0';                     -- '1' の間は ev_enable の 0→1 でイベントのリングを先頭に戻さない
     -- 拍の入力
     in_valid     : in  std_logic;
     in_ready     : out std_logic;
@@ -40,7 +47,8 @@ entity la_mem_writer is
     trigger_slot : out unsigned(2 downto 0);
     written      : out unsigned(ADDR_BITS downto 0);
     total        : out unsigned(31 downto 0);
-    ev_written   : out unsigned(31 downto 0);
+    la_pos       : out unsigned(ADDR_BITS - 1 downto 0);     -- ロジアナのリングの次の書き位置
+    ev_written   : out unsigned(63 downto 0);
     ev_pos       : out unsigned(ADDR_BITS - 5 downto 0);     -- イベントの次の書き位置（リングの中。ストリームが追う）
     -- メモリ（mem_port、書き込みのみ）
     cmd_valid    : out std_logic;
@@ -68,7 +76,15 @@ architecture rtl of la_mem_writer is
   signal trig_slot : unsigned(2 downto 0) := (others => '0');
   signal ev_prev   : std_logic := '0';
   signal ev_ptr    : unsigned(EV_BITS - 1 downto 0) := (others => '0');
-  signal ev_count  : unsigned(31 downto 0) := (others => '0');
+  function count_start return unsigned is
+  begin
+    if COUNT_START_BELOW_4G = 0 then
+      return to_unsigned(0, 64);
+    end if;
+    return shift_left(to_unsigned(1, 64), 32) - to_unsigned(COUNT_START_BELOW_4G, 64);
+  end function;
+  signal ev_count  : unsigned(63 downto 0) := count_start;
+  constant TOTAL_START : unsigned(31 downto 0) := to_unsigned(0, 32) - to_unsigned(TOTAL_START_BELOW_4G, 32);
   signal writing   : boolean;                                -- ロジアナのリングを書いている
   signal take      : boolean;                                -- この拍をメモリに書く
   signal fire      : boolean;
@@ -89,6 +105,7 @@ begin
   trigger_slot <= trig_slot;
   written      <= count;
   total        <= total_r;
+  la_pos       <= ptr;
   ev_written   <= ev_count;
   ev_pos       <= ev_ptr;
 
@@ -96,12 +113,12 @@ begin
   begin
     if rising_edge(clk) then
       ev_prev <= ev_enable;
-      if rst = '1' or (ev_enable = '1' and ev_prev = '0') then
+      if rst = '1' or (ev_enable = '1' and ev_prev = '0' and ev_keep = '0') then
         ev_ptr   <= (others => '0');                         -- イベントの記録を始める
-        ev_count <= (others => '0');
+        ev_count <= count_start;
       elsif fire and in_kind = '1' then
         ev_ptr <= ev_ptr + 1;
-        if ev_count /= x"FFFFFFFF" then
+        if ev_count /= (ev_count'range => '1') then
           ev_count <= ev_count + 1;
         end if;
       end if;
@@ -116,7 +133,7 @@ begin
         state     <= S_RUN;
         ptr       <= (others => '0');
         count     <= (others => '0');
-        total_r   <= (others => '0');
+        total_r   <= TOTAL_START;
         post      <= post_beats;
         streaming <= stream;
       elsif fire and in_kind = '0' then

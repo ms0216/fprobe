@@ -15,8 +15,8 @@ from .gowin import ToolchainNotFound
 from .project import BuildStamp, ClockConstraint, Pin, _check_pins, _tcl_path
 from .timing import ClockTiming, TimingReportError, TimingSummary
 
-__all__ = ["DEFAULT_VIVADO_HOME", "ENV_VAR", "MmcmSolution", "VivadoProject", "VivadoToolchain", "parse_vivado_timing",
-           "render_vivado_tcl", "render_xdc", "vivado_undriven"]
+__all__ = ["DEFAULT_VIVADO_HOME", "ENV_VAR", "MmcmSolution", "module_constraints", "VivadoProject", "VivadoToolchain", "parse_vivado_timing",
+           "render_vivado_tcl", "render_xdc", "vivado_undriven", "vivado_unmatched_constraints"]
 
 ENV_VAR = "FPROBE_VIVADO_HOME"
 DEFAULT_VIVADO_HOME = Path(r"C:\AMDDesignTools\2025.2\Vivado")
@@ -40,11 +40,16 @@ class VivadoToolchain:
 
 @dataclass(frozen=True)
 class MmcmSolution:
-    """7 系の MMCME2 の分周: fvco = fin * mult / divclk、fout = fvco / out_div（UG472。VCO は 600〜1200 MHz、-1 品）。"""
+    """7 系の MMCME2 の分周: fvco = fin * mult / divclk、fout = fvco / out_div（UG472。VCO は 600〜1200 MHz、-1 品）。
+
+    2 本目の出力（CLKOUT1。取り込みのクロック cap_clk）は構成ごとに sys の整数倍 ratio を選ぶ: 分周 = out_div / ratio
+    （同じ VCO から割るので sys と立ち上がりがそろう。cap_div）。BUFG の上限（DS187 -1: 464 MHz）を超える比は作れない。"""
     fin_mhz: float
     mult: float
     divclk: int
     out_div: float
+
+    BUFG_MAX_MHZ = 464.0            # DS187 v1.21（-1）の BUFG の上限（docs/superpowers/specs/2026-10-29-performance-limits-study.md §0.1）
 
     def __post_init__(self):
         if not 600.0 <= self.vco_mhz <= 1200.0:
@@ -57,6 +62,18 @@ class MmcmSolution:
     @property
     def fout_hz(self) -> int:
         return round(self.vco_mhz / self.out_div * 1e6)
+
+    def cap_div(self, ratio: int) -> int:
+        """cap_clk = sys × ratio を作る CLKOUT1 の分周（整数）。作れない比は ValueError。"""
+        if ratio < 2 or self.out_div % ratio:
+            raise ValueError(f"cap_clk は sys の 2 以上の整数倍（sys の分周 {self.out_div} が比 {ratio} で割り切れない）")
+        div = round(self.out_div) // ratio
+        if self.vco_mhz / div > self.BUFG_MAX_MHZ:
+            raise ValueError(f"cap_clk {self.vco_mhz / div} MHz が BUFG の上限 {self.BUFG_MAX_MHZ} MHz を超える")
+        return div
+
+    def cap_hz(self, ratio: int) -> int:
+        return round(self.vco_mhz / self.cap_div(ratio) * 1e6)
 
 
 @dataclass(frozen=True)
@@ -106,6 +123,8 @@ def render_xdc(project: VivadoProject) -> str:
             lines.append(f"set_property {_PULL[pin.pull]} true {port}")
         if pin.drive is not None:
             lines.append(f"set_property DRIVE {pin.drive} {port}")
+        if pin.slew is not None:
+            lines.append(f"set_property SLEW {pin.slew} {port}")
     for c in project.clocks:
         if c.kind == "port":
             lines.append(f"create_clock -name {c.name} -period {c.period_ns:.3f} [get_ports {{{c.target}}}]")
@@ -119,6 +138,11 @@ def render_xdc(project: VivadoProject) -> str:
     return "\n".join(lines) + "\n"
 
 
+def module_constraints(sources) -> tuple[Path, ...]:
+    """ソースの隣にあるモジュールの制約（<ソースの幹>.xdc）。"""
+    return tuple(x for x in (Path(s).with_suffix(".xdc") for s in sources) if x.is_file())
+
+
 def render_vivado_tcl(project: VivadoProject, build_dir: Path, directive: str) -> str:
     lines = [f"create_project -in_memory -part {project.part}",
              "set_property target_language VHDL [current_project]"]
@@ -129,12 +153,16 @@ def render_vivado_tcl(project: VivadoProject, build_dir: Path, directive: str) -
                   "generate_target all $bdf",
                   "read_vhdl [make_wrapper -files $bdf -top]"]
     lines += [f"read_vhdl -vhdl2008 {_tcl_path(src)}" for src in project.build_sources(build_dir)]
+    # モジュールの制約: ソースの隣の <entity>.xdc（ファイル名の幹 = entity 名）を、そのモジュールの全部の実体に効かせる（UG903 の -ref）。
+    # -unmanaged: Tcl として読む（generic で FF が無い実体を if で飛ばし、当たらない制約を正当な場合でも出さない）
+    lines += [f"read_xdc -unmanaged -ref {xdc.stem} {_tcl_path(xdc)}" for xdc in module_constraints(project.sources)]
     lines += [f"read_xdc {project.name}.xdc",
               f"synth_design -top {project.top} -part {project.part}",
               "opt_design",
               f"place_design -directive {directive}",
-              "phys_opt_design",
+              "phys_opt_design -directive AggressiveExplore",
               f"route_design -directive {directive}",
+              "phys_opt_design -directive AggressiveExplore",     # 配線の後: 配線で分かった遅い経路を複製・再配置で直す
               "report_timing_summary -file timing.rpt",
               "report_utilization -file util.rpt",
               "report_utilization -hierarchical -file util_hier.rpt",   # モジュールごと（fprobe_gw resources）
@@ -150,6 +178,16 @@ _UNDRIVEN = re.compile(r"^WARNING: \[Synth 8-\d+\].*(?:does not have driver|undr
 def vivado_undriven(log: str) -> list[str]:
     """駆動されない配線の警告の行（重複を除いて出た順に）。"""
     return list(dict.fromkeys(m.group(0).strip() for m in _UNDRIVEN.finditer(log)))
+
+
+# 制約の対象が見つからない（12-4739）。Vivado が生成した IP の制約（.gen/ の下。PS7 の PJTAG など使わない端子）は除く
+_UNMATCHED = re.compile(r"^CRITICAL WARNING: \[Vivado 12-4739\].*$", re.M)
+
+
+def vivado_unmatched_constraints(log: str) -> list[str]:
+    """自分の制約（モジュールの xdc・トップの xdc）のうち、対象が見つからず効いていないものの警告の行（重複を除いて出た順に）。"""
+    lines = (m.group(0).strip() for m in _UNMATCHED.finditer(log))
+    return list(dict.fromkeys(line for line in lines if "/.gen/" not in line.replace("\\", "/")))
 
 
 def _section(report: str, title: str) -> list[str]:

@@ -59,7 +59,7 @@ def test_sampled_timeline_is_a_lower_bound(demo):
     demo.rtos_timeline_start(method="sampled", rate_hz=5_000)
     demo.now[0] = 1.0
     got = demo.rtos_timeline_get(limit=3)
-    assert got["method"] == "sampled" and got["lower_bound"] and got["resolution"] == HZ / 5_000
+    assert got["method"] == "sampled" and got["lower_bound"] and got["resolution"] >= HZ / 5_000   # 分解能 = 実際の間隔の最大（設定の周期以上）
     assert "exceptions" not in got and all(r["samples"] >= 1 for r in got["runs"])
     demo.rtos_timeline_stop()
     with pytest.raises(ValueError, match="itm"):

@@ -10,6 +10,9 @@ Zephyr の CTF は「出来事の記録が隙間なく並ぶだけ」の流れ�
 | ts64_id16 | u64 時刻（ns）+ u16 ID                   | main（2026-05 以降） |
 | id16      | u16 ID（CONFIG_TRACING_CTF_TIMESTAMP=n）  | 時刻なし |
 
+時刻の速さは TSDL の `clock { freq = …; }` か、使う側が明示した ts_hz（どちらも無ければ分からない = None。Zephyr の
+metadata には clock が無いので、時刻の単位を既定にしない。clock と食い違う ts_hz は受けない）。
+
 欄の並びはビルドの metadata（TSDL）が正: `metadata` を渡すとそれを読む（見出しも metadata の event_header から）。
 見出しの形は版で違うので既定を持たない（metadata の event_header か、使う側が header で明示する）。
 metadata を渡さなければ組み込みの表（スレッド・割り込み・アイドル・セマフォ・ミューテックス・named_event 等の主な出来事。
@@ -30,7 +33,6 @@ from .model import Trace, TraceEvent
 __all__ = ["CtfDecoder", "CtfError", "CtfMetadata", "HEADERS", "decode_ctf", "parse_tsdl"]
 
 HEADERS = ("ts32_id8", "ts32_id16", "ts64_id16", "id16")
-NS_HZ = 1e9
 
 
 class CtfError(Exception):
@@ -62,6 +64,7 @@ class CtfMetadata:
     header: tuple[CtfField, ...]
     events: dict[int, CtfEvent] = field(default_factory=dict)
     big_endian: bool = False
+    clock_hz: float | None = None          # TSDL の clock の freq（無ければ None）
 
 
 _INT = {"int8_t": (8, True), "uint8_t": (8, False), "uint16_t": (16, False), "int16_t": (16, True),
@@ -97,6 +100,10 @@ def parse_tsdl(text: str, header: str | None = None) -> CtfMetadata:
         raise CtfError(f"metadata に struct event_header が無い: 見出しの形を header（{' / '.join(HEADERS)}）で明示する")
     order = re.search(r"byte_order\s*=\s*(\w+)", text)
     meta = CtfMetadata(header_fields, big_endian=bool(order and order[1] in ("be", "network")))
+    for block in _blocks(text, "clock"):
+        freq = re.search(r"\bfreq\s*=\s*(0[xX][0-9a-fA-F]+|\d+)\s*;", block)
+        if freq is not None:
+            meta.clock_hz = float(int(freq[1], 0))
     for block in _blocks(text, "event"):
         name = re.search(r"name\s*=\s*\"?([\w.]+)\"?\s*;", block)
         event_id = re.search(r"\bid\s*=\s*(0[xX][0-9a-fA-F]+|\d+)\s*;", block)
@@ -205,13 +212,21 @@ work_submit_to_queue_exit
 
 class CtfDecoder:
     """流れ → Trace。metadata が無ければ組み込みの表と header の形（既定なし: 版で違う）。stop_at_zero は RAM の
-    backend の 0 埋めの終わり。"""
+    backend の 0 埋めの終わり。ts_hz は時刻の速さ（TSDL に clock が無いときに使う側が明示する。既定なし）。"""
 
-    def __init__(self, metadata: CtfMetadata | None = None, header: str | None = None, stop_at_zero: bool = False):
+    def __init__(self, metadata: CtfMetadata | None = None, header: str | None = None, stop_at_zero: bool = False,
+                 ts_hz: float | None = None):
         if metadata is None and header is None:
             raise CtfError(f"metadata（ビルドの TSDL）か、見出しの形 header（{' / '.join(HEADERS)}）を明示する")
         self.meta = metadata or builtin_metadata(header)
-        self.trace = Trace("ctf", ts_hz=NS_HZ if any(f.name == "timestamp" for f in self.meta.header) else None)
+        timed = any(f.name == "timestamp" for f in self.meta.header)
+        clock_hz = self.meta.clock_hz
+        if clock_hz is not None and ts_hz is not None and float(ts_hz) != clock_hz:
+            raise CtfError(f"ts_hz {ts_hz} が TSDL の clock の freq {clock_hz:g} と違う")
+        self.trace = Trace("ctf", ts_hz=(clock_hz or (float(ts_hz) if ts_hz else None)) if timed else None)
+        self.trace.timed = timed
+        if timed and self.trace.ts_hz is None:
+            self.trace.notes.append("時刻の速さが分からない（TSDL に clock が無く、ts_hz も無い）: 時刻は記録の単位のまま")
         self._order = ">" if self.meta.big_endian else "<"
         self._buf = bytearray()
         self._ts: int | None = None
@@ -313,8 +328,8 @@ class CtfDecoder:
 
 
 def decode_ctf(data: bytes, metadata: CtfMetadata | None = None, header: str | None = None,
-               ram_buffer: bool = False) -> Trace:
-    decoder = CtfDecoder(metadata, header, stop_at_zero=ram_buffer)
+               ram_buffer: bool = False, ts_hz: float | None = None) -> Trace:
+    decoder = CtfDecoder(metadata, header, stop_at_zero=ram_buffer, ts_hz=ts_hz)
     decoder.feed(data)
     if decoder._buf and decoder.synced and not decoder.ended:
         decoder.trace.notes.append(f"末尾の {len(decoder._buf)} バイトは記録の途中で終わっている")

@@ -115,6 +115,30 @@ describe("Debugger", () => {
     expect(get().breakpoints.map((b) => b.address)).toEqual([0x1a4]);
   });
 
+  it("ステップの結果（API が返した steps・runs・elapsed_s）を保持する。位置が変わらなくても進んだと分かる", async () => {
+    const stop = { reason: "step", pc: 0x200000b0, where: "reset_handler+60 (sram_demo.c:28)", elapsed_s: 0.012,
+                   time_source: "host", steps: 1, runs: 1 };
+    const { dbg, get } = setup({ "debug.step": stop });
+    await dbg.step("over");
+    expect(get().lastStep).toEqual({ mode: "over", steps: 1, runs: 1, elapsedS: 0.012, where: stop.where });
+  });
+
+  it("ステップの結果が steps・runs を持たなければ（古いデーモン）、持たないまま保持して数を作らない", async () => {
+    const { dbg, get } = setup({ "debug.step": { reason: "step", pc: 4, where: "f+0 (main.c:4)", elapsed_s: 0.1, time_source: "host" } });
+    await dbg.step("into");
+    expect(get().lastStep).toEqual({ mode: "into", steps: null, runs: null, elapsedS: 0.1, where: "f+0 (main.c:4)" });
+  });
+
+  it("走り出したらステップの結果の表示は消える", async () => {
+    const { app, dbg, get, conn } = setup({ "debug.step": { reason: "step", pc: 4, where: "f", elapsed_s: 0.1, time_source: "host",
+                                                            steps: 2, runs: 0 } });
+    await dbg.step("over");
+    expect(get().lastStep).not.toBeNull();
+    conn.emit("target.state", { state: "RUNNING" });
+    await settle();
+    expect(get().lastStep).toBeNull();
+  });
+
   it("命令ステップは target.step を 1 命令", async () => {
     const { conn, dbg } = setup({ "target.step": {} });
     await dbg.stepInstruction();
@@ -190,7 +214,9 @@ describe("Debugger（最終レビュー）", () => {
     const { conn, dbg, get } = setup({
       "debug.breakpoint.list": () => ({ breakpoints: bps, watchpoints: [] }),
       "debug.breakpoint.set": ({ location }: any) => {
-        bps = [{ address: 0x200, location, file: "main.c", line: 4, where: "f (main.c:4)" }];   // 2 行目を押すと 4 行目の番地
+        // 2 行目を押すと 4 行目の番地。置いた場所はデーモンが解いた at（画面は場所の文字を解釈しない）
+        bps = [{ address: 0x200, location, file: "main.c", line: 4, where: "f (main.c:4)",
+                 at: { file: "main.c", path: "/src/main.c", line: 2 } }];
         return bps[0];
       },
       "debug.breakpoint.clear": ({ location }: any) => {
@@ -342,14 +368,15 @@ describe("Debugger の呼び出し履歴", () => {
 
   it("フレームの場所はデーモンの欄 file・line だけ（where の文の形から拾わない）", () => {
     expect(frameLine({ pc: 1, where: "f+2 (dir/a.c:7)", note: "" })).toBeNull();
-    expect(frameLine({ pc: 1, where: "x", note: "", file: "C:\\src\\b.c", line: 3 })).toEqual({ file: "b.c", line: 3 });
+    // file は行表のファイルの名前（debug.source.list の name と同じ。画面はパスを切らない）
+    expect(frameLine({ pc: 1, where: "x", note: "", file: "b.c", line: 3 })).toEqual({ file: "b.c", line: 3 });
     expect(frameLine({ pc: 1, where: "0x100", note: "", file: null as any, line: null as any })).toBeNull();
   });
 
-  it("番地の場所（showAddress）は debug.symbol.info の欄 file・line で（空白を含むパスも）", async () => {
+  it("番地の場所（showAddress）は debug.symbol.info の欄 file・line で（where の文字を解釈しない）", async () => {
     const { dbg } = setup({
-      "debug.symbol.info": { address: 0x104, where: "f+4 (C:\\My Src\\main.c:12)", function: "f", offset: 4,
-                             file: "C:\\My Src\\main.c", line: 12 },
+      "debug.symbol.info": { address: 0x104, where: "f+4 (main.c:12)", function: "f", offset: 4,
+                             file: "main.c", line: 12 },
       "debug.disasm.around": { instructions: [] },
     });
     expect(await dbg.showAddress(0x104)).toEqual({ file: "main.c", line: 12 });
@@ -432,9 +459,9 @@ describe("ライブ ウォッチ（走らせたまま読む・ELF だけで式�
     expect((await dbg.evaluate("*p")).value).toBe(7);
   });
 
-  it("走っている間の書き込みは watch.write（フレームを付けない）で、書いたらウォッチを読み直す", async () => {
+  it("走っている間の書き込みも debug.write_expression（フレームを付けない。道はデーモンが選ぶ）で、書いたらウォッチを読み直す", async () => {
     const { conn, dbg } = live();
-    conn.responders["watch.write"] = ({ expression, value }: any) => ({ expression, value });
+    conn.responders["debug.write_expression"] = ({ expression, value }: any) => ({ expression, value, via: "running" });
     conn.link!("open", {});
     await dbg.addWatch("counter");
     conn.emit("target.state", { state: "RUNNING" });
@@ -442,8 +469,8 @@ describe("ライブ ウォッチ（走らせたまま読む・ELF だけで式�
     await settle();
     const before = conn.calls.filter(([m]) => m === "debug.evaluate").length;
     expect(await dbg.writeExpression("counter", 3)).toBe(true);
-    expect(conn.calls.find(([m]) => m === "watch.write")?.[1]).toEqual({ expression: "counter", value: 3 });
-    expect(conn.calls.some(([m]) => m === "debug.write_expression")).toBe(false);
+    expect(conn.calls.find(([m]) => m === "debug.write_expression")?.[1]).toEqual({ expression: "counter", value: 3 });
+    expect(conn.calls.some(([m]) => m === "watch.write")).toBe(false);
     expect(conn.calls.filter(([m]) => m === "debug.evaluate").length).toBeGreaterThan(before);
     stop();
   });

@@ -82,6 +82,7 @@ class SamplingPlan:
     utilization: float | None = None              # SWO の帯域に対する割合
     fits: bool = True                             # 帯域に収まる
     fitted: bool = False                          # 収めるためにサンプルの間隔を延ばした
+    exception_rate_hz: float | None = None        # 見積もりに使った例外の回数（使う側が渡したもの。None = 入れていない）
     # pcsr
     sampler_ranges: list[tuple[int, int]] | None = None
     period_s: float | None = None
@@ -118,11 +119,12 @@ def _bandwidth(rate_hz: float, interval: int, exception_rate_hz: float, timestam
 
 
 def plan_itm_sampling(core_clock_hz: float, rate_hz: float, swo_baud: float, *, traceclk_hz: float | None = None,
-                      exception_trace: bool = False, exception_rate_hz: float = 0, timestamps: bool = False,
+                      exception_trace: bool = False, exception_rate_hz: float | None = None, timestamps: bool = False,
                       headroom: float = 1.0) -> SamplingPlan:
     """SWO で PC サンプルを受けるための設定。サンプル率は目標より速くしない。見積もった使用率が headroom（既定 1.0 =
     帯域の上限。余裕は使う側が明示する）を超えるなら間隔を延ばす。
-    exception_rate_hz は例外トレースの見積もりに使う 1 秒あたりの例外の回数。"""
+    exception_rate_hz は例外トレースの見積もりに使う 1 秒あたりの例外の回数（使う側が明示する。None = 見積もりに入れない:
+    例外の分の帯域は見込まず、警告に書く。既定の暗黙の回数を置かない）。"""
     if core_clock_hz <= 0 or rate_hz <= 0 or swo_baud <= 0:
         raise ValueError("クロック・サンプル率・SWO の速度は正")
     warnings: list[str] = []
@@ -139,7 +141,10 @@ def plan_itm_sampling(core_clock_hz: float, rate_hz: float, swo_baud: float, *, 
     warnings += swo.warnings
     acpr, baud, error = swo.acpr, swo.baud, swo.baud_error
 
-    exc_rate = exception_rate_hz if exception_trace else 0
+    exc_rate = (exception_rate_hz or 0) if exception_trace else 0
+    if exception_trace and exception_rate_hz is None:
+        warnings.append("例外トレースの帯域は見積もりに入れていない（exception_rate_hz を渡していない）: "
+                        "例外が多ければ SWO が溢れてサンプルが欠けうる")
 
     def usage(k: int) -> tuple[float, float]:
         cycles = candidates[k][0]
@@ -172,7 +177,8 @@ def plan_itm_sampling(core_clock_hz: float, rate_hz: float, swo_baud: float, *, 
     ]
     return SamplingPlan("itm", core_clock_hz / cycles, writes, warnings, interval_cycles=cycles, cyctap=cyctap,
                         postpreset=post, acpr=acpr, swo_baud=baud, baud_error=error, bytes_per_s=bytes_per_s,
-                        utilization=utilization, fits=fits, fitted=fitted)
+                        utilization=utilization, fits=fits, fitted=fitted,
+                        exception_rate_hz=exception_rate_hz if exception_trace else None)
 
 
 @dataclass(frozen=True)
@@ -241,10 +247,12 @@ def exception_trace_writes() -> list[RegisterWrite]:
                           "DWT: 例外トレース（EXCTRCENA）・CYCCNT・同期パケット（SYNCTAP）")]
 
 
-def plan_pcsr_sampling(rate_hz: float, sys_clock_hz: int | None = None, swd_hz: float | None = None) -> SamplingPlan:
+def plan_pcsr_sampling(rate_hz: float, sys_clock_hz: int | None = None, swd_hz: float | None = None,
+                       min_half_period: int | None = None) -> SamplingPlan:
     """DAP サンプラで DWT_PCSR を周期で読む設定（SWO を使わない。ITM の無い Cortex-M0+ でも使える）。
     サンプラのか所と周期は fprobe.sampler.Sampler.configure にそのまま渡す。
-    sys_clock_hz（FPGA）と swd_hz（つないだ SWD の速さの要求）があれば、1 巡回の時間を見積もり（swd）、rate_hz を
+    sys_clock_hz（FPGA）と swd_hz（つないだ SWD の速さの要求）があれば、1 巡回の時間を見積もり（swd。min_half_period は
+    デバイスが申告する SWCLK の半周期の下限 Capabilities.min_half_period）、rate_hz を
     出せる見込みの速さにし、足りなければ要る SWD の速さを警告に書く（B9。B17 の後は SWD 4 MHz で 1 巡回 3 転送 約 37 µs）。"""
     if rate_hz <= 0:
         raise ValueError("サンプル率は正")
@@ -252,9 +260,11 @@ def plan_pcsr_sampling(rate_hz: float, sys_clock_hz: int | None = None, swd_hz: 
     plan = SamplingPlan("pcsr", rate_hz, writes, sampler_ranges=[(DWT_PCSR, 4)], period_s=1 / rate_hz,
                         requested_rate_hz=rate_hz)
     if sys_clock_hz and swd_hz:
+        if min_half_period is None:
+            raise ValueError("見積もりには min_half_period（Capabilities.min_half_period）が要る")
         slots = plan_slots(plan.sampler_ranges)
-        estimate = round_estimate(slots, sys_clock_hz, swd_hz)
-        need = swd_hz_for_rate(slots, rate_hz, sys_clock_hz)
+        estimate = round_estimate(slots, sys_clock_hz, swd_hz, min_half_period)
+        need = swd_hz_for_rate(slots, rate_hz, sys_clock_hz, min_half_period)
         plan.swd = {**estimate, "swd_hz_for_rate": need}
         if estimate["max_rate_hz"] < rate_hz:
             plan.rate_hz = estimate["max_rate_hz"]

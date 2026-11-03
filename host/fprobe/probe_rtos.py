@@ -1,8 +1,8 @@
 """Probe の道具: RTOS の認識（F6）。止まったターゲットのタスクの一覧・タスクごとの呼び出し履歴と C の式、
 止めずに見るタスクの時間軸。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_debug・_recorder・
-_swo_baud・swo_start と、WindowTools（DAP サンプラの持ち主・出来事の窓・write_registers）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・session・_symbols・_debug・_recorder・
+_swo_baud・swo_start と、WindowService（DAP サンプラの持ち主・出来事の窓・write_registers）を使う。
 機器に触るのは必ず _lock の中。
 
 - RTOS の読み手（fprobe.rtos.open_rtos）は呼ぶたびに作る（リストは止まっている間しか一貫しない。DWARF の索引は
@@ -15,7 +15,7 @@ _swo_baud・swo_start と、WindowTools（DAP サンプラの持ち主・出来�
   例外トレースがあれば割り込みの区間 isr も）。
 - 時間軸と一緒に読むもの（U09）: memory = タスクの保存された SP とヒープの残量の語、mutexes = ミューテックスの持ち主と
   待ちの先頭の語（DAP サンプラ。sampled はいまのタスクの語と同じサンプラ、itm はサンプラだけ memory_rate_hz で）、
-  exceptions = 例外トレース（方法 itm の SWO に一緒に流す）。解析の道具は probe_rtos_analysis（RtosAnalysisTools）。
+  exceptions = 例外トレース（方法 itm の SWO に一緒に流す）。解析の道具は probe_rtos_analysis（RtosAnalysisService）。
 - 方法 itm はカーネルの出来事（U10。fprobe_trace.h の記録: ITM のポート 30・29）も読む: キュー・セマフォ・ミューテックスの
   操作・準備完了・待ち・優先度・割り込みの出入り。始めにオブジェクトの一覧を走行中に読み（名前・種類・長さ）、止めたとき
   記録に出来事・待ちの区間（blocked）・逆転の区間（inversion）を書く。
@@ -46,8 +46,9 @@ from .rtos.model import Task, TaskState
 from .rtos.timeline import (STREAM, TRACE_PORT, TaskEvent, Timeline, itm_packets, task_events, timeline_from_events,
                             timeline_from_samples, write_task_events, write_timeline)
 from .sampler import MAX_SLOTS, Sampler, plan_slots
+from .probe_service import HostView
 
-__all__ = ["RtosTools", "TRACE_FLAG"]
+__all__ = ["RtosService", "TRACE_FLAG"]
 
 TRACE_FLAG = "fprobe_trace_enabled"      # fprobe_trace.h: デバッガが 1 を書くとトレースフックが ITM に書く
 ITM_WORD_BYTES = 5                       # 4 バイトのスティミュラスのパケット（ヘッダ + 4）
@@ -55,7 +56,12 @@ SWO_BITS_PER_BYTE = {"uart": 10}         # 受信の方式 → 線の 1 バイ�
                                          # Manchester の枠のビット数は数えていない（分解能・帯域の使用率を出さない）
 RUNS_LIMIT = 200                         # rtos_timeline_get が 1 回に返す区間の数の既定
 _HANDLE = re.compile(r"0x[0-9a-fA-F]+")
-_DURATIONS = ("total", "max_run", "min_run", "mean_run")
+_DURATIONS = ("total", "max_run", "min_run", "mean_run", "max_cut_run")
+
+
+def _us(ticks: float | None, hz: float) -> float | None:
+    """タイムベースの刻み → µs（None = 分からない・無い、はそのまま）。"""
+    return None if ticks is None else ticks * 1e6 / hz
 
 
 class _MemoryOnly:
@@ -81,7 +87,7 @@ class _TimelineRun:
     address: int | None = None           # sampled: 実行中のタスクの変数の番地
     rate_hz: float | None = None         # sampled: サンプルの周期
     flag: int | None = None              # itm: fprobe_trace_enabled の番地
-    resolution: float = 0                # itm: 時刻の分解能（タイムベース）
+    resolution: float | None = None      # itm: 時刻の分解能（タイムベース。None = 分からない）
     warnings: list[str] = field(default_factory=list)
     order: int | None = None             # 優先度の向き（1 = 大きい方が高い、-1 = 小さい方が高い、None = 不明）
     priorities: dict[int, int] = field(default_factory=dict)     # TCB → 元の優先度（ジョブ・逆転の判定）
@@ -144,19 +150,30 @@ def _mutex_tasks(watches: list[MutexWatch], samples: list[tuple[int, int, int]])
     return tasks
 
 
-class RtosTools:
-    """RTOS の認識（Probe の mixin）。"""
+class RtosService:
+    """RTOS の認識（Probe のサービス）。"""
 
-    def _init_rtos(self) -> None:
+    API = ("rtos_backtrace", "rtos_info", "rtos_objects", "rtos_read", "rtos_tasks", "rtos_timeline_get",
+           "rtos_timeline_start", "rtos_timeline_stop")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_current_timeline", "_exception_names", "_kernel", "_rtos_debug_info", "_rtos_last", "_rtos_run",
+              "_timeline_dict")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_claim_sampler", "_close_window", "_debug", "_lock", "_open_window", "_recorder", "_release_sampler",
+             "_swo_baud", "_swo_mode", "_symbols", "_vector_names", "_vector_table_arg", "_window_events",
+             "_window_info", "session", "swo_start", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._rtos_run: _TimelineRun | None = None
         self._rtos_last: _TimelineResult | None = None
 
     # --- RTOS の読み手 -----------------------------------------------------------------------
 
     def _rtos_debug_info(self):
-        if self._symbols is None:
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
-        info = Debugger(None, self._symbols).debug_info()
+        info = Debugger(None, self._host._symbols).debug_info()
         if info is None:
             raise RuntimeError("ELF に DWARF（-g）が無い: RTOS の構造体が分からない")
         return info
@@ -165,7 +182,7 @@ class RtosTools:
         """RTOS の読み手（_lock の中で）。halted なら、止まっていなければ誤り。動いているターゲットの読み手は
         メモリだけを読む（コアのレジスタは止めないと意味が無い: 実行中のタスクの SP は分からないとする）。"""
         info = self._rtos_debug_info()
-        target = self.target
+        target = self._host.target
         running = target.get_state() != Target.State.HALTED
         if halted and running:
             raise RuntimeError("ターゲットが動いている: 止めてから（target_halt）。一覧は live=true で走行中にも読める"
@@ -174,7 +191,7 @@ class RtosTools:
         options = {} if port is None else {"port": port}
         if options and detect(info) not in ("freertos", "threadx"):
             raise ValueError("port を渡せるのは FreeRTOS・ThreadX だけ")
-        kernel = open_rtos(info, access, self._symbols, **options)
+        kernel = open_rtos(info, access, self._host._symbols, **options)
         if kernel is None:
             raise RuntimeError("ELF に RTOS（FreeRTOS / Zephyr / RTX5 / ThreadX / µC/OS-III / NuttX）が見つからない")
         return kernel
@@ -188,7 +205,7 @@ class RtosTools:
 
     def _trace_flag(self) -> int | None:
         try:
-            return self._symbols.variable(TRACE_FLAG).address if self._symbols is not None else None
+            return self._host._symbols.variable(TRACE_FLAG).address if self._host._symbols is not None else None
         except KeyError:
             return None
 
@@ -197,15 +214,15 @@ class RtosTools:
     def rtos_info(self) -> dict:
         """ELF の RTOS の種類と、接続していればスケジューラの状態・ティック・実行中のタスク（止まっていればタスクの数）。
         トレースフック（方法 itm）の有無と、時間軸を取っているか。"""
-        with self._lock:
+        with self._host._lock:
             info = self._rtos_debug_info()
             kind = detect(info)
-            out = {"rtos": kind, "elf": str(self._symbols.path), "trace_hook": self._trace_flag() is not None,
-                   "timeline": self._timeline_state(), "connected": self._debug is not None}
-            if kind is None or self._debug is None:
+            out = {"rtos": kind, "elf": str(self._host._symbols.path), "trace_hook": self._trace_flag() is not None,
+                   "timeline": self._timeline_state(), "connected": self._host._debug is not None}
+            if kind is None or self._host._debug is None:
                 return out
             kernel = self._kernel(halted=False)
-            halted = self.target.get_state() == Target.State.HALTED
+            halted = self._host.target.get_state() == Target.State.HALTED
             current = kernel.current()
             out.update(name=kernel.name, halted=halted, scheduler=kernel.scheduler_state(), tick=kernel.tick_count(),
                        current={"handle": current, "name": kernel.handle_name(current) if current else None})
@@ -220,7 +237,7 @@ class RtosTools:
     def rtos_tasks(self, live: bool = False) -> dict:
         """タスクの一覧（名前・優先度・状態・待っているもの・スタックの使用量とあふれの印）。止まっているときだけ。
         live なら走行中にも読む（止めずに読むのでリストが途中で変わり得る: consistent = false）。"""
-        with self._lock:
+        with self._host._lock:
             kernel = self._kernel(halted=not live)
             return self._consistency(kernel.snapshot())
 
@@ -229,7 +246,7 @@ class RtosTools:
         メッセージバッファ。Zephyr は k_* の各種）と、ヒープの要約、止めた瞬間の優先度の逆転・デッドロック。
         登録簿に無い・名前の無いものも、変数の型・待っているタスクから番地で出す。kinds で種類を絞る。
         止まっているときだけ（live なら走行中にも: consistent = false）。"""
-        with self._lock:
+        with self._host._lock:
             kernel = self._kernel(halted=not live)
             tasks = kernel.tasks()
             objects = kernel.objects(tasks=tasks)
@@ -243,7 +260,7 @@ class RtosTools:
 
     def _consistency(self, out: dict) -> dict:
         """止まっているか・一貫しているか（_lock の中で）。"""
-        halted = self.target.get_state() == Target.State.HALTED
+        halted = self._host.target.get_state() == Target.State.HALTED
         out.update(halted=halted, consistent=halted)
         if not halted:
             out["notes"] = ["走行中に読んだ: リスト・数・持ち主は読む間に変わり得る（一貫しない）。実行中のタスクの SP は"
@@ -255,7 +272,7 @@ class RtosTools:
         """タスク（名前か TCB の番地）の呼び出し履歴。止まっているタスクは保存された文脈から、実行中のタスクは
         実レジスタから巻き戻す。variables なら各段の引数とローカル変数も。止まっているときだけ。
         port は保存された文脈の積み方（FreeRTOS・ThreadX。ELF から決まらないとき使う側が渡す）。"""
-        with self._lock:
+        with self._host._lock:
             kernel = self._kernel(port=port)
             t = kernel.task(self._task_key(task))
             return {"task": t.name, "handle": t.handle, "state": t.state.value,
@@ -265,7 +282,7 @@ class RtosTools:
                   port: str | None = None) -> dict:
         """タスクの文脈で C の式を読む（frame は rtos_backtrace の index。そのフレームの引数・ローカル変数も使える）。
         port は rtos_backtrace と同じ。"""
-        with self._lock:
+        with self._host._lock:
             kernel = self._kernel(port=port)
             t = kernel.task(self._task_key(task))
             return {"task": t.name, **kernel.inspector(t).read(expression, frame, max_elements)}
@@ -298,13 +315,13 @@ class RtosTools:
             raise ValueError("exceptions（割り込みの区間）は method itm だけ（例外トレースは SWO に出る）")
         if memory_rate_hz <= 0:
             raise ValueError("memory_rate_hz は正")
-        with self._lock:
+        with self._host._lock:
             if self._rtos_run is not None:
                 raise RuntimeError("時間軸を取っている（rtos_timeline_stop を先に）")
             kernel = self._kernel(halted=False)
-            table = self._vector_table_arg(vector_table, vector_table_size)
-            hz = self.session.device.capabilities().timebase_hz
-            halted = self.target.get_state() == Target.State.HALTED
+            table = self._host._vector_table_arg(vector_table, vector_table_size)
+            hz = self._host.session.device.capabilities().timebase_hz
+            halted = self._host.target.get_state() == Target.State.HALTED
             warnings: list[str] = []
             task_list: list[Task] | None = None
             if halted or memory or mutexes:
@@ -406,15 +423,15 @@ class RtosTools:
         address = kernel.current_address()
         ranges = [(address, 4)] + extra
         self._check_slots(ranges)
-        self._claim_sampler("rtos", caller)
+        self._host._claim_sampler("rtos", caller)
         try:
-            device = self.session.device
+            device = self._host.session.device
             sampler = Sampler(device)
             sampler.configure(ranges, 1.0 / rate_hz, ap)
-            window = self._open_window()
+            window = self._host._open_window()
             sampler.start()
         except Exception:
-            self._release_sampler("rtos")
+            self._host._release_sampler("rtos")
             raise
         warnings = ["memory・mutexes の語も同じサンプラで読むので 1 巡回が長くなる（分解能が粗くなる）"] if extra else []
         return _TimelineRun("sampled", window, names, hz, address=address, rate_hz=rate_hz, warnings=warnings,
@@ -429,7 +446,7 @@ class RtosTools:
             raise RuntimeError(f"ファームにトレースフックが無い（fprobe_trace.h の {TRACE_FLAG}）: method sampled を使う")
         if extra:
             self._check_slots(extra)
-            self._claim_sampler("rtos", caller)
+            self._host._claim_sampler("rtos", caller)
         try:
             warnings: list[str] = []
             kernel_ports = 1 << KERNEL_PORT | 1 << PAYLOAD_PORT
@@ -442,31 +459,31 @@ class RtosTools:
                 writes[2:2] = swo.writes                              # 鍵を外した後、ITM を有効にする前に
                 warnings += swo.warnings
                 baud = round(swo.baud)
-            target = self.target
+            target = self._host.target
             original = write_registers(target, writes)                 # 止めるとき DWT_CTRL（同期パケット等）を戻す
             if baud is not None:
-                self.swo_start(baud)
-            baud = baud or self._swo_baud
+                self._host.swo_start(baud)
+            baud = baud or self._host._swo_baud
             if baud is None:
-                warnings.append("SWO の速度が分からない（swo_start か swo_baud）: 時刻の分解能を 0 にした")
-            window = self._open_window()
+                warnings.append("SWO の速度が分からない（swo_start か swo_baud）: 時刻の分解能は分からない（None）")
+            window = self._host._open_window()
             target.write_memory(flag, 1)
             restore: dict[int, int] = {DWT_CTRL: original[DWT_CTRL]}
             if exceptions:                                            # 受信と窓を先に、例外トレースは最後に
                 write_registers(target, exception_trace_writes())
             if extra:
-                sampler = Sampler(self.session.device)
+                sampler = Sampler(self._host.session.device)
                 sampler.configure(extra, 1.0 / memory_rate_hz, ap)
                 sampler.start()
         except Exception:
             if extra:
-                self._release_sampler("rtos")
+                self._host._release_sampler("rtos")
             raise
-        bits = SWO_BITS_PER_BYTE.get(self._swo_mode)
+        bits = SWO_BITS_PER_BYTE.get(self._host._swo_mode)
         if baud is not None and bits is None:
-            warnings.append(f"SWO の方式 {self._swo_mode} の 1 バイトのビット数を数えていない: 時刻の分解能を 0 に、"
-                            "帯域の使用率は出さない")
-        resolution = ITM_WORD_BYTES * bits / baud * hz if baud and bits else 0
+            warnings.append(f"SWO の方式 {self._host._swo_mode} の 1 バイトのビット数を数えていない: 時刻の分解能は分からない"
+                            "（None）、帯域の使用率は出さない")
+        resolution = ITM_WORD_BYTES * bits / baud * hz if baud and bits else None
         return _TimelineRun("itm", window, names, hz, flag=flag, resolution=resolution, warnings=warnings,
                             sampler=bool(extra), memory_rate_hz=memory_rate_hz if extra else None,
                             exceptions=exceptions, restore=restore, baud=baud, core_clock_hz=core_clock_hz,
@@ -475,25 +492,25 @@ class RtosTools:
     def rtos_timeline_stop(self) -> dict:
         """時間軸を取るのを止め、結果の要約（タスクごとの合計・CPU の使用率・実行の回数・最長／最短、切り替えの回数）を
         返す。記録中なら時間軸を記録の stream "rtos" に書く（run・switch・gap。方法 itm は task_in 等の生の出来事も）。"""
-        with self._lock:
+        with self._host._lock:
             run = self._rtos_run
             if run is None:
                 raise RuntimeError("時間軸を取っていない（rtos_timeline_start）")
             try:
                 if run.sampler:
-                    Sampler(self.session.device).stop()
-                if run.method == "itm" and self._debug is not None:
-                    self.target.write_memory(run.flag, 0)            # トレースフックを止める（ITM の設定は残す）
+                    Sampler(self._host.session.device).stop()
+                if run.method == "itm" and self._host._debug is not None:
+                    self._host.target.write_memory(run.flag, 0)            # トレースフックを止める（ITM の設定は残す）
                     for address, value in run.restore.items():       # 例外トレースを元に戻す
-                        self.target.write_memory(address, value)
+                        self._host.target.write_memory(address, value)
             finally:
                 if run.sampler:
-                    self._release_sampler("rtos")
-                self._close_window(run.window)
+                    self._host._release_sampler("rtos")
+                self._host._close_window(run.window)
                 self._rtos_run = None
         result = self._build_timeline(run)
         self._rtos_last = result
-        rec = self._recorder
+        rec = self._host._recorder
         if rec is not None:
             self._record_timeline(rec, result)
         return self._timeline_dict(result, 0, 0, recorded=rec is not None)
@@ -548,7 +565,7 @@ class RtosTools:
 
     def _exception_names(self, run: _TimelineRun) -> dict[int, str]:
         """割り込みの名前（rtos_timeline_start に渡したベクタ表から。無ければ番号の名前）。"""
-        return self._vector_names(run.vector_table)
+        return self._host._vector_names(run.vector_table)
 
     def _timeline_state(self) -> dict | None:
         run = self._rtos_run
@@ -571,7 +588,7 @@ class RtosTools:
 
     def _build_timeline(self, run: _TimelineRun) -> _TimelineResult:
         words = run.words
-        sampled = self._window_events(run.window, "sample") if run.sampler else []
+        sampled = self._host._window_events(run.window, "sample") if run.sampler else []
         extra = [(t, a, v) for t, a, v in sampled if a in words]
         mutex_tasks = _mutex_tasks(run.mutexes, extra)
         if run.method == "sampled":
@@ -580,7 +597,7 @@ class RtosTools:
             period = run.timebase_hz / run.rate_hz
             tl = timeline_from_samples(samples, run.names, period=period)      # 実際の間隔は分解能（resolution）
             return _TimelineResult(tl, None, run, extra)
-        data = [(t, b) for t, _, b in self._window_events(run.window, "swo")]
+        data = [(t, b) for t, _, b in self._host._window_events(run.window, "swo")]
         packets = itm_packets(data)
         events = task_events(packets)
         kernel = kernel_trace(packets)
@@ -596,9 +613,9 @@ class RtosTools:
     def _learn_names(self, run: _TimelineRun, handles: set[int]) -> None:
         """一覧に無い TCB の名前と元の優先度を、動作中の読みで引く（読めなければ番地のまま・優先度は分からない）。"""
         unknown = sorted(h for h in handles if h and (h not in run.names or h not in run.priorities))
-        if not unknown or self._debug is None:
+        if not unknown or self._host._debug is None:
             return
-        with self._lock:
+        with self._host._lock:
             try:
                 kernel = self._kernel(halted=False)
             except Exception:
@@ -618,10 +635,10 @@ class RtosTools:
         hz = run.timebase_hz
         stats = tl.stats()
         for row in stats["tasks"].values():
-            row.update({f"{k}_us": row[k] * 1e6 / hz for k in _DURATIONS})
+            row.update({f"{k}_us": _us(row[k], hz) for k in _DURATIONS})
         out = {"running": run.window.t1 is None, "method": tl.method, "timebase_hz": hz,
-               "t0": tl.t0, "t1": tl.t1, "resolution": tl.resolution, "resolution_us": tl.resolution * 1e6 / hz,
-               "lower_bound": tl.lower_bound, "stats": stats, "window": self._window_info(run.window, hz),
+               "t0": tl.t0, "t1": tl.t1, "resolution": tl.resolution, "resolution_us": _us(tl.resolution, hz),
+               "lower_bound": tl.lower_bound, "stats": stats, "window": self._host._window_info(run.window, hz),
                "warnings": list(run.warnings), "runs_total": len(tl.runs)}
         if limit:
             out["offset"] = offset

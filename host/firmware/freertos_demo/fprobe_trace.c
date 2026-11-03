@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 /* fprobe_trace.h のカーネルの出来事の記録を ITM に書く（見出しをポート 30、中身をポート 29）。
  * 割り込みを禁止して書く: 途中で ISR のフックの記録が割り込まない（ホストは見出しの後に中身が並ぶと仮定する）。
  * ITM（TCR.ITMENA と TER のポート 29・30）が無効なら何もしない（FIFO を待たない）。

@@ -112,6 +112,7 @@ class DemoMemory:
     """偽の RAM（ELF の中身で初めにうめ、デモの変数の値を置く）。RAM の外は読めない（周辺は 0）。"""
 
     def __init__(self, segments):
+        self.peripherals = None          # 周辺（0x40000000〜）の読み書きの口（read(address, length) / write(address, data)）。無ければ 0
         self.ram = bytearray(RAM_SIZE)
         for s in segments:
             if RAM_BASE <= s.address < RAM_BASE + RAM_SIZE:
@@ -122,10 +123,14 @@ class DemoMemory:
         if RAM_BASE <= address and address + length <= RAM_BASE + RAM_SIZE:
             return bytes(self.ram[address - RAM_BASE:address - RAM_BASE + length])
         if 0x40000000 <= address < 0x60000000:
-            return bytes(length)                                  # 周辺（デモでは 0）
+            # 周辺: レジスタの値（周辺レジスタの読み書きと同じ。同じ番地は同じ値）。口が無い・どのレジスタにも当たらない番地は 0
+            return self.peripherals.read(address, length) if self.peripherals is not None else bytes(length)
         raise NotAvailable(f"0x{address:08X} は読めない（デモの RAM の外）")
 
     def write(self, address: int, data: bytes) -> None:
+        if self.peripherals is not None and 0x40000000 <= address < 0x60000000:
+            self.peripherals.write(address, data)
+            return
         if not (RAM_BASE <= address and address + len(data) <= RAM_BASE + RAM_SIZE):
             raise PermissionError(f"0x{address:08X} には書けない（デモの RAM の外）")
         self.ram[address - RAM_BASE:address - RAM_BASE + len(data)] = data

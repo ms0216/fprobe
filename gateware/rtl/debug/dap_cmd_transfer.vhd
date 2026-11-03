@@ -29,7 +29,8 @@ entity dap_cmd_transfer is
     link_req     : out std_logic;
     link_request : out std_logic_vector(3 downto 0);
     link_data    : out std_logic_vector(63 downto 0);
-    link_ack     : in  std_logic;
+    link_ack     : in  std_logic;                         -- いちばん古い転送の応答がある（link_take の周期まで保つ）
+    link_take    : out std_logic;                         -- link_ack を取る（S_WAIT_LINK・S_B_RUN の間）
     link_resp    : in  std_logic_vector(7 downto 0);
     link_ok      : in  boolean;
     link_rdata   : in  std_logic_vector(31 downto 0);
@@ -48,8 +49,7 @@ architecture rtl of dap_cmd_transfer is
                    S_T_READ, S_T_READ_DONE, S_T_MATCH_VALUE, S_T_MATCH_POSTED, S_T_MATCH_CHECK,
                    S_T_WRITE_COLLECT, S_T_WRITE_GET, S_T_WRITE_DATA, S_T_WRITE_DONE, S_T_COUNTED,
                    S_T_FINISH, S_T_LAST_READ, S_T_HEADER,
-                   S_B_START, S_B_FIRST, S_B_POSTED, S_B_READ, S_B_READ_DONE, S_B_READ_NEXT, S_B_WRITE_GET,
-                   S_B_WRITE, S_B_WRITE_DONE, S_B_HEADER);
+                   S_B_START, S_B_FIRST, S_B_RUN, S_B_WRITE, S_B_HEADER);
   signal state, ret : state_t := S_IDLE;
   signal get_req_r, put_req_r, link_req_r, done_r : std_logic := '0';
   signal get_n_r, put_n_r : natural range 1 to 8 := 1;
@@ -73,7 +73,14 @@ architecture rtl of dap_cmd_transfer is
   signal match_left  : unsigned(15 downto 0) := (others => '0');
   signal match_zero  : boolean := true;                                    -- match_left = 0
   signal matched     : boolean := false;                                   -- 直近の読み値が値一致
+  -- TransferBlock の先出し
+  signal b_issue     : unsigned(16 downto 0) := (others => '0');          -- まだ出していない転送の数
+  signal b_rsp       : unsigned(16 downto 0) := (others => '0');          -- まだ取っていない応答の数
+  signal b_out       : natural range 0 to 2 := 0;                          -- 出して応答を取っていない転送の数
+  signal b_tail      : boolean := false;                                   -- 最後に RDBUFF を出す（AP の読み・書き）
+  signal b_first     : boolean := false;                                   -- 次の応答は AP の読みの最初（値なし）
 begin
+  link_take    <= '1' when state = S_WAIT_LINK or state = S_B_RUN else '0';
   get_req      <= get_req_r;
   get_n        <= get_n_r;
   put_req      <= put_req_r;
@@ -119,6 +126,17 @@ begin
       ret        <= back;
       state      <= S_WAIT_LINK;
     end procedure;
+
+    -- 転送を出す（応答を待たない。TransferBlock の先出し）
+    procedure swd_issue(request : std_logic_vector(3 downto 0); wdata : std_logic_vector(31 downto 0)) is
+    begin
+      link_req_r <= '1';
+      request_r  <= request;
+      data_r     <= wdata;
+    end procedure;
+
+    variable out_v  : natural range 0 to 3;
+    variable stop_v : boolean;
 
     procedure set_resp(v : std_logic_vector(7 downto 0)) is
     begin
@@ -391,7 +409,12 @@ begin
             finish(x"00" & resp & std_logic_vector(t_done(7 downto 0)), 2);
 
           ------------------------------------------------------------------------------
-          -- DAP_TransferBlock
+          -- DAP_TransferBlock（先出し。docs/superpowers/specs/2026-11-03-dap-line-rate-design.md §4）
+          --   線に出す転送: AP の読みは count 回の AP の読み（最初はポスト）+ RDBUFF、DP の読みは count 回、書きは count 回 +
+          --   最後の確認の RDBUFF。応答を待たずに次の転送を出し（応答を取っていない転送は 2 つまで。2 つ目は dap_link が
+          --   条件つきで出すので、前が失敗すれば線に出ない）、応答は順に取る: 読みの値は put32（AP の最初の応答は値なし）、
+          --   書きは次の値を get(4) で先に取ってから出す。失敗の応答を取ったらそこで止める（出して応答の無い転送は dap_link が
+          --   捨てる）。応答の並び・数・失敗の扱いは参照実装（DAP.c）と同じ。
           ------------------------------------------------------------------------------
           when S_B_START =>
             select_device(arg(7 downto 0));
@@ -402,66 +425,71 @@ begin
             put(3, (others => '0'), S_B_FIRST);                       -- [1..2] 処理数, [3] 応答は最後に書く
 
           when S_B_FIRST =>
+            b_out <= 0;
             if t_left = 0 then
               state <= S_B_HEADER;
-            elsif t_request(REQ_RNW) = '1' then
-              if t_request(REQ_APNDP) = '1' then
-                swd(t_request(3 downto 0), (others => '0'), S_B_POSTED);   -- 最初の AP 読み出しをポスト
+            elsif t_request(REQ_RNW) = '1' and t_request(REQ_APNDP) = '0' then
+              b_issue <= resize(t_left, 17);                          -- DP の読み: count 回
+              b_rsp   <= resize(t_left, 17);
+              b_tail  <= false;
+              state   <= S_B_RUN;
+            else
+              b_issue <= resize(t_left, 17) + 1;                      -- AP の読み + RDBUFF / 書き + 確認の RDBUFF
+              b_rsp   <= resize(t_left, 17) + 1;
+              b_tail  <= true;
+              state   <= S_B_RUN;
+            end if;
+            b_first <= t_request(REQ_RNW) = '1' and t_request(REQ_APNDP) = '1';
+
+          when S_B_RUN =>
+            out_v  := b_out;
+            stop_v := false;
+            -- 応答を取る（この状態では link_take = 1）
+            if link_ack = '1' then
+              out_v := out_v - 1;
+              b_rsp <= b_rsp - 1;
+              set_resp(link_resp);
+              if not link_ok then
+                stop_v := true;
+                state  <= S_B_HEADER;                                 -- 失敗: 止める
               else
-                state <= S_B_READ;
+                b_first <= false;
+                if b_rsp = 1 then
+                  state <= S_B_HEADER;                                -- 最後の応答（値があれば put の後に S_B_RUN で終える）
+                end if;
+                if t_request(REQ_RNW) = '1' then
+                  if not b_first then
+                    t_done <= t_done + 1;
+                    put32(link_rdata, S_B_RUN);
+                  end if;
+                elsif not (b_tail and b_rsp = 1) then
+                  t_done <= t_done + 1;                               -- 書き（最後の確認の RDBUFF は数えない）
+                end if;
               end if;
-            else
-              state <= S_B_WRITE_GET;
-            end if;
-
-          when S_B_POSTED =>
-            if not last_ok then
+            elsif b_rsp = 0 then
               state <= S_B_HEADER;
-            else
-              state <= S_B_READ;
             end if;
-
-          when S_B_READ =>
-            t_left <= t_left - 1;
-            if t_left = 1 and t_request(REQ_APNDP) = '1' then
-              swd(DP_RDBUFF_READ, (others => '0'), S_B_READ_DONE);     -- 最後は RDBUFF で回収
-            else
-              swd(t_request(3 downto 0), (others => '0'), S_B_READ_DONE);
+            -- 次の転送を出す（応答を取っていない転送は 2 つまで。失敗を取った周期は出さない）
+            if not stop_v and b_issue /= 0 and out_v < 2 then
+              if b_tail and b_issue = 1 then
+                swd_issue(DP_RDBUFF_READ, (others => '0'));          -- 最後の RDBUFF（AP の読みの回収・書きの確認）
+                out_v   := out_v + 1;
+                b_issue <= b_issue - 1;
+              elsif t_request(REQ_RNW) = '1' then
+                swd_issue(t_request(3 downto 0), (others => '0'));
+                out_v   := out_v + 1;
+                b_issue <= b_issue - 1;
+              else
+                get(4, S_B_WRITE);                                    -- 書きの値を取ってから出す（書きは put しない）
+              end if;
             end if;
-
-          when S_B_READ_DONE =>
-            if not last_ok then
-              state <= S_B_HEADER;
-            else
-              t_done <= t_done + 1;
-              put32(rdata, S_B_READ_NEXT);
-            end if;
-
-          when S_B_READ_NEXT =>
-            if t_left = 0 then
-              state <= S_B_HEADER;
-            else
-              state <= S_B_READ;
-            end if;
-
-          when S_B_WRITE_GET =>
-            if t_left = 0 then
-              swd(DP_RDBUFF_READ, (others => '0'), S_B_HEADER);        -- 最後の書き込みの確認
-            else
-              get(4, S_B_WRITE);
-            end if;
+            b_out <= out_v;
 
           when S_B_WRITE =>
-            t_left <= t_left - 1;
-            swd(t_request(3 downto 0), arg(31 downto 0), S_B_WRITE_DONE);
-
-          when S_B_WRITE_DONE =>
-            if not last_ok then
-              state <= S_B_HEADER;
-            else
-              t_done <= t_done + 1;
-              state  <= S_B_WRITE_GET;
-            end if;
+            swd_issue(t_request(3 downto 0), arg(31 downto 0));
+            b_out   <= b_out + 1;
+            b_issue <= b_issue - 1;
+            state   <= S_B_RUN;
 
           when S_B_HEADER =>
             finish(resp & std_logic_vector(t_done), 3);

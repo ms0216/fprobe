@@ -1,6 +1,6 @@
 """連続試験を無人で動かす起動役。セッション（Claude Code など）から切り離して動かす用。
 - 実行中だけ Windows のスリープを防ぐ（SetThreadExecutionState。システムの電源設定は変えない。終わると元に戻る）。
-- 引数はそのまま soak.py に渡す（例: --host <PYNQ の IP> --until 06:30 --log build/soak/soak.jsonl）。
+- 引数はそのまま soak.py に渡す（例: --host <家の LAN のアドレス> --until 06:30 --log build/soak/soak.jsonl）。
 """
 
 import ctypes

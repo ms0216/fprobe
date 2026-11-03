@@ -24,16 +24,19 @@
 --       印      delta(29:16) | 1 | 番号(14:7) | late(6:0)   印の命令を受けた。印の瞬間 = この記録の時刻 − late
 --               （late 127 = 127 周期以上待った。瞬間は分からないので PC は時刻合わせに使わない）
 --   2 = 溢れ    0(29:16) | lost(15:0)         FIFO が一杯で記録できなかった値の変化の数（LOST_BITS の上限で止まる）。
---               鎖が切れる（次の値は delta 0）
+--               鎖が切れる（次の値は delta 0）。値の前に続けて来ることがある（溢れの記録の次の周期に値が
+--               変わったとき。その間に失った数は続けて来た溢れの lost の和）
 --   3 = 制御    種類(29:26) | 中身             種類 0 = 組の番号（7:0。今の SELECT）、1 = 応答 番地(19:16) | 値(15:0)
 --   開始・溢れの後・組の切り替え: 「組 → (溢れ) → 値（今の値）」。印の後は、変化の無い周期に組と今の値を書き直す
 --   （記録の途中の印から読み始めても、組・時刻・値が分かる）。印・応答・書き直しは変化の無い周期にだけ書くので、
 --   値の記録の時刻は常に変化の SAMPLE_DELAY 周期後（印は待った分を late に入れる）。
 --
 -- レジスタ（16 ビット）: 0・1 ID "FOBS"（下位 0x4253・上位 0x464F）、2 VERSION（2）、3 GROUPS、4 FIFO_DEPTH、
---   5・6 CLOCK_HZ（下位・上位）、7 SYNC_DELAY（印の瞬間が Update-DR の瞬間より何周期遅いか。半周期の単位、平均。
---   ±0.5 周期）、8 SAMPLE_DELAY（値の記録の時刻が変化より何周期遅いか。probes が同じ clk の登録の出力のとき）、
---   9 LOST_BITS、14 CONTROL（bit0 = 開始）、15 SELECT（観測する組。GROUPS 以上は無視）。
+--   5・6 CLOCK_HZ（下位・上位）、7 SYNC_DELAY（10 と 11 の中点。古い PC のため）、8 SAMPLE_DELAY（値の記録の時刻が
+--   変化より何周期遅いか。probes が同じ clk の登録の出力のとき）、9 LOST_BITS、
+--   10・11 SYNC_DELAY_LO・SYNC_DELAY_HI（印の瞬間が Update-DR を出る TCK の立ち上がりより何周期遅いかの下限・上限。
+--   半周期の単位。どちらも含む。0 = 申告なし: 10・11 を持たない古い回路は 0 を返す。そのときは 7 の ±0.5 周期）、
+--   14 CONTROL（bit0 = 開始）、15 SELECT（観測する組。GROUPS 以上は無視）。
 --
 -- クロックをまたぐもの: CONTROL・SELECT と読み・印の頼みはトグルで clk へ、溢れ・記録中の印は値のまま TCK へ
 -- （どれも次に使うまで数十 TCK 以上動かない）。2 クロック版の clk は TCK の 1/10 程度より遅くないこと。
@@ -89,11 +92,17 @@ architecture rtl of obs_core is
     constant DELTA_MAX  : natural := 2 ** 14 - 1;
     constant LATE_MAX   : natural := 2 ** 7 - 1;
     -- 遅れの申告（この回路の作りから決まる。gateware/tests の試験が実際と一致することを確かめる）:
-    -- 印 = Update-DR の TCK の立ち上がりで反転したトグルを 3 段で同期し、変わったのを見た辺の周期に書く。その辺は
-    --   立ち上がりの後の最初の辺（平均 0.5 周期後）から 3 周期後 → 平均 3.5 周期。1 クロック版は TCK の標本化
-    --   （obs_tck_sampler）の分が足される（gateware/tests の obs_soft_core の試験で測った値）
-    -- 値 = probes の変化を次の辺で比べ、その辺で記録 → 1 周期
-    constant SYNC_DELAY_HALVES : natural := choose(ONE_CLOCK, 13, 7);
+    -- 印 = Update-DR を出る TCK の立ち上がり（u）で反転したトグルを 3 段で同期し、変わったのを見た辺の次の辺を印の
+    --   瞬間にする。最初の段が取り込むのは u の後の最初の辺 e1（e1 − u は 0 より大きく 1 以下）なので、印の瞬間 − u =
+    --   e1 + 3 − u は (3, 4] 周期（u が辺と重なると、取り込むのがその辺か次の辺かは決まらない = 3 か 4）。
+    --   よって範囲は [3, 4] 周期。どの値になるかは u と clk の位相だけで決まり、回路からは分からない。
+    --   1 クロック版は TCK を obs_tck_sampler の 2 段で標本化し、TAP と観測の回路がその次の周期の辺で見る（3 周期多い）
+    --   → [6, 7] 周期（obs_core_tb・obs_soft_core_tb の試験で、範囲の端まで出ることも確かめる）
+    -- 値 = probes の変化を次の辺で比べ、その辺で記録 → 1 周期（probes が同じ clk の登録の出力のとき）
+    constant SYNC_DELAY_LO_HALVES : natural := choose(ONE_CLOCK, 12, 6);
+    constant SYNC_DELAY_HI_HALVES : natural := choose(ONE_CLOCK, 14, 8);
+    -- 古い申告（範囲の中点。レジスタ 10・11 を読まない PC のため）
+    constant SYNC_DELAY_HALVES : natural := (SYNC_DELAY_LO_HALVES + SYNC_DELAY_HI_HALVES) / 2;
     constant SAMPLE_DELAY      : natural := 1;
     constant LOST_MAX   : unsigned(LOST_BITS - 1 downto 0) := (others => '1');
 
@@ -143,6 +152,8 @@ architecture rtl of obs_core is
             when 7 => return std_logic_vector(to_unsigned(SYNC_DELAY_HALVES, 16));
             when 8 => return std_logic_vector(to_unsigned(SAMPLE_DELAY, 16));
             when 9 => return std_logic_vector(to_unsigned(LOST_BITS, 16));
+            when 10 => return std_logic_vector(to_unsigned(SYNC_DELAY_LO_HALVES, 16));
+            when 11 => return std_logic_vector(to_unsigned(SYNC_DELAY_HI_HALVES, 16));
             when REG_CONTROL => return (0 => control, others => '0');
             when REG_SELECT => return std_logic_vector(to_unsigned(select_group, 16));
             when others => return (others => '0');
@@ -453,20 +464,35 @@ begin
                         prev <= value;
                         chained <= '0';
                         delta <= delta_1;
-                        dropping <= '0';                               -- 書いたので溢れは終わり（後の SELECT で
-                        lost <= (others => '0');                       -- 前の数を書かない。R17）
-                        state <= S_VALUE;
+                        lost <= (others => '0');                       -- 書いた数は数え直す（dropping は値の記録を
+                        state <= S_VALUE;                              -- 書くまで残す。下の S_VALUE）
                     when S_VALUE =>
-                        -- 鎖が続いていれば前の時刻のある記録からの周期数、切れていれば 0（鎖の始め）
-                        wr := true;
-                        wl := value;
-                        if chained = '1' then
-                            wh := std_logic_vector(delta);
+                        if dropping = '1' and changed then
+                            -- 溢れの記録を書いた次の周期に値が変わった: 溢れの記録の lost はその前の周期の変化までなので、
+                            -- ここで値の記録を書くと、この変化は値に現れるのに数に入らない（失った数が 1 少なく見える）。
+                            -- この変化を失ったものとして数え、溢れの記録をもう 1 つ書いてから値を書く（PC は続けて来た
+                            -- 溢れの数を足す）。値・溢れの 2 語が入らなければ、空くまで数える
+                            lost <= lost_1;
+                            prev <= value;
+                            delta <= delta_1;
+                            if free_2 then
+                                state <= S_OVERFLOW;
+                            else
+                                state <= S_RESYNC;
+                            end if;
+                        else
+                            -- 鎖が続いていれば前の時刻のある記録からの周期数、切れていれば 0（鎖の始め）
+                            wr := true;
+                            wl := value;
+                            if chained = '1' then
+                                wh := std_logic_vector(delta);
+                            end if;
+                            prev <= value;
+                            delta <= DELTA_ONE;
+                            chained <= '1';
+                            dropping <= '0';                           -- 値を書いたので溢れは終わり（後の SELECT で
+                            state <= S_RUN;                            -- 前の数を書かない。R17）
                         end if;
-                        prev <= value;
-                        delta <= DELTA_ONE;
-                        chained <= '1';
-                        state <= S_RUN;
                     when S_RUN =>
                         if changed then
                             if not free_1 then

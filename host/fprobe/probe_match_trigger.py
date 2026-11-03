@@ -1,7 +1,8 @@
-"""ハードの値の一致のトリガ（fpga_obs_trigger_*・sampler_trigger_*）の mixin。
+"""ハードの値の一致のトリガ（fpga_obs_trigger_*・sampler_trigger_*）のサービス。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う。成り立った瞬間にクロストリガの経路（源 obs_match / sampler_match）で MCU の停止
-（halt）・ロジアナのトリガ（la）を起こす。Probe の _lock・session・_caps・fpga_obs_signals_get を使う。
+成り立った瞬間にクロストリガの経路（源 obs_match / sampler_match）で MCU の停止（halt）・ロジアナのトリガ（la）を起こす。
+頼る相手（NEEDS）: 核（Probe の _lock・session・_caps）、経路のビット（XtrigService の _route_bit・_need_inject）、
+FPGA の観測の信号の定義（FpgaObsService の fpga_obs_signals_get）。
 仕様: docs/superpowers/specs/2026-10-21-system-analysis-design.md §4.1、2026-10-23-sampler-match-trigger-design.md
 """
 
@@ -13,7 +14,10 @@ from . import generated as g
 from .collector import unwrap48
 from .fpga_obs import compile_match
 from .fpga_signals import FpgaSignals
+from .probe_service import HostView
 from .xtrig import Source
+
+__all__ = ["MatchTriggerService"]
 
 
 def _obs_trigger_path() -> Path:
@@ -47,15 +51,21 @@ def _need_action(halt: bool, la: bool) -> None:
 
 
 def _need_sampler_match(caps) -> None:
-    if not getattr(caps, "sampler_match", False):
+    if not caps.sampler_match:
         raise RuntimeError("この構成にはサンプラの値の一致のトリガが無い（ケイパビリティ sampler_match）")
 
 
-class MatchTriggerTools:
-    """Probe に混ぜるハードの値の一致のトリガ。"""
+class MatchTriggerService:
+    """ハードの値の一致のトリガ。"""
 
-    def _init_match_trigger(self) -> None:
-        self._obs_trigger: dict | None = None              # 仕掛けた FPGA の条件のトリガ（condition・halt・la）
+    API = ("fpga_obs_trigger_set", "fpga_obs_trigger_status", "fpga_obs_trigger_clear", "sampler_trigger_set",
+           "sampler_trigger_status", "sampler_trigger_clear")
+
+    NEEDS = ("_caps", "_lock", "_need_inject", "_route_bit", "fpga_obs_signals_get", "session")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+        self._obs_trigger: dict | None = None               # 仕掛けた FPGA の条件のトリガ（condition・halt・la）
 
     def fpga_obs_trigger_set(self, condition: str, halt: bool = True, la: bool = False, group: int = 0) -> dict:
         """FPGA の条件（システム解析と同じ書き方。例 "restart changed and state=BUSY"・"state=BUSY"（入った瞬間）・
@@ -66,17 +76,17 @@ class MatchTriggerTools:
         SWCLK、無ければ読んで戻す転送が足される。2026-10-22 の Shrike-Lite の実測: SWD 4 MHz で 101 µs、1 MHz で
         206〜362 µs）。信号の名前は組 group の定義（fpga_obs_signals_get）から。
         docs/superpowers/specs/2026-10-21-system-analysis-design.md §4.1"""
-        with self._lock:
-            caps = self.session.device.capabilities()
-            if not getattr(caps, "obs_match", False):
+        with self._host._lock:
+            caps = self._host.session.device.capabilities()
+            if not caps.obs_match:
                 raise RuntimeError("この構成にはハードの FPGA の条件のトリガが無い（ケイパビリティ obs_match）")
-            self._need_inject(caps, halt)
-            defs = self.fpga_obs_signals_get()
+            self._host._need_inject(caps, halt)
+            defs = self._host.fpga_obs_signals_get()
             _need_action(halt, la)
             mask, value, change = compile_match(condition, FpgaSignals.from_dict(defs["recording"] or defs["signals"]),
                                                 group)
             self._obs_trigger = None                                     # 書く途中で失敗しても古い記憶を残さない
-            dev = self.session.device
+            dev = self._host.session.device
             dev.write32(g.OBS_MATCH_CHANGE, 0)                          # 変える間は止める（途中の組で発火しない）
             dev.write32(g.OBS_MATCH, mask | value << 16)
             dev.write32(g.OBS_MATCH_CHANGE, change | 1 << g.OBS_MATCH_CHANGE_ENABLE[0])
@@ -89,16 +99,16 @@ class MatchTriggerTools:
         """ハードの FPGA の条件のトリガ: 条件・halt・la・成り立った回数 count（無ければ condition = null）。
         条件の文字はデーモンにしか無いので、デーモンの再起動の前に仕掛けたもの（FPGA には残って MCU を止め続ける）は
         レジスタから orphan = true（mask・value・change・halt・la・count）で返す。fpga_obs_trigger_clear で外せる。"""
-        with self._lock:
+        with self._host._lock:
             trig = self._obs_trigger
             armed = self._obs_armed()
             if trig is not None and armed is None:                   # FPGA を書き直した・経路を外された: もう無い
                 self._obs_trigger = trig = None
             if trig is not None:
-                return {**trig, "count": self.session.device.read32(g.OBS_MATCH_COUNT)}
+                return {**trig, "count": self._host.session.device.read32(g.OBS_MATCH_COUNT)}
             if armed is None:
                 return {"condition": None}
-            dev = self.session.device
+            dev = self._host.session.device
             match = dev.read32(g.OBS_MATCH)
             regs = {"mask": match & 0xFFFF, "value": match >> 16 & 0xFFFF, "change": dev.read32(g.OBS_MATCH_CHANGE) & 0xFFFF}
             saved = _load_obs_trigger()                        # デーモンの再起動の前に仕掛けた条件の文字
@@ -110,18 +120,18 @@ class MatchTriggerTools:
     def fpga_obs_trigger_clear(self) -> dict:
         """ハードの FPGA の条件のトリガをやめる（クロストリガの経路の obs_match を外す。ほかの源の経路は触らない）。
         デーモンの再起動の前に仕掛けた条件（orphan）も外す。"""
-        with self._lock:
+        with self._host._lock:
             if self._obs_trigger is not None or self._obs_armed() is not None:
-                self.session.device.write32(g.OBS_MATCH_CHANGE, 0)
+                self._host.session.device.write32(g.OBS_MATCH_CHANGE, 0)
                 self._obs_route(False, False)
             self._obs_trigger = None
             _save_obs_trigger(None)
             return {"condition": None}
 
     def _obs_armed(self) -> dict | None:
-        """FPGA の条件のトリガがレジスタの上で生きていれば {halt, la}（_lock の中で）。無い・この構成に無ければ None。"""
-        dev = self.session.device
-        if not getattr(self._caps(), "obs_match", False):
+        """FPGA の条件のトリガがレジスタの上で生きていれば {halt, la}（核の lock の中で）。無い・この構成に無ければ None。"""
+        dev = self._host.session.device
+        if not self._host._caps().obs_match:
             return None
         if not dev.read32(g.OBS_MATCH_CHANGE) >> g.OBS_MATCH_CHANGE_ENABLE[0] & 1:
             return None
@@ -131,8 +141,8 @@ class MatchTriggerTools:
         return {"halt": halt, "la": la} if halt or la else None
 
     def _obs_route(self, halt: bool, la: bool) -> None:
-        """クロストリガの経路の obs_match のビットだけを変える（_lock の中で）。"""
-        self._route_bit(Source.OBS_MATCH, halt, la)
+        """クロストリガの経路の obs_match のビットだけを変える（核の lock の中で）。"""
+        self._host._route_bit(Source.OBS_MATCH, halt, la)
 
     def sampler_trigger_set(self, address: int, mask: int, value: int, halt: bool, la: bool) -> dict:
         """DAP サンプラが読んだ address の語が (値 xor value) and mask = 0 に入った瞬間（前の標本が不一致・今の標本が一致）に
@@ -144,16 +154,16 @@ class MatchTriggerTools:
         for name, v in (("address", address), ("mask", mask), ("value", value)):
             if not 0 <= v <= 0xFFFFFFFF:
                 raise ValueError(f"{name} は 32 ビット（{v:#x}）")
-        with self._lock:
-            _need_sampler_match(self._caps())
-            self._need_inject(self._caps(), halt)
-            dev = self.session.device
+        with self._host._lock:
+            _need_sampler_match(self._host._caps())
+            self._host._need_inject(self._host._caps(), halt)
+            dev = self._host.session.device
             dev.write32(g.SAMPLER_MATCH_CONTROL, 0)                    # 変える間は止める
             dev.write32(g.SAMPLER_MATCH_ADDR, address)
             dev.write32(g.SAMPLER_MATCH_MASK, mask)
             dev.write32(g.SAMPLER_MATCH_VALUE, value)
             dev.write32(g.SAMPLER_MATCH_CONTROL, 1 << g.SAMPLER_MATCH_CONTROL_ENABLE[0])
-            self._route_bit(Source.SAMPLER_MATCH, halt, la)
+            self._host._route_bit(Source.SAMPLER_MATCH, halt, la)
             return {"address": address, "mask": mask, "value": value, "halt": halt, "la": la}
 
     def sampler_trigger_status(self) -> dict:
@@ -162,9 +172,9 @@ class MatchTriggerTools:
         time（最後に発火した標本を受けた時刻）・prev_time（その直前の不一致の標本の時刻。条件に入ったのは prev_time と time の間の
         どこか）。回路の時刻は 48 ビット（イベントの時刻と同じ幅）なので、読んだ時のタイムベースの上位で 64 ビットに延ばして返す
         （発火が無い・標本が無いときは回路の値のまま）。"""
-        with self._lock:
-            _need_sampler_match(self._caps())
-            dev = self.session.device
+        with self._host._lock:
+            _need_sampler_match(self._host._caps())
+            dev = self._host.session.device
             # 1 回のまとめ読み（数・時刻を同じ時点に近づける。ハードにラッチは無い）
             address, mask, value, ctrl, seen, count, t_lo, t_hi, p_lo, p_hi = dev.read(g.SAMPLER_MATCH_ADDR, 10)
             route, bit = dev.read32(g.XTRIG_ROUTE), int(Source.SAMPLER_MATCH)
@@ -180,8 +190,8 @@ class MatchTriggerTools:
 
     def sampler_trigger_clear(self) -> dict:
         """サンプラの値の一致のトリガをやめる（比べるのを止め、経路の sampler_match を外す。ほかの源の経路は触らない）。"""
-        with self._lock:
-            if getattr(self._caps(), "sampler_match", False):
-                self.session.device.write32(g.SAMPLER_MATCH_CONTROL, 0)
-                self._route_bit(Source.SAMPLER_MATCH, False, False)
+        with self._host._lock:
+            if self._host._caps().sampler_match:
+                self._host.session.device.write32(g.SAMPLER_MATCH_CONTROL, 0)
+                self._host._route_bit(Source.SAMPLER_MATCH, False, False)
             return {"enabled": False}

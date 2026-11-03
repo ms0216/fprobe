@@ -9,9 +9,9 @@ MCP の登録は [MCP](mcp.md)、書き込みと接続は [はじめに](getting
 | 項目 | 値 | 出典 |
 |---|---|---|
 | チャンネル数 | 16 ビット幅。うち外の信号が入るのは 14 本（後述） | ボード定義 `pynq_z2.py`・ケイパビリティ `la_layout` |
-| サンプル速度 | 最大 100 MS/s（PYNQ-Z2。`la_sample_hz` = `sys_clock_hz` = 100 MHz）。分周は 1〜65536（`rate_hz` で指定。実際の周期は結果の `sample_period_ns` に返る） | feature-matrix・`la.py` |
-| 深さ（内蔵、構成 `fprobe_pynq`） | 8192 サンプル（BSRAM）。`la_capture` で使う | feature-matrix |
-| 深さ（深いバッファ、構成 `fprobe_pynq_deep`） | PS の DDR の 32 MB。RAW は 1 サンプル 2 バイトで、上限は 32 MB ÷ 2 バイト = 約 1670 万サンプル（100 MS/s で約 0.17 秒）。実際に使えるリングは `la_deep_arm` が返す `capacity_beats`（1 拍 = 16 バイト = RAW 8 サンプル）。イベント記録と同じ領域を分け合うので、これより小さい | feature-matrix・pynq-z2.md・`la.py` |
+| サンプル速度 | 構成ごとに違う（`la_sample_hz`。`probe_info` で確かめる）: `fprobe_pynq`・`fprobe_pynq_deep` は最大 100 MS/s（= `sys_clock_hz`。分周は 1〜65536、`rate_hz` で指定。実際の周期は結果の `sample_period_ns` に返る）、`fprobe_pynq_cap` は 300 MS/s、`fprobe_pynq_fast` は 800 MS/s（ISERDESE2、`rate_hz` の指定は断る）、`fprobe_pynq_deep_fast` は 800 MS/s（深いバッファ。**実機は未確認**） | `fprobe_gw/designs.py` の `_pynq`・`la.py`・docs/superpowers/specs/2026-11-01-la-resolution-design.md §12 |
+| 深さ（内蔵、構成 `fprobe_pynq`） | 8192 サンプル（BSRAM）。`la_capture` で使う。`fprobe_pynq_fast` は 131072 サンプル（800 MS/s で 163.8 µs） | feature-matrix・`designs.py` |
+| 深さ（深いバッファ、構成 `fprobe_pynq_deep`） | PS の DDR の 32 MiB のうち、ロジアナの分は 30 MiB（31,457,280 バイト = 1,966,080 拍。残りの 2 MiB はイベント記録）。RAW は 1 サンプル 2 バイトで、上限は 30 MiB ÷ 2 バイト = 15,728,640 サンプル（100 MS/s で約 0.157 秒）。実際に使えるリングは `la_deep_arm` が返す `capacity_beats`（1 拍 = 16 バイト = RAW 8 サンプル） | `la_deep_buffer.vhd` の EV_SIZE・LA_SIZE（全体の 1/16 がイベント）・`designs.py` の `PYNQ_Z2_DEEP_BYTES`・`la.py` |
 | トリガ | 値の一致（`mask`・`value`）、立ち上がり（`rise`）、立ち下がり（`fall`）、グリッチフィルタ、パルス幅、クロストリガ（`external_only`） | `la_arm` |
 | 圧縮 | RLE（変化点圧縮）。深いバッファで使える | `la_deep_arm` |
 | 解読 | uart / spi / i2c / swd / can / onewire / jtag / i2s / parallel / manchester と、その上の jtag_arm / spiflash / eeprom24 / modbus | `la_decode` |
@@ -116,7 +116,7 @@ la_stream(vcd_path="stream.vcd", duration_s=10, rate_hz=1000000, rle=True)
 
 - トリガは使いません。記録の長さは保存先の空きで決まります。
 - `overrun` が true なら、ホストが追いつかず途中で止まったことを表します（それまでの分は正しい）。
-- PYNQ は PS の中継を通るので、ストリームが約 1〜2 MB/s を超えると制御の応答が遅れます（docs/boards/pynq-z2.md の実測）。RAW は 1 サンプル 2 バイトなので、1〜2 MB/s は約 0.5〜1 MS/s に当たります（この換算は算出）。それより速い信号は、変化の少ない信号を RLE で流すか、トリガ付きの `la_deep_capture` を使います。
+- PYNQ（`fprobe_pynq_deep` の版 2）は、PS が DDR を直接読んで、TCP で送ります。実測（RAW、16 ch、docs/boards/pynq-z2.md）で、欠けなしに続けられるのは約 35〜40 MB/s（約 17.5〜20 MS/s）、60 秒でも途切れませんでした。リングを Linux の reserved-memory に置く起動の設定（docs/boards/pynq-z2.md）にすると、25 MS/s（50 MB/s）を 60 秒（3 GB）欠けなしで続けられました（11 回中 11 回。PC の受信が詰まると溢れるので、PC が忙しいときは余裕が減ります）（RAW は 1 サンプル 2 バイトなので、MS/s への換算は算出）。それより速い信号は、使うチャンネルだけ詰めて流す（`stream(pack_channels=8|4|2)`。ケイパビリティ `la_pack`。8 ch なら 50 MS/s、4 ch なら 100 MS/s を 50 MB/s で、選んだチャンネルは欠けなし。選ばなかった上位のチャンネルは記録されない。PYNQ の実機で 60 秒を確認）、変化の少ない信号を RLE で流す、またはトリガ付きの `la_deep_capture` を使います。要求が持続できる速さを超えると、PL の DDR のリングが溜め、溢れたら `overrun` で止まります。
 - 記録（`recording_start`）と同時に流す版は `recording_la_stream_start` / `recording_la_stream_stop`（5 の流れで使う）。
 
 ### 3.5 トリガの状態の確認: `la_trigger_status`
@@ -186,10 +186,10 @@ recording_stop()
 
 ## 6. 制限
 
-- サンプル速度は最大 100 MS/s（PYNQ-Z2）。それより速い信号は取れません。入力として読める最大の周波数（FPGA の入力の帯域・基板の配線・サンプルの取り込みの設定時間）は **未確認**です。100 MS/s のサンプルで読めるのは、概ねその半分（Nyquist）より遅い信号という一般則に留まります。
+- サンプル速度は構成ごとに最大 100 MS/s（`fprobe_pynq`・`fprobe_pynq_deep`）・300 MS/s（`fprobe_pynq_cap`）・800 MS/s（`fprobe_pynq_fast`。`fprobe_pynq_deep_fast` も 800 MS/s だが実機は未確認）。それより速い信号は取れません。800 MS/s の構成でも、見える最小のパルスの幅は約 7.5 ns（実測。線のアナログの帯域で決まる。la-resolution §12）。以下の 100 MS/s の記述は `fprobe_pynq`・`fprobe_pynq_deep` のものです。入力として読める最大の周波数（FPGA の入力の帯域・基板の配線・サンプルの取り込みの設定時間）は **未確認**です。100 MS/s のサンプルで読めるのは、概ねその半分（Nyquist）より遅い信号という一般則に留まります。
 - 内蔵の深さは 8192 サンプル（100 MS/s で 81.92 µs）。
 - 深いバッファは PS の DDR の 32 MB。**使う前に DDR の上端を予約する**必要があります（`python -m fprobe_gw pynq reserve` の後に再起動。docs/boards/pynq-z2.md）。予約が無い、または中継が準備を終えていないと、深いバッファの捕捉は始まりません。2026-10-20 には、この再起動がシャットダウンの途中で止まり、電源の入れ直しで起動した記録があります。
-- 深いバッファのストリームが約 1〜2 MB/s を超えると、制御の応答が遅れます（上記）。
+- 深いバッファのストリームの持続できる速さは、PYNQ で約 35〜40 MB/s、リングを reserved-memory に置き、中継が割り込みの設定を入れると約 50 MB/s（実測。上限は 約 54 MB/s。壁は ARM の 2 コアが TCP の処理と読みで埋まる分）。ストリーム中の制御（CSR の読み）の往復は、17 MS/s でも中央値 4.6 ms（最大 14 ms）でした。
 - RLE の 1 レコードの繰り返しは 65536 サンプルまで。
 - 深いバッファの `before_beats` / `after_beats` の上限は、リングの拍数（`la_deep_arm` の `capacity_beats`）で決まります。`after_beats` が `capacity_beats` 以上だと ValueError。
 - `rate_hz` は 100 MHz ÷ 1〜65536 の範囲に丸められます（最低約 1.5 kHz）。結果の `sample_period_ns` が実際の周期です。

@@ -32,7 +32,8 @@ def round_transfers(slots: list[tuple[int, int]]) -> int:
     if len(slots) == 1 and slots[0][1] == 1:
         return 3                                               # 同じ番地を読み続ける: TAR を書かない
     return sum(TRANSFERS_PER_SLOT + n for _, n in slots)
-_HALF_MIN, _HALF_MAX = 2, 65535                # SWCLK の半周期（sys の周期数）の範囲（dap_cmd_config）
+_HALF_MAX = 65535                              # SWCLK の半周期（sys の周期数）の上限（dap_cmd_config）。下限はデバイスが申告する
+                                               # （Capabilities.min_half_period: 今の回路は 1、古い回路は 2）
 
 
 def _half_clock(sys_clock_hz: int) -> tuple[int, int]:
@@ -41,25 +42,26 @@ def _half_clock(sys_clock_hz: int) -> tuple[int, int]:
     return half_clock, half_clock // 101 * 100
 
 
-def swclk_hz(sys_clock_hz: int, requested_hz: float) -> float:
-    """要求した SWD の速さ（DAP_SWJ_Clock）で FPGA が実際に出す SWCLK。半周期 = ceil(sys/2 / (1.01 × 要求))、2〜65535。"""
+def swclk_hz(sys_clock_hz: int, requested_hz: float, min_half_period: int) -> float:
+    """要求した SWD の速さ（DAP_SWJ_Clock）で FPGA が実際に出す SWCLK。半周期 = ceil(sys/2 / (1.01 × 要求))、
+    min_half_period（Capabilities.min_half_period）〜65535。"""
     half_clock, tolerated = _half_clock(sys_clock_hz)
     requested = max(1, int(requested_hz))
-    half = min(max(-(-tolerated // requested), _HALF_MIN), _HALF_MAX)
+    half = min(max(-(-tolerated // requested), min_half_period), _HALF_MAX)
     return half_clock / half
 
 
-def round_estimate(slots: list[tuple[int, int]], sys_clock_hz: int, swd_hz: float) -> dict:
+def round_estimate(slots: list[tuple[int, int]], sys_clock_hz: int, swd_hz: float, min_half_period: int) -> dict:
     """か所 [(番地, 語数)] の定常の 1 巡回の見積もり: swd_hz（要求）、swclk_hz（実際）、transfers、round_us、max_rate_hz
     （巡回が続けて回ったときの速さ。実機は調停の分と、ホストの命令ごとの戻し・借り直しの分だけ遅い）。"""
     transfers = round_transfers(slots)
-    swclk = swclk_hz(sys_clock_hz, swd_hz)
+    swclk = swclk_hz(sys_clock_hz, swd_hz, min_half_period)
     round_s = transfers * BITS_PER_TRANSFER / swclk
     return {"swd_hz": swd_hz, "swclk_hz": swclk, "transfers": transfers, "round_us": round_s * 1e6,
             "max_rate_hz": 1 / round_s}
 
 
-def swd_hz_for_rate(slots: list[tuple[int, int]], rate_hz: float, sys_clock_hz: int) -> int | None:
+def swd_hz_for_rate(slots: list[tuple[int, int]], rate_hz: float, sys_clock_hz: int, min_half_period: int) -> int | None:
     """rate_hz の巡回に要る、最も遅い SWD の速さの要求（target_connect の frequency_hz に渡す値）。FPGA の最も速い
     SWCLK でも届かなければ None。"""
     if not rate_hz > 0:
@@ -68,7 +70,7 @@ def swd_hz_for_rate(slots: list[tuple[int, int]], rate_hz: float, sys_clock_hz: 
     needed = transfers * BITS_PER_TRANSFER * rate_hz             # 要る SWCLK
     half_clock, tolerated = _half_clock(sys_clock_hz)
     half = min(math.floor(half_clock / needed), _HALF_MAX)
-    if half < _HALF_MIN:
+    if half < min_half_period:
         return None
     return -(-tolerated // half)                                 # この半周期を選ばせる最も遅い要求
 
@@ -96,16 +98,34 @@ def plan_slots(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
 class Sampler:
     def __init__(self, device):
         caps = device.capabilities()
-        if not getattr(caps, "sampler", False):
+        if not caps.sampler:
             raise RuntimeError("このデバイスには DAP サンプラが無い（ケイパビリティ FEATURES）")
         self.dev = device
         self.sys_clock_hz = caps.sys_clock_hz
+        self.min_half_period = caps.min_half_period   # 申告の無いもの（古いデバイス）は下限 2（caps.py の既定）
         self.ap = 0
+        self.check_words = 1
 
-    def configure(self, ranges: list[tuple[int, int]], period_s: float, ap: int = 0) -> list[tuple[int, int]]:
-        """観測する範囲（(番地, バイト数)）と周期を設定する（止めてから）。設定したか所を返す。"""
+    def check_words_max(self) -> int:
+        """JTAG の誤りの確認の間隔 K の上限（CSR sampler.check.max。古い回路は 1 = 語ごとだけ）。"""
+        if not self.dev.capabilities().dap_line_time:
+            return 1
+        return self.dev.read32(g.SAMPLER_CHECK) >> g.SAMPLER_CHECK_MAX[0] & ((1 << g.SAMPLER_CHECK_MAX[1]) - 1)
+
+    def configure(self, ranges: list[tuple[int, int]], period_s: float, ap: int = 0,
+                  check_words: int = 1) -> list[tuple[int, int]]:
+        """観測する範囲（(番地, バイト数)）と周期を設定する（止めてから）。設定したか所を返す。
+        check_words = K: JTAG で CTRL/STAT による誤りの確認を K 回の読みに 1 回にする（docs/superpowers/specs/
+        2026-11-01-bandwidth-observation-design.md 2.3）。確認が通るまで K 語は出ず（回路に溜まる）、STICKYERR なら
+        その区間はイベント 18（誤りの区間）になって値は出ない。1 = 語ごと（停止の見張りと同じ。今までの動き）。K > 1 は使う側が
+        明示して選ぶ（速さと、値が出るまでの遅れ・誤りのときに捨てる語の数の引き換え。本体は選ばない）。上限は
+        check_words_max()。SWD は値を返した AP の転送の ACK が確認なので K を使わない。"""
         if isinstance(ap, bool) or not isinstance(ap, int) or not 0 <= ap <= 255:
             raise ValueError(f"ap は 0〜255: {ap!r}")
+        if isinstance(check_words, bool) or not isinstance(check_words, int) or check_words < 1:
+            raise ValueError(f"check_words は 1 以上の整数: {check_words!r}")
+        if check_words > 1 and check_words > self.check_words_max():
+            raise ValueError(f"check_words {check_words} はこの回路の上限 {self.check_words_max()} を超える")
         slots = plan_slots(ranges)
         period = round(period_s * self.sys_clock_hz)
         if not 1 <= period < 1 << 32:
@@ -115,7 +135,10 @@ class Sampler:
             address, n = slots[k] if k < len(slots) else (0, 1)
             self.dev.write(g.SAMPLER_SLOT_INDEX, [k, address, ((n - 1) << 8) | (k < len(slots)), 1])
         self.dev.write32(g.SAMPLER_PERIOD, period)
+        if self.dev.capabilities().dap_line_time:
+            self.dev.write32(g.SAMPLER_CHECK, check_words << g.SAMPLER_CHECK_WORDS[0])
         self.ap = ap
+        self.check_words = check_words
         return slots
 
     def start(self, jitter: int = 0) -> None:

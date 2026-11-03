@@ -127,3 +127,36 @@ async def events_from_the_debugger_and_host_and_four_stages(dut):
     assert len(seq.fires) == 1
     await seq.arm()                                      # 再び仕掛ける
     assert dut.fired.value == 0 and int(dut.stage.value) == 0
+
+
+@cocotb.test()
+async def the_fire_cycle_is_the_table_delay_after_the_event(dut):
+    """時刻の正しさ S1b の A2: fprobe_core は fire が 1 の周期の time を seq_time に取る。周期 T（時刻 T の辺の直後）に変わった
+    probes の入り口 → fire は周期 T + TRIG_SEQ_PIN_DELAY、周期 M の match・host のパルス → M + TRIG_SEQ_EVENT_DELAY
+    （fprobe_gw.timing。ピンは probes の前の段（グリッチフィルタ等）がさらに足される: TIMING の seq_pin・seq_internal）。"""
+    from cocotb.triggers import Timer
+    from fprobe_gw.timing import TRIG_SEQ_EVENT_DELAY, TRIG_SEQ_PIN_DELAY
+    seq = await setup(dut)
+
+    async def now() -> int:
+        await RisingEdge(dut.clk)
+        await Timer(1, unit="ps")                        # monitor がこの辺を数えた後: この周期の番号
+        return seq.cycle
+
+    for kind in ("rise", "match", "host"):
+        cond = {"rise": A, "match": MATCH, "host": HOST}[kind]
+        seq.configure(stages=1, conds=(cond,), a=(0, 0, 1, 0))
+        dut.probes.value = 0
+        seq.probes = 0
+        await ClockCycles(dut.clk, 4)
+        await seq.arm()
+        t = await now()
+        if kind == "rise":
+            dut.probes.value = 1
+        else:
+            getattr(dut, kind).value = 1
+            await RisingEdge(dut.clk)
+            getattr(dut, kind).value = 0
+        await ClockCycles(dut.clk, 10)
+        want = t + (TRIG_SEQ_PIN_DELAY if kind == "rise" else TRIG_SEQ_EVENT_DELAY)
+        assert seq.fires == [want], (kind, t, seq.fires)

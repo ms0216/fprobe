@@ -18,9 +18,10 @@ import time
 import typing
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from . import probe_names
-from .api.client import DaemonClient
+from .api.client import ApiError, DaemonClient
 from .api import DEFAULT_PORT, device_of
 from .api.spec import Method, Spec, load_spec
 from .home import fprobe_home
@@ -59,7 +60,12 @@ def _annotation(schema: dict):
     return _PY_TYPES.get(kind, typing.Any)
 
 
-NOTICE_TOPICS = ("elf.changed",)                      # AI に知らせる通知（次の道具の結果の notices に添える）
+# 道具にする session.*（読むだけのもの）: 許可の表、デーモンの状態（利用者・一時停止・ターゲットの状態）、操作の記録（人が
+# 何をしたかを AI も見る。人と AI の見えるものを一対一に）
+MCP_SESSION_METHODS = ("session.permissions", "session.status", "session.activity.list")
+# AI に知らせる通知（次の道具の結果の notices に添える）: ELF の更新、人の操作（activity の role = human。AI 自身の操作は
+# 自分で知っている）、一時停止・再開（control）
+NOTICE_TOPICS = ("elf.changed", "activity", "control")
 NOTICE_LIMIT = 20
 
 
@@ -74,6 +80,8 @@ class Notices:
         self._dropped = 0
 
     def add(self, topic: str, params: dict) -> None:
+        if topic == "activity" and params.get("role") != "human":
+            return                                       # AI・スクリプトの操作は添えない（人の操作だけ）
         with self._lock:
             self._pending.append({"topic": topic, **params})
             over = len(self._pending) - NOTICE_LIMIT
@@ -120,7 +128,12 @@ def tool_function(client, method: Method, notices: Notices | None = None):
 
     def tool(**kwargs):
         kwargs = {k: v for k, v in kwargs.items() if v is not None or k not in omit_when_none}
-        result = client.call(method.name, **kwargs)
+        try:
+            result = client.call(method.name, **kwargs)
+        except (ApiError, ConnectionError) as e:
+            # デーモンが返した誤り（例外の種類とメッセージ。ApiError の文面は "型: メッセージ"）と接続の切れは、想定した誤りとして
+            # 文面ごと AI に返す。ToolError 以外の例外は MCP の SDK が文面を隠し、AI は原因を知れず同じ道具を繰り返した
+            raise ToolError(str(e)) from e
         return result if notices is None else notices.attach(result)
 
     tool.__signature__ = _inspect.Signature(parameters)
@@ -133,11 +146,32 @@ def tool_function(client, method: Method, notices: Notices | None = None):
 def build_client_server(client, spec: Spec, notices: Notices | None = None) -> MCPServer:
     server = MCPServer("fprobe", instructions=INSTRUCTIONS)
     for method in spec.methods.values():
-        if method.name.startswith("session.") or method.binary:      # バイナリの応答は画面用（AI は la.view 等）
+        # セッションの操作は接続のもの（道具にしない）。許可の表は読むだけで、人と同じく AI にも見せる。バイナリの応答は画面用
+        if (method.name.startswith("session.") and method.name not in MCP_SESSION_METHODS) or method.binary:
             continue
         server.add_tool(tool_function(client, method, notices), name=method.name.replace(".", "_"),
                         description=method.summary)
     return server
+
+
+# Ethernet で開くとき、リンクの確立（ボードの書き込み直後の自動ネゴシエーション等）を待つ秒数（MCP が起動するデーモンに渡す値。識別の READ を
+# この間だけ送り直し、送り直した回数は probe.info の link_open で返す。--eth-link-up-wait で変えられる）
+ETH_LINK_UP_WAIT_S = 15.0
+
+
+def daemon_command(args) -> list[str]:
+    """起動するデーモンのコマンド（つなぎ方と、Ethernet ならリンクの確立を待つ秒数を明示して渡す）。"""
+    command = [_sys.executable, "-m", "fprobe.api.daemon", "--listen", str(args.listen)]
+    for flag, value in (("--serial", args.serial), ("--port", args.port), ("--eth", args.eth)):
+        if value:
+            command += [flag, value]
+    if args.eth:
+        command += ["--eth-link-up-wait", str(args.eth_link_up_wait)]
+    if args.port:
+        command += ["--baud", str(args.baud)]
+    if getattr(args, "bitstreams", None):
+        command += ["--bitstreams", args.bitstreams]
+    return command
 
 
 def ensure_daemon(args) -> str:
@@ -145,14 +179,7 @@ def ensure_daemon(args) -> str:
     url = f"ws://127.0.0.1:{args.listen}/api"
     if _listening(args.listen):
         return url
-    command = [_sys.executable, "-m", "fprobe.api.daemon", "--listen", str(args.listen)]
-    for flag, value in (("--serial", args.serial), ("--port", args.port), ("--eth", args.eth)):
-        if value:
-            command += [flag, value]
-    if args.port:
-        command += ["--baud", str(args.baud)]
-    if getattr(args, "bitstreams", None):
-        command += ["--bitstreams", args.bitstreams]
+    command = daemon_command(args)
     fprobe_home().mkdir(parents=True, exist_ok=True)
     log = open(fprobe_home() / "daemon.log", "a", encoding="utf-8")
     _subprocess.Popen(command, stdout=log, stderr=_subprocess.STDOUT,
@@ -218,6 +245,8 @@ def main() -> None:
     parser.add_argument("--port", help="SerialLink（UART のホストリンク）の COM ポート。指定すると USB ではなくこれで開く")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="SerialLink のボーレート")
     parser.add_argument("--eth", help="EthLink（UDP のホストリンク）のボードの IP アドレス。指定すると USB ではなくこれで開く")
+    parser.add_argument("--eth-link-up-wait", type=float, default=ETH_LINK_UP_WAIT_S, metavar="SECONDS",
+                        help=f"--eth で開くとき、リンクの確立を待つ秒数（起動するデーモンに渡す。既定 {ETH_LINK_UP_WAIT_S:g}）")
     parser.add_argument("--listen", type=int, default=DEFAULT_PORT, help="fprobe-daemon のポート")
     parser.add_argument("--bitstreams", help="起動するデーモンに渡す: Primer の構成のビットストリームの置き場所"
                                              "（<dir>/<design>/top.fs）")

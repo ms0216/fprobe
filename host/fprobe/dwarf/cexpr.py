@@ -126,7 +126,7 @@ class _Evaluator:
         self.skip = 0                                 # > 0: 短絡評価で値を使わない右辺（メモリを読まない）
         memory = frame.read_memory if frame else _no_memory
         registers = frame.read_register if frame else _no_register
-        self.context = EvalContext(memory, registers)
+        self.context = EvalContext(memory, registers, load_bias=frame.load_bias if frame else 0)
 
     # 字句の操作
     def peek(self, k: int = 0):

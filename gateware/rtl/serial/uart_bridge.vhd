@@ -7,6 +7,7 @@
 -- 割り算器は SHARED_DIVIDER なら外（div_* ポート、udiv_shared の使い手の約束）、でなければ中に持つ。
 -- リセット直後は DEFAULT_BAUD。分周比は 2〜2^20-1（100 MHz で約 95 baud〜50 Mbaud）に制限する。
 -- 受信の異常（停止ビットが 0、取り出されないうちに次のバイトが揃った）は数えて観測できるようにする。
+-- 受けたバイトの時刻（out_time）は、そのバイトの開始ビットの辺を見つけた周期の time（uart_rx。時刻の正しさの R3）。
 --
 -- ブレーク（brk = '1'）: 送信の線を Low に保つ（送りかけのバイトは崩れる。新しいバイトは受け取らない）。
 -- フロー制御（FLOW のときだけ。docs/superpowers/specs/2026-10-19-u51-u52-swo-uart-design.md §4）:
@@ -40,6 +41,8 @@ entity uart_bridge is
     out_valid    : out std_logic;
     out_ready    : in  std_logic;
     out_data     : out std_logic_vector(7 downto 0);
+    out_time     : out unsigned(47 downto 0);    -- out_data のバイトの開始ビットの辺を見つけた周期の time
+    time         : in  unsigned(47 downto 0) := (others => '0');   -- タイムベース
     -- ピン
     rx           : in  std_logic;
     tx           : out std_logic;
@@ -177,8 +180,8 @@ begin
 
   rx_i : entity work.uart_rx
     generic map (DIVISOR_BITS => DIVISOR_BITS)
-    port map (clk => clk, rst => rst, divisor => divisor, rx => rx, out_valid => out_valid,
-              out_ready => out_ready, out_data => out_data, frame_error => ferr, overrun => orun);
+    port map (clk => clk, rst => rst, divisor => divisor, rx => rx, time => time, out_valid => out_valid,
+              out_ready => out_ready, out_data => out_data, out_time => out_time, frame_error => ferr, overrun => orun);
 
   current_baud <= baud_r;
   frame_errors <= ferr_count;

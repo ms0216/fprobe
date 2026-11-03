@@ -10,6 +10,7 @@ from fprobe.caps import Output
 from fprobe.mcp_server import Probe
 from fprobe.xtrig import OutputConfig, OutputMode, PinOutputs, Source, pulse_range_s, pulse_ticks
 from probe_fakes import HZ, FakeDevice
+from caps_fakes import with_caps
 
 PINS = (Output(0, 4, False), Output(1, 5, True), Output(2, 6, True), Output(3, 7, False))
 
@@ -20,9 +21,7 @@ class OutputDevice(FakeDevice):
         self.pins, self.actions = pins, actions
 
     def capabilities(self):
-        caps = super().capabilities()
-        caps.outputs, caps.output_actions = self.pins, self.actions
-        return caps
+        return with_caps(super().capabilities(), outputs=self.pins, output_actions=self.actions)
 
 
 def field(word, f):

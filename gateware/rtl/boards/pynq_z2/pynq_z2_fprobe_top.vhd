@@ -9,6 +9,12 @@
 --   深いバッファ（P3。構成の MEM_ADDR_BITS > 0）: ブロック設計 ps7_hp_bd の S_AXI_HP0 に axi_mem_port をつなぎ、PS の DDR の
 --   領域（物理番地は PS の中継が zynq_frame_link の MEM_BASE に書く。書くまで mem_ready = 0）を fprobe_core の外部メモリに
 --   する（mem_clk = sys）。内蔵ロジアナは持たない（Primer の DDR3 の構成と同じ）。MEM_ADDR_BITS = 0 なら ps7_bd（HP0 無し）。
+--   1 周期に複数のサンプルの構成（LA_LANES > 1。fprobe_pynq_fast）: 専用の入力 la_in（と LA_FINE_PINS なら PMOD JA の 8 本）を
+--   xilinx_la_iserdes（ISERDESE2、CLK = cap_clk の両方の辺、CLKDIV = sys）で取り、sys の 1 周期に LA_LANES = 2 × CAP_RATIO
+--   サンプルにしてコアの la_input_lanes（・la_pin_lanes）に渡す（docs/superpowers/specs/2026-11-01-la-resolution-design.md の段 1・段 2）。
+--   JA に ISERDESE2 を置くと、端子の入力は IBUF から ISERDESE2 の D にだけつながるので、JA を読む回路（DAP・UART・gpio・ロジアナの
+--   sys の経路）はすべて ISERDESE2 の組み合わせの出力 O（= 端子の値。ja_in）を読む。出力は OLOGIC の組み合わせの経路で今と同じ。
+--   クロック: MMCM（VCO 1200 MHz）の CLKOUT0 = sys 100 MHz、CLKOUT1 = cap_clk = sys × CAP_RATIO（pynq_z2_pkg.mmcm_cap_div）。
 --   LED（アクティブ High）: led(0) = MMCM のロック、led(1) = sys の心拍、led(2) = PC へ送るフレームがある、led(3) = 消灯
 library ieee;
 use ieee.std_logic_1164.all;
@@ -29,6 +35,8 @@ entity pynq_z2_fprobe_top is
     -- ボードの間の時刻の同期（Raspberry Pi のヘッダの GPIO16 = 36 番が親から、GPIO20 = 38 番が子へ。同期の無い構成では Z）
     sync_in    : in    std_logic;
     sync_out   : out   std_logic;
+    -- 外部ピン入力の限界を測る試験用の方形波（Raspberry Pi のヘッダの GPIO12 = 32 番。有効にしたときだけ駆動、それ以外は Z）
+    testgen_pin : out  std_logic;
     -- PS の DAP の PJTAG（EMIO）の素通し（Raspberry Pi のヘッダの GPIO8〜11。independent の起動のときだけ DAP がつながる）
     ps_pjtag_tck : in  std_logic;
     ps_pjtag_tms : in  std_logic;
@@ -144,6 +152,7 @@ architecture rtl of pynq_z2_fprobe_top is
   signal sys_clk, sys_rst, mmcm_lock, aresetn : std_logic;
   signal obs_tck_o, obs_tms_o, obs_tdi_o, obs_oe : std_logic;      -- 対象の FPGA の観測の JTAG
   signal sync_o : std_logic;                                         -- ボードの間の時刻の同期（コアの出力）
+  signal testgen_q, testgen_oe : std_logic;                          -- 外部ピン入力の限界を測る試験用の方形波（コアの出力）
   -- AXI4-Lite（PS → zynq_frame_link）
   signal araddr, awaddr, rdata, wdata : std_logic_vector(31 downto 0);
   signal arprot, awprot : std_logic_vector(2 downto 0);
@@ -167,14 +176,40 @@ architecture rtl of pynq_z2_fprobe_top is
   signal line_changed : std_logic;
   -- デバッグの線
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe, uart_tx, uart_tx_oe : std_logic;
+  signal swdio_o_lead : std_logic;                                   -- SWDIO / TMS のその周期の前半（ODDR の D1）
   signal uart_cts_n, uart_rts_n, rts_claim, cts_claim : std_logic;
   signal rts_pin, cts_pin : std_logic_vector(1 downto 0);
-  signal gpio_drive, gpio_enable, func_o, func_oe : std_logic_vector(7 downto 0);
-  signal pin_o, pin_oe, claimed : std_logic_vector(7 downto 0);
+  signal gpio_drive, gpio_enable, func_o, func_oe, func_o_lead : std_logic_vector(7 downto 0);
+  signal pin_o, pin_oe, claimed, pin_o_lead : std_logic_vector(7 downto 0);
+  -- PMOD JA の出力の最後の段: 出力は ODDR（xilinx_oddr。端子の OLOGIC、前半 pin_o_lead・後半 pin_o）、Hi-Z の制御は 1 段の FF
+  -- （IOB の TFF）。TCK / TMS / TDI の端子までの遅れが配置に依らず揃う（stop-precision §3.1）。その代わり、どの機能の出力も
+  -- pin_select の後 1 周期（sys）遅れて端子に出る（入力は変わらない。SWD / JTAG の往復はこの 1 周期だけ長く見える）。
+  -- 前半と後半が違うのは JTAG の half_period = 1 の TMS だけ（TCK の立ち下がりの半周期 = 5 ns 後に変わる。jtag_phy の
+  -- tms_lead、docs/superpowers/specs/2026-11-03-dap-line-rate-design.md §3）。pad_t = 1 で Hi-Z（OBUFT の T）
+  signal pad_q : std_logic_vector(7 downto 0);
+  signal pad_t : std_logic_vector(7 downto 0) := (others => '1');
+  attribute IOB : string;
+  attribute IOB of pad_t : signal is "TRUE";
+  -- 同期の出力の最後の 1 段の FF（JA と同じく IOB に詰める。時刻の正しさ R9、段階 S3）: 線の辺が配置に依らず、JA の出力と
+  -- 同じ段数（fprobe_gw.timing の BOARD_OUTPUT_TICKS）になる
+  signal sync_pad : std_logic := '0';
+  attribute IOB of sync_pad : signal is "TRUE";
   signal xout_o, xout_oe, xout_claim : std_logic_vector(1 downto 0);
   signal xout_pin : std_logic_vector(3 downto 0);
   signal heartbeat : unsigned(25 downto 0);
   -- 外部メモリ（MEM_ADDR_BITS = 0 なら使わない: mem_ready = 0）
+  -- 取り込みのクロックを使う構成（CAP_RATIO >= 2）だけ、MMCM の 2 本目の出力を出す
+  constant CAP_DIV : natural := mmcm_cap_div(work.design_caps_pkg.CAP_RATIO);
+  signal cap_clk : std_logic;
+  -- 1 周期に複数のサンプル（端子の ISERDESE2）。ch 0〜7 = PMOD JA（FINE_PINS のときだけ）、続いて専用の入力
+  constant LANES : positive := work.design_caps_pkg.LA_LANES;
+  constant INPUTS : natural := work.design_caps_pkg.LA_INPUTS;
+  constant FINE_PINS : boolean := work.design_caps_pkg.LA_FINE_PINS and LANES > 1;
+  constant JA_SERDES : natural := 8 * to_natural(FINE_PINS);
+  constant SERDES_CH : natural := JA_SERDES + INPUTS * to_natural(LANES > 1);
+  signal la_in_lanes : std_logic_vector(maximum(LANES * INPUTS, 1) - 1 downto 0);
+  signal ja_lanes : std_logic_vector(LANES * 8 - 1 downto 0);
+  signal ja_in : std_logic_vector(7 downto 0);                     -- PMOD JA の端子の値（ファブリックで読む回路はこれを使う）
   constant MEM_BITS : natural := work.design_caps_pkg.MEM_ADDR_BITS;
   constant DEEP : boolean := MEM_BITS > 0;
   constant MEM_SPAN : natural := to_natural(DEEP) * (2 ** MEM_BITS) * 16;   -- MEM_BASE から使うバイト数
@@ -183,13 +218,59 @@ architecture rtl of pynq_z2_fprobe_top is
   signal mem_ready, mem_cmd_valid, mem_cmd_ready, mem_cmd_write, mem_rd_valid : std_logic;
   signal mem_cmd_addr : unsigned(maximum(MEM_BITS, 1) - 1 downto 0);
   signal mem_cmd_data, mem_rd_data : std_logic_vector(127 downto 0);
+  -- PS が DDR のリングを直接読む流れのレジスタ（窓 zynq_frame_link → コアの la_ps_port。深いバッファの構成だけ意味を持つ）
+  signal ps_bus_rd, ps_bus_wr : std_logic;
+  signal ps_bus_addr : unsigned(7 downto 0);
+  signal ps_bus_wdata, ps_bus_rdata : std_logic_vector(31 downto 0);
+  signal mem_wr_pending : unsigned(3 downto 0);
 begin
   clock_i : entity work.xilinx_mmcm
     generic map (CLKIN_PERIOD_NS => MMCM_CLKIN_PERIOD_NS, MULT => MMCM_MULT, DIVCLK => MMCM_DIVCLK,
-                 OUT_DIV => MMCM_OUT_DIV)
-    port map (clkin => sys_clk_in, clkout => sys_clk, lock => mmcm_lock);
+                 OUT_DIV => MMCM_OUT_DIV, CAP_DIV => CAP_DIV)
+    port map (clkin => sys_clk_in, clkout => sys_clk, cap_clkout => cap_clk, lock => mmcm_lock);
   sys_reset_i : entity work.reset_sync
     port map (clk => sys_clk, arst_in => not mmcm_lock, rst => sys_rst);
+
+  assert LANES = 1 or LANES = 2 * work.design_caps_pkg.CAP_RATIO
+    report "LA_LANES must be 2 * CAP_RATIO (ISERDESE2 DDR: CLK = cap_clk, CLKDIV = sys)" severity failure;
+  -- 最も新しいレーンの遅れ: ケイパビリティの生成パッケージの値（時刻の表 fprobe_gw.timing が段数に使う。正は
+  -- fprobe_gw.designs.pynq_z2_iserdes_newest_age）と、この包み（xilinx_la_iserdes）の関数が一致すること
+  assert work.design_caps_pkg.LA_LANE_IN_AGE = iserdes_newest_age(maximum(LANES, 6)) * to_natural(LANES > 1)
+    report "design_caps_pkg.LA_LANE_IN_AGE differs from pynq_z2_pkg.iserdes_newest_age" severity failure;
+  lanes_g : if SERDES_CH > 0 generate
+    signal serdes_pins, serdes_o : std_logic_vector(SERDES_CH - 1 downto 0);
+    signal serdes_q : std_logic_vector(LANES * SERDES_CH - 1 downto 0);
+  begin
+    serdes_i : entity work.xilinx_la_iserdes
+      generic map (CHANNELS => SERDES_CH, LANES => LANES)
+      port map (clk_fast => cap_clk, clk_div => sys_clk, rst => sys_rst, pins => serdes_pins, q => serdes_q, o => serdes_o);
+    ja_g : if FINE_PINS generate
+      serdes_pins(7 downto 0) <= pmod1;
+      ja_in <= serdes_o(7 downto 0);
+      ja_lane_g : for k in 0 to LANES - 1 generate
+        ja_lanes((k + 1) * 8 - 1 downto k * 8) <= serdes_q(k * SERDES_CH + 7 downto k * SERDES_CH);
+      end generate;
+    end generate;
+    no_ja_g : if not FINE_PINS generate
+      ja_in <= pmod1;
+      ja_lanes <= (others => '0');
+    end generate;
+    in_g : if INPUTS > 0 generate
+      serdes_pins(SERDES_CH - 1 downto JA_SERDES) <= la_in(INPUTS - 1 downto 0);
+      in_lane_g : for k in 0 to LANES - 1 generate
+        la_in_lanes((k + 1) * INPUTS - 1 downto k * INPUTS) <=
+          serdes_q(k * SERDES_CH + SERDES_CH - 1 downto k * SERDES_CH + JA_SERDES);
+      end generate;
+    end generate;
+    no_in_g : if INPUTS = 0 generate
+      la_in_lanes <= (others => '0');
+    end generate;
+  end generate;
+  no_lanes_g : if SERDES_CH = 0 generate
+    la_in_lanes <= (others => '0');
+    ja_lanes <= (others => '0');
+    ja_in <= pmod1;
+  end generate;
   aresetn <= not sys_rst;
 
   ps_plain : if not DEEP generate
@@ -207,6 +288,7 @@ begin
     mem_rd_valid <= '0';
     mem_rd_data <= (others => '0');
     mem_errors <= (others => '0');
+    mem_wr_pending <= (others => '0');
   end generate;
 
   -- 深いバッファ: S_AXI_HP0 ⇄ axi_mem_port ⇄ fprobe_core の外部メモリ
@@ -249,7 +331,7 @@ begin
       port map (clk => sys_clk, rst => sys_rst, base => mem_base, ready => mem_ready,
                 cmd_valid => mem_cmd_valid, cmd_ready => mem_cmd_ready, cmd_write => mem_cmd_write,
                 cmd_addr => mem_cmd_addr, cmd_data => mem_cmd_data, rd_valid => mem_rd_valid, rd_data => mem_rd_data,
-                errors => mem_errors,
+                errors => mem_errors, wr_pending => mem_wr_pending,
                 m_axi_awaddr => hp_awaddr, m_axi_awlen => hp_awlen, m_axi_awsize => hp_awsize,
                 m_axi_awburst => hp_awburst, m_axi_awvalid => hp_awvalid, m_axi_awready => hp_awready,
                 m_axi_wdata => hp_wdata, m_axi_wstrb => hp_wstrb, m_axi_wlast => hp_wlast, m_axi_wvalid => hp_wvalid,
@@ -271,7 +353,9 @@ begin
               rx_we => m_we, rx_waddr => m_waddr, rx_wdata => m_wdata, rx_commit => m_commit, rx_len => m_rx_len,
               rx_busy => m_busy, tx_valid => m_tx_valid, tx_len => m_tx_len, tx_raddr => m_raddr,
               tx_rdata => m_rdata, tx_done => m_tx_done, mem_base => mem_base,
-              mem_errors => mem_errors);
+              mem_errors => mem_errors,
+              ps_bus_rd => ps_bus_rd, ps_bus_wr => ps_bus_wr, ps_bus_addr => ps_bus_addr, ps_bus_wdata => ps_bus_wdata,
+              ps_bus_rdata => ps_bus_rdata);
 
   mux_i : entity work.frame_mux
     generic map (MAX_PAYLOAD => MAX_PAYLOAD, RAM_BITS => RAM_BITS)
@@ -303,11 +387,20 @@ begin
                  RESET_SPLIT => true,        -- 最悪の経路が reset_sync の出力の扇出（約 3500）だった。docs/reports/fprobe-core-notes.md §2
                  LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
                  LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
+                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS,
                  AUX => work.design_caps_pkg.AUX, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
                  LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS,
                  LA_INTERNAL => not DEEP, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
-                 OBS_PORT => work.design_caps_pkg.OBS_PORT, SYNC => work.design_caps_pkg.SYNC)
-    port map (clk => sys_clk, rst => sys_rst,
+                 OBS_PORT => work.design_caps_pkg.OBS_PORT, SYNC => work.design_caps_pkg.SYNC,
+                 CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
+                 LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN,
+                 LA_LANES => LANES, LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS,
+                 LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,
+                 LA_FINE_PINS => FINE_PINS,
+                 EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK,
+                 SAMPLER_CHECK_MAX => work.design_caps_pkg.SAMPLER_CHECK_MAX,
+                 MEM_SAME_CLOCK => true)     -- 深いバッファの mem_clk は sys_clk（下の port map）
+    port map (clk => sys_clk, cap_clk => cap_clk, rst => sys_rst,
               ctrl_in_valid => req_valid, ctrl_in_ready => req_ready, ctrl_in_data => req_data,
               ctrl_in_last => req_last,
               ctrl_out_valid => rsp_valid, ctrl_out_ready => rsp_ready, ctrl_out_data => rsp_data,
@@ -317,29 +410,39 @@ begin
               dap_out_valid => drsp_valid, dap_out_ready => drsp_ready, dap_out_data => drsp_data,
               dap_out_last => drsp_last,
               swclk_o => swclk_o, swclk_oe => swclk_oe, swdio_o => swdio_o, swdio_oe => swdio_oe,
-              swdio_i => pmod1(DBG_SWDIO), nreset_low => nreset_low, nreset_i => pmod1(DBG_NRESET),
-              tdi_o => tdi_o, tdi_oe => tdi_oe, tdo_i => pmod1(DBG_SWO) or claimed(DBG_SWO),
-              swo_i => pmod1(DBG_SWO) or claimed(DBG_SWO), swo_out_valid => swo_valid, swo_out_ready => swo_ready,
+              swdio_o_lead => swdio_o_lead,
+              swdio_i => ja_in(DBG_SWDIO), nreset_low => nreset_low, nreset_i => ja_in(DBG_NRESET),
+              tdi_o => tdi_o, tdi_oe => tdi_oe, tdo_i => ja_in(DBG_SWO) or claimed(DBG_SWO),
+              swo_i => ja_in(DBG_SWO) or claimed(DBG_SWO), swo_out_valid => swo_valid, swo_out_ready => swo_ready,
               swo_out_data => swo_data, swo_flush => open,
               uart_baud => line_rate, uart_baud_load => line_changed,
               uart_in_valid => uo_valid, uart_in_ready => uo_ready, uart_in_data => uo_data,
               uart_out_valid => ui_valid, uart_out_ready => ui_ready, uart_out_data => ui_data,
-              uart_rx => pmod1(DBG_UART_RX) or claimed(DBG_UART_RX), uart_tx => uart_tx, uart_tx_oe => uart_tx_oe,
+              uart_rx => ja_in(DBG_UART_RX) or claimed(DBG_UART_RX), uart_tx => uart_tx, uart_tx_oe => uart_tx_oe,
               uart_host_rts => '0', uart_host_break => '0', uart_cts_n => uart_cts_n,
               uart_rts_n => uart_rts_n, uart_rts_claim => rts_claim, uart_rts_pin => rts_pin,
               uart_cts_claim => cts_claim, uart_cts_pin => cts_pin, uart_cts => open,
-              la_pins => pmod1,
-              la_inputs => la_in(maximum(work.design_caps_pkg.LA_INPUTS, 1) - 1 downto 0),
-              gpio_drive => gpio_drive, gpio_enable => gpio_enable, gpio_level => pmod1,
+              la_pins => ja_in, la_pin_lanes => ja_lanes,
+              la_inputs => la_in(maximum(work.design_caps_pkg.LA_INPUTS, 1) - 1 downto 0), la_input_lanes => la_in_lanes,
+              gpio_drive => gpio_drive, gpio_enable => gpio_enable, gpio_level => ja_in,
               xout_o => xout_o, xout_oe => xout_oe, xout_claim => xout_claim, xout_pin => xout_pin,
               mem_clk => sys_clk, mem_rst => sys_rst, mem_ready => mem_ready,
               mem_cmd_valid => mem_cmd_valid, mem_cmd_ready => mem_cmd_ready, mem_cmd_write => mem_cmd_write,
               mem_cmd_addr => mem_cmd_addr, mem_cmd_data => mem_cmd_data, mem_rd_valid => mem_rd_valid,
-              mem_rd_data => mem_rd_data,
+              mem_rd_data => mem_rd_data, mem_wr_pending => mem_wr_pending,
               stream_out_valid => st_valid, stream_out_ready => st_ready, stream_out_data => st_data,
+              ps_bus_rd => ps_bus_rd, ps_bus_wr => ps_bus_wr, ps_bus_addr => ps_bus_addr, ps_bus_wdata => ps_bus_wdata,
+              ps_bus_rdata => ps_bus_rdata,
               obs_tck => obs_tck_o, obs_tms => obs_tms_o, obs_tdi => obs_tdi_o, obs_tdo => obs_tdo,
-              obs_oe => obs_oe, sync_in => sync_in, sync_out => sync_o);
-  sync_out <= sync_o when work.design_caps_pkg.SYNC else 'Z';
+              obs_oe => obs_oe, sync_in => sync_in, sync_out => sync_o, testgen_out => testgen_q, testgen_oe => testgen_oe);
+  process (sys_clk)
+  begin
+    if rising_edge(sys_clk) then
+      sync_pad <= sync_o;
+    end if;
+  end process;
+  sync_out <= sync_pad when work.design_caps_pkg.SYNC else 'Z';
+  testgen_pin <= testgen_q when testgen_oe = '1' else 'Z';
   obs_tck <= obs_tck_o when obs_oe = '1' else 'Z';
   obs_tms <= obs_tms_o when obs_oe = '1' else 'Z';
   obs_tdi <= obs_tdi_o when obs_oe = '1' else 'Z';
@@ -375,7 +478,7 @@ begin
     uart_cts_n <= '0';
     for j in UART_FLOW_PIN_CHOICES'range loop
       if cts_claim = '1' and to_integer(unsigned(cts_pin)) = j then
-        uart_cts_n <= pmod1(UART_FLOW_PIN_CHOICES(j));
+        uart_cts_n <= ja_in(UART_FLOW_PIN_CHOICES(j));
       end if;
     end loop;
   end process;
@@ -386,8 +489,31 @@ begin
               xout_o => xout_o, xout_oe => xout_oe, xout_claim => xout_claim, xout_pin => xout_pin,
               pin_o => pin_o, pin_oe => pin_oe, claimed => claimed);
 
+  -- 周期の前半の値: 機能の出力のうち SWDIO / TMS だけ前半の値に替え、同じ選択を通す（gpio・クロストリガの出力は前半も同じ）
+  process (all)
+  begin
+    func_o_lead <= func_o;
+    func_o_lead(DBG_SWDIO) <= swdio_o_lead;
+  end process;
+  pin_select_lead_i : entity work.pin_select
+    generic map (PINS => 8, ACTIONS => 2, PIN_CHOICES => (XOUT_PIN_CHOICES(0), XOUT_PIN_CHOICES(1), XOUT_PIN_CHOICES(2), XOUT_PIN_CHOICES(3)))
+    port map (gpio_drive => gpio_drive, gpio_enable => gpio_enable, func_o => func_o_lead, func_oe => func_oe,
+              xout_o => xout_o, xout_oe => xout_oe, xout_claim => xout_claim, xout_pin => xout_pin,
+              pin_o => pin_o_lead, pin_oe => open, claimed => open);
+
+  oddr_i : entity work.xilinx_oddr
+    generic map (WIDTH => 8)
+    port map (clk => sys_clk, d1 => pin_o_lead, d2 => pin_o, q => pad_q);
+
+  process (sys_clk)
+  begin
+    if rising_edge(sys_clk) then
+      pad_t <= not pin_oe;
+    end if;
+  end process;
+
   pins : for i in pmod1'range generate
-    pmod1(i) <= pin_o(i) when pin_oe(i) = '1' else 'Z';
+    pmod1(i) <= pad_q(i) when pad_t(i) = '0' else 'Z';
   end generate;
 
   process (sys_clk)

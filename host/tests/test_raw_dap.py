@@ -131,6 +131,59 @@ def test_jtag_faults_are_found_through_ctrl_stat():
     assert dap.mem_read32_repeat(0, 0x20000000, 2) == [0x11111111, 0x11111111]
 
 
+def test_switch_to_jtag_leaves_the_tap_in_run_test_idle():
+    """fprobe の jtag_phy（と CMSIS-DAP の DAP_Transfer）は TAP が Run-Test/Idle にいる前提。TMS = 1 の列で終えると Test-Logic-Reset に
+    残り、最初の転送が崩れた（実機の Pi 2B で DPIDR が 0xFFFFFFFF、2026-10-29）。TMS = 1 の列の後に TMS = 0 を 1 回。"""
+    link = FakeDapLink(FakeTarget(swd=False, jtag_dp_index=0))
+    dap = RawDap(link)
+    dap.start("jtag", 1_000_000, jtag_chain=[4], dap_index=0)
+    dap.switch_to_jtag()
+    tms = "".join(format(bits, "0%db" % n)[::-1] for n, bits in link.swj_log)     # 時間順の TMS
+    assert tms.endswith("1" * 5 + "0")
+
+
+def test_many_memory_words_go_in_one_round_trip_and_jtag_faults_are_still_found():
+    """複数の番地の読み書きを 1 回の往復（flush）にまとめる（複数のコアへの停止要求をほぼ同時に出すため）。JTAG の誤りは CTRL/STAT で見る"""
+    ap = FakeMemAp(words={0x20000000: 0x11111111, 0x20000004: 0x22222222})
+    link = FakeDapLink(FakeTarget(swd=False, jtag_dp_index=0, aps={0: ap}))
+    dap = RawDap(link)
+    dap.start("jtag", 1_000_000, jtag_chain=[4], dap_index=0)
+    dap.read_dpidr()
+    dap.power_up()
+    dap.mem_read32(0, 0x20000000)                                    # CSW・SELECT は先に済ませておく
+    before = link.flushes
+    dap.mem_write32_many(0, [(0x20000000, 0xA), (0x20000004, 0xB)])
+    assert link.flushes - before == 1 and (ap.words[0x20000000], ap.words[0x20000004]) == (0xA, 0xB)
+    before = link.flushes
+    assert dap.mem_read32_many(0, [0x20000004, 0x20000000]) == [0xB, 0xA]
+    assert link.flushes - before == 1
+    with pytest.raises(DapError):
+        dap.mem_read32_many(0, [0x20000000, 0x60000000])
+    assert dap.mem_write32_many(0, []) is None and dap.mem_read32_many(0, []) == []
+
+
+@pytest.mark.parametrize("protocol", ["jtag", "swd"])
+def test_writes_then_a_repeated_read_are_one_round_trip_over_jtag_and_counted(protocol):
+    """書きの後に同じ番地を繰り返し読む（コアの DCC の速いモード）: JTAG は 1 回の往復（誤りの確かめも同じ往復）。SWD は書きと
+    読みを分ける（値は同じ）。round_trips は RawDap が送った転送の往復を数える（計測用）。"""
+    ap = FakeMemAp(words={0x20000000: 0x11111111})
+    link = FakeDapLink(FakeTarget(swd=protocol == "swd", jtag_dp_index=0, aps={0: ap}))
+    dap = RawDap(link)
+    dap.start(protocol, 1_000_000, jtag_chain=[4], dap_index=0) if protocol == "jtag" else dap.start("swd", 1_000_000)
+    if protocol == "swd":
+        dap.switch_to_swd()
+    dap.read_dpidr()
+    dap.power_up()
+    dap.mem_read32(0, 0x20000000)
+    before, counted = link.flushes, dap.round_trips
+    assert dap.mem_write32_then_read_repeat(0, [(0x20000004, 0x5)], 0x20000000, 3) == [0x11111111] * 3
+    assert ap.words[0x20000004] == 0x5
+    if protocol == "jtag":
+        assert link.flushes - before == dap.round_trips - counted == 1
+        with pytest.raises(DapError):
+            dap.mem_write32_then_read_repeat(0, [(0x20000004, 0x6)], 0x60000000, 2)
+
+
 def test_dp_register_names_and_addresses():
     assert dp_address("ctrl/stat") == 4 and dp_address("TARGETID") == 0x24 and dp_address("0x34") == 0x34
     for bad in ("FOO", 0x3, 0x100):
@@ -141,3 +194,36 @@ def test_dp_register_names_and_addresses():
         dap.read_dp(0x28)                                                    # 0x8 にはバンクが無い
     with pytest.raises(ValueError):
         dap.read_ap(256, 0)
+
+
+def test_jtag_idle_cycles_are_set_only_when_given_and_after_the_connect():
+    link = FakeDapLink()
+    dap = RawDap(link)
+    dap.start("jtag", 4_000_000, [4], jtag_idle_cycles=8)
+    assert link.transfer_idle_cycles == [8]
+    dap.start("jtag", 4_000_000, [4])
+    assert link.transfer_idle_cycles == [8]                      # 与えなければ触らない（pyOCD の既定のまま）
+
+
+def test_idle_cycles_are_for_jtag_only():
+    with pytest.raises(ValueError):
+        RawDap(FakeDapLink()).start("swd", 1_000_000, jtag_idle_cycles=8)
+
+
+def test_starting_jtag_puts_the_tap_in_run_test_idle_so_the_first_transfer_does_not_assume_a_state_the_pins_changed():
+    # DAP_Connect で線を解放して取り直すと、TMS のプルアップ等で TAP の状態が変わりうる（PYNQ の PMOD で Pi 2B を読むと、IR スキャンが
+    # Shift-IR に入らず DPIDR が 0xFFFFFFFF になった）。start の最後に TMS = 1 を 6 回 → TMS = 0 で Run-Test/Idle に置く
+    link = FakeDapLink()
+    calls = []
+    real = link.jtag_sequence
+    link.jtag_sequence = lambda cycles, tms, read_tdo, tdi: (calls.append((cycles, tms)), real(cycles, tms, read_tdo, tdi))[1]
+    RawDap(link).start("jtag", 1_000_000, [4])
+    assert calls[-2:] == [(6, 1), (1, 0)]
+
+
+def test_starting_swd_sends_no_jtag_sequence():
+    link = FakeDapLink()
+    calls = []
+    link.jtag_sequence = lambda *a: calls.append(a)
+    RawDap(link).start("swd", 1_000_000)
+    assert calls == []

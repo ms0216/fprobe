@@ -20,9 +20,10 @@ import bisect
 import random
 import time
 from contextlib import contextmanager
-from types import SimpleNamespace
 
+from caps_fakes import FakeDeviceBase, caps_for
 from demo_recording import HALTS, HZ, ISRS, SPAN
+from fake_probe_contract import unsupported_arg
 from fprobe.api import NoData
 from fprobe.probe_profile import _ProfileResult, _ProfileRun
 from fprobe.probe_rtos import _TimelineResult, _TimelineRun
@@ -48,7 +49,8 @@ _HANDLE_TEXT = "0x"
 
 class _DemoSession:
     """本物の Probe の session の代わり（方法 pcsr の結果がタイムベースの速さを読む。機器は開かない）。"""
-    device = SimpleNamespace(capabilities=lambda: SimpleNamespace(timebase_hz=HZ))
+    device = FakeDeviceBase()
+    device.caps = caps_for(timebase_hz=HZ)
 
     def close(self) -> None:
         pass
@@ -140,7 +142,10 @@ class RtosDemo:
 
     def rtos_timeline_start(self, method="sampled", rate_hz=20_000.0, ap=0, swo_baud=None, core_clock_hz=None,
                             memory=False, tasks=None, mutexes=None, exceptions=False, memory_rate_hz=1000.0,
-                            kernel=True, caller=None):
+                            kernel=True, vector_table=None, vector_table_size=None, caller=None):
+        for arg, value in (("vector_table", vector_table), ("vector_table_size", vector_table_size)):
+            if value is not None:
+                raise unsupported_arg("rtos_timeline_start", arg, value)
         if method not in ("sampled", "itm"):
             raise ValueError("method は sampled か itm")
         if exceptions and method != "itm":
@@ -165,6 +170,11 @@ class RtosDemo:
         state["stopped"] = self._upto(state)
         result = self._timeline_result()
         return self._elf._timeline_dict(result, 0, 0, recorded=False)
+
+    def rtos_timeline_inversions(self, limit=100):
+        """本物の Probe の解析を、デモの時間軸（記録）に。"""
+        self._timeline_result()
+        return self._elf.rtos_timeline_inversions(limit)
 
     def rtos_timeline_get(self, offset=0, limit=200):
         self._timeline_result()
@@ -276,7 +286,9 @@ class RtosDemo:
                             "分からない。正確な様子は target_halt してから"]
         return out
 
-    def rtos_backtrace(self, task, variables=False, max_elements=64):
+    def rtos_backtrace(self, task, variables=False, max_elements=64, port=None):
+        if port is not None:
+            raise unsupported_arg("rtos_backtrace", "port", port)
         tasks = self.rtos_tasks(live=True)["tasks"]
         key = int(task, 16) if isinstance(task, str) and task.strip().lower().startswith(_HANDLE_TEXT) else task
         found = next((t for t in tasks if t["name"] == key or t["handle"] == key), None)
@@ -310,7 +322,11 @@ class RtosDemo:
             self._elf._session = saved
 
     def profile_start(self, method="itm", rate_hz=10_000.0, core_clock_hz=None, swo_baud=2_000_000,
-                      exception_trace=True, exception_rate_hz=1000.0, timestamps=None, ap=0, caller=None):
+                      exception_trace=True, exception_rate_hz=None, timestamps=None, ap=0, vector_table=None,
+                      vector_table_size=None, caller=None):
+        for arg, value in (("vector_table", vector_table), ("vector_table_size", vector_table_size)):
+            if value is not None:
+                raise unsupported_arg("profile_start", arg, value)
         if method not in ("itm", "pcsr"):
             raise ValueError("method は itm か pcsr")
         if method == "itm" and core_clock_hz is None:
@@ -400,10 +416,10 @@ class RtosDemo:
         with self._demo_session():
             return self._running(self._elf._profile_summary(result, "function", top, None))
 
-    def profile_result(self, by="function", top=20, function=None):
+    def profile_result(self, by="function", top=20, function=None, order="samples"):
         self._profile_result()
         with self._demo_session():
-            return self._running(self._elf.profile_result(by, top, function))
+            return self._running(self._elf.profile_result(by, top, function, order))
 
     def profile_coverage(self, functions=None, all_functions=False):
         self._profile_result()
@@ -414,16 +430,17 @@ class RtosDemo:
         return self._elf.profile_exceptions()
 
     def profile_aggregate(self, by="function", groups=None, t0_s=None, t1_s=None, t0=None, t1=None, top=20,
-                          function=None, separator=None):
+                          function=None, separator=None, order="samples"):
         self._profile_result()
         with self._demo_session():
-            return self._elf.profile_aggregate(by, groups, t0_s, t1_s, t0, t1, top, function, separator)
+            return self._elf.profile_aggregate(by, groups, t0_s, t1_s, t0, t1, top, function, separator, order)
 
     # --- 記録・ELF（本物の Probe にそのまま） -------------------------------------------------------
 
     # 記録の読み（recording_find・recording_query）は fake_demo_search.py（SearchDemo）
 
     def stack_static(self, su_paths=None, indirect=None, assume_address_taken=False, roots=None, entry=None,
-                     exception_frame=None, function=None, top=50, vector_table=None, vector_table_size=None):
+                     exception_frame=None, function=None, top=50, vector_table=None, vector_table_size=None,
+                     branch_tables=None):
         return self._elf.stack_static(su_paths, indirect, assume_address_taken, roots, entry, exception_frame,
-                                      function, top, vector_table, vector_table_size)
+                                      function, top, vector_table, vector_table_size, branch_tables)

@@ -29,10 +29,19 @@ architecture rtl of uart_tx is
   signal frame     : std_logic_vector(9 downto 0) := (others => '1');  -- LSB から送出
   signal bits_left : natural range 0 to 10 := 0;
   signal timer     : unsigned(DIVISOR_BITS - 1 downto 0) := (others => '0');
+  signal end_at    : unsigned(DIVISOR_BITS - 1 downto 0) := (others => '0');   -- divisor - 1
   signal bit_end   : boolean;
   signal ready     : std_logic;
 begin
-  bit_end <= timer >= divisor - 1;     -- 送信中に divisor を小さくされても通り過ぎない（= だと 2^N 周期止まる）
+  -- しきい値（divisor から求める）はレジスタに置く: 毎周期の引き算と比較が 1 周期に入り、sys を上げると遅い経路だった
+  -- （2026-10-29）。divisor はフレームの間に変えない設定なので、反映が 1 周期遅れても振る舞いは変わらない。
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      end_at <= divisor - 1;
+    end if;
+  end process;
+  bit_end <= timer >= end_at;          -- 送信中に divisor を小さくされても通り過ぎない（= だと 2^N 周期止まる）
   ready   <= '1' when bits_left = 0 or (bits_left = 1 and bit_end) else '0';
 
   process (clk)

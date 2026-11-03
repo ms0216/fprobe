@@ -82,8 +82,14 @@ def test_all_dfsr_bits_are_reported_beside_the_one_word_reason():
     assert fault.dfsr_bits(0) == []
 
 
+def _service_on(**host):
+    """サービスのメソッドを、偽のホスト（target・_dbg・_link）の上で呼ぶための self。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(_host=SimpleNamespace(**host))
+
+
 def test_probe_reads_the_halt_reason_from_dfsr_and_the_instruction_at_pc():
-    # Probe._halt_reason: DFSR と（BKPT なら）PC の命令を読む。デバッガが置いたブレークポイントと区別する
+    # TargetService._halt_reason（Probe が委ねる）: DFSR と（BKPT なら）PC の命令を読む。デバッガが置いたブレークポイントと区別する
     from types import SimpleNamespace
     from fprobe.mcp_server import Probe
 
@@ -98,12 +104,12 @@ def test_probe_reads_the_halt_reason_from_dfsr_and_the_instruction_at_pc():
         def read16(self, address):
             return self.code[address]
 
-    panic = SimpleNamespace(target=Core(0x02, {0x1003B5E0: 0xBE00}), _dbg=None, _link=None)
+    panic = _service_on(target=Core(0x02, {0x1003B5E0: 0xBE00}), _dbg=None, _link=None)
     assert Probe._halt_reason(panic, 0x1003B5E0) == {"halt_reason": "bkpt_instruction", "halt_bits": ["BKPT"]}
-    mine = SimpleNamespace(target=Core(0x03, {0x20000100: 0xBE00}), _dbg=SimpleNamespace(breakpoints={0x20000100: 1}), _link=None)
+    mine = _service_on(target=Core(0x03, {0x20000100: 0xBE00}), _dbg=SimpleNamespace(breakpoints={0x20000100: 1}), _link=None)
     assert Probe._halt_reason(mine, 0x20000100) == {"halt_reason": "breakpoint", "halt_bits": ["HALTED", "BKPT"]}
-    assert Probe._halt_reason(SimpleNamespace(target=Core(0x01, {}), _dbg=None, _link=None), 0x100)["halt_reason"] == "request"
-    assert Probe._halt_reason(SimpleNamespace(target=SimpleNamespace(), _dbg=None, _link=None), 0x100) == {}   # 読めない
+    assert Probe._halt_reason(_service_on(target=Core(0x01, {}), _dbg=None, _link=None), 0x100)["halt_reason"] == "request"
+    assert Probe._halt_reason(_service_on(target=SimpleNamespace(), _dbg=None, _link=None), 0x100) == {}   # 読めない
 
 
 def test_halt_reason_is_only_read_on_cortex_m():
@@ -113,11 +119,11 @@ def test_halt_reason_is_only_read_on_cortex_m():
     touched = []
     core = SimpleNamespace(read32=lambda a: touched.append(a) or 0x01, write32=lambda a, v: touched.append(a))
     for target in ("bcm2836", "rp2350_riscv"):
-        p = SimpleNamespace(target=core, _dbg=None, _link={"target": target})
+        p = _service_on(target=core, _dbg=None, _link={"target": target})
         assert Probe._halt_reason(p, 0x100) == {}
         Probe._clear_halt_reason(p)
     assert touched == []
-    p = SimpleNamespace(target=core, _dbg=None, _link={"target": "rp2040_core0"})
+    p = _service_on(target=core, _dbg=None, _link={"target": "rp2040_core0"})
     assert Probe._halt_reason(p, 0x100)["halt_reason"] == "request"
 
 
@@ -157,3 +163,12 @@ def test_each_cause_names_the_register_it_was_read_from():
     assert reg["PRECISERR"] == "BFSR" and reg["BFARVALID"] == "BFSR"
     assert reg["NOCP"] == "UFSR" and reg["DIVBYZERO"] == "UFSR"
     assert reg["FORCED"] == "HFSR" and reg["BKPT"] == "DFSR"
+
+
+def test_exception_says_whether_it_is_a_fault_exception():
+    """故障の例外の中か（IPSR 3〜7。アーキテクチャの定義）を API が返す。画面・AI は例外名の表を持たない（E1）。"""
+    for ipsr, fault_exception in ((3, True), (4, True), (5, True), (6, True), (7, True), (2, False), (11, False),
+                                  (15, False), (16, False)):
+        core = FakeCore({"xpsr": 0x01000000 | ipsr, "lr": 0x08000101, "msp": 0x20000F00, "psp": 0}, {})
+        assert fault.analyze(core)["exception"]["fault"] is fault_exception, ipsr
+    assert fault.analyze(FakeCore({"xpsr": 0x01000000, "lr": 0x08000101}, {}))["exception"] is None

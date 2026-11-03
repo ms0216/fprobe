@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 /* fprobe テストポイント: ターゲット側の出力（挿入ツールが写しの先頭で取り込む）。
  *
  *   FPROBE_TP(id)            ID だけ（関数の入口・出口・分岐）

@@ -5,10 +5,12 @@ use ieee.std_logic_1164.all;
 
 entity fprobe_core_harness is
   generic (
-    RESET_SPLIT : boolean := false
+    RESET_SPLIT : boolean := false;
+    EVENT_COUNT_START_BELOW_4G : natural := 0
   );
   port (
     clk            : in  std_logic;
+    cap_clk        : in  std_logic := '0';                -- CAP_RATIO >= 2 の構成の取り込みのクロック
     rst            : in  std_logic;
     ctrl_in_valid  : in  std_logic;
     ctrl_in_ready  : out std_logic;
@@ -38,7 +40,9 @@ entity fprobe_core_harness is
     aux_rx         : in  std_logic;
     sync_in        : in  std_logic;
     sync_out       : out std_logic;
-    -- CMSIS-DAP のパケットと SWD の線（ターゲットのモデル tests/models/swd_target.py をつなぐ）
+    testgen_out    : out std_logic;                        -- 試験用の方形波（LA_TESTGEN の構成だけ。ほかは 0・0）
+    testgen_oe     : out std_logic;
+    -- CMSIS-DAP のパケットと SWD / JTAG の線（ターゲットのモデル tests/models/swd_target.py・jtag_target.py をつなぐ）
     dap_in_valid   : in  std_logic;
     dap_in_ready   : out std_logic;
     dap_in_data    : in  std_logic_vector(7 downto 0);
@@ -49,7 +53,9 @@ entity fprobe_core_harness is
     dap_out_last   : out std_logic;
     swclk          : out std_logic;
     swdio          : out std_logic;
-    target_swdio   : in  std_logic
+    target_swdio   : in  std_logic;
+    tdi            : out std_logic;                        -- JTAG（SWDIO = TMS、SWCLK = TCK。tests/models/jtag_target.py をつなぐ）
+    tdo            : in  std_logic := '1'
   );
 end entity;
 
@@ -72,8 +78,10 @@ begin
                  LA_FILTER => work.test_caps_pkg.LA_FILTER, LA_PULSE => work.test_caps_pkg.LA_PULSE,
                  LA_INPUT_COUNT => work.test_caps_pkg.LA_INPUTS,
                  EVENT_RING_BITS => work.test_caps_pkg.EVENT_RING_BITS, SYNC => work.test_caps_pkg.SYNC,
-                 RESET_SPLIT => RESET_SPLIT)
-    port map (clk => clk, rst => rst,
+                 RESET_SPLIT => RESET_SPLIT, CAP_RATIO => work.test_caps_pkg.CAP_RATIO,
+                 LA_TESTGEN => work.test_caps_pkg.LA_TESTGEN, EVENT_BYTE_PACK => work.test_caps_pkg.EVENT_BYTE_PACK,
+                 EVENT_COUNT_START_BELOW_4G => EVENT_COUNT_START_BELOW_4G)
+    port map (clk => clk, cap_clk => cap_clk, rst => rst,
               ctrl_in_valid => ctrl_in_valid, ctrl_in_ready => ctrl_in_ready,
               ctrl_in_data => ctrl_in_data, ctrl_in_last => ctrl_in_last,
               ctrl_out_valid => ctrl_out_valid, ctrl_out_ready => ctrl_out_ready,
@@ -82,7 +90,7 @@ begin
               dap_in_data => dap_in_data, dap_in_last => dap_in_last, dap_out_valid => dap_out_valid,
               dap_out_ready => dap_out_ready, dap_out_data => dap_out_data, dap_out_last => dap_out_last,
               swclk_o => sclk, swclk_oe => sclk_oe, swdio_o => sdo, swdio_oe => sdo_oe, swdio_i => sdi, nreset_low => open, nreset_i => '1',
-              tdi_o => open, tdi_oe => open, tdo_i => '1',
+              tdi_o => tdi, tdi_oe => open, tdo_i => tdo,
               swo_i => '1', swo_out_valid => open, swo_out_ready => '1', swo_out_data => open,
               uart_baud => (others => '0'), uart_baud_load => '0', uart_in_valid => uart_in_valid,
               uart_in_ready => uart_in_ready, uart_in_data => uart_in_data,
@@ -91,7 +99,7 @@ begin
               la_inputs => la_inputs(maximum(work.test_caps_pkg.LA_INPUTS, 1) - 1 downto 0),
               xout_o => xout_o, xout_oe => xout_oe, xout_claim => xout_claim, xout_pin => xout_pin,
               gpio_drive => gpio_drive, gpio_enable => gpio_enable, gpio_level => gpio_level, aux_rx => aux_rx,
-              sync_in => sync_in, sync_out => sync_out,
+              sync_in => sync_in, sync_out => sync_out, testgen_out => testgen_out, testgen_oe => testgen_oe,
               stream_out_valid => stream_out_valid, stream_out_ready => stream_out_ready,
               stream_out_data => stream_out_data);
 end architecture;

@@ -95,6 +95,17 @@ def _normal_path(path: Path) -> Path:
     return Path(os.path.normpath(path))
 
 
+def source_path(directory: str, name: str, comp_dir: str | None) -> Path:
+    """行表の (ディレクトリ, ファイル名) → ソースの場所。相対ならコンパイルした場所（comp_dir）の下。
+    Windows の絶対（C:/… と UNC）は、どのホストでも絶対として扱う（POSIX 版の pathlib は C:/… を相対と見て、
+    comp_dir を前に連結してしまう）。"""
+    path = Path(directory) / name
+    absolute = path.is_absolute() or re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", directory) is not None
+    if not absolute and comp_dir:
+        path = Path(comp_dir) / path
+    return _normal_path(path)
+
+
 def is_network_path(path: str | Path) -> bool:
     """外の共有（UNC。円記号 2 つか // で始まる）。開くと認証が外へ出るので、ELF・ソースでは開かない。
     ただし Windows のローカルの長いパス（円記号 2 つ + "?" + 円記号 + ドライブ名）は除く。"""
@@ -227,10 +238,7 @@ class Symbols:
             for f in files:
                 index = f.dir_index or 0                            # DWARF 5 で番号が無いこともある
                 directory = dirs[index] if index < len(dirs) else ""
-                path = Path(directory) / f.name.decode()
-                if not path.is_absolute() and comp_dir:
-                    path = Path(_text(comp_dir.value)) / path
-                path = _normal_path(path)
+                path = source_path(directory, f.name.decode(), _text(comp_dir.value) if comp_dir else None)
                 paths.append(path)
                 same = sources.setdefault(path.name, [])
                 if path not in same:                                # 同じ名前の別のファイルも残す（どちらとも決めない）
@@ -276,6 +284,19 @@ class Symbols:
     def source_conflicts(self) -> dict[str, list[Path]]:
         """同じファイル名の別のファイル: 名前 → 場所の一覧（出た順）。"ファイル:行" はディレクトリを添えて選ぶ。"""
         return {name: list(paths) for name, paths in self._source_paths.items() if len(paths) > 1}
+
+    def line_place(self, location: str) -> dict | None:
+        """"ファイル:行" の場所 → {"file": 行表のファイルの名前（source_list の name。同じ名前の 2 つ目以降は same_name の
+        名前のまま）, "path": 行表の場所, "line": 行}。"ファイル:行" の形でない・解けなければ None（画面が場所の文字を
+        解釈しないための事実）。"""
+        if not is_line_location(location):
+            return None
+        file, _, line = location.strip().rpartition(":")
+        try:
+            path = self._source_for(file)
+        except KeyError:
+            return None
+        return {"file": path.name, "path": str(path), "line": int(line)}
 
     def _source_for(self, file: str) -> Path:
         """"ファイル:行" のファイルの部分 → 行表の場所。名前の同じファイルが複数なら、添えたディレクトリ（後ろから

@@ -133,3 +133,31 @@ async def a_read_error_on_any_word_of_the_beat_is_counted(dut):
     await wait_reads(dut, got, 1)
     await ClockCycles(dut.clk, 5)
     assert int(dut.errors.value) == 1
+
+
+@cocotb.test()
+async def wr_pending_counts_the_writes_whose_response_has_not_returned(dut):
+    # PS が DDR を直接読む構成（la_deep_buffer の ps_*）は、応答の来ていない書きの拍を「読める」と教えない。
+    # その数は、受けた書き − 返ってきた応答（B）。毎周期、模型の数え方と一致する
+    from cocotb.triggers import ReadOnly
+    mem, got = await setup(dut, seed=5)
+    state = {"expected": 0, "peak": 0}
+
+    async def monitor():
+        while True:
+            await ReadOnly()
+            # この周期の値（レジスタ）は、前の周期までの受理と応答を数えたもの
+            assert int(dut.wr_pending.value) == state["expected"], (int(dut.wr_pending.value), state["expected"])
+            state["peak"] = max(state["peak"], state["expected"])
+            accepted = dut.cmd_valid.value == 1 and dut.cmd_write.value == 1 and dut.cmd_ready.value == 1
+            responded = dut.m_axi_bvalid.value == 1 and dut.m_axi_bready.value == 1
+            state["expected"] += int(accepted) - int(responded)               # この周期の分は、次の周期の値に出る
+            await RisingEdge(dut.clk)
+
+    task = cocotb.start_soon(monitor())
+    for i in range(40):
+        await command(dut, True, 10 + i, 0xC0DE0000 + i)
+    await ClockCycles(dut.clk, 200)
+    task.cancel()
+    assert state["peak"] >= 2, state                                  # 応答待ちが重なる（模型が応答を遅らせる）
+    assert int(dut.wr_pending.value) == 0                              # 全部の応答が返ると 0

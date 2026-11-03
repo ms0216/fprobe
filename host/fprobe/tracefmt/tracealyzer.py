@@ -13,7 +13,9 @@ trcTimestamp.h・trcPrint.c・trcISR.c・trcTask.c・trcObject.c・kernelports/F
 
 確かでない点: 出来事のコードは FreeRTOS のポートのもの（platform 0x1AA1）。ほかの RTOS のポートはコードが違う
 （その場合は名前を付けずに "code 0x.." と生の値で出す）。ISR の拡張の形（ISR_BEGIN_EXT）は扱わない。時刻は
-増えるタイマ（type 1・5）を前提に 32 ビットで続け、減るタイマ・OS のタイマの形（type 2・3・4・6）は生の値。
+増えるタイマ（type 1・5）だけ 32 ビットで続け（Trace.unwrap の前提）、減るタイマ・OS のタイマの形（type 2・3・4・6）は
+時刻にしない（ts は順の番号、生の値は args の raw_ts。Trace.timed = False）。欠けた出来事の印（overflow）は前の出来事の
+時刻に置き、欠けた区間の両端を after_ts・before_ts に残す。
 RAM のスナップショット（RingBuffer のストリームポートの TraceRingBuffer_t。エントリの表が全部の枠で、出来事は
 コアごとの head / tail のリング）と、4.5 までのスナップショット（RecorderDataType）は読まない（形が流れと違い、
 細部を確かめられていない）。
@@ -22,6 +24,7 @@ RAM のスナップショット（RingBuffer のストリームポートの Trac
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 
 from ..logfmt.printf import Words, format_c
 from .model import Trace, TraceEvent
@@ -124,10 +127,15 @@ class TracealyzerDecoder:
         kind, period = struct.unpack_from(self._order + "II", self._buf)
         freq = int.from_bytes(self._buf[8:8 + w], "little" if self._order == "<" else "big")
         os_tick_hz = struct.unpack_from(self._order + "I", self._buf, 12 + w)[0]
-        self.trace.ts_hz = float(freq) if freq else None
-        self.trace.system.update(timer_type=kind, timer_period=period, os_tick_hz=os_tick_hz)
-        if kind not in (1, 5):
-            self.trace.notes.append(f"時刻の形 {kind}（減るタイマ・OS のタイマ）: 時刻は生の値で、続け方は確かでない")
+        self.trace.system.update(timer_type=kind, timer_period=period, timer_freq=freq, os_tick_hz=os_tick_hz)
+        if kind in (1, 5):
+            self.trace.ts_hz = float(freq) if freq else None
+        else:
+            # 減るタイマ・OS のタイマの値は、増える 32 ビットの時刻として続けられない（続け方を確かめていない）:
+            # 時刻にしない（ts は順の番号、生の値は args の raw_ts）
+            self.trace.timed = False
+            self.trace.notes.append(f"時刻の形 {kind}（減るタイマ・OS のタイマ）: 時刻として続けられないので、ts は"
+                                    "出来事の順の番号（生の値は args の raw_ts）")
         del self._buf[:size]
         self._stage = "table"
         return True
@@ -180,15 +188,26 @@ class TracealyzerDecoder:
         seq = count & (0xFFF if self.cores > 1 else 0xFFFF)
         modulus = 0x1000 if self.cores > 1 else 0x10000
         previous = self._counts.get(core)
+        before = self._ts
+        if self.trace.timed:
+            self._ts = self.trace.unwrap(self._ts, ts)
+        else:
+            self._ts = 0 if self._ts is None else self._ts + 1        # 順の番号（時刻ではない）
         if previous is not None:
             gap = (seq - previous - 1) % modulus
             if gap:
+                # 欠けた出来事は前の出来事（after_ts）と、この出来事（before_ts）の間のどこか。印は前の出来事の時刻に置く
+                # （その後のタスクの様子は分からない）
                 self.trace.lost += gap
-                out.append(self._add(TraceEvent(self._ts or ts, "overflow", "lost", None, {"missing": gap})))
+                at = before if before is not None else self._ts
+                out.append(self._add(TraceEvent(at, "overflow", "lost", None,
+                                                {"missing": gap, "after_ts": before, "before_ts": self._ts})))
                 self._current, self._isr_depth = None, 0
         self._counts[core] = seq
-        self._ts = self.trace.unwrap(self._ts, ts)
-        out.extend(self._add(e) for e in self._decode(code, words, raw, self._ts))
+        events = self._decode(code, words, raw, self._ts)
+        if not self.trace.timed:
+            events = [replace(e, args={**e.args, "raw_ts": ts}) for e in events]
+        out.extend(self._add(e) for e in events)
         return True
 
     def _add(self, event: TraceEvent) -> TraceEvent:

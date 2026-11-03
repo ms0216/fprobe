@@ -12,11 +12,12 @@ from ..toolchain.vivado import MmcmSolution
 from ..toolchain.programmer import JtagIdentity
 from ..toolchain.project import ClockConstraint, GowinIp, IoDelay, Pin
 
-__all__ = ["ETH_REF_CLK_PORT", "MEM_CLK_NET", "MEMORY_CLK_NET", "SYS_CLK_NET", "ULPI_CLK_PORT", "Board", "Ddr3",
+__all__ = ["CAP_CLK_NET", "ETH_REF_CLK_PORT", "MEM_CLK_NET", "MEMORY_CLK_NET", "SYS_CLK_NET", "ULPI_CLK_PORT", "Board", "Ddr3",
            "Ethernet", "UlpiTiming"]
 
 # トップ entity の信号名の規約（SDC がこの名前を参照する）
 SYS_CLK_NET = "sys_clk"        # PLL 出力のシステムクロック
+CAP_CLK_NET = "cap_clk"        # MMCM の 2 本目の出力（sys の整数倍。内蔵ロジアナの取り込み）
 ULPI_CLK_PORT = "ulpi_clk"     # ULPI PHY の CLKOUT（入力ポート）。usb ドメインのクロック
 MEM_CLK_NET = "mem_clk"        # メモリコントローラのユーザー側クロック（mem ドメイン）
 MEMORY_CLK_NET = "ddr3_memory_clk"   # DDR3 のメモリクロック（メモリ用 PLL の出力）
@@ -94,6 +95,8 @@ class Board:
     toolchain: str = "gowin"                 # ビルドの道具（"gowin" / "vivado"）
     # sys の生成クロックの元の端子（Vivado: MMCM の CLKOUT0）。None なら SYS_CLK_NET の配線で制約する（Gowin）
     sys_clock_pin: str | None = None
+    # 取り込みのクロック（MMCM の CLKOUT1。比は構成が選ぶ: sync_pll.cap_div(ratio)）の元の端子。無ければ None
+    cap_clock_pin: str | None = None
 
     def uart_flow(self) -> tuple[int, ...]:
         """RTS/CTS の端子の候補 j のロジアナのチャンネル（= pmod1 の番号）。ケイパビリティ UART_FLOW の中身。"""
@@ -128,6 +131,12 @@ class Board:
         if self.sys_clock_pin is not None:
             return ClockConstraint(SYS_CLK_NET, self.sys_clock_pin, "pin", self.sync_pll.fout_hz)
         return ClockConstraint(SYS_CLK_NET, SYS_CLK_NET, "net", self.sync_pll.fout_hz)
+
+    def cap_clock(self, ratio: int) -> ClockConstraint:
+        """取り込みのクロック cap_clk = sys × ratio（構成が選ぶ。sys と同じ MMCM の VCO から割った整数倍。関連クロックなので、
+        sys との間も時間検査される）。"""
+        assert self.cap_clock_pin is not None and isinstance(self.sync_pll, MmcmSolution)
+        return ClockConstraint(CAP_CLK_NET, self.cap_clock_pin, "pin", self.sync_pll.cap_hz(ratio))
 
     def ulpi_clock(self) -> ClockConstraint:
         return ClockConstraint(ULPI_CLK_PORT, ULPI_CLK_PORT, "port", ULPI_CLK_HZ)

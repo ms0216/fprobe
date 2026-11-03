@@ -9,23 +9,7 @@ import pytest
 from fprobe.la import Transitions
 from fprobe.mcp_server import Probe
 from fprobe.recording_sql import QueryError
-
-HZ = 100_000_000
-
-
-class FakeDevice:
-    def __init__(self):
-        self.ticks = 1_000_000
-
-    def time(self):
-        self.ticks += 1000
-        return self.ticks
-
-    def read32(self, address):
-        return 0                                     # イベント記録の容量 0 = 無い構成
-
-    def capabilities(self):
-        return SimpleNamespace(timebase_hz=HZ, board="fake", design="fprobe")
+from test_probe_recording import FakeDevice
 
 
 @pytest.fixture

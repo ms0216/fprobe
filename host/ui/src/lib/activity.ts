@@ -1,6 +1,6 @@
 // Activity（AI と人の操作の記録）の計算: 役割の絞り込み（AI / Human / Script / Hook）・誤りだけ、行 ↔ 記録の時刻
 // （記録中のデーモンは操作を記録の stream host の call として、操作の番号 seq と一緒に入れる）。Svelte に依らない。
-import type { DaemonConnection } from "./api";
+import type { DaemonConnection, Result } from "./api";
 import { queryCut, type QueryCut } from "./cut";
 import { nearestAtOrBefore } from "./timeline/events";
 import type { ActivityEntry } from "./state";
@@ -31,9 +31,10 @@ export class HostCallIndex {
   readonly keys: string[] = [];
   private byKey = new Map<string, number>();
 
-  constructor(rows: [number, unknown, unknown][]) {
-    for (const [t, seq, time] of [...rows].sort((a, b) => a[0] - b[0])) {
-      if (typeof seq !== "number" || typeof time !== "string") continue;
+  /** rows: recording.query（HOST_CALLS_SQL）の行 [t, seq, time] */
+  constructor(rows: Result<"recording.query">["rows"]) {
+    for (const [t, seq, time] of [...rows].sort((a, b) => Number(a[0]) - Number(b[0]))) {
+      if (typeof t !== "number" || typeof seq !== "number" || typeof time !== "string") continue;
       const key = callKey({ seq, time });
       this.times.push(t);
       this.keys.push(key);

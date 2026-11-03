@@ -2,6 +2,10 @@
 
 INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - まず `probe_info` でケイパビリティ（ロジアナのチャンネル数・深さ等）を確認する。
+- PC のファイルを実行する・書く引数（`la_decoder_load` の path、`linux_memap_connect` の xsdb、`la_export`・
+  `recording_export` 等の書き出しの path）は、利用者が決めた許可の表にあるものだけ通る。表は `session_permissions`
+  （読むだけ。AI からは変えられない）。断られたら（E_NOT_ALLOWED、data.reason = path_not_permitted）表にある場所を使うか、
+  利用者に表への追加を頼む。
 - ターゲットの操作は `target_connect` の後。target は pyOCD のターゲット名（例: stm32f401xe, cortex_m）。
   "auto" なら部品を判別して選ぶ。つながらないときは未接続で `target_diagnose`（電圧 → SWD / JTAG → DP → AP →
   部品 → 保護を順に調べ、段ごとに読めた事実。試す速さは frequencies_hz で渡す）。
@@ -35,7 +39,8 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - 拡張ヘッダの端子を直接動かす（未接続のときだけ）: `gpio_set` / `gpio_read` / `gpio_sequence`（値の列を書いて読む）、
   戻すのは `gpio_release`。SPI の相手（SPI Flash・センサー）は `spi_transfer`（端子 = ロジアナの ch、mode・語長。
   16 進の data を送り read_length 語を読む）。SPI Flash の消去・書き込みは Python のプラグイン `fprobe.plugins.spiflash`。
-- 長時間の波形（トリガなし）は `la_stream` で VCD に流し続ける。
+- 長時間の波形（トリガなし）は `la_stream` で VCD に流し続ける。溢れても止めずに続けるなら gaps = true（PYNQ の深いバッファ）:
+  回路が捨てた区間を gaps（位置と長さの事実。値は無い）で返す。
 - Flash: `target_flash`（書き込み・既定で検証・段ごとの速度）、`target_flash_erase`（range / chip / mass）、
   `target_flash_verify`（ファイルとの比較）、`target_flash_read`（読んで保存）、`target_flash_regions`（セクタの並び）、
   外付け Flash は `target_flash_algo_add`（.FLM）、速度は `target_flash_benchmark`。デバイスの定義が無ければ
@@ -69,7 +74,7 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   命令単位は `target_step`。止まったまま関数を試すなら `debug_call`（function と arguments。数・C の式・{"string": ...}。
   戻り値を返し、レジスタとスタックは元に戻る）。
 - 止まったら: `debug_backtrace`（variables=true で各段の引数とローカル変数も）、`debug_evaluate`（C の式。例
-  "head->samples[1]"、frame で呼び出し元の変数）、`debug_frame_variables`、書くのは `debug_write_expression`、
+  "head->samples[1]"、frame で呼び出し元の変数）、`debug_frame_variables`、書くのは `debug_write_expression`（走行中は止めずに書く。via が選んだ道）、
   型は `debug_type_info`。走らせたまま式を読むのは `debug_evaluate` の live=true（大域・静的。止めない）、ターゲット
   なしで式と型を調べるのは `debug_expression_check`（ELF だけ）。命令は `debug_disasm_text`（ソースの行を挟む。省略時は PC の前後）。
   読んだ値（evaluate・変数・watch・戻り値等）はどれも kind（値の種類。DWARF の型で決まる）を持つ object: int・float・
@@ -132,7 +137,7 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   `profile_start` の method pcsr で DWT_PCSR を読んでおく）の行と t との差・その間の幅、t の時点で記録された状態と前後の
   止まった出来事（止まった PC は正確）、動いていたタスク。行は推定しない（サンプルの間に何を実行したかは記録に無い）。
   材料の無いものは missing の理由。
-- 記録の集計・検索は `recording_query`（読み取り専用の SQL。表 events(t, t_end, stream, kind, a, b, body, unc)。時刻 t は
+- 記録の集計・検索は `recording_query`（読み取り専用の SQL。表 events(t, t_end, stream, kind, a, b, body, unc, rowid)。rowid は入れた順（同じ時刻の並びの鍵）。時刻 t は
   タイムベース（recording_status の timebase_hz、多くは 100 MHz）。body は json_extract で。a・b の意味は stream ごと:
   sample = a 番地・b 値（32 ビット）、fpga の kind value = a 組・b 生の値（信号は fpga_obs_signals_get の lsb・width で
   (b >> lsb) & ((1 << width) - 1)）、dap = a 番地・b データ、uart = b バイト。fpga の kind hidden = スナップショット型で
@@ -156,7 +161,8 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   無い変数（止まった watch・記録していないピン等。0 回は「原因でない」ではない）。reads = MCU のメモリの読みの事実
   （回数・間隔の分位・いちばん長い空白の時刻。結果の時刻は読みの間隔だけ遅れて見える）。gaps = データの欠け（reason:
   reads_missing MCU の読みの空白（gap_s を明示したときだけ。それより長い空白）・read_failed 読めなかった語・pins_missing ピンの無い区間・fpga_lost FPGA の欠落・
-  events_error 取り込みの失敗・recording_dropped 長期の記録の間引き。その間の結果・候補は数えられていない）。同じ時刻に成立する自動の候補は
+  events_error 取り込みの失敗・recording_dropped 長期の記録の間引き。その間の結果・候補は数えられていない。
+  pin_skew_unknown だけは欠けではなく、ピンの ch のずれが分からずずらさずに置いた区間で、結果から外さない）。同じ時刻に成立する自動の候補は
   1 つにまとめ same に。fpga_hidden = スナップショットの間で見えなかった FPGA の変化の数）。返すのは測った事実だけで、
   判定・経験則の順位づけはしない: preceded（結果の直前に候補があった割合）と coverage（記録のうち候補の後 window 以内に
   当たる時間の割合）を並べて、どう読むかは自分で決める（どちらも 1 に近い候補は、いつも起きているだけかもしれない）。
@@ -211,6 +217,26 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - 人の画面と同じところを見る・見せる: `ui_state_get`（時間軸の視点 view・カーソル 3 種・開いている段 rows・選んだ
   出来事 event・呼び出し履歴のフレーム frame）、`ui_state_set`（渡したものだけ変える。例: 異常の区間に view と
   cursors を置いて人に示す。人の画面がそこへ移る）。
+- Linux（Cortex-A。Raspberry Pi 2B 等）のアプリを JTAG の全コア停止で止めて調べる（gdb を使わない）: `linux_halt_open` →
+  `linux_halt_debug_attach`（pid・PC の上の ELF。全コアを止めたまま返る。max_halt_s を過ぎて呼び出しが無ければ全コアを走らせる）→
+  `linux_halt_debug_break_insert`（"race.c:11"・関数名・番地）→ `linux_halt_debug_run`（wait_s まで待つ。時間切れは走らせたまま）→
+  当たったら `linux_halt_debug_threads`（variables=true・expressions で、全スレッドの行・引数・局所変数・式を同じ時点で 1 回で読む）/
+  `linux_halt_debug_read`・`linux_halt_debug_memory`・`linux_halt_debug_step` → `linux_halt_debug_run`（wait_s=0 で再開）→
+  `linux_halt_debug_close`（BKPT を全部外し、全コアを走らせる）→ `linux_halt_close`。
+  attach の間は、人の画面（ソース・ブレークポイント・止まった場所・レジスタ・呼び出し履歴・変数・逆アセンブル）がそのプロセスを
+  描く（target_status の linux 欄。debug_* の道具もそのプロセスで答える）。止まった Pi は ssh に答えないので、PC に無いソースは
+  attach の fetch_from_target のとき（止める前）に取り寄せる。人の画面の道（行のクリック・ステップのボタン）は attach の
+  breakpoint_kind・step_max_instructions・step_timeout_s を使う（渡さなければ断る）。`linux_halt_debug_step` の timeout_s は必須。
+- 人の画面の様子と操作: `session_status`（利用者・一時停止・ターゲットの状態）・`session_activity_list`（操作の記録）。人の操作
+  （activity の role = human）と一時停止・再開は、次の道具の結果の notices にも添わる。人にパネルを見せるには
+  `ui_state_set` の panel（View メニューと同じ）。
+  `linux_gdb_batch` は対象の上の gdb を ssh で使い、JTAG・全コア停止は使わない（gdb の attach は ptrace でスレッドを 1 つずつ止め、
+  他のプロセスとコアは走り続ける）。
+  止めの事実（停止の応答の stop: 方式・コア間のずれの上限 skew_upper_bound_ns・根拠 basis・仮定 assumptions・仮定なしの上限）は
+  `linux_halt_open` の設定で変わる。実測（PYNQ-Z2 → Raspberry Pi 2B、2 スレッドのデータ競合のアプリ、ブレークポイントで止めた各 5 回、
+  2026-11-03）: FPGA の停止の見張り（open の fpga_halt_watch_bound_ns と fpga_halt_watch_poll_s）ありで上限 40.8〜61.3 µs（FPGA の時刻）、
+  見張りなし・fpga_request_times ありで 1.06〜1.55 ms（FPGA の時刻。仮定なしで 2.1〜2.6 ms）。データ競合など同時点の値が要るときは、
+  `linux_halt_open` で FPGA の見張り（fpga_halt_watch_bound_ns・fpga_halt_watch_poll_s）を付ける。見張りは PYNQ-Z2 の構成の回路にある。
 - 人間が画面から一時停止しているあいだ、操作の道具は再開まで待たされる（読むだけの道具は通る）。
 - 人間が IDE（GDB。デーモンの --gdb）で同じターゲットを同時にデバッグしていることがある: ターゲットは GDB からも
   止まる・動く。`debug_breakpoint_list` の location が "gdb:0x…" のものは GDB が置いたもの（外さない）。

@@ -8,8 +8,8 @@ import pytest
 import uvicorn
 
 from fake_daemon import FakeProbe
-from fprobe.api import (API_VERSION, E_DEVICE, E_INVALID_PARAMS, E_NO_DATA, E_NO_HELLO, E_NOT_CONNECTED, E_VERSION,
-                        NoData, NotConnected)
+from fprobe.api import (API_VERSION, E_DEVICE, E_INVALID_PARAMS, E_NO_DATA, E_NO_HELLO, E_NOT_ALLOWED, E_NOT_CONNECTED,
+                        E_PARSE, E_VERSION, NoData, NotConnected)
 from fprobe.api.client import ApiError, DaemonClient
 from fprobe.api.daemon import create_app
 
@@ -23,14 +23,14 @@ class FakeBackend(FakeProbe):
         self.halt_s = 0.01
         self.status_error: Exception | None = None
 
-    def target_halt(self):
+    def target_halt(self, core=None):
         time.sleep(self.halt_s)
-        return super().target_halt()
+        return super().target_halt(core)
 
     def la_view(self, start=0, end=None, width=1000):
         return {"levels": ["0" * width]}
 
-    def target_resume(self):
+    def target_resume(self, core=None):
         pass                                                         # すぐ同じ場所で止まり直す（ループの中のブレークポイント）
 
     def target_status(self):
@@ -51,7 +51,7 @@ class FakeBackend(FakeProbe):
     def target_voltage(self):
         return {"bad": object()}                                     # JSON にできない値
 
-    def target_reset(self, halt=False):
+    def target_reset(self, halt=False, kind="default"):
         raise SystemExit("機器の処理が BaseException を投げた")
 
 
@@ -177,6 +177,33 @@ def test_lan_requires_the_token(tmp_path):
         ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "session.hello",
                       "params": {"name": "x", "role": "ai", "api_version": API_VERSION}})
         assert ws.receive_json()["error"]["code"] == -32012
+
+
+def test_a_wrong_token_with_non_ascii_characters_is_refused_not_an_internal_error(tmp_path):
+    # secrets.compare_digest は ASCII でない str を比べられず TypeError を投げる（2026-11-03 の安全のレビュー）。LAN から届く
+    # 合言葉はどんな文字でも「違う」と答え、利用者が ASCII でない合言葉を --token で決めてもつなげること
+    from starlette.testclient import TestClient
+    hello = {"name": "x", "role": "ai", "api_version": API_VERSION}
+    app = create_app(FakeBackend(), token="s3cret", activity_dir=tmp_path)
+    with TestClient(app) as tc, tc.websocket_connect("/api") as ws:
+        ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": {**hello, "token": "合言葉"}})
+        assert ws.receive_json()["error"]["code"] == E_NOT_ALLOWED
+    app = create_app(FakeBackend(), token="合言葉", activity_dir=tmp_path)
+    with TestClient(app) as tc, tc.websocket_connect("/api") as ws:
+        ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "session.hello", "params": {**hello, "token": "合言葉"}})
+        assert "result" in ws.receive_json()
+
+
+def test_a_deeply_nested_frame_gets_a_parse_error_and_the_connection_survives(daemon):
+    # json.loads は深すぎる入れ子で ValueError でなく RecursionError を投げる。受信の輪から漏れると、応答なしで接続が切れていた
+    import websockets.sync.client
+    url, _ = daemon
+    with websockets.sync.client.connect(url) as ws:
+        ws.send("[" * 100_000 + "]" * 100_000)
+        assert json.loads(ws.recv(timeout=5))["error"]["code"] == E_PARSE
+        ws.send(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "session.hello",
+                            "params": {"name": "x", "role": "ai", "api_version": API_VERSION}}))
+        assert "result" in json.loads(ws.recv(timeout=5))
 
 
 def test_requests_fail_fast_after_the_connection_is_lost(daemon):
@@ -534,7 +561,7 @@ def test_operations_and_target_states_are_noted_for_the_recording(tmp_path):
     # 記録中なら、デーモンは操作の記録（AI と人）とターゲットの状態の変化を、機能の実装（Probe）の記録の口へ渡す
     backend = FakeBackend()
     noted = []
-    backend.record_host_event = lambda stream, kind, body: noted.append((stream, kind, body))
+    backend.record_host_event = lambda stream, kind, body, **kw: noted.append((stream, kind, body))
     url, _, stop = _serve(backend, tmp_path, watch_s=0.05)
     gui = DaemonClient(url, "gui", "human")
     gui.subscribe(["target.state"], lambda topic, data: None)
@@ -717,17 +744,6 @@ def test_binary_methods_are_refused_to_callers_that_cannot_take_frames(daemon):
     with pytest.raises(_Rpc) as e:
         asyncio.run(d.invoke(d.new_client("gdb", "human", "gdb"), "timeline.tiles", {}))
     assert e.value.code == E_NOT_ALLOWED
-
-
-def test_the_lan_token_is_kept_across_restarts(tmp_path):
-    """--lan の合言葉は、指定が無ければ保存したものを使い回す（デーモンを起動し直しても画面の URL が変わらない。
-    2026-10-18 に FPGA の書き替えでデーモンを止めるたびに URL が変わった）。--new-token で作り直す。"""
-    from fprobe.api.daemon import lan_token
-    first = lan_token(None, tmp_path)
-    assert first and lan_token(None, tmp_path) == first
-    assert lan_token("given", tmp_path) == "given" and lan_token(None, tmp_path) == first   # 指定は保存を変えない
-    renewed = lan_token(None, tmp_path, renew=True)
-    assert renewed != first and lan_token(None, tmp_path) == renewed
 
 
 class LinkBackend(FakeBackend):

@@ -107,8 +107,8 @@ class SearchDemo:
     def recording_mark(self, text, t=None, caller=None):
         return self._elf.recording_mark(text, t, caller)
 
-    def record_host_event(self, stream, kind, body):
-        self._elf.record_host_event(stream, kind, body)          # デーモンの操作の記録（記録中だけ書かれる）
+    def record_host_event(self, stream, kind, body, time_source="host", started_host_s=None):
+        self._elf.record_host_event(stream, kind, body, time_source, started_host_s)          # デーモンの操作の記録（記録中だけ書かれる）
 
     # --- 記録の一覧・開く・始める・止める（デモのフォルダの中で本物と同じに） ---------------------------
 

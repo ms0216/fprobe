@@ -55,7 +55,7 @@ def test_undefined_symbol_is_not_resolved_to_elf_header():
         site_of(DATA / "tick_arm", "/tmp/tick_arm", symbol="nanosleep@GLIBC_2.4")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-LINUX-02: プローブ名の正規表現が ^...$ + match で、末尾の改行を通す（シェルの命令が割れる）")
+# BUG-LINUX-02（修正済み。2026-11-03 の安全のレビュー）
 def test_probe_name_rejects_trailing_newline():
     assert NAME.match("abc\n") is None
 
@@ -82,7 +82,7 @@ def test_gdb_batch_rejects_nonpositive_timeout(monkeypatch, tmp_path, bad):
         p.linux_gdb_batch(target="t", commands=["bt"], timeout_s=bad, pid=1)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-LINUX-06: SshTarget の user が - で始まると ssh のオプションとして解釈される（ProxyCommand 等）")
+# BUG-LINUX-06（修正済み。2026-11-03 の安全のレビュー）
 def test_ssh_user_cannot_become_option():
     try:
         argv = SshTarget("host", "-oProxyCommand=calc").argv("true")
@@ -90,6 +90,24 @@ def test_ssh_user_cannot_become_option():
         return
     dest = next(a for a in argv if a.endswith("@host"))
     assert argv[argv.index(dest) - 1] == "--"
+
+
+@pytest.mark.parametrize("user, host", [("u", "-oProxyCommand=calc"), ("u", "h ost"), ("u", ""), ("", "h"),
+                                        ("u\n", "h"), ("u", "h\n-oProxyCommand=calc")])
+def test_ssh_destination_cannot_carry_options_or_separators(user, host):
+    # host も user と同じく目的地の 1 語。- で始まる・空白・制御文字・空は ssh/scp の引数を割るので断る
+    with pytest.raises(ValueError):
+        SshTarget(host, user)
+
+
+def test_probe_add_target_name_cannot_escape_the_linux_home(monkeypatch, tmp_path):
+    ssh = StubSsh()
+    p = _probe(monkeypatch, tmp_path, ssh)
+    p._linux["../../escape"] = p._linux["t"]
+    with pytest.raises(ValueError):
+        p.linux_probe_add(target="../../escape", name="tick", binary="/tmp/tick_arm", symbol="tick", method="ptrace",
+                          pid=1)
+    assert ssh.gets == []                                 # 取り寄せる前に断る
 
 
 @pytest.mark.xfail(strict=True, reason="BUG-LINUX-07: uprobe_events に書いた後の enable が失敗すると、カーネルに行が残り、プローブ表にも無い")
@@ -103,14 +121,14 @@ def test_probe_add_uprobe_failure_does_not_leak_kernel_event(monkeypatch, tmp_pa
     assert cleaned or tracked
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-LINUX-08: binary の .. が sysroot の外に出る（lstrip('/') だけで正規化しない）")
+# BUG-LINUX-08（修正済み。2026-11-03 の安全のレビュー）
 def test_probe_add_binary_cannot_escape_sysroot(monkeypatch, tmp_path):
     ssh = StubSsh()
     p = _probe(monkeypatch, tmp_path, ssh)
     try:
         p.linux_probe_add(target="t", name="tick", binary="/../../escape/tick", symbol="tick", method="ptrace", pid=1)
-    except Exception:                                   # noqa: BLE001  後ろの失敗は問わない（取り寄せた先だけ見る）
-        pass
+    except ValueError:                                  # 断るなら取り寄せる前に
+        assert ssh.gets == []
     sysroot = (tmp_path / "home" / "linux" / "t" / "sysroot").resolve()
     for _, local in ssh.gets:
         assert local.resolve().is_relative_to(sysroot), local

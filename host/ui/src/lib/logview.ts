@@ -42,6 +42,23 @@ export function locationText(loc: { file?: string; line?: number; module?: strin
   return [where, loc.function].filter(Boolean).join(" ");
 }
 
+/** 受け取りの様子の行（log.status。docs/superpowers/specs/2026-11-02-ui-default-panels-design.md §4.4）: API の名前と値の
+ *  まま。解読できなかった数（errors）も出す（欠けを見せる）。まだ一度も始めていない（{running: false} だけ）なら null */
+export function logStatusItems(s: any): [string, string][] | null {
+  if (!s || s.format === undefined) return null;
+  const out: [string, string][] = [];
+  const add = (k: string, v: unknown) => { if (v !== undefined && v !== null) out.push([k, String(v)]); };
+  add("format", s.format);
+  add("source", s.source);
+  add("records", s.records);
+  add("kept", s.kept);
+  for (const [k, n] of Object.entries(s.kinds ?? {})) add(`kinds.${k}`, n);
+  add("errors", s.errors);
+  add("bytes", s.bytes);
+  add("recorded", s.recorded);
+  return out;
+}
+
 export class LogView {
   records: LogRecord[] = [];
   dropped = 0;

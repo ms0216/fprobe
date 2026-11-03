@@ -68,6 +68,7 @@ class EvalContext:
     address_of_index: Callable[[int], int] | None = None   # DW_OP_addrx（.debug_addr）
     base_type: Callable[[int], tuple[int, bool]] | None = None   # DW_OP_convert: CU 内の DIE の位置 → (バイト数, 符号付き)
     extras: dict = field(default_factory=dict)
+    load_bias: int = 0                           # 実行時の番地 − リンク時の番地（PIE・共有ライブラリ）。DW_OP_addr・addrx に足す
 
 
 def register_width(number: int) -> int:
@@ -155,11 +156,14 @@ def _run(ops: Sequence, context: EvalContext, stack: list[int]) -> Place:
         elif name in ("DW_OP_addr", "DW_OP_const1u", "DW_OP_const2u", "DW_OP_const4u", "DW_OP_const8u",
                       "DW_OP_constu", "DW_OP_const1s", "DW_OP_const2s", "DW_OP_const4s", "DW_OP_const8s",
                       "DW_OP_consts"):
-            stack.append(args[0] & (MASK if name == "DW_OP_addr" else WIDE_MASK))
+            stack.append((args[0] + context.load_bias) & MASK if name == "DW_OP_addr" else args[0] & WIDE_MASK)
         elif name in ("DW_OP_addrx", "DW_OP_GNU_addr_index", "DW_OP_constx", "DW_OP_GNU_const_index"):
             if context.address_of_index is None:
                 raise NotAvailable(f"{name} を解く .debug_addr が無い")
-            stack.append(context.address_of_index(args[0]))
+            index_value = context.address_of_index(args[0])
+            # DW_OP_addrx は .debug_addr の番地（リンク時）。DW_OP_constx は定数（ずらさない）
+            stack.append((index_value + context.load_bias) & MASK if name in ("DW_OP_addrx", "DW_OP_GNU_addr_index")
+                         else index_value)
         elif name.startswith("DW_OP_reg") and name != "DW_OP_regx" and not name.startswith("DW_OP_regval"):
             current = RegisterPlace(int(name[9:]))
         elif name == "DW_OP_regx":

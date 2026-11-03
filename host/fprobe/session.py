@@ -14,6 +14,7 @@ DAP（ch 1）と SWO（ch 2）を pyOCD に渡す。
 """
 
 from collections.abc import Callable, Sequence
+from types import MethodType
 
 import usb.core
 import usb.util
@@ -29,13 +30,23 @@ from pyocd.utility.concurrency import locked
 from pyocd.probe.pydapaccess.interface.pyusb_v2_backend import PyUSBv2, _match_cmsis_dap_v2_interface
 
 from . import generated as g
-from .device import LINK_UP_S, Device
+from .device import Device
 from .pyocd_targets import register
-from .frame_link import CH_DAP, CH_SWO, MAX_PAYLOAD, FrameLink
+from .frame_link import CH_DAP, CH_STREAM, CH_SWO, CH_UART0, MAX_PAYLOAD, FrameLink
 from .serial_link import DEFAULT_BAUD, SerialLink
 from .transport import LinkTransport, UsbTransport, find_device
 
-__all__ = ["SWO_MODES", "LinkDapInterface", "Session", "swo_start"]
+__all__ = ["SWO_MODES", "LinkDapInterface", "Session", "link_buffer_bytes", "swo_start"]
+
+
+def link_buffer_bytes() -> dict[int, int]:
+    """フレームのリンクのバイト列のチャンネルごとに、PC に溜める上限（FrameLink の buffer_bytes）。値と根拠:
+    - STREAM（ch 4）: la.STREAM_BUFFER_BYTES（消費側 LaStream の 1 回の読みの 2 倍 = 二重のバッファ。根拠はそこ）。
+    - SWO（ch 2）・UART0（ch 3）: 4 MB。消費側（pyOCD の SWO の読み手・uart_read）が読まない間に溜める量の上限で、それを超えた
+      フレームは捨てて数える（StreamBuffer.dropped_frames・dropped_bytes。黙って捨てない）。どちらの線も 2 Mbaud（約 200 KB/s）
+      以下なので、約 20 秒読まれなくても欠けない量。値はメモリの上限を決めるだけで、欠けたかどうかは数えた事実で返る。"""
+    from .la import STREAM_BUFFER_BYTES
+    return {CH_SWO: 4 << 20, CH_UART0: 4 << 20, CH_STREAM: STREAM_BUFFER_BYTES}
 
 
 class _SharedPyUSBv2(PyUSBv2):
@@ -104,7 +115,8 @@ class LinkDapInterface(Interface):
         return True
 
     def open(self):
-        self._link.discard(CH_DAP)
+        # 前の利用者が時間切れで残した応答を読まない（必要なら柵で同期し直す。frame_link の説明）
+        self._link.discard(CH_DAP, fence_timeout_s=self.DEFAULT_USB_TIMEOUT_S)
         self.closed = False
 
     def close(self):
@@ -163,18 +175,28 @@ def _pipelined_read_memory_block32(self: MEM_AP, addr: int, size: int) -> Sequen
         return [w for result in results for w in result()]
     except exceptions.TransferError as error:
         self._handle_error(error, self.dp.next_access_number)
-    return _original_read_memory_block32(self, addr, size)        # 誤りの場所を特定して報告する
+    return self._read_memory_block32(addr, size)                   # 誤りの場所を特定して報告する（元の方法）
 
 
-_original_read_memory_block32 = MEM_AP._read_memory_block32
+def _attach_pipelined_reads(session: PyocdSession) -> None:
+    """開いた pyOCD のセッションの MEM-AP のブロック読み出しを先送り版にする（その AP にだけ。pyOCD のクラスは変えない）。
+
+    AP は開くとき（探索）に作られ、生成時に _read_memory_block32 を read_memory_block32 に束ねる。プローブが加速の口を
+    出した AP（read_memory_block32 が _accelerated_*）はそのまま。
+    ponytail: pyOCD 0.45 の MEM_AP の内部（_read_memory_block32 の束ね・_reg_offset・_csw）に頼る。pyOCD を上げて
+    内部が変わったら test_dap_perf_hw の読み比べで分かる。上流に入れば消す。"""
+    for ap in session.target.aps.values():
+        if isinstance(ap, MEM_AP) and ap.read_memory_block32 == ap._read_memory_block32:
+            ap.read_memory_block32 = MethodType(_pipelined_read_memory_block32, ap)
 
 
-def _install_pipelined_reads() -> None:
-    """pyOCD の MEM-AP のブロック読み出しを先送り版にする（以後に作られる AP が使う。何度呼んでもよい）。
+class _PipelinedPyocdSession(PyocdSession):
+    """開いた後に、そのセッションの AP にだけ先送りの読み出しを付ける pyOCD のセッション（with でも open でも）。"""
 
-    ponytail: pyOCD 0.45 の MEM_AP._read_memory_block32 を置き換える（AP は生成時にこれを read_memory_block32 に
-    束ねる）。pyOCD を上げて内部が変わったら test_dap_perf_hw の読み比べで分かる。上流に入れば消す。"""
-    MEM_AP._read_memory_block32 = _pipelined_read_memory_block32
+    def open(self, init_board: bool = True) -> None:
+        super().open(init_board)
+        if init_board:
+            _attach_pipelined_reads(self)
 
 
 SWO_MODES = {"uart": DAPSWOMode.UART, "manchester": DAPSWOMode.MANCHESTER}
@@ -244,8 +266,8 @@ class Session:
 
     @classmethod
     def open_serial(cls, port: str, baud: int = DEFAULT_BAUD) -> "Session":
-        """SerialLink（UART のホストリンク）の COM ポート port で開く。"""
-        link = SerialLink.open(port, baud)
+        """SerialLink（UART のホストリンク）の COM ポート port で開く。PC に溜める上限は link_buffer_bytes（根拠はそこ）。"""
+        link = SerialLink.open(port, baud, buffer_bytes=link_buffer_bytes())
         try:
             device = Device(LinkTransport(link))
         except BaseException:
@@ -255,12 +277,22 @@ class Session:
                    address={"link": "serial", "address": port})
 
     @classmethod
-    def open_eth(cls, host: str, port: int | None = None) -> "Session":
-        """EthLink（UDP のホストリンク）でボードの IP アドレス host に開く。"""
-        from .eth_link import DEFAULT_PORT, EthLink
-        link = EthLink.open(host, port or DEFAULT_PORT)
+    def open_eth(cls, host: str, port: int | None = None, *, link_up_wait_s: float, stream_tcp: bool = True,
+                 stream_buffer_bytes: int | None = None) -> "Session":
+        """EthLink（UDP のホストリンク）でボードの IP アドレス host に開く。PYNQ の中継には、byte チャンネルのフレームを
+        1 つの UDP にまとめて送るよう頼む（eth_link.BUNDLE_BYTES。ほかのボードは無視する）。PS が DDR を直接読めるボード
+        （ケイパビリティ la_stream_ps）では、ストリームを TCP でも受ける（stream_tcp = False で UDP のまま）。
+        stream_buffer_bytes: TCP のストリームを PC に溜める上限（EthLink.open_stream_tcp の buffer_bytes）。None = la.STREAM_BUFFER_BYTES
+        （消費側の 1 回の読みの 2 倍。根拠はそこ）。
+        link_up_wait_s: リンクの確立を待つ秒数（識別の READ をこの間だけ送り直す。Device の identify_wait_s。使う側が明示する。
+        送り直した回数は device.identify_resends）。"""
+        from .eth_link import BUNDLE_BYTES, DEFAULT_PORT, EthLink
+        from .la import STREAM_BUFFER_BYTES
+        link = EthLink.open(host, port or DEFAULT_PORT, bundle_bytes=BUNDLE_BYTES, buffer_bytes=link_buffer_bytes())
         try:
-            device = Device(LinkTransport(link), wait_s=LINK_UP_S)
+            device = Device(LinkTransport(link), identify_wait_s=link_up_wait_s)
+            _maybe_open_stream_tcp(link, device.capabilities(), stream_tcp,
+                                   STREAM_BUFFER_BYTES if stream_buffer_bytes is None else stream_buffer_bytes)
         except BaseException:
             link.close()
             raise
@@ -274,12 +306,11 @@ class Session:
         jtag_chain: JTAG チェーンの IR 長（装置 0 = TDO 側から。例: STM32 は [4, 5]）。指定すると JTAG で接続する
         （pyOCD 自体にはチェーンの指定が無く、IR 4 の 1 台を仮定するため）。"""
         register()
-        _install_pipelined_reads()
         link = _ChainedDapAccess(None, interface=self._dap_interface())
         if jtag_chain is not None:
             link.jtag_chain = list(jtag_chain)
             options.setdefault("dap_protocol", "jtag")
-        return PyocdSession(CMSISDAPProbe(link), **options)
+        return _PipelinedPyocdSession(CMSISDAPProbe(link), **options)
 
     def dap_access(self) -> DAPAccessCMSISDAP:
         """pyOCD のターゲットを作らずに CMSIS-DAP の層（DAP の接続口）を開いて返す。低レベルの道具・接続の診断が使う
@@ -290,11 +321,21 @@ class Session:
         return link
 
     def close(self) -> None:
-        self.device.close()
-        self._release()
+        """機器の口とリンクを閉じる（機器の口を閉じるのに失敗しても、リンクは必ず閉じる）。"""
+        try:
+            self.device.close()
+        finally:
+            self._release()
 
     def __enter__(self) -> "Session":
         return self
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+def _maybe_open_stream_tcp(link, caps, enabled: bool, buffer_bytes: int) -> None:
+    """PS が DDR を直接読めるボード（la_stream_ps）では、ストリームを TCP でも受ける（PC に溜める上限 buffer_bytes）。ほかのボード・
+    呼び手が断ったときは何もしない。"""
+    if enabled and caps.la_stream_ps:
+        link.open_stream_tcp(buffer_bytes=buffer_bytes)

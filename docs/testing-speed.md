@@ -23,3 +23,25 @@
 `pip install pytest-xdist` のうえ `FPROBE_SIM_JOBS=1 pytest gateware/tests -n 6` とすると、試験の関数単位でも並列になる
 （`test_fprobe_core` の 12 通りなど、モジュールを分けても並ばない分）。`-n` と `FPROBE_SIM_JOBS` を両方大きくするとコアを奪い合う。
 ホストも `pytest host -n auto` で並べられるが、daemon・ポートを使う試験の衝突は未確認。
+
+## 速さの約束の試験は別に走らせる（`perf` の印、2026-11-03）
+
+`perf_budget.within` で「この量をこの時間以内」を測る試験 7 件（`test_la_vcd_perf`・`test_recording_vcd_perf`・`test_recording` の 100 万件・
+`test_waveform`・`test_decode_swd`・`test_decode_uart`）に `@pytest.mark.perf` を付け、**既定の `pytest` から外した**（`host/pyproject.toml` の
+`addopts = "-m 'not perf'"`）。速さの約束だけを続けて走らせる:
+
+```sh
+cd host
+pytest              # 機能の試験（perf を除く。約 4 分半）
+pytest -m perf      # 速さの約束だけ（別のプロセス。約 12 秒）
+```
+
+- 理由: 全体の実行（5000 件超）の中では、ほかの試験の後始末（残ったスレッド・メモリ・ディスクの書き）と PC の混み具合が測りに混ざり、
+  上限を超えて落ちることがあった（C と利用者の手元）。`perf_budget.within` の測り直し（最良の回で比べる）では、混みが長く続くと救えない。
+  別のプロセスで続けて走らせると、ほかの試験と同時でも、直前の試験の後始末とも混ざらない。約束（上限）は緩めない。
+- 機能の試験を `-n`（xdist）で並べる場合も、`pytest -m perf` は `-n` を付けずに走らせる（並べると測りが揺れる）。
+- 一つの試験を指定するときも、`perf` は `-m perf` が要る（`pytest tests/test_waveform.py -m perf`。無いと「deselected」になる）。
+- 付け忘れは `test_perf_budget.py::test_every_test_that_measures_a_budget_with_within_is_marked_perf` が落ちて分かる。
+- 実測（負荷は CPU を回し続けるプロセスを並べた。4 コア）: 2 ファイル（`test_la_vcd_perf`・`test_recording_vcd_perf`）を単独で走らせて、
+  負荷なし 0/20、負荷 4 本 0/20、負荷 12 本 **1/20** 失敗（3 件とも上限超え）。つまり、別に走らせても、走らせる間に PC が極端に混めば落ちる。
+  perf の実行は、ほかの重い作業と同時にしないこと。

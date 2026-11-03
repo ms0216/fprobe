@@ -15,6 +15,7 @@ from fprobe.la import (DeepAnalyzer, SegmentSplitter, StreamFormatError, decode_
 from fprobe.recording import Recorder, Recording
 from fprobe.recording_stream import LaRecordingStream
 from test_la_stream import FakeStreamDevice, raw_source
+from caps_fakes import FakeDeviceBase, with_caps
 
 EV_CAPACITY = 1 << 19
 
@@ -57,18 +58,22 @@ class FakeMixedDevice(FakeStreamDevice):
         self.ends, self.written_events, self.post = ends, written_events, None
 
     def capabilities(self):
-        return SimpleNamespace(mem_bytes=128 << 20, la_channels=16, la_sample_hz=100_000_000, la_stream_events=True)
+        return with_caps(super().capabilities(), la_stream_events=True)
 
     def write32(self, address, value):
         if address == g.LA_DEEP_POST_BEATS:
             self.post = value
         super().write32(address, value)
 
+    def read(self, address, count, *, timeout_retries=0):
+        if address == g.EVENTS_WRITTEN:
+            assert count == 4
+            return [self.written_events & 0xFFFFFFFF, 0, EV_CAPACITY, self.written_events >> 32]
+        return super().read(address, count)
+
     def read32(self, address):
         if address == g.EVENTS_CAPACITY:
             return EV_CAPACITY
-        if address == g.EVENTS_WRITTEN:
-            return self.written_events
         return super().read32(address)
 
     def _write_beats(self, n):
@@ -194,10 +199,17 @@ class FakeEventLog:
         return decode_events(b"".join(event(i) for i in range(end - last, end)))
 
 
+class ClockDevice(FakeDeviceBase):
+    """タイムベースだけを読む偽の機器（取り込みの手渡しはリングを読まない）。"""
+
+    def time(self):
+        return 5000
+
+
 def test_collector_hands_over_and_takes_back(tmp_path):
     rec = Recorder(tmp_path / "c", timebase_hz=100e6)
     log = FakeEventLog(written=30)
-    collector = Collector(SimpleNamespace(time=lambda: 5000), rec, events=log)
+    collector = Collector(ClockDevice(), rec, events=log)
     collector._seen = 20
     seen, carry = collector.hand_over()                            # 20〜29 を取り込んでから渡す
     assert (seen, carry) == (30, None) and log.reads == [(10, 30)]
@@ -221,8 +233,7 @@ class ProbeMixedDevice(FakeMixedDevice):
         self._count = 0
 
     def capabilities(self):
-        return SimpleNamespace(mem_bytes=128 << 20, la_channels=16, la_sample_hz=100_000_000, la_stream_events=True,
-                               timebase_hz=100_000_000, board="fake", design="fprobe_la")
+        return with_caps(super().capabilities(), design="fprobe_la")
 
     def time(self):
         self.now += 1000
@@ -231,10 +242,6 @@ class ProbeMixedDevice(FakeMixedDevice):
     def write(self, address, words):
         if address == g.LA_DEEP_READ_FIRST:
             self._count = words[1]
-
-    def read(self, address, count):
-        assert address == g.EVENTS_WRITTEN and count == 2
-        return [self.written_events, 0]
 
     def read32(self, address):
         if address in (g.LA_DEEP_RING_BEATS, g.LA_DEEP_STATUS, g.LA_DEEP_STREAM_BEATS, g.EVENTS_CAPACITY,

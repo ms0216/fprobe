@@ -121,7 +121,9 @@ class ZephyrObjects:
         if active:
             remaining, stopped = self._remaining(node)
             if remaining is not None:
+                # 期限の差分の列の和: 最後のティックの告知からの経過（announce の残り）を含まない（引いていない）
                 fields["remaining_ticks"] = remaining
+                fields["remaining_excludes"] = ["elapsed_since_last_announce"]
             elif stopped:                                             # 上限で止めた: 残りは分からない（無いのではない）
                 fields["remaining_truncated"] = True
                 self._notes.append(f"timeout_list を辿る上限 {MAX_ITEMS} 個に達したので止めた（この節まで届かず、"

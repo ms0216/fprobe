@@ -54,6 +54,8 @@ class JtagDp(Bypass):
     def __init__(self, wait_after_ap: int = 0, **registers):
         self.regs = SwdTarget(SimpleNamespace(target_swdio=SimpleNamespace(value=None)), **registers)
         self.result = 0                       # 直前の読みの結果（次のスキャンで返す）
+        self.all_ones = 0                     # 続く all_ones 回の DPACC / APACC のスキャンは捕捉値が全部 1 で、要求を実行しない（TDO が浮いた等）
+        self.dropping = False
         # AP の転送を受けた後、続く wait_after_ap 回の DPACC / APACC のスキャンは WAIT を返し、そのスキャンの要求は捨てる
         # （ADIv5: 前の転送が終わっていない。実機の Cortex-A7 の DCC の速い読みで起きる）。WAIT のスキャンの値は不定
         self.wait_after_ap = wait_after_ap
@@ -69,6 +71,10 @@ class JtagDp(Bypass):
         return super().dr_length()
 
     def capture_dr(self) -> int:
+        self.dropping = self.all_ones > 0 and self.ir in (self.IR_DPACC, self.IR_APACC)
+        if self.dropping:
+            self.all_ones -= 1
+            return (1 << 35) - 1
         if self.ir in (self.IR_DPACC, self.IR_APACC):
             self.waiting = self.busy > 0
             if self.waiting:
@@ -78,7 +84,7 @@ class JtagDp(Bypass):
         return super().capture_dr()
 
     def update_dr(self, value: int):
-        if self.ir not in (self.IR_ABORT, self.IR_DPACC, self.IR_APACC):
+        if self.ir not in (self.IR_ABORT, self.IR_DPACC, self.IR_APACC) or self.dropping:
             return
         if self.ir != self.IR_ABORT and self.waiting:
             self.busy -= 1                                # WAIT のスキャン: 要求は捨てる

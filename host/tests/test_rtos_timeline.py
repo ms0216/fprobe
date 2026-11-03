@@ -215,3 +215,65 @@ def test_sampled_resolution_is_the_achieved_interval_when_the_sampler_is_slower(
     samples = [(100 * i, h) for i, h in enumerate([IDLE] * 5 + [A] * 3 + [IDLE] * 2)]
     tl = timeline_from_samples(samples, NAMES, period=20)
     assert tl.resolution == 100 and not tl.gaps and len(tl.switches) == 2
+
+
+# --- 時刻の事実（段 H2: 観測の端・抜けの端の区間、分からない分解能） -----------------------------------------------
+
+def test_sampled_edges_cut_by_the_observation_are_marked_and_not_given_zero_uncertainty():
+    tl = timeline_from_samples(sampled([IDLE] * 3 + [A] * 2), NAMES)
+    first, last = tl.runs
+    assert first.start_cut and not first.end_cut and first.uncertainty == 50       # 始めは最初のサンプル（本当の始めではない）
+    assert last.end_cut and not last.start_cut and last.uncertainty == 50
+    only = timeline_from_samples(sampled([A] * 4), NAMES).runs[0]
+    assert only.start_cut and only.end_cut and only.uncertainty is None             # 両端とも観測の端: 0 にしない
+
+
+def test_sampled_runs_next_to_a_gap_are_cut():
+    samples = sampled([IDLE] * 3) + sampled([A] * 3, t0=10_000)
+    tl = timeline_from_samples(samples, NAMES, gap=250)
+    assert [(r.start_cut, r.end_cut) for r in tl.runs] == [(True, True), (True, True)]
+
+
+def test_itm_runs_closed_by_the_end_or_an_overflow_are_cut():
+    events = [TaskEvent(0, "task_in", A), TaskEvent(100, "task_out", A), TaskEvent(150, "task_in", B),
+              TaskEvent(200, "overflow"), TaskEvent(400, "task_in", C)]
+    tl = timeline_from_events(events, NAMES, resolution=5, t_end=900)
+    assert [(r.task, r.start_cut, r.end_cut) for r in tl.runs] == [
+        ("ctrl", False, False), ("sensor", False, True), ("worker", False, True)]
+
+
+def test_stats_durations_leave_out_cut_runs():
+    events = [TaskEvent(0, "task_in", A), TaskEvent(100, "task_out", A), TaskEvent(150, "task_in", A),
+              TaskEvent(160, "task_out", A), TaskEvent(170, "task_in", A)]
+    s = timeline_from_events(events, NAMES, resolution=5, t_end=10_000).stats()["tasks"]["ctrl"]
+    assert s["runs"] == 3 and s["cut_runs"] == 1 and s["total"] == 100 + 10 + 9_830
+    assert (s["max_run"], s["min_run"], s["mean_run"]) == (100, 10, 55)               # 終わりで切った区間は入れない
+    assert s["max_cut_run"] == 9_830
+    cut_only = timeline_from_samples(sampled([A] * 3), NAMES).stats()["tasks"]["ctrl"]
+    assert cut_only["max_run"] is None and cut_only["min_run"] is None and cut_only["mean_run"] is None
+
+
+def test_an_unknown_resolution_is_none_not_zero(tmp_path):
+    events = [TaskEvent(0, "task_in", A), TaskEvent(100, "task_in", B), TaskEvent(200, "task_out", B)]
+    tl = timeline_from_events(events, NAMES)
+    assert tl.resolution is None and tl.runs[0].uncertainty is None and tl.switches[0].uncertainty is None
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6)
+    write_timeline(rec, timeline_from_events(events, NAMES, resolution=0))     # 0 は 0（分からないと混ぜない）
+    rec.close()
+    r = Recording(tmp_path / "r")
+    assert [e.uncertainty for e in r.events(streams=["rtos"], kinds=["switch"])] == [0]
+    r.close()
+
+
+def test_itm_packets_refuse_an_offset_outside_the_bytes(monkeypatch):
+    from fprobe.rtos import timeline as tlmod
+
+    class Fake:
+        def __init__(self, synced):
+            pass
+
+        def feed(self, data):
+            return [Instrumentation(31, 4, A, offset=len(data))]
+    monkeypatch.setattr(tlmod, "ItmDecoder", Fake)
+    with pytest.raises(ValueError):
+        itm_packets([(10, 0x0B)])

@@ -19,8 +19,8 @@ Perfetto UI（ui.perfetto.dev。データはブラウザの中に留まる）・
 | dap・uart | 点 | DAP / UART rx / UART tx |
 | annotation mark（印）・events_lost | 全体の点 | — |
 | annotation の解読（区間を持つ）| スライス | 解読 <種類> |
-| host call（API の操作。所要時間から区間を作る）| スライス | 操作 <利用者> |
-| ロジアナの波形 | チャンネルごとのカウンタ（0 / 1。変化だけ）と、捕捉の区間のスライス | ロジアナ |
+| host call（API の操作。記録が写した始まり t_start から終わりまで。t_start の無い古い記録は点）| スライス | 操作 <利用者> |
+| ロジアナの波形 | チャンネルごとのカウンタ（0 / 1。変化だけ。ch のずれで置き直す）と、捕捉の区間のスライス（args の skew_unknown = ずれが分からずずらさなかった ch） | ロジアナ |
 | そのほか（target・debug・rtt・semihosting・swo の行等）| 区間を持てばスライス、無ければ点 | ストリームの名前 |
 | clock（時計の対応付けの点）| 書かない | — |
 
@@ -171,9 +171,14 @@ def _event(w: _TraceWriter, e: Event, names: Mapping[int, str]) -> None:
             w.instant(None, f"イベント記録の取りこぼし {e.a} 件", e.t, _args(w, e))
         else:
             w.instant("注釈", _describe(e), e.t, _args(w, e))
-    elif s == "host" and k == "call" and isinstance(body.get("seconds"), (int, float)):
-        start = e.t - body["seconds"] * w.hz                          # 記録の時刻は終わったとき
-        w.slice(f"操作 {body.get('client', '?')}", str(body.get("method", k)), start, e.t, _args(w, e))
+    elif s == "host" and k == "call":
+        # 記録の時刻は終わったとき。始まりは記録が同じ時計の対応付けで写した t_start（PC の秒数 × 公称の速さで推定しない）。
+        # t_start の無い古い記録は点にする（区間を作らない。seconds は args に残る）
+        track, name = f"操作 {body.get('client', '?')}", str(body.get("method", k))
+        if isinstance(body.get("t_start"), (int, float)):
+            w.slice(track, name, body["t_start"], e.t, _args(w, e))
+        else:
+            w.instant(track, name, e.t, _args(w, e))
     elif e.t_end is not None:
         w.slice(s, _describe(e), e.t, e.t_end, _args(w, e, {"a": e.a, "b": e.b}))
     else:
@@ -218,9 +223,12 @@ def _waveform(w: _TraceWriter, recording: Recording, channels: Iterable[int] | N
         last = tr.length if w.t1 is None else min(tr.length, -(-(w.t1 - base) // tps))
         if last <= first:
             continue
+        # skew_unknown = ずれが分からず、ずらさずに置いた ch（fprobe.timing）
         w.slice("ロジアナ", "捕捉", base + first * tps, base + last * tps,
-                {"channels": tr.channels, "sample_period_ns": tr.sample_period_s * 1e9})
+                {"channels": tr.channels, "sample_period_ns": tr.sample_period_s * 1e9,
+                 "skew_unknown": tr.skew_unknown()})
         wanted = [ch for ch in (range(tr.channels) if channels is None else channels) if ch < tr.channels]
+        skew = [s * tps for s in tr.skew_samples(tps)]                 # ch ごとの時刻のずれ（刻み。fprobe.timing）
         i = max(bisect_right(tr.starts, first) - 1, 0)
         previous = tr.values[i] if len(tr.values) else 0
         for ch in wanted:                                              # 範囲の始まりの値
@@ -233,7 +241,7 @@ def _waveform(w: _TraceWriter, recording: Recording, channels: Iterable[int] | N
             changed = value ^ previous
             for ch in wanted:
                 if changed >> ch & 1:
-                    w.counter(f"LA ch{ch}", base + start * tps, value >> ch & 1)
+                    w.counter(f"LA ch{ch}", base + start * tps + skew[ch], value >> ch & 1)
             previous = value
 
 

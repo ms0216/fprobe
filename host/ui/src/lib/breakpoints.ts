@@ -1,19 +1,14 @@
 // Breakpoints のパネルの計算（Svelte に依らない）: ブレークポイントの動作（VS Code の Edit Condition / Hit Count /
 // Log Message、Ozone の Breakpoint Properties）の編集と debug.breakpoint.set の引数、ログ・ブレークポイントの記録
 // （debug.breakpoint.log）の読み続けと表示、ベクタキャッチ（target.vector_catch / .get）の名前。
+import type { Result } from "./api";
+import type { BreakpointAction } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection } from "./api";
 import type { Mark } from "./timeline/state";
 import { kindOf } from "./vartree";
 
 /** debug.breakpoint.list の action（fprobe.probe_breakpoints._Action.describe） */
-export interface BreakpointAction {
-  condition: string | null;
-  ignore_count: number;
-  log: string[] | null;
-  message: string | null;
-  hits: number;
-  last_error: string | null;
-}
+export type { BreakpointAction };
 
 /** 編集の欄（文字のまま。VS Code の 3 つの欄と同じ） */
 export interface ActionEdit {
@@ -80,19 +75,7 @@ export function formatValue(v: unknown): string {
 }
 
 /** debug.breakpoint.log の 1 件 */
-export interface LogEntry {
-  seq: number;
-  host_s: number;
-  address: number;
-  where: string;
-  function?: string;
-  file?: string;
-  line?: number;
-  hit: number;
-  message: string | null;
-  values: Record<string, unknown>;   // 式 → 値（fprobe.dwarf.values の形）
-  t?: number;                 // 記録中なら記録のタイムベースの時刻
-}
+export type LogEntry = Result<"debug.breakpoint.log">["entries"][number];
 
 /** ログの 1 件の文: message の {式} を値に置き換える。message が無ければ "式 = 値, …" */
 export function formatLog(e: LogEntry): string {

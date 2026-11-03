@@ -93,3 +93,18 @@ describe("startParams のチャンネル", () => {
     expect(startParams({ format: "defmt", source: "rtt", channel: " 2 ", elf: "", til: "" }).channel).toBe(2);
   });
 });
+
+describe("受け取りの様子の行（log.status）", async () => {
+  const { logStatusItems } = await import("../src/lib/logview");
+  it("まだ始めていない（running: false だけ）は出さない", () => {
+    expect(logStatusItems({ running: false })).toBeNull();
+    expect(logStatusItems(null)).toBeNull();
+  });
+
+  it("API の名前と値のまま。重要度ごとの数と、解読できなかった数（errors）も出す", () => {
+    expect(logStatusItems({ running: true, format: "defmt", source: "rtt", records: 12, kept: 12,
+                            kinds: { info: 10, error: 2 }, bytes: 340, errors: 1, recorded: false }))
+      .toEqual([["format", "defmt"], ["source", "rtt"], ["records", "12"], ["kept", "12"], ["kinds.info", "10"],
+                ["kinds.error", "2"], ["errors", "1"], ["bytes", "340"], ["recorded", "false"]]);
+  });
+});

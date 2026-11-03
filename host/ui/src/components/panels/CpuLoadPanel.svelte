@@ -150,7 +150,7 @@
     if (w) reveal({ source: "recording", t: w.t0, tEnd: w.t1 });
   }
 
-  const dur = (ticks: number) => formatDuration(ticks / hz);
+  const dur = (ticks: number | null) => (ticks === null ? "—" : formatDuration(ticks / hz));
 </script>
 
 <div class="pane cpu">

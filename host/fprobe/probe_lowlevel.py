@@ -1,7 +1,7 @@
 """Probe の道具: 接続の診断と低レベル操作（U29）。J-Link Commander の ReadDP / WriteAP / JTAG の IR・DR / ピン /
 TestRSpeed、EmuDiag、BMP の swdp_scan に当たる。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_debug と target_voltage を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・target・_debug と target_voltage を使う。
 機器に触るのは必ず _lock の中。
 
 二つの経路:
@@ -25,8 +25,9 @@ from .aux_mcu import Aux
 from .jtag_chain import bits_from_text, clock, dap_link_wire, reset_tap, scan_chain, shift, shift_device
 from .raw_dap import DapError, RawDap, dp_address
 from .stm32_option_bytes import protection_status
+from .probe_service import HostView
 
-__all__ = ["LowLevelTools", "PIN_BITS", "SPEED_TEST_LIMIT"]
+__all__ = ["LowLevelService", "PIN_BITS", "SPEED_TEST_LIMIT"]
 
 PIN_BITS = {"swclk": 0, "swdio": 1, "nreset": 7}              # CMSIS-DAP の DAP_SWJ_Pins の並び
 NOT_REPORTED = ["tdi", "tdo", "ntrst"]
@@ -34,21 +35,33 @@ SPEED_TEST_LIMIT = 16 << 20
 DEFAULT_HZ = 1_000_000
 
 
-def jtag_half_period(sys_clock_hz: int, requested_hz: float) -> int:
+def jtag_half_period(sys_clock_hz: int, requested_hz: float, min_half_period: int) -> int:
     """要求した速さ（DAP_SWJ_Clock）で jtag_phy が使う半周期（sys の周期数）。dap_cmd_config.vhd と同じ整数の計算
-    （fprobe.sampler.swclk_hz と同じ）。JTAG の 1 ビットは 2 × 半周期 + 1 周期（High 相の後に 1 周期の区切り）。"""
+    （fprobe.sampler.swclk_hz と同じ）。下限 min_half_period はデバイスが申告する（Capabilities.min_half_period: 今の回路は
+    1 = sys / 2、2026-11-03 より前の回路は 2）。JTAG の 1 ビットは 2 × 半周期 + Capabilities.jtag_bit_extra_cycles 周期
+    （今の回路は 0 = SWD と同じ sys / (2 × 半周期)、2026-11-01 より前の回路は 1）。"""
     tolerated = sys_clock_hz // 2 // 101 * 100
-    return min(max(-(-tolerated // max(1, int(requested_hz))), 2), 65535)
+    return min(max(-(-tolerated // max(1, int(requested_hz))), min_half_period), 65535)
 
 
 class NotDisconnected(RuntimeError):
     pass
 
 
-class LowLevelTools:
-    """接続の診断と低レベル操作（Probe の mixin）。"""
+class LowLevelService:
+    """接続の診断と低レベル操作（Probe のサービス）。"""
 
-    def _init_lowlevel(self) -> None:
+    API = ("ap_read", "ap_write", "dp_read", "dp_write", "jtag_clock", "jtag_reset", "jtag_sample_delay_scan",
+           "jtag_sample_delay_set", "jtag_scan", "jtag_shift", "pins_read", "pins_write", "target_diagnose",
+           "target_speed_test")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_auto_target", "_close_lowlevel", "_jtag_wire", "_path", "_raw", "_raw_dp", "_raw_link",
+              "_require_disconnected")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_ensure_design", "_lock", "_require_dap_free", "session", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._raw_link = None                       # Session.dap_access（未接続のときだけ）
         self._raw_dap: RawDap | None = None
         self._raw_dp_ready = False                  # DPIDR を読み、デバッグ電源を上げた
@@ -65,14 +78,15 @@ class LowLevelTools:
                 link.close()
 
     def _require_disconnected(self, what: str) -> None:
-        if self._debug is not None:
+        if self._host._debug is not None:
             raise NotDisconnected(f"{what}はターゲットに接続中は使えない（pyOCD の接続を壊す）: target_disconnect してから")
 
     def _raw(self) -> RawDap:
         """未接続の CMSIS-DAP の層（開いていなければ開く）。"""
         self._require_disconnected("線を直接動かす操作")
+        self._host._require_dap_free("線を直接動かす操作")
         if self._raw_dap is None:
-            self._raw_link = self.session.dap_access()
+            self._raw_link = self._host.session.dap_access()
             self._raw_dap = RawDap(self._raw_link)
         return self._raw_dap
 
@@ -102,9 +116,9 @@ class LowLevelTools:
 
     def pins_read(self) -> dict:
         """デバッグコネクタのピンの状態（SWCLK/TCK・SWDIO/TMS・nRESET）。変えない。"""
-        with self._lock:
-            if self._debug is not None:                                 # 接続中: pyOCD のプローブの口で
-                pins = self._debug.probe.read_pins(DebugProbe.PinGroup.PROTOCOL_PINS, DebugProbe.ProtocolPin.ALL_PINS)
+        with self._host._lock:
+            if self._host._debug is not None:                                 # 接続中: pyOCD のプローブの口で
+                pins = self._host._debug.probe.read_pins(DebugProbe.PinGroup.PROTOCOL_PINS, DebugProbe.ProtocolPin.ALL_PINS)
                 value = CMSISDAPProbe.to_cmsis_dap_pins(pins)
             else:
                 value = self._raw_started().link.pin_access(0, 0)
@@ -129,7 +143,7 @@ class LowLevelTools:
         if not mask:
             raise ValueError("変えるピンが無い（swclk / swdio / nreset）")
         value = sum(v << PIN_BITS[n] for n, v in wanted.items() if v)
-        with self._lock:
+        with self._host._lock:
             link = self._raw_started().link
             before = link.pin_access(0, 0)
             link.pin_access(mask, value)
@@ -157,9 +171,9 @@ class LowLevelTools:
         """DP のレジスタを読む（名前 DPIDR / CTRL/STAT / SELECT / RDBUFF / TARGETID / DLPIDR / EVENTSTAT / BASEPTR0、
         または番地。bit 7:4 が DPBANKSEL、例 0x24 = TARGETID）。"""
         address = dp_address(register)
-        with self._lock:
-            if self._debug is not None:
-                value = self._debug.target.dp.read_dp(address)
+        with self._host._lock:
+            if self._host._debug is not None:
+                value = self._host._debug.target.dp.read_dp(address)
             else:
                 value = self._raw_dp().read_dp(address)
             return {"register": address, "value": value, "path": self._path()}
@@ -167,9 +181,9 @@ class LowLevelTools:
     def dp_write(self, register: int | str, value: int) -> dict:
         """DP のレジスタに書く（ABORT = 0x0 への書き込みで誤りの印を消す、等）。"""
         address = dp_address(register)
-        with self._lock:
-            if self._debug is not None:
-                self._debug.target.dp.write_dp(address, value)
+        with self._host._lock:
+            if self._host._debug is not None:
+                self._host._debug.target.dp.write_dp(address, value)
             else:
                 self._raw_dp().write_dp(address, value)
             return {"register": address, "value": value, "path": self._path()}
@@ -177,19 +191,19 @@ class LowLevelTools:
     def ap_read(self, ap: int, register: int) -> dict:
         """AP のレジスタを読む。ap は ADIv5 なら APSEL（0〜255）、ADIv6 なら AP の番地。register は AP の中の番地
         （例 0xFC = IDR、ADIv6 の MEM-AP は 0xDFC）。"""
-        with self._lock:
-            if self._debug is not None:
-                value = self._debug.target.dp.read_ap(self._pyocd_ap_address(ap, register))
+        with self._host._lock:
+            if self._host._debug is not None:
+                value = self._host._debug.target.dp.read_ap(self._pyocd_ap_address(ap, register))
             else:
                 value = self._raw_dp().read_ap(ap, register)
             return {"ap": ap, "register": register, "value": value, "path": self._path()}
 
     def ap_write(self, ap: int, register: int, value: int) -> dict:
         """AP のレジスタに書く（ap・register は ap_read と同じ）。"""
-        with self._lock:
-            if self._debug is not None:
-                self._debug.target.dp.write_ap(self._pyocd_ap_address(ap, register), value)
-                self._debug.target.dp.flush()
+        with self._host._lock:
+            if self._host._debug is not None:
+                self._host._debug.target.dp.write_ap(self._pyocd_ap_address(ap, register), value)
+                self._host._debug.target.dp.flush()
             else:
                 self._raw_dp().write_ap(ap, register, value)
             return {"ap": ap, "register": register, "value": value, "path": self._path()}
@@ -198,14 +212,14 @@ class LowLevelTools:
         from pyocd.coresight.dap import ADIVersion
         if register & 3:
             raise ValueError("AP のレジスタ番地は 4 の倍数")
-        if self._debug.target.dp.adi_version == ADIVersion.ADIv6:
+        if self._host._debug.target.dp.adi_version == ADIVersion.ADIv6:
             return ap + register
         if not 0 <= ap <= 0xFF or not 0 <= register <= 0xFC:
             raise ValueError("ADIv5 の AP は APSEL 0〜255、レジスタ番地 0〜0xFC")
         return ap << 24 | register
 
     def _path(self) -> str:
-        if self._debug is not None:
+        if self._host._debug is not None:
             return "pyocd"
         return f"raw {self._raw_dap.protocol} {self._raw_dap.frequency_hz} Hz"
 
@@ -223,8 +237,8 @@ class LowLevelTools:
         """JTAG のチェーンを走査する（未接続のときだけ）: 装置の数・IDCODE・IR 長（表・Capture-IR から。一つに決まらなければ ambiguous と候補）。
         返る jtag_chain は target_connect にそのまま渡せる。TAP はリセットして IDCODE を選んだ状態で終える。
         Primer の構成に JTAG が無ければ書き替えてから（probe_design_get）。"""
-        self._ensure_design("jtag")
-        with self._lock:
+        self._host._ensure_design("jtag")
+        with self._host._lock:
             scan = scan_chain(self._jtag_wire(frequency_hz), max_devices=max_devices)
             self._jtag_scan = scan
             return scan.as_dict()
@@ -233,7 +247,7 @@ class LowLevelTools:
 
     def _write_jtag_delay(self, cycles: int) -> int:
         """CSR debug.sample_delay の jtag の欄だけを書き、読み返した値を返す（_lock の中で。古い回路は欄が無く 0 が返る）。"""
-        dev = self.session.device
+        dev = self._host.session.device
         shift_, width = g.DEBUG_SAMPLE_DELAY_JTAG
         mask = ((1 << width) - 1) << shift_
         dev.write32(g.DEBUG_SAMPLE_DELAY, dev.read32(g.DEBUG_SAMPLE_DELAY) & ~mask | cycles << shift_)
@@ -241,13 +255,13 @@ class LowLevelTools:
 
     def jtag_sample_delay_set(self, cycles: int) -> dict:
         """JTAG の TDO の取り込みを、次の TCK の立ち下がりの直前から cycles 周期（sys、0〜7）遅らせる。
-        TDO が立ち下がりから 2 × half_period 周期（sys）より遅れて届くとき（Pi 2B の 14.3 MHz 以上で見た。1 ビットずれて読める）に使う。
+        TDO が立ち下がりから（1 ビットの長さ − 1）周期（sys。今の回路は 2 × half_period − 1）より遅れて届くとき（Pi 2B の 14.3 MHz 以上で見た。1 ビットずれて読める）に使う。
         どの値がよいかは jtag_sample_delay_scan の事実で決める。readback = 読み返した値（古い回路は欄が無く 0）。
         Primer の構成に JTAG が無ければ書き替えてから書く。値は構成を書き替える（FPGA を書き直す）と 0 に戻る。"""
         if not 0 <= cycles <= 7:
             raise ValueError(f"cycles は 0〜7（{cycles}）")
-        self._ensure_design("jtag")                     # 先に JTAG の構成へ（後で書き替えると 0 に戻る）
-        with self._lock:
+        self._host._ensure_design("jtag")                     # 先に JTAG の構成へ（後で書き替えると 0 に戻る）
+        with self._host._lock:
             return {"cycles": cycles, "readback": self._write_jtag_delay(cycles)}
 
     def jtag_sample_delay_scan(self, frequency_hz: int, expected_idcodes: list[int], reads: int) -> dict:
@@ -255,15 +269,16 @@ class LowLevelTools:
         32 × len(expected_idcodes) ビット）を reads 回読み、expected_idcodes（TDO 側から。呼び手が明示）と一致した回数
         matches と、見えた値の並び observed（値の組と回数）を返す。applied = 遅れの欄を書いて読み返せた。
         どれを使うかは決めない（終わったら元の遅れに戻す。使うには jtag_sample_delay_set）。未接続のときだけ。
-        実際の TCK: half_period（SWJ_Clock と同じ整数の計算）と tck_hz = sys / (2 × half_period + 1)。"""
+        実際の TCK: half_period（SWJ_Clock と同じ整数の計算）と tck_hz = sys / (2 × half_period + extra)。extra は
+        デバイスが申告する 1 ビットの余分な周期（今の回路は 0、ケイパビリティに申告の無い古い回路は 1）。"""
         if not expected_idcodes or reads < 1:
             raise ValueError("expected_idcodes は 1 つ以上、reads は 1 以上")
-        self._ensure_design("jtag")
+        self._host._ensure_design("jtag")
         n = len(expected_idcodes)
         expected = [v & 0xFFFFFFFF for v in expected_idcodes]
-        with self._lock:
+        with self._host._lock:
             self._require_disconnected("TDO の取り込みの遅れの走査")      # 遅れの欄を書く前に（接続中の転送を乱さない）
-            original = (self.session.device.read32(g.DEBUG_SAMPLE_DELAY) >> g.DEBUG_SAMPLE_DELAY_JTAG[0]
+            original = (self._host.session.device.read32(g.DEBUG_SAMPLE_DELAY) >> g.DEBUG_SAMPLE_DELAY_JTAG[0]
                         & (1 << g.DEBUG_SAMPLE_DELAY_JTAG[1]) - 1)
             rows = []
             try:
@@ -281,15 +296,17 @@ class LowLevelTools:
                                  "observed": [{"idcodes": list(k), "count": c} for k, c in seen.items()]})
             finally:
                 self._write_jtag_delay(original)
-            sys_hz = self.session.device.capabilities().sys_clock_hz
-            half = jtag_half_period(sys_hz, frequency_hz)
-            return {"frequency_hz": frequency_hz, "half_period": half, "tck_hz": sys_hz / (2 * half + 1),
+            caps = self._host.session.device.capabilities()
+            sys_hz = caps.sys_clock_hz
+            half = jtag_half_period(sys_hz, frequency_hz, caps.min_half_period)
+            return {"frequency_hz": frequency_hz, "half_period": half,
+                    "tck_hz": sys_hz / (2 * half + caps.jtag_bit_extra_cycles),
                     "expected_idcodes": expected, "delays": rows, "restored_delay": original}
 
     def jtag_reset(self) -> dict:
         """すべての TAP を Test-Logic-Reset に（TMS = 1 を 6 回）して Run-Test/Idle へ。"""
-        self._ensure_design("jtag")
-        with self._lock:
+        self._host._ensure_design("jtag")
+        with self._host._lock:
             reset_tap(self._jtag_wire())
             return {"state": "run-test/idle"}
 
@@ -297,8 +314,8 @@ class LowLevelTools:
                    chain: list[int] | None = None) -> dict:
         """チェーンの device 番目に IR を入れ（ほかは BYPASS）、DR を dr_length ビット シフトする（ほかは 1 ビット）。
         chain は IR 長の列（TDO 側から。省略時は最後の jtag_scan）。取り出した IR・DR を返す。"""
-        self._ensure_design("jtag")
-        with self._lock:
+        self._host._ensure_design("jtag")
+        with self._host._lock:
             if chain is None:
                 if self._jtag_scan is None or self._jtag_scan.chain is None:
                     raise ValueError("chain（IR 長の列）が要る: 先に jtag_scan するか chain を与える")
@@ -311,8 +328,8 @@ class LowLevelTools:
         TAP の状態は呼び手が管理する（ほかの JTAG の道具は Run-Test/Idle を前提にする）。"""
         tms_bits = bits_from_text(tms)
         tdi_bits = bits_from_text(tdi) if tdi is not None else [0] * len(tms_bits)
-        self._ensure_design("jtag")
-        with self._lock:
+        self._host._ensure_design("jtag")
+        with self._host._lock:
             tdo = clock(self._jtag_wire(), tms_bits, tdi_bits)
             return {"tdo": "".join(map(str, tdo)), "clocks": len(tdo)}
 
@@ -324,8 +341,8 @@ class LowLevelTools:
         if address % 4 or length % 4 or not 0 < length <= SPEED_TEST_LIMIT:
             raise ValueError(f"address と length は 4 の倍数、length は 4〜{SPEED_TEST_LIMIT}")
         words = length // 4
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             t0 = time.perf_counter()
             original = target.read_memory_block32(address, words)
             out = {"address": address, "bytes": length, "read": _rate(length, time.perf_counter() - t0),
@@ -347,7 +364,7 @@ class LowLevelTools:
 
     def _swd_frequency(self) -> int | None:
         try:
-            return int(self._debug.probe.session.options.get("frequency"))
+            return int(self._host._debug.probe.session.options.get("frequency"))
         except Exception:
             return None
 
@@ -359,13 +376,13 @@ class LowLevelTools:
         frequencies_hz: 試す速さ（この順に。省略は [DEFAULT_HZ] の 1 つだけ。暗黙に下げない）。段ごとの status（ok 読めた /
         fail 読めなかった / skip）・message・data と、reached（DP に届いた）・応答した protocol と frequency_hz を返す。
         結論の文・接続の引数のおすすめはプラグイン（fprobe.plugins.heuristics.diagnose_verdict）。"""
-        with self._lock:
+        with self._host._lock:
             d = self._diagnose(frequencies_hz or [DEFAULT_HZ], max_aps, jtag)
             return d.as_dict()
 
     def _diagnose(self, frequencies_hz: list[int], max_aps: int, jtag: bool, measure: bool = True) -> diag.Diagnosis:
         self._require_disconnected("接続の診断")
-        jtag = jtag and self.session.device.capabilities().jtag      # JTAG の無い構成（標準）では JTAG を調べない
+        jtag = jtag and self._host.session.device.capabilities().jtag      # JTAG の無い構成（標準）では JTAG を調べない
         dap = self._raw()
         self._raw_dp_ready = False
         voltage = self._voltage_reading if measure else None
@@ -378,7 +395,7 @@ class LowLevelTools:
         return d
 
     def _voltage_reading(self) -> dict:
-        return Aux(self.session.device).read().as_dict()
+        return Aux(self._host.session.device).read().as_dict()
 
     def _auto_target(self, frequency_hz: int) -> tuple[str, dict]:
         """target_connect の target="auto": 診断（電圧・ピンを除く。速さは頼まれた frequency_hz だけ）で部品を判別し、

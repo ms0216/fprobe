@@ -81,7 +81,8 @@ def operations(seed: int) -> list:
 def run(seed: int) -> list:
     rng = random.Random(seed * 7 + 1)
     d = ObsDecoder(sync_delay=rng.choice([0.0, 3.0]), sample_delay=rng.choice([0.0, 2.0]),
-                   nominal_ratio=rng.choice([None, 1.0, 1.5]), recent=rng.choice([0, 50]))
+                   nominal_ratio=rng.choice([None, 1.0, 1.5]), recent=rng.choice([0, 50]),
+                   borrow_ratio=True, max_pending=None)          # 保存した出力は傾きを借りる形（段 H の前の既定）
     out = []
     for op in operations(seed):
         if op[0] == "feed":
@@ -90,13 +91,13 @@ def run(seed: int) -> list:
             d.events_lost()
             continue
         elif op[0] == "reset":
-            d.reset_clock(*op[1:])
+            d.reset_clock(*op[1:], borrow_ratio=True)
             continue
         else:
             got = d.flush()
         out += got
     out.append(list(d.recent))
-    return [[s.time_fprobe, s.target_cycles, s.value, s.lost, s.group, s.kind, s.received, s.time_basis]
+    return [[s.time_fprobe, s.target_cycles, s.value, s.lost, s.group, s.kind, s.received, s.time_basis, s.copy]
             if not isinstance(s, list) else [[x.time_fprobe, x.target_cycles, x.value, x.kind] for x in s]
             for s in out]
 

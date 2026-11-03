@@ -7,6 +7,7 @@ from fprobe.collector import Collector, add_capture, add_events, unwrap48
 from fprobe.events import KIND_AUX, KIND_HOST, KIND_INJECT_TRANSFERS, KIND_SYNC, KIND_UART_RX, DapEvent
 from fprobe.la import Transitions
 from fprobe.recording import Recorder, Recording
+from caps_fakes import FakeDeviceBase, caps_for
 
 HZ = 100_000_000
 
@@ -57,7 +58,7 @@ def test_injected_writes_are_recorded_as_inject_with_the_transfer_count(tmp_path
     rec.flush()
     got = [(e.t & 0xFFFF_FFFF_FFFF, e.stream, e.kind, e.a, e.b, e.body) for e in Recording.open(rec.directory).events()]
     assert got == [(35, "dap", "inject", 0xE000EDF0, 0xA05F0003, {"ack": 1, "transfers": 7}),
-                   (40, "dap", "ap_read", 0x2000_0000, 0x1234, {"ack": 1})]
+                   (40, "dap", "ap_read", 0x2000_0000, 0x1234, {"ack": 1, "requested": 30, "t_lo": None})]   # 頼んだ転送の前は見えていない
 
 
 def test_sync_pairs_become_sync_rows_with_the_64_bit_parent_time(tmp_path):
@@ -73,7 +74,7 @@ def test_sync_pairs_become_sync_rows_with_the_64_bit_parent_time(tmp_path):
                    ((3 << 48) | 50, "sync", "pair", 7, 0, {"parent": 7})]
 
 
-class FakeDevice:
+class FakeDevice(FakeDeviceBase):
     """time() と、EventLog の代わりの読み出し（written を増やして返す）。"""
 
     def __init__(self):
@@ -161,7 +162,7 @@ def test_fpga_observation_events_become_fpga_rows(tmp_path):
 
     rec = Recorder(tmp_path / "r", timebase_hz=HZ)
     ref = 1 << 40
-    obs = ObsDecoder(nominal_ratio=1.0)
+    obs = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     add_events(rec, [rec8(3, 0, 3000), rec8(0, 0x11, 3000), sync9(1, 3005), rec8(1, 5 << 16 | 1 << 15 | 1 << 7, 3100)],
                ref, obs=obs)
     add_events(rec, [rec8(2, 7, 4000), rec8(3, 1, 4000), rec8(0, 0x22, 4000), sync9(2, 4010),
@@ -183,7 +184,7 @@ def test_fpga_rows_without_a_sync_keep_their_received_time(tmp_path):
 
     rec = Recorder(tmp_path / "r", timebase_hz=HZ)
     ref = 1 << 40
-    obs = ObsDecoder(nominal_ratio=1.0)
+    obs = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     add_events(rec, [rec8(3, 0, 1000), rec8(0, 0x09, 1000),                       # 鎖 A（印が来ない）
                      rec8(3, 0, 2000), rec8(2, 4, 2000), rec8(0, 0x0A, 2000),     # 組 → 溢れ 4 → 鎖 B
                      DapEvent(2005, KIND_OBS_SYNC, False, False, 0, 0, False, 0, 1),
@@ -199,7 +200,7 @@ def test_stopping_flushes_the_values_of_an_unsynced_chain(tmp_path):
     from fprobe.events import KIND_OBS_RECORD
     from fprobe.fpga_obs import ObsDecoder
     rec = Recorder(tmp_path / "r", timebase_hz=HZ)
-    obs = ObsDecoder(nominal_ratio=1.0)
+    obs = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     add_events(rec, [DapEvent(700, KIND_OBS_RECORD, False, False, 0, 0, False, 0, 3 << 30),
                      DapEvent(700, KIND_OBS_RECORD, False, False, 0, 0, False, 0, 0x33)], 1 << 40, obs=obs)
     flush_obs(rec, obs, 1 << 40)                                  # 鎖は終わっていないが、記録は止める
@@ -270,13 +271,11 @@ def test_the_collector_survives_failures_outside_the_event_read_and_stop_still_r
 
 def test_stopping_keeps_the_sync_counts_in_the_recording_meta(tmp_path):
     # 同期の CRC 異常で捨てた組の数は CSR にしか無い: 記録を止めるときに meta に事実として残す（モジュール化 M3）
-    from types import SimpleNamespace
-
     from fprobe import generated as g
 
     class SyncDevice(FakeDevice):
         def capabilities(self):
-            return SimpleNamespace(sync=True)
+            return caps_for(sync=True)
 
         def read32(self, address):
             assert address == g.SYNC_STATUS

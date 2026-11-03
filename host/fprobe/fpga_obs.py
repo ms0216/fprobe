@@ -8,7 +8,7 @@
   0 値 delta | value(15:0)（delta 0 = 鎖の始め）、1 刻み delta | 0・印 delta | 1 | 番号(14:7) | late(6:0)、
   2 溢れ lost(15:0)（鎖が切れる）、3 制御 種類(29:26): 0 組(7:0)・1 応答 番地(19:16) | 値(15:0)。
 時刻は数えない: delta を足し合わせた「鎖の時刻」を、印（番号つき。fprobe がその Update-DR の時刻をイベント 9 にする）
-で fprobe の時刻と結ぶ。鎖ごとに印の組を直線に合わせる（組が 1 つなら申告の CLOCK_HZ の比を傾きにする）。
+で fprobe の時刻と結ぶ。値の時刻は隣り合う印の窓を通る直線の範囲（obs_decoder の説明。組が 1 つなら申告の CLOCK_HZ の比を傾きにする）。
 
 標本型（obs_snap_core。極小の FPGA 向け）: 記録の語 = 0xA7 | 前の標本からの変化の回数(23:16) | 値(15:0)。時刻は
 fprobe がその Capture-DR を出た瞬間（イベントの時刻そのもの）。標本の間の見えない変化は切れ目（失った数）にする。
@@ -18,14 +18,15 @@ import time
 
 from . import generated as g
 from .obs_condition import compile_match
-from .obs_decoder import WIDTH, ObsDecoder, ObsSample, SyncSegment, fit_line, fit_sync, samples
+from .obs_decoder import WIDTH, ObsDecoder, ObsSample, SyncSegment, samples
 
-__all__ = ["CHAIN_FIELDS", "FpgaObs", "ObsDecoder", "ObsSample", "SyncSegment", "compile_match", "fit_line", "fit_sync",
+__all__ = ["CHAIN_FIELDS", "FpgaObs", "ObsDecoder", "ObsSample", "SyncSegment", "compile_match",
            "samples"]
 
 OP_WRITE, OP_READ = 1, 2
 REG_ID_LO, REG_ID_HI, REG_VERSION, REG_GROUPS, REG_FIFO_DEPTH, REG_CLOCK_LO, REG_CLOCK_HI = range(7)
 REG_SYNC_DELAY, REG_SAMPLE_DELAY, REG_LOST_BITS = 7, 8, 9    # 申告の遅れ（半周期の単位・周期）と失った数の幅
+REG_SYNC_DELAY_LO, REG_SYNC_DELAY_HI = 10, 11    # 印の遅れの下限・上限（半周期の単位。0 = 申告なしの古い回路）
 REG_CONTROL, REG_SELECT = 14, 15
 OBS_ID = 0x464F4253                               # "FOBS"
 SNAP_ID = 0x534E4150                              # 標本型（エンジンが id に出す "SNAP"）
@@ -38,11 +39,12 @@ class FpgaObs:
 
     def __init__(self, device):
         caps = device.capabilities()
-        if not getattr(caps, "fpga_obs", False):
+        if not caps.fpga_obs:
             raise RuntimeError("この構成には FPGA の観測が無い（ケイパビリティ FEATURES の FPGA_OBS。PYNQ 等の大きい構成だけ）")
         self.dev = device
         self.sync_delay = 0.0                          # 観測の回路の申告（open で読む。周期）
         self.sample_delay = 0.0
+        self._set_ranges(None, None, None, None)       # 申告の遅れの範囲（open で読む。delay_ranges）
         self.clock_hz = 0
         self.mode = "stream"                           # open で決まる: "stream"（記録型）・"snapshot"（標本型）
         self.sys_clock_hz = caps.sys_clock_hz or 100_000_000
@@ -50,14 +52,19 @@ class FpgaObs:
 
     def samples(self, events, nominal_ratio: float | None = None) -> list[ObsSample]:
         """samples（モジュールの関数）を、open で読んだ観測の回路の遅れで。"""
-        return samples(events, nominal_ratio, sync_delay=self.sync_delay, sample_delay=self.sample_delay)
+        return samples(events, nominal_ratio, sync_delay=self.sync_delay, sample_delay=self.sample_delay,
+                       **self.delay_ranges())
 
     def open(self, chain: dict | None = None, user_ir: int = 2, half_period: int = 10, words: int = 64,
              sync_period: int = 100, timeout_s: float = 1.0, id_scans: int = 0) -> dict:
         """対象の JTAG の鎖での位置（chain: CHAIN_FIELDS のうち要るもの。ir_len の既定は 4）・USER の命令・TCK の半周期
         （sys の周期数。1 クロック版の観測の回路は TCK ≤ 対象の clk / 8）・1 スキャンの記録の語数・印の間隔（スキャンの
         数）を設定して始め、観測の回路の申告を返す。id_scans = 始めに ID の応答を待つスキャンの上限（使う側が渡す。
-        0 = 上限なし。上限まで来なければ回路が stuck・id_timeout で止める）。"""
+        0 = 上限なし。上限まで来なければ回路が stuck・id_timeout で止める）。
+        申告の遅れ（周期）: sync_delay・sample_delay は復号器の 1 点の補正（sync_delay は範囲の中点）。sync_delay_lo・
+        sync_delay_hi = 印の瞬間が Update-DR を出る TCK の立ち上がり（イベント 9 の時刻）より遅い範囲（端を含む。
+        レジスタ 10・11、無い古い回路は SYNC_DELAY の ±0.5）、sample_delay_lo・sample_delay_hi = 値の記録が変化より
+        遅い範囲。標本型はどれも None（申告が無く分からない）。"""
         unknown = set(chain or {}) - set(CHAIN_FIELDS)
         if unknown:
             raise ValueError(f"chain に知らない項目: {sorted(unknown)}（使えるのは {sorted(CHAIN_FIELDS)}）")
@@ -117,20 +124,44 @@ class FpgaObs:
             raise RuntimeError(f"観測の回路が答えない（ID {status['id']:#010x}。鎖の位置・USER の命令・配線・TCK の速さ"
                                "（1 クロック版は対象の clk の 1/8 以下）を確かめる）")
         if status["id"] == SNAP_ID:
-            # 標本型: レジスタが無い（組 1・幅 16。時刻は fprobe の Capture-DR の瞬間）
+            # 標本型: レジスタが無い（組 1・幅 16。時刻は fprobe の Capture-DR を出る TCK の立ち上がり）。遅れの申告も
+            # 無い: 値を取り込む瞬間が端子の立ち上がりより何周期遅いかは回路の作りで違い（obs_snap_core は対象の clk で
+            # (2, 3] 周期。それと違う作りの回路もある）、対象の clk も申告されないので、範囲は分からない（None）。
+            # sync_delay・sample_delay（0.0）は復号器に渡す 1 点の補正で、標本型の時刻には使わない
             self.mode = "snapshot"
             self.sync_delay = self.sample_delay = 0.0
+            self._set_ranges(None, None, None, None)
             self.clock_hz = 0
             return {"id": status["id"], "mode": "snapshot", "version": 2, "width": WIDTH, "groups": 1,
-                    "fifo_depth": 0, "clock_hz": 0, "sync_delay": 0.0, "sample_delay": 0.0, "lost_bits": 8}
+                    "fifo_depth": 0, "clock_hz": 0, "sync_delay": 0.0, "sample_delay": 0.0, "lost_bits": 8,
+                    **self.delay_ranges()}
         self.mode = "stream"
         self.sync_delay = self.register_read(REG_SYNC_DELAY) / 2
         self.sample_delay = float(self.register_read(REG_SAMPLE_DELAY))
+        lo, hi = self.register_read(REG_SYNC_DELAY_LO), self.register_read(REG_SYNC_DELAY_HI)
+        if hi:
+            sync_lo, sync_hi = lo / 2, hi / 2
+        else:
+            # レジスタ 10・11 の無い回路（0 を返す）: その回路の申告は「SYNC_DELAY は平均、±0.5 周期」
+            sync_lo, sync_hi = self.sync_delay - 0.5, self.sync_delay + 0.5
+        # 値の記録の遅れは SAMPLE_DELAY の 1 点（probes が同じ clk の登録の出力という入れ方の約束のときの、作りから
+        # 決まる値。範囲の形で揃えて渡す）
+        self._set_ranges(sync_lo, sync_hi, self.sample_delay, self.sample_delay)
         self.clock_hz = self.register_read(REG_CLOCK_LO) | self.register_read(REG_CLOCK_HI) << 16
         return {"id": status["id"], "mode": "stream", "version": self.register_read(REG_VERSION), "width": WIDTH,
                 "groups": self.register_read(REG_GROUPS), "fifo_depth": self.register_read(REG_FIFO_DEPTH),
                 "clock_hz": self.clock_hz, "sync_delay": self.sync_delay, "sample_delay": self.sample_delay,
-                "lost_bits": self.register_read(REG_LOST_BITS)}
+                "lost_bits": self.register_read(REG_LOST_BITS), **self.delay_ranges()}
+
+    def _set_ranges(self, sync_lo, sync_hi, sample_lo, sample_hi) -> None:
+        self.sync_delay_lo, self.sync_delay_hi = sync_lo, sync_hi
+        self.sample_delay_lo, self.sample_delay_hi = sample_lo, sample_hi
+
+    def delay_ranges(self) -> dict:
+        """申告の遅れの範囲（周期。端を含む。None = 分からない）: 印の瞬間は Update-DR を出る TCK の立ち上がりより
+        [sync_delay_lo, sync_delay_hi]、値の記録は変化より [sample_delay_lo, sample_delay_hi] 遅い。ObsDecoder の同じ名の引数。"""
+        return {"sync_delay_lo": self.sync_delay_lo, "sync_delay_hi": self.sync_delay_hi,
+                "sample_delay_lo": self.sample_delay_lo, "sample_delay_hi": self.sample_delay_hi}
 
     def close(self, timeout_s: float = 1.0) -> None:
         """止める（今のスキャンを終え、TAP を Test-Logic-Reset に戻して線を手放す）。手放すまで待つ（その後なら別の

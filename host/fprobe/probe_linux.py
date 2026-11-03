@@ -19,12 +19,15 @@ from .linux.agent import BINARY, Agent, deploy
 from .linux.caps import CAPS_SCRIPT, parse_caps
 from .linux.clock import TargetClock
 from .linux.gdb_relay import EMPTY_STATUS, GdbRelay
-from .linux.memap import XsdbMemAp
+from .jtag_chain import scan_chain
+from .armv7a_debug import decode_ap_idr
+from .linux.memap import JtagMemAp, XsdbMemAp
 from .linux.ptrace_plan import plan_breakpoint
 from .linux.perf import parse_perf_sample, parse_perf_stat
 from .linux.ring import HEADER, RECORD, RingError, RingReader, parse_header
-from .linux.ssh import SshTarget, SshTimeout
+from .linux.ssh import GuardedSsh, SshTarget, SshTimeout, TargetHalted
 from .linux.uprobe import GROUP, NAME, parse_lost, parse_trace_line, site_of, uprobe_line
+from .probe_service import HostView
 
 KEEP = 100_000                                       # メモリに持つ出来事の数（あふれた数は dropped）
 BATCH_BACKSTOP_S = 10                                # gdb.batch: ターゲットの timeout が効かないときの PC 側の待ちの上乗せ
@@ -64,6 +67,19 @@ def _home() -> Path:
     return Path(os.environ.get("FPROBE_HOME", Path.home() / ".fprobe")) / "linux"
 
 
+def _sysroot_file(target: str, binary: str) -> Path:
+    """ターゲットのファイル binary を写す PC の場所（_home()/target/sysroot の下）。target・binary の .. やパスの区切りで
+    その外（既存のファイルの上書き）に出るなら ValueError。"""
+    home = _home().resolve()
+    root = (home / target / "sysroot").resolve()
+    if root.parent.parent != home:
+        raise ValueError(f"Linux のターゲットの名前 {target!r} は PC のフォルダの 1 段の名前にならない（.. や区切りを含む）")
+    local = (root / binary.lstrip("/")).resolve()
+    if local == root or not local.is_relative_to(root):
+        raise ValueError(f"binary {binary!r} を写す先が sysroot（{root}）の外に出る")
+    return local
+
+
 @dataclass
 class _Target:
     ssh: SshTarget
@@ -99,8 +115,24 @@ class _Target:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-class LinuxTools:
-    def _init_linux(self) -> None:
+class LinuxService:
+    API = ("linux_agent_deploy", "linux_agent_start", "linux_agent_status", "linux_agent_stop", "linux_capabilities",
+           "linux_connect", "linux_core_fetch", "linux_core_limit_set", "linux_core_pattern_set", "linux_core_status",
+           "linux_disconnect", "linux_events_read", "linux_ftrace_disable", "linux_ftrace_enable", "linux_gdb_batch",
+           "linux_gdb_serve", "linux_gdb_status", "linux_gdb_stop", "linux_log_read", "linux_memap_connect",
+           "linux_memap_connect_jtag", "linux_memap_disconnect", "linux_perf_record", "linux_perf_stat",
+           "linux_probe_add", "linux_probe_list", "linux_probe_remove", "linux_ring_open", "linux_ring_read",
+           "linux_ring_unwatch", "linux_ring_watch", "linux_sync", "linux_trace_start", "linux_trace_stop")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_close_linux", "_linux", "_linux_before_recording_stop", "_linux_event", "_linux_flush", "_linux_keep",
+              "_linux_ring_cpu", "_linux_ring_record", "_running")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    # _linux_halted_reason: 対象が linux.halt で全コアを止められているか（止まっていれば ssh・エージェントを叩かない）
+    NEEDS = ("_debug", "_ensure_design", "_jtag_wire", "_linux_halted_reason", "_lock", "_raw", "_recorder",
+             "_require_disconnected")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._linux: dict[str, _Target] = {}
 
     def _close_linux(self) -> None:
@@ -136,6 +168,9 @@ class LinuxTools:
 
     def linux_connect(self, target: str, host: str, user: str, port: int = 22, key: str | None = None,
                       sudo: bool = False, sudo_password_env: str | None = None) -> dict:
+        reason = self._host._linux_halted_reason(target)
+        if reason is not None:                               # 止まった対象: 切り直さず、叩かない
+            raise TargetHalted(reason)
         if target in self._linux:
             self.linux_disconnect(target=target)
         if sudo_password_env and not sudo:
@@ -152,11 +187,15 @@ class LinuxTools:
         if r.returncode:
             raise RuntimeError(f"{user}@{host} に入れない（{r.returncode}）: {_text(r.stderr).strip()}")
         caps = parse_caps(_text(r.stdout))
-        self._linux[target] = _Target(ssh, sudo, caps, sudo_password_env)
+        guarded = GuardedSsh(ssh, lambda: self._host._linux_halted_reason(target))
+        self._linux[target] = _Target(guarded, sudo, caps, sudo_password_env)
         return caps
 
     def linux_disconnect(self, target: str) -> dict:
+        """切る。対象が linux.halt で止まっていれば、対象の上の後始末（ftrace・プローブ・エージェントの終わり）は叩かずに
+        手元だけ閉じ、叩かなかったことを remote_cleanup_skipped（理由）で返す。"""
         t = self._lt(target)
+        halted = self._host._linux_halted_reason(target)
         self._linux_stop_sync(t)
         if t.ring_stop is not None:
             t.ring_stop.set()
@@ -177,7 +216,10 @@ class LinuxTools:
         if t.agent is not None:
             t.agent.stop()
         del self._linux[target]
-        return {"target": target, "disconnected": True}
+        out = {"target": target, "disconnected": True}
+        if halted is not None:
+            out["remote_cleanup_skipped"] = halted
+        return out
 
     def linux_capabilities(self, target: str) -> dict:
         return self._lt(target).caps
@@ -202,7 +244,9 @@ class LinuxTools:
 
     def linux_agent_status(self, target: str) -> dict:
         t = self._lt(target)
-        st = t.agent.status() if t.agent else {"running": False, "exit_code": None, "stderr_tail": ""}
+        # 起動していなければ、Agent.status と同じ欄を「何も無い」で（応答の形を道筋で変えない）
+        st = t.agent.status() if t.agent else {"running": False, "exit_code": None, "stderr_tail": "", "watchdog_s": None,
+                                               "event_errors": 0, "last_event_error": None, "bad_lines": 0}
         return {**st, "deployed": t.deployed, "sync_error": t.sync_error, "ring": t.ring, "ring_stats": dict(t.ring_stats),
                 "trace_unparsed": t.trace_unparsed, "trace_unrouted": t.trace_unrouted}
 
@@ -238,7 +282,7 @@ class LinuxTools:
             raise ValueError(f"プローブの名前 {name!r} は英数字と _（先頭は数字以外、64 文字まで）")
         if name in t.probes:
             raise ValueError(f"プローブ {name} はもうある")
-        local = _home() / target / "sysroot" / binary.lstrip("/")
+        local = _sysroot_file(target, binary)
         t.ssh.get(binary, local)                     # シンボルのため、ターゲットのバイナリをそのまま取り寄せる
         out = {"name": name, "method": method, "binary": binary, "sysroot_file": str(local),
                "sha256": hashlib.sha256(local.read_bytes()).hexdigest()}
@@ -341,6 +385,8 @@ class LinuxTools:
         while not stop.wait(interval):
             try:
                 self.linux_sync(target=target, count=1)
+            except TargetHalted:
+                continue                             # 止まっている間は休み、走り出したら続ける
             except (RuntimeError, ValueError) as e:
                 t.sync_error = str(e)                # status に事実で出す（調停を止めない）
                 return
@@ -621,6 +667,39 @@ class LinuxTools:
         t.memap = XsdbMemAp(xsdb, cable_serial=cable_serial, chain_idcode=chain_idcode, timeout_s=timeout_s)
         return t.memap.info
 
+    def linux_memap_connect_jtag(self, target: str, chain_idcode: int, ap: int, frequency_hz: int) -> dict:
+        """止めずに読む口（memap）を、fprobe の JTAG の口につないだ DAP の MEM-AP で開く（xsdb 不要）。
+        chain_idcode（チェーンにあるはずの DP の IDCODE。違うターゲットを読まない）・ap（MEM-AP の番号。Zynq の AHB-AP は 0）・
+        frequency_hz は使う側が明示する。開いている間、プローブの生の DAP をこの口が使う（jtag.scan 等とは同時に使えない）。"""
+        t = self._lt(target)
+        self._host._require_disconnected("止めずに読む口（JTAG）")
+        if t.memap is not None:
+            t.memap.close()
+            t.memap = None
+        self._host._ensure_design("jtag")
+        with self._host._lock:
+            scan = scan_chain(self._host._jtag_wire(frequency_hz))
+            want = chain_idcode & 0x0FFFFFFF
+            index = next((d.index for d in scan.devices if d.idcode is not None and d.idcode & 0x0FFFFFFF == want), None)
+            if index is None:
+                seen = ", ".join(f"0x{d.idcode:08X}" if d.idcode is not None else "BYPASS" for d in scan.devices) or "なし"
+                raise RuntimeError(f"チェーンに IDCODE 0x{chain_idcode:08X} の装置が見えない（見えた装置: {seen}）")
+            if scan.chain is None or len(scan.chain) != len(scan.devices):
+                raise RuntimeError(f"チェーンの IR 長が分からない: {scan.as_dict()}")
+            dap = self._host._raw()
+            dap.start("jtag", frequency_hz, scan.chain, dap_index=index)
+            dap.read_dpidr()                                    # JTAG の初期化に要る（無いと SELECT の書き込みが応答しない）
+            if not dap.power_up()["debug_power"]:
+                raise RuntimeError("DP のデバッグ電源が上がらない")
+            dap.clear_errors()                                  # 接続の前から残っていた誤りの印（STICKYERR 等）を消す。以後の読みの誤りは事実で出る
+            idr = decode_ap_idr(dap.read_ap(ap, 0xFC))
+            if idr["kind"] != "mem-ap":
+                raise RuntimeError(f"AP {ap} は MEM-AP でない: {idr}")
+            info = {"via": "probe_jtag", "chain_idcode": chain_idcode, "device_index": index, "ap": ap,
+                    "ap_idr": idr["value"], "frequency_hz": frequency_hz}
+            t.memap = JtagMemAp(dap, ap, info)
+            return info
+
     def linux_memap_disconnect(self, target: str) -> dict:
         t = self._lt(target)
         if t.memap is not None:
@@ -630,7 +709,7 @@ class LinuxTools:
 
     def _linux_ring_cpu(self):
         """止めて読む CPU（target.connect で Cortex-A のコアにつないだもの）"""
-        target = getattr(self._debug, "target", None) if self._debug is not None else None
+        target = getattr(self._host._debug, "target", None) if self._host._debug is not None else None
         if target is None or not hasattr(target, "core") or not hasattr(target.core, "read_memory_fast"):
             raise RuntimeError("Cortex-A のコアに target.connect していない（道 B の access=halt はそのコアに読ませる）")
         return _ArmACpu(target)
@@ -666,7 +745,7 @@ class LinuxTools:
 
         out = {"records": [], "lost": [], "torn": [], "corrupt": [], "head": None, "left": 0}
         header_error = None
-        with self._lock:
+        with self._host._lock:
             was = access == "halt" and cpu.state() == "halted"
             t0 = time.perf_counter()
             failed = False
@@ -723,6 +802,8 @@ class LinuxTools:
             while not stop.wait(interval_s):
                 try:
                     self.linux_ring_read(target=target, address=address, access=access, max_records=max_records)
+                except TargetHalted:
+                    continue                                 # 止まっている間は休み、走り出したら続ける
                 except Exception as e:                       # noqa: BLE001  止めて事実を残す（調停を止めない）
                     t.ring_stats["error"] = f"{type(e).__name__}: {e}"
                     return
@@ -829,7 +910,7 @@ class LinuxTools:
     @staticmethod
     def _linux_converted(t: _Target, body: dict) -> dict:
         """その時点の組で換算した写し（host_s・sync）。換算できなければそのまま。"""
-        conv = t.clock.to_host(body["target_ns"]) if LinuxTools._convertible(body) else None
+        conv = t.clock.to_host(body["target_ns"]) if LinuxService._convertible(body) else None
         if conv is None:
             return body
         return {**body, "host_s": conv["host_s"],
@@ -857,7 +938,7 @@ class LinuxTools:
             if len(t.events) == t.events.maxlen:
                 t.dropped += 1
             t.events.append(body)
-            rec = self._recorder
+            rec = self._host._recorder
             if rec is not None and self._convertible(body):     # 記録中に受けた出来事だけを、その記録に入れる
                 t.pending.append((body, rec))
         if flush:
@@ -879,7 +960,7 @@ class LinuxTools:
             t.examined, t.examined_last = len(wait), last
             converted = [(self._linux_converted(t, e), rec) for e, rec in ready]
         for body, rec in converted:
-            if rec is not self._recorder or "sync" not in body:
+            if rec is not self._host._recorder or "sync" not in body:
                 t.not_recorded += 1                  # 記録が替わった・組が 2 つ未満（事実として数える）
                 continue
             try:
@@ -889,7 +970,16 @@ class LinuxTools:
                 continue
             body["sync"]["clockmap_uncertainty_ticks"] = map_unc
             rec.add(f"{target}.{body['method']}", body["probe"], ticks, body=body,
-                    uncertainty=body["sync"]["half_rtt_ns"] / 1e9 * rec.clock.hz + map_unc)
+                    uncertainty=sync_uncertainty(body["sync"], rec.clock.hz, map_unc))
+
+
+def sync_uncertainty(sync: dict, hz: float, map_unc: float) -> float | None:
+    """対象の時刻を PC の時刻へ換算した出来事の記録の不確かさ（タイムベース）: 往復の半分 + 記録の時計の写し。
+    組の範囲の外（outside）へ延ばした時刻は、組の外の時計の比のゆれが分からず上限が無いので None（分からない。
+    範囲の内と同じ幅を付けない。sync の outside・nearest_pair_ns が延ばした事実）。"""
+    if sync.get("outside"):
+        return None
+    return sync["half_rtt_ns"] / 1e9 * hz + map_unc
 
 class _MemapReader:
     """止めずに読む口を、止めて読む CPU と同じ形で使う（止める・再開は何もしない）"""

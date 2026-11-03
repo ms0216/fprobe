@@ -44,7 +44,7 @@ def test_vector_catch_then_continue_stops_in_the_fault_handler_with_a_real_shape
     status = demo.target_status()
     assert status["function"] == "default_handler" and status["line"] == 32
     report = demo.target_fault()
-    assert report["faulted"] and report["exception"] == {"number": 3, "name": "HardFault"}
+    assert report["faulted"] and report["exception"] == {"number": 3, "name": "HardFault", "fault": True}
     assert [c["bit"] for c in report["causes"]] == ["FORCED", "PRECISERR", "BFARVALID"]
     assert report["registers"]["BFAR"] == 0x20018000 and report["fault_address"]["address"] == 0x20018000
     frame = report["frame"]

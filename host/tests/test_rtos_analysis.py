@@ -142,8 +142,9 @@ def test_memory_series_from_saved_stack_pointers_and_heap_free():
     low = out["stacks"]["low"]
     assert (low["size"], low["max_used"], low["min_used"], low["last_used"]) == (512, 300, 100, 200)
     # 窓ごとの、その窓のサンプルの最大。サンプルの無い窓に前の値を続けて置かない（値は次のサンプルまで続くと仮定しない）
-    assert low["max_at"] == 10 and low["points"] == [[0, 300]]
-    assert out["heap"]["points"] == [[16, 700]]
+    # 点の時刻はその値を読んだサンプルの時刻（窓の始めの時刻にしない: その時刻には読んでいない）
+    assert low["max_at"] == 10 and low["points"] == [[10, 300]]
+    assert out["heap"]["points"] == [[30, 700]]
     heap = out["heap"]
     assert (heap["min_free"], heap["last_free"], heap["total"]) == (700, 700, 1000) and heap["min_at"] == 30
 
@@ -183,6 +184,8 @@ def test_inversion_episodes_from_sampled_mutex_words():
     assert (ep["mutex"], ep["holder"], ep["waiter"], ep["t0"], ep["t1"]) == ("log_mutex", "low", "high", 10, 40)
     assert ep["duration"] == 30 and ep["holder_time"] == 15 and ep["interference"] == {"mid": 15}
     assert ep["interfered"] and out["interfered"] == 1 and "unbounded" not in ep and out["max"]["duration"] == 30
+    # 持ち主と待ち手の語は別々の時刻に読んだ: 組にして逆転とみた読みの時刻の差の最大（t 36 の待ち手と t 11 の持ち主）
+    assert ep["pair_read_span"] == 25 and ep["opened_reads"] == {"holder_t": 0, "head_t": 10}
 
 
 def test_a_task_after_the_last_sample_that_saw_the_inversion_is_not_interference():

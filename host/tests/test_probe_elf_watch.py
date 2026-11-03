@@ -152,3 +152,14 @@ def test_dropped_notices_are_counted():
     assert out["notices_dropped"] == 3 and out["notices_limit"] == NOTICE_LIMIT
     notices.add("t", {"n": 0})
     assert "notices_dropped" not in notices.attach({})
+
+
+def test_the_ai_is_told_what_the_human_did_and_about_pauses_but_not_its_own_calls():
+    """点検 A4: 人の操作（activity の role = human）と一時停止（control）を、AI の次の道具の結果に添える。"""
+    notices = Notices()
+    notices.add("activity", {"seq": 1, "client": "claude", "role": "ai", "method": "target.halt"})
+    notices.add("activity", {"seq": 2, "client": "gui", "role": "human", "method": "target.halt"})
+    notices.add("control", {"paused": True, "paused_by": "gui", "held": 0})
+    out = notices.attach({})
+    assert [(n["topic"], n.get("method")) for n in out["notices"]] == [("activity", "target.halt"), ("control", None)]
+    assert out["notices"][0]["role"] == "human"

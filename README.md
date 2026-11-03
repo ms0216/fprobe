@@ -183,7 +183,11 @@ stats = DeepAnalyzer(s.device).stream_to_vcd("long.vcd", duration_s=60, rle=True
 print(stats.samples, stats.mb_per_s, stats.overrun)
 ```
 
-CLI: `fprobe la out.vcd --stream 60 --rle`。MCP: `la_stream`。
+受け取り（取り込み）と VCD への書き出しは分かれている。`raw_path="long.fplaraw"` を渡すと受け取った拍をそのまま保存したファイルが残り、
+`DeepAnalyzer.stream_to_raw`（取り込みだけ）と `fprobe.la_raw.raw_to_vcd`（あとから VCD に）で別々に行える
+（`docs/superpowers/specs/2026-11-03-la-raw-capture-design.md`）。
+
+CLI: `fprobe la out.vcd --stream 60 --rle`。MCP: `la_stream`（生の保存ファイルから VCD は `la_raw_to_vcd`）。
 
 ### DAP のイベント記録
 

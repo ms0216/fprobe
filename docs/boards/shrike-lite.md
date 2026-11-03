@@ -15,7 +15,7 @@ fprobe の観測の対象（MCU と FPGA が連携するシステムの題材）
 
 ## FPGA の書き方
 
-RP2040 の MicroPython（Vicharak の版。COM16、シリアル <Shrike のシリアル>）の `shrike.reset(); shrike.flash('x.bin')`。
+RP2040 の MicroPython（Vicharak の版。COM16、シリアル 454D4A3330370016）の `shrike.reset(); shrike.flash('x.bin')`。
 x.bin は Workshop の `FPGA_bitstream_MCU.bin` と同じ形（`fprobe_gw.toolchain.forgefpga.mcu_image`）。
 
 ## ビルド（GUI なし）

@@ -1,7 +1,7 @@
 """Probe の道具: 変数のライブ観測（F4。ターゲットを止めずに、FPGA の DAP サンプラが周期的に読む）と、その拡充（U43）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder と、DAP サンプラの
-持ち主（WindowTools._claim_sampler）、背景の周期の仕事（ObserveTools._add_job）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・target・_symbols・_recorder と、DAP サンプラの
+持ち主（WindowService._claim_sampler）、背景の周期の仕事（ObserveService._add_job）を使う。
 
 - watch_set で、変数の名前・C の式・番地を、ELF の DWARF で番地と大きさにし、サンプラのか所にする。値は DAP の
   イベント記録（種類 7）に入り、記録中なら stream "sample" にも入る。値は変数の全部の語がそろった時点で 1 つの値。
@@ -36,8 +36,9 @@ from .events import INJECT_KINDS, KIND_SAMPLE, EventCursor, EventLog, resolve
 from .sampler import Sampler
 from .watch_buffer import TargetRing
 from .watch_trigger import Capture, Condition
+from .probe_service import HostView
 
-__all__ = ["ValueStats", "WatchTools", "measure", "pair_latest", "rates", "xy_result"]
+__all__ = ["ValueStats", "WatchService", "measure", "pair_latest", "rates", "xy_result"]
 
 READ_LIMIT = 4096                      # 1 回に読むイベント記録の件数（最新から）
 CHASE_LIMIT = 100_000                  # ホストが読んだ値を式ごとに残す数
@@ -187,6 +188,14 @@ class _Watched:
         return decode(self.type, data)
 
 
+def _window_us(spans: list | None, i: int, hz: float) -> dict:
+    """値の列の i 番目の、値を読んだ瞬間の範囲（µs。線上の点の回路のサンプラの値だけ。無ければ空）。"""
+    if not spans:
+        return {}
+    lo, hi = spans[i]
+    return {"time_lo_us": None if lo is None else lo * 1e6 / hz, "time_hi_us": None if hi is None else hi * 1e6 / hz}
+
+
 class _Assembler:
     """サンプラの語（番地, 値）から変数の値を組み立てる。語は巡回の順に読むので、変数の最後の語が来た時点で
     同じ巡回の値がそろう。"""
@@ -222,8 +231,20 @@ class _Buffer:
     cursor: int = 0                                       # 既定の読み手の次の通し番号
 
 
-class WatchTools:
-    def _init_watch(self) -> None:
+class WatchService:
+    API = ("watch_buffer_read", "watch_buffer_start", "watch_buffer_stop", "watch_capture", "watch_measure",
+           "watch_series", "watch_set", "watch_status", "watch_stop", "watch_trigger", "watch_values", "watch_write",
+           "watch_xy")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_capture_dict", "_chase_rate", "_describe", "_stats_once", "_watch_buffer", "_watch_client",
+              "_watch_rate", "_watch_rejected", "_watch_running", "_watch_started", "_watch_target", "_watch_targets",
+              "_watched", "_write_bits")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_add_job", "_claim_sampler", "_job_errors", "_linux_view", "_lock", "_name_watches", "_recorder",
+             "_release_sampler", "_remove_job", "_sampler_user", "_symbols", "session", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._watched: list[_Watched] = []
         self._watch_running = False                        # watch_set で動き、watch_stop で false（一覧は残る）
         self._watch_rejected: list[dict] = []
@@ -242,7 +263,7 @@ class WatchTools:
         self._stats_assembler: _Assembler | None = None
 
     def _watch_info(self):
-        return Debugger(None, self._symbols).debug_info() if self._symbols else None
+        return Debugger(None, self._host._symbols).debug_info() if self._host._symbols else None
 
     def _watch_target(self, expression: str) -> _Watched:
         raw = _RAW.fullmatch(expression.strip())
@@ -250,17 +271,17 @@ class WatchTools:
             return _Watched(expression, int(raw[1], 16), int(raw[2] or 4))   # 大きさが無ければサンプラの読みの単位（1 語）
         info = self._watch_info()
         if info is None:
-            if self._symbols is None:
+            if self._host._symbols is None:
                 raise RuntimeError("ELF が読み込まれていない（elf_load を先に。番地なら \"0x20000000:4\" の形で）")
-            s = self._symbols.variable(expression)                        # DWARF が無い: シンボルの番地と大きさ
+            s = self._host._symbols.variable(expression)                        # DWARF が無い: シンボルの番地と大きさ
             if not s.size:
                 raise ValueError(f"{expression} のシンボルに大きさが無い（\"0x{s.address:08X}:4\" の形で大きさを付ける）")
             return _Watched(expression, s.address, s.size)
         try:
             v = evaluate(expression, info, _frame(_no_memory))           # 大域だけ（メモリは読まない）
         except _NeedsMemory:
-            with self._lock:                                              # ポインタをたどる: いまの値で形を確かめる
-                v = evaluate(expression, info, _frame(PyocdAccess(self.target).read_memory))
+            with self._host._lock:                                              # ポインタをたどる: いまの値で形を確かめる
+                v = evaluate(expression, info, _frame(PyocdAccess(self._host.target).read_memory))
             chase = True
         else:
             chase = False
@@ -281,24 +302,24 @@ class WatchTools:
         watched, rejected = self._watch_labelled(expressions, names, chase_rate_hz)
         sampled = [w for w in watched if not w.chase]
         slots = []
-        with self._lock:
-            device = self.session.device
+        with self._host._lock:
+            device = self._host.session.device
             if sampled:
-                self._claim_sampler("watch", caller)
+                self._host._claim_sampler("watch", caller)
                 slots = Sampler(device).configure([(w.address, w.size) for w in sampled], 1.0 / rate_hz, ap)
-                if self._recorder is None:
+                if self._host._recorder is None:
                     EventLog(device).ensure_started()                     # 記録中は Collector が始めている
                 cursor = EventCursor(EventLog(device))                     # 統計: 始めてからの値をすべて
                 Sampler(device).start(jitter)
                 self._watch_base = _counts(Sampler(device).status())
-            elif self._sampler_user == "watch":                           # 前の watch_set のサンプラ
+            elif self._host._sampler_user == "watch":                           # 前の watch_set のサンプラ
                 Sampler(device).stop()
-                self._release_sampler("watch")
+                self._host._release_sampler("watch")
             self._end_watch_jobs()
             self._watched, self._watch_rate, self._chase_rate = watched, rate_hz, chase_rate_hz
             self._watch_running = bool(watched)
             if names is not None:                        # 記録の段の名前（観測を止めた後・後から開いた記録でも）
-                self._name_watches({w.address: w.name for w in sampled if w.address is not None})
+                self._host._name_watches({w.address: w.name for w in sampled if w.address is not None})
             self._watch_rejected, self._watch_started = rejected, time.monotonic()
             self._watch_client = dict(caller) if caller is not None else None
             if not sampled:
@@ -331,9 +352,9 @@ class WatchTools:
         self._stats_cursor = cursor
         self._stats_assembler = _Assembler(watched) if sampled else None
         if sampled:
-            self._add_job("watch.stats", 0.0, self._stats_once)
+            self._host._add_job("watch.stats", 0.0, self._stats_once)
         if self._chase_series:
-            self._add_job("watch.chase", 1.0 / chase_rate_hz, self._chase_once)
+            self._host._add_job("watch.chase", 1.0 / chase_rate_hz, self._chase_once)
 
     def _watch_targets(self, expressions: list[str]) -> tuple[list[_Watched], list[dict]]:
         """式ごとにか所にする。誤った式は rejected（{"expression", "error"}）に外す。全部が誤りなら誤り（1 つなら
@@ -358,9 +379,9 @@ class WatchTools:
 
     def _end_watch_jobs(self) -> None:
         """ホストの読みと条件つきの取得を終える（_lock の中で）。"""
-        self._remove_job("watch.chase")
-        self._remove_job("watch.drain")
-        self._remove_job("watch.stats")
+        self._host._remove_job("watch.chase")
+        self._host._remove_job("watch.drain")
+        self._host._remove_job("watch.stats")
         trigger = self._watch_trigger
         if trigger is not None and not trigger.capture.done:
             c = trigger.capture
@@ -368,15 +389,15 @@ class WatchTools:
 
     def watch_stop(self) -> dict:
         """周期的な読みを止める（読んだ値はイベント記録・記録に残る。条件つきの取得は打ち切る）。"""
-        with self._lock:
+        with self._host._lock:
             self._end_watch_jobs()
             self._watch_running = False                         # 一覧は残す（値を読む）が、動いてはいない
-            if self._sampler_user not in (None, "watch"):
+            if self._host._sampler_user not in (None, "watch"):
                 return {"stopped": True}                       # サンプラはほかの道具のもの: 触らない（止めてあるものは止まっている）
-            if self._sampler_user == "watch" or not any(w.chase for w in self._watched):
-                sampler = Sampler(self.session.device)
+            if self._host._sampler_user == "watch" or not any(w.chase for w in self._watched):
+                sampler = Sampler(self._host.session.device)
                 sampler.stop()
-                self._release_sampler("watch")
+                self._host._release_sampler("watch")
                 return sampler.status()
             return {"stopped": True}
 
@@ -388,8 +409,8 @@ class WatchTools:
         その数からの loss_ratio・measured_hz（rates）。stats = 変数ごとの watch_set から読んだ値の統計（ValueStats。
         サンプラの値はイベント記録を続きから読んで数え、読めずに一周された・上限を超えたイベントの数は
         stats_lost_events。ホストの読みの値は読むたびに数える）。"""
-        with self._lock:
-            status = Sampler(self.session.device).status() if any(not w.chase for w in self._watched) else {}
+        with self._host._lock:
+            status = Sampler(self._host.session.device).status() if any(not w.chase for w in self._watched) else {}
         if status and self._watch_base is not None:                       # 起動からの数 → watch_set からの数
             device = _counts(status)
             status.update({k: (v - self._watch_base[k]) & 0xFFFFFFFF for k, v in device.items()}, device=device)
@@ -409,54 +430,80 @@ class WatchTools:
 
     # --- 値の列 ---------------------------------------------------------------------------------
 
-    def _series(self, last: int) -> tuple[dict[str, list], float, dict[str, int | None]]:
+    def _series(self, last: int, windows: dict | None = None) -> tuple[dict[str, list], float, dict[str, int | None]]:
         """イベント記録の最新の分（サンプラ）とホストの読み（ポインタをたどる式）から、変数ごとの (時刻, 値) の列と、
-        変数ごとの読んだ範囲の始め（それより古い値があったが読まなかった・残っていなければその時刻、全部読めば None）。"""
+        変数ごとの読んだ範囲の始め（それより古い値があったが読まなかった・残っていなければその時刻、全部読めば None）。
+
+        サンプラの値の時刻は回路で意味が違う: DAP の時刻が線上の点の回路（ケイパビリティ dap_line_time。time-accuracy
+        S2）は読みを頼んだ転送の線上の点（窓の始め）、古い回路は値が返った周期。windows を渡すと、線上の点の回路では
+        変数ごとに値の列と同じ並びの (t_lo, t_hi)（対象がその値を読んだ瞬間の範囲。複数の語の変数は語の範囲を合わせた
+        もの。分からない端は None）を入れ、windows["_time_point"] に時刻の意味（read_request / value_returned）を入れる。"""
         if not self._watched:
             raise RuntimeError("観測していない（watch_set を先に）")
         out: dict[str, list] = {w.name: [] for w in self._watched}
         start: dict[str, int | None] = {w.name: None for w in self._watched}
         events: list = []
         older = False                                    # イベント記録に、読んだより古いイベントがあった
-        with self._lock:
-            device = self.session.device
-            hz = device.capabilities().timebase_hz
+        with self._host._lock:
+            device = self._host.session.device
+            caps = device.capabilities()
+            hz = caps.timebase_hz
+            line_time = bool(caps.dap_line_time)
+            output_ticks = caps.dap_output_ticks
             if any(not w.chase for w in self._watched):
                 log = EventLog(device)
                 written = log.counts()[0]
                 events = log.read(min(last, READ_LIMIT), end=written)
-                older = len(events) < written
+                older = log.records < written
             reference = device.time()                    # 48 ビットのイベントの時刻を 64 ビットにする基準（読んだ後）
             for name, series in self._chase_series.items():
                 kept = list(series)
                 out[name] = kept[-last:]
                 if out[name] and self._chase_total.get(name, 0) > len(out[name]):
                     start[name] = out[name][0][0]
-        resolved = list(resolve(unwrap_events(events, reference)))
+        resolved = list(resolve(unwrap_events(events, reference), line_time=line_time, output_ticks=output_ticks))
         if older and resolved:
             for w in self._watched:
                 if not w.chase:
                     start[w.name] = resolved[0].time
         assembler = _Assembler(self._watched)
+        words = {w.name: w.words for w in self._watched if not w.chase}
+        word_windows: dict[int, tuple[int | None, int | None]] = {}
+        if windows is not None:
+            windows["_time_point"] = "read_request" if line_time else "value_returned"
+            if line_time:
+                windows.update({name: [] for name in words})
         for a in resolved:
             if a.kind == "sample":
+                word_windows[a.address] = (a.time_lo, a.time_hi)
                 for name, value in assembler.feed(a.address, a.value):
                     out[name].append((a.time, value))
+                    if windows is not None and line_time:
+                        spans = [word_windows.get(x, (None, None)) for x in words[name]]
+                        los, his = [s[0] for s in spans], [s[1] for s in spans]
+                        windows[name].append((None if None in los else min(los), None if None in his else max(his)))
         return out, hz, start
 
     def watch_values(self) -> dict:
-        """観測している変数の最新の値と、その時刻（タイムベースの µs）。"""
-        series, hz, _ = self._series(READ_LIMIT)
-        return {"values": [{"name": name, "time_us": s[-1][0] * 1e6 / hz, "value": s[-1][1]} if s
+        """観測している変数の最新の値と、その時刻（タイムベースの µs）。time_point = 時刻の意味（_series）。線上の点の
+        回路では値を読んだ瞬間の範囲 time_lo_us・time_hi_us も（分からない端は None）。"""
+        windows: dict = {}
+        series, hz, _ = self._series(READ_LIMIT, windows)
+        return {"time_point": windows["_time_point"],
+                "values": [{"name": name, "time_us": s[-1][0] * 1e6 / hz, "value": s[-1][1],
+                            **_window_us(windows.get(name), -1, hz)} if s
                            else {"name": name, "time_us": None, "value": None} for name, s in series.items()]}
 
     def watch_series(self, name: str, last: int = 1000) -> dict:
         """変数 1 つの値の列（古い順。時刻はタイムベースの µs）。last はイベント記録から読む件数（最大 4096）。
         from_us = 読んだ範囲の始め（それより古い値があったが読まなかった・残っていない。全部読めば None）。"""
-        series, hz, start = self._series(last)
+        windows: dict = {}
+        series, hz, start = self._series(last, windows)
         if name not in series:
             raise KeyError(f"{name!r} は観測していない")
-        return {"name": name, "samples": [{"time_us": t * 1e6 / hz, "value": v} for t, v in series[name]],
+        return {"name": name, "time_point": windows["_time_point"],
+                "samples": [{"time_us": t * 1e6 / hz, "value": v, **_window_us(windows.get(name), i, hz)}
+                            for i, (t, v) in enumerate(series[name])],
                 "from_us": None if start[name] is None else start[name] * 1e6 / hz}
 
     def watch_xy(self, x: str, y: str, last: int = 1000, max_dt_us: float | None = None) -> dict:
@@ -496,9 +543,9 @@ class WatchTools:
     def _chase_once(self) -> None:
         """背景の仕事（_lock の中で）: ポインタをたどる式を評価し直して読む。"""
         info = self._watch_info()
-        access = PyocdAccess(self.target)
+        access = PyocdAccess(self._host.target)
         frame = _frame(access.read_memory)
-        t = self.session.device.time()
+        t = self._host.session.device.time()
         trigger = self._watch_trigger
         for w in self._watched:
             if not w.chase:
@@ -538,8 +585,8 @@ class WatchTools:
         stop_c = Condition.parse(stop, names) if stop is not None else None
         if pre_s < 0 or (post_s is not None and post_s <= 0) or max_samples < 1:
             raise ValueError("pre_s ≥ 0、post_s > 0、max_samples ≥ 1")
-        with self._lock:
-            device = self.session.device
+        with self._host._lock:
+            device = self._host.session.device
             hz = device.capabilities().timebase_hz
             self._end_watch_jobs()
             capture = Capture(start_c, stop_c, round(pre_s * hz), None if post_s is None else round(post_s * hz),
@@ -557,9 +604,9 @@ class WatchTools:
             self._prefill(trigger, prefill)
             self._watch_trigger = trigger
             if needs_events:
-                self._add_job("watch.drain", 0.0, self._drain_once)
+                self._host._add_job("watch.drain", 0.0, self._drain_once)
             if self._chase_series:
-                self._add_job("watch.chase", 1.0 / self._chase_rate, self._chase_once)
+                self._host._add_job("watch.chase", 1.0 / self._chase_rate, self._chase_once)
         return self._capture_dict(trigger, include_samples=False)
 
     def _prefill(self, trigger: _Trigger, events: list) -> None:
@@ -580,10 +627,10 @@ class WatchTools:
         """背景の仕事（_lock の中で）: イベント記録の続きを読み、条件つきの取得に流す。"""
         trigger = self._watch_trigger
         if trigger is None or trigger.capture.done:
-            self._remove_job("watch.drain")
+            self._host._remove_job("watch.drain")
             return
         latest = None
-        device = self.session.device
+        device = self._host.session.device
         for e in unwrap_events(trigger.cursor.take(), device.time()):
             if e.time <= trigger.skip_until:
                 continue
@@ -620,7 +667,7 @@ class WatchTools:
         deadline = time.monotonic() + wait_s
         while not trigger.capture.done and time.monotonic() < deadline:
             time.sleep(0.01)
-        with self._lock:
+        with self._host._lock:
             return self._capture_dict(trigger)
 
     # --- 走行中の書き込み ---------------------------------------------------------------------------
@@ -629,9 +676,11 @@ class WatchTools:
         """走行中の変数に書く（止めない。CubeMonitor・µC/Probe の実行中の変更）。expression: 大域・静的の C の式
         （ポインタをたどってもよい）か番地（"0x20000000:4" は整数を書く）。value: 数・列挙の名前・真偽。書いた後に
         読み直した値を返す。ビットフィールドは読み・変え・書きで、ターゲットが同じ語を同時に書くと失われうる（atomic）。"""
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.watch_write(expression=expression, value=value)
         raw = _RAW.fullmatch(expression.strip())
-        with self._lock:
-            access = PyocdAccess(self.target)
+        with self._host._lock:
+            access = PyocdAccess(self._host.target)
             if raw:
                 address, size = int(raw[1], 16), int(raw[2] or 4)
                 if isinstance(value, (str, float)) or size not in (1, 2, 4, 8):
@@ -684,8 +733,8 @@ class WatchTools:
         info = self._watch_info()
         if info is None:
             raise RuntimeError("ELF に DWARF が無い（watch_buffer は配列の型を使う）")
-        with self._lock:
-            access = PyocdAccess(self.target)
+        with self._host._lock:
+            access = PyocdAccess(self._host.target)
             frame = _frame(access.read_memory)
             va, vh = evaluate(array, info, frame), evaluate(head, info, frame)
             s = strip(va.type)
@@ -698,18 +747,18 @@ class WatchTools:
             ring = TargetRing(s.element, va.address, s.length, vh.address, hs.size, counter)
             ring.poll(access.read_memory)                                  # いまの位置に合わせる
             self._watch_buffer = _Buffer(ring, array, head, rate_hz)
-            self._add_job("watch.buffer", 1.0 / rate_hz, self._buffer_once)
+            self._host._add_job("watch.buffer", 1.0 / rate_hz, self._buffer_once)
         return self._buffer_info()
 
     def _buffer_once(self) -> None:
         """背景の仕事（_lock の中で）: 増えた要素を吸い出す。"""
         buf = self._watch_buffer
         if buf is None:
-            self._remove_job("watch.buffer")
+            self._host._remove_job("watch.buffer")
             return
-        got = buf.ring.poll(PyocdAccess(self.target).read_memory)
+        got = buf.ring.poll(PyocdAccess(self._host.target).read_memory)
         if got:
-            t = self.session.device.time()
+            t = self._host.session.device.time()
             buf.samples.extend((seq, t, value) for seq, value in got)
 
     def _buffer_info(self) -> dict:
@@ -719,14 +768,14 @@ class WatchTools:
         r = buf.ring
         return {"array": buf.array, "head": buf.head, "counter": r.counter, "rate_hz": buf.rate_hz,
                 "address": f"0x{r.base:08X}", "length": r.length, "element": type_name(r.element),
-                "total": r.seq, "lost": r.lost, "error": self._job_errors.get("watch.buffer")}
+                "total": r.seq, "lost": r.lost, "error": self._host._job_errors.get("watch.buffer")}
 
     def watch_buffer_read(self, since: int | None = None, limit: int = 1000) -> dict:
         """吸い出した要素（機器には触れない）: samples = [{"seq"（通し番号）, "time_us"（PC が読んだ時刻）, "value"}]。
         since を省くと前回の続きから（読むと進む）。since を渡すとそこから（画面用。進まない）。lost は一周されて
         読めなかった要素の数、evicted はホストで持つ数の上限（kept_limit = BUFFER_LIMIT）を超えて捨てた、since より後の
         要素の数、next は次の since。"""
-        with self._lock:                                                   # 背景の吸い出しと取り合わない
+        with self._host._lock:                                                   # 背景の吸い出しと取り合わない
             buf = self._watch_buffer
             if buf is None:
                 raise RuntimeError("吸い出していない（watch_buffer_start を先に）")
@@ -735,13 +784,13 @@ class WatchTools:
             nxt = items[-1][0] + 1 if items else max(first, buf.samples[0][0] if buf.samples else first)
             if since is None:
                 buf.cursor = nxt
-            hz = self.session.device.capabilities().timebase_hz
+            hz = self._host.session.device.capabilities().timebase_hz
             evicted = max(0, buf.samples[0][0] - first) if buf.samples else 0
             return {"samples": [{"seq": seq, "time_us": t * 1e6 / hz, "value": v} for seq, t, v in items],
                     "next": nxt, "evicted": evicted, "kept_limit": BUFFER_LIMIT, **self._buffer_info()}
 
     def watch_buffer_stop(self) -> dict:
         """吸い出しを止める（吸い出した要素は watch_buffer_read で読める）。"""
-        with self._lock:
-            self._remove_job("watch.buffer")
+        with self._host._lock:
+            self._host._remove_job("watch.buffer")
             return self._buffer_info()

@@ -103,3 +103,27 @@ async def out_flush_discards_what_was_written_before(dut):
     got = await consume(dut, len(fresh), random.Random(5))
     await producer
     assert got == fresh
+
+
+@cocotb.test()
+async def in_below_half_reports_the_write_side_level(dut):
+    """書き込み側の in_below_half: 書き込み側から見た語の数が DEPTH / 2（8）未満のとき 1。読みが届くと戻る。"""
+    await setup(dut)
+    rng = random.Random(9)
+    await ReadOnly()
+    assert int(dut.in_below_half.value) == 1                # 空
+    await RisingEdge(dut.in_clk)
+    await produce(dut, list(range(7)), rng, idle=0)
+    await ReadOnly()
+    assert int(dut.in_below_half.value) == 1                # 7 語
+    await RisingEdge(dut.in_clk)
+    await produce(dut, [7, 8], rng, idle=0)
+    await ClockCycles(dut.in_clk, 4)                        # 出力レジスタへの先読み（1 語）が書き込み側に届く
+    await ReadOnly()
+    assert int(dut.in_below_half.value) == 0                # メモリに 8 語 = 半分（出力レジスタの 1 語は数えない）
+    await RisingEdge(dut.in_clk)
+    got = await consume(dut, 4, rng, ready=1.0)
+    assert got == [0, 1, 2, 3]
+    await ClockCycles(dut.in_clk, 4)                        # 読みの位置が書き込み側に届く
+    await ReadOnly()
+    assert int(dut.in_below_half.value) == 1

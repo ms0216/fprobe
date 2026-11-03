@@ -7,9 +7,9 @@ use work.csr_bus_pkg.all;
 use work.build_info_pkg.all;
 
 package design_caps_pkg is
-  constant CAPS_ROM : csr_word_array_t(0 to 45) := (
+  constant CAPS_ROM : csr_word_array_t(0 to 77) := (
     x"50414346",
-    x"000000B8",
+    x"00000138",
     x"00040001",
     x"00000002",
     x"000C0002",
@@ -41,12 +41,44 @@ package design_caps_pkg is
     x"00002120",
     x"00000000",
     x"0004000D",
-    x"00000008",
+    x"00010008",
     x"0004000E",
-    x"00000005",
+    x"0000001D",
     x"00060014",
     x"00040003",
     x"00000001",
+    x"00300015",
+    x"00010000",
+    x"00000100",
+    x"01000001",
+    x"00010000",
+    x"00000100",
+    x"01000001",
+    x"00000000",
+    x"80800000",
+    x"FF8080FF",
+    x"80FF8080",
+    x"8080FF80",
+    x"FF8080FF",
+    x"00480019",
+    x"01000101",
+    x"00010003",
+    x"0100010E",
+    x"00010004",
+    x"0000050D",
+    x"00000001",
+    x"01000205",
+    x"00010002",
+    x"02000206",
+    x"00000000",
+    x"05000207",
+    x"00010002",
+    x"05000908",
+    x"00010002",
+    x"02000717",
+    x"00000000",
+    x"02000818",
+    x"00000000",
     x"00140010",
     BUILD_INFO(0),
     BUILD_INFO(1),
@@ -66,6 +98,7 @@ package design_caps_pkg is
   constant LA_FILTER : boolean := false;
   constant LA_PULSE : boolean := false;
   constant LA_STREAM_EVENTS : boolean := false;
+  constant LA_STREAM_GAPS : boolean := false;
   constant OBS_PORT : boolean := false;
   constant SYNC : boolean := false;
   constant XOUT_COUNT : natural := 0;
@@ -74,4 +107,12 @@ package design_caps_pkg is
   constant UART_FLOW : boolean := false;
   constant MEM_ADDR_BITS : natural := 0;
   constant EVENT_RING_BITS : natural := 0;
+  constant CAP_RATIO : natural := 1;
+  constant LA_LANES : positive := 1;
+  constant LA_LANE_ADDR_BITS : positive := 1;
+  constant LA_FINE_PINS : boolean := false;
+  constant LA_LANE_IN_AGE : natural := 0;
+  constant LA_TESTGEN : boolean := false;
+  constant EVENT_BYTE_PACK : boolean := false;
+  constant SAMPLER_CHECK_MAX : positive := 1;
 end package;

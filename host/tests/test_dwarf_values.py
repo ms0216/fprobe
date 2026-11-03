@@ -37,11 +37,23 @@ def test_a_typedef_of_a_float_is_a_float_even_when_the_number_is_whole():
 def test_an_array_says_its_length_and_how_many_items_it_carries():
     a = ArrayType(INT, 5)
     data = b"".join(struct.pack("<i", i * 10) for i in range(5))
-    assert decode(a, data) == varray(ints(0, 10, 20, 30, 40))
+    assert decode(a, data) == varray(ints(0, 10, 20, 30, 40), element_type="int")
     cut = decode(a, data, DecodeContext(max_elements=2))
-    assert cut == varray(ints(0, 10), length=5) and len(cut["items"]) < cut["length"]       # 切った
+    assert cut == varray(ints(0, 10), length=5, element_type="int") and len(cut["items"]) < cut["length"]   # 切った
     text = decode(ArrayType(U8, 4), b"ab\0z", DecodeContext(max_elements=1))
-    assert text == varray(ints(97), length=4, string="ab")                                  # 文字列は全体から
+    assert text == varray(ints(97), length=4, element_type="unsigned char", string="ab")    # 文字列は全体から
+
+
+def test_a_pointer_says_whether_its_target_can_be_read():
+    """先を読めるか（deref）は型の事実でホストが決める: 番地が 0 でなく、指す先が void・関数でない。画面は型の文字を
+    解釈しない（E6）。"""
+    from fprobe.dwarf.typesys import FunctionType
+    at = (0x2000_0000).to_bytes(4, "little")
+    assert decode(PointerType(INT), at)["deref"] is True
+    assert decode(PointerType(INT), bytes(4))["deref"] is False                                      # NULL
+    assert decode(PointerType(QualifiedType("const", VoidType())), at)["deref"] is False               # const void *
+    assert decode(PointerType(TypedefType("handler_t", FunctionType(INT, ()))), at)["deref"] is False  # 関数へのポインタ
+    assert decode(PointerType(PointerType(VoidType())), at)["deref"] is True                          # void ** の先は void *
 
 
 def test_bitfields_are_int_enum_or_bool_like_whole_values():
@@ -59,9 +71,9 @@ def test_every_kind_of_value_and_the_number_of_the_scalar_kinds():
     assert decode(BaseType("odd", 2, "unknown"), b"\xff\x7f") == vbytes("ff7f")
     assert decode(BaseType("half", 2, "float"), b"\x00\x3c") == vbytes("003c")             # 4 / 8 以外の浮動小数
     assert decode(VoidType(), b"\x01\x02") == vbytes("0102")
-    assert decode(PointerType(INT), (0x2000_0000).to_bytes(4, "little")) == vptr(0x2000_0000, "int")
+    assert decode(PointerType(INT), (0x2000_0000).to_bytes(4, "little")) == vptr(0x2000_0000, "int", deref=True)
     assert decode(StructType("struct", "Opaque", None), b"") == vna("不完全型 struct Opaque")
     assert unavailable("optimized out") == vna("optimized out")
     assert SCALAR_KINDS == ("int", "float", "bool", "enum")
     assert [scalar(v) for v in (vint(3), vfloat(2.5), vbool(False), venum("A", 1))] == [3, 2.5, False, 1]
-    assert scalar(vstruct(enum=venum("A", 1), value=vint(1))) is None and scalar(varray(ints(1))) is None
+    assert scalar(vstruct(enum=venum("A", 1), value=vint(1))) is None and scalar(varray(ints(1), element_type="int")) is None

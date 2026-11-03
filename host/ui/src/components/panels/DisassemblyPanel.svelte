@@ -3,8 +3,8 @@
   // その番地）の前後の命令（ソースの行の見出しを挟む）。いまの命令を強調。
   // 左の余白で命令の番地にブレークポイント（止めると壊れうるターゲットは確かめる）。番地の欄（番地・関数名・C の式。
   // Memory と同じ解き方）でその場所の命令を見る（走っていても ELF から）。命令ステップ（1 命令）。
-  // 命令のバイトはダブルクリックで書ける: Flash の領域（target.flash.regions）の外なら target.memory.write。Flash の中は
-  // target.flash が要ることを示し、ここでは書かない（領域を読めていなければ書かない）
+  // 命令のバイトはダブルクリックで書ける: デーモンが Flash の外（in_flash = false）と返した命令は target.memory.write。
+  // Flash の中は target.flash が要ることを示し、ここでは書かない（分からなければ書かない）
   import { tick } from "svelte";
   import { errorText } from "../../lib/api";
   import { command, type CommandState } from "../../lib/commands";
@@ -13,7 +13,7 @@
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
   import { resolveAddress } from "../../lib/memory";
-  import { bytesWriteCall, instructionWriteKind, writeBuilt, type FlashRegion } from "../../lib/valuewrite";
+  import { bytesWriteCall, instructionWriteKind, writeBuilt } from "../../lib/valuewrite";
   import EditValue from "./EditValue.svelte";
   import Empty from "./Empty.svelte";
 
@@ -38,17 +38,7 @@
   });
   const hex = (n: number) => n.toString(16).toUpperCase().padStart(8, "0");
 
-  // Flash の領域（命令を書く経路を決める事実）。接続するたびに読む
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
-  let regions = $state<FlashRegion[] | null>(null);
-  $effect(() => {
-    if (!connected) {
-      regions = null;
-      return;
-    }
-    conn.call("target.flash.regions", {}, { quiet: true })
-      .then((r: { regions?: FlashRegion[] }) => (regions = r?.regions ?? null), () => (regions = null));
-  });
   const reasons = { flash: "disasm.writeFlash", unknown: "disasm.writeUnknown" } as const;
 
   async function writeBytes(address: number, current: string, input: string): Promise<string | null> {
@@ -94,7 +84,7 @@
           {#if ins.new_line && ins.file}
             <div class="src muted">{ins.file}:{ins.line} — {ins.function ?? ""}</div>
           {/if}
-          {@const how = ins.bytes ? instructionWriteKind(regions, ins.address, ins.bytes.length / 2) : "unknown"}
+          {@const how = ins.bytes ? instructionWriteKind(ins) : "unknown"}
           <div class="ins" class:pc={ins.address === $dbg.stop?.pc} class:frame={ins.address === framePc}
                class:focus={ins.address === $dbg.focus}>
             <button class="gutter" disabled={!online} onclick={() => toggle(ins.address)}

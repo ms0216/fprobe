@@ -1,6 +1,6 @@
 """Probe の道具: 解読器の一覧と利用者の解読器の読み込み、捕捉のファイルへの書き出し（sigrok の .sr・VCD）と読み込み。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_capture・_capture_info・_capture_names・_keep_capture を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・_capture・_capture_info・_capture_names・_keep_capture を使う。
 機器には触らない（捕捉は la_capture 等が取ったもの）。解読そのもの（la_decode）は probe_observe にある。
 
 仕様: docs/superpowers/specs/2026-10-18-u20-decoders-design.md
@@ -12,14 +12,23 @@ from .api import NoData
 from .decode import decoders, load_file
 from .la import write_vcd
 from .sigrok import read_sr, write_sr
+from .probe_service import HostView
 
-__all__ = ["DecodeTools"]
+__all__ = ["DecodeService"]
 
 EXPORT_FORMATS = ("sr", "vcd")
 
 
-class DecodeTools:
-    """解読器とロジアナのファイルの道具（Probe の mixin）。"""
+class DecodeService:
+    """解読器とロジアナのファイルの道具（Probe のサービス）。"""
+
+    API = ("la_decoder_load", "la_decoders", "la_export", "la_load")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_capture", "_capture_info", "_capture_names", "_keep_capture", "_lock")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     def la_decoders(self) -> dict:
         """la_decode に使える解読器の一覧（名前・下の解読（積み重ねる解読器）・設定・既定の種類・出どころ）。"""
@@ -33,8 +42,8 @@ class DecodeTools:
                 "decoders": [d.describe() for d in decoders() if d.name in names]}
 
     def _last_capture(self):
-        with self._lock:
-            tr, info = self._capture, self._capture_info
+        with self._host._lock:
+            tr, info = self._host._capture, self._host._capture_info
         if tr is None:
             raise NoData("捕捉が無い（la_capture / la_deep_capture / la_load を先に）")
         return tr, info
@@ -46,7 +55,7 @@ class DecodeTools:
         if format not in EXPORT_FORMATS:
             raise ValueError(f"形式は {EXPORT_FORMATS} のどれか（{format!r}）")
         tr, info = self._last_capture()
-        names = {**self._capture_names, **{int(k): str(v) for k, v in (names or {}).items()}}
+        names = {**self._host._capture_names, **{int(k): str(v) for k, v in (names or {}).items()}}
         if format == "vcd":
             if channels is not None:
                 raise ValueError("vcd は全チャンネルを書く（channels は sr だけ）")
@@ -60,7 +69,7 @@ class DecodeTools:
         """sigrok の .sr を最後の捕捉として読み込む（他のロジアナで取った波形も la_decode・la_measure・la_view で扱う）。
         トリガは先頭のサンプルとする。"""
         tr, names = read_sr(Path(path))
-        with self._lock:
-            self._keep_capture(tr, "file", names)
-            info = dict(self._capture_info)
+        with self._host._lock:
+            self._host._keep_capture(tr, "file", names)
+            info = dict(self._host._capture_info)
         return {"capture": info, "path": str(path), "names": {str(k): v for k, v in names.items()}}

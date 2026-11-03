@@ -6,16 +6,14 @@ import {
   memoryWriteCall, parseInteger, performWrite, writeBuilt, writeOneToClear,
 } from "../src/lib/valuewrite";
 
-describe("式の書き込み: どの API で書くか（ターゲットの状態の事実だけで決める）", () => {
-  it("走行中・スリープ中は watch.write、止まっているときは debug.write_expression、それ以外は書けない", () => {
-    expect(exprWriteMethod("RUNNING")).toBe("watch.write");
-    expect(exprWriteMethod("SLEEPING")).toBe("watch.write");
-    expect(exprWriteMethod("HALTED")).toBe("debug.write_expression");
-    for (const s of ["DISCONNECTED", "RESET", "LOCKUP", undefined]) expect(exprWriteMethod(s)).toBeNull();
+describe("式の書き込み: 道はデーモンが決める（画面は状態で API を選ばない）", () => {
+  it("つながっていれば debug.write_expression（止まっていても走っていても。道はデーモンが選ぶ）、未接続は書けない", () => {
+    for (const s of ["RUNNING", "SLEEPING", "HALTED", "RESET", "LOCKUP"]) expect(exprWriteMethod(s)).toBe("debug.write_expression");
+    for (const s of ["DISCONNECTED", undefined]) expect(exprWriteMethod(s)).toBeNull();
   });
 
-  it("引数: 走行中は値をそのまま、止まっているときは真偽を数に・フレームを渡したときだけ付ける", () => {
-    expect(exprWriteCall("RUNNING", "x", true)).toEqual({ method: "watch.write", params: { expression: "x", value: true } });
+  it("引数: 真偽は数に・フレームを渡したときだけ付ける（状態で形を変えない）", () => {
+    expect(exprWriteCall("RUNNING", "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
     expect(exprWriteCall("HALTED", "x", true)).toEqual({ method: "debug.write_expression", params: { expression: "x", value: 1 } });
     expect(exprWriteCall("HALTED", "x", 5, 2)).toEqual({ method: "debug.write_expression",
                                                          params: { expression: "x", value: 5, frame: 2 } });
@@ -76,15 +74,12 @@ describe("メモリの値を書く（番地と大きさは API の結果の事�
 });
 
 describe("命令のバイトを書く（逆アセンブル）", () => {
-  const regions = [{ start: 0x08000000, size: 0x80000 }];
-  it("Flash の領域（target.flash.regions）に掛かれば flash、外なら memory、領域が分からなければ unknown", () => {
-    expect(instructionWriteKind(regions, 0x08000100, 2)).toBe("flash");
-    expect(instructionWriteKind(regions, 0x0807FFFF, 2)).toBe("flash");
-    expect(instructionWriteKind(regions, 0x20000100, 4)).toBe("memory");
-    expect(instructionWriteKind(regions, 0x07FFFFFE, 2)).toBe("memory");
-    expect(instructionWriteKind(regions, 0x07FFFFFF, 2)).toBe("flash");
-    expect(instructionWriteKind(null, 0x20000100, 2)).toBe("unknown");
-    expect(instructionWriteKind([], 0x20000100, 2)).toBe("memory");
+  it("デーモンの in_flash（命令が Flash の領域に掛かるか）をそのまま: true は flash、false は memory、null・無しは unknown", () => {
+    // 重なりの計算は画面でしない（番地が Flash の中でも in_flash を読むだけ）
+    expect(instructionWriteKind({ address: 0x20000100, in_flash: true })).toBe("flash");
+    expect(instructionWriteKind({ address: 0x08000100, in_flash: false })).toBe("memory");
+    expect(instructionWriteKind({ address: 0x08000100, in_flash: null })).toBe("unknown");
+    expect(instructionWriteKind({ address: 0x08000100 })).toBe("unknown");
   });
 
   it("書くバイトはメモリの順の 16 進（空白は無視）で、命令と同じ長さ", () => {

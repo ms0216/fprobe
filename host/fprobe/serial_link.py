@@ -10,6 +10,7 @@
 """
 
 import struct
+from collections.abc import Mapping
 from typing import Protocol
 
 from . import generated as g
@@ -107,8 +108,8 @@ class SerialLink(FrameLink):
     name = "serial"
     dap_packet_count = 1          # FPGA の受信 FIFO は 64 バイト（流している間に次の 512 バイトは溢れる）
 
-    def __init__(self, port: SerialPort, *, owns_port: bool = False):
-        super().__init__()
+    def __init__(self, port: SerialPort, *, owns_port: bool = False, buffer_bytes: Mapping[int, int]):
+        super().__init__(buffer_bytes=buffer_bytes)
         self._port = port
         self._owns_port = owns_port
         self._start()
@@ -116,9 +117,10 @@ class SerialLink(FrameLink):
             self._port.write(bytes(1))                     # FPGA 側の受信途中のごみを区切る（区切りの 0x00）
 
     @classmethod
-    def open(cls, port: str, baud: int = DEFAULT_BAUD) -> "SerialLink":
+    def open(cls, port: str, baud: int = DEFAULT_BAUD, *, buffer_bytes: Mapping[int, int]) -> "SerialLink":
+        """buffer_bytes: バイト列のチャンネル（SWO・UART0・STREAM）ごとに PC に溜める上限（FrameLink。全部を明示する）。"""
         from serial import Serial
-        return cls(Serial(port, baud, timeout=0.05), owns_port=True)
+        return cls(Serial(port, baud, timeout=0.05), owns_port=True, buffer_bytes=buffer_bytes)
 
     def _write_frame(self, ch: int, payload: bytes) -> None:
         self._port.write(encode_frame(ch, payload))

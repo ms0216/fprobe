@@ -71,16 +71,17 @@ _CORE = ("common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.
          "debug/dap_pkg.vhd", "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
          "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
-         "la/la_filter.vhd", "la/la_pulse.vhd", "la/la_front.vhd", "la/la_capture.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
-         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_encoder.vhd", "mem/la_mem_writer.vhd",
-         "mem/mem_reader.vhd", "la/la_deep_buffer.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
-         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_collector.vhd", "core/fprobe_core.vhd")
+         "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd", "la/la_front.vhd", "la/la_record.vhd", "la/la_capture.vhd", "la/la_lane_front.vhd", "la/la_lane_capture.vhd", "la/la_lane_inputs.vhd", "la/la_cap_domain.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
+         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/la_mem_writer.vhd",
+         "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "la/la_deep_buffer.vhd", "la/la_ps_port.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
+         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_byte_pack.vhd", "core/event_collector.vhd", "core/fprobe_core.vhd")
 
 
 def core_sources(caps_package: Path) -> list[Path]:
     """fprobe_core とその依存（依存順）。caps_package はデザインのケイパビリティ生成パッケージ。"""
     return [*rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "core/csr_bus_pkg.vhd"),
-            CORE_GENERATED / "csr_map_pkg.vhd", build_info.DEFAULT_PACKAGE,
+            CORE_GENERATED / "csr_map_pkg.vhd", CORE_GENERATED / "timing_pkg.vhd", CORE_GENERATED / "ps_window_pkg.vhd",
+            build_info.DEFAULT_PACKAGE,
             *(CORE_GENERATED / f"csr_{b.name}.vhd" for b in FPROBE_MAP.blocks if not b.external),
             caps_package,
             *rtl(*_CORE)]
@@ -117,31 +118,75 @@ def _primer_usb(name: str, *, la_inputs: int = 0, **features) -> Design:
 PYNQ_Z2_DEEP_BYTES = 32 * 1024 * 1024        # 深いバッファの領域（DDR の 0x1E000000〜。host/pynq/uEnv.txt の mem=479M。その下の 1 MB 0x1DF00000〜 は Linux のリング）
 
 
-def _pynq(name: str, *, mem_bytes: int = 0) -> Design:
+# 1 周期に複数のサンプルの構成（fprobe_pynq_fast）の内蔵バッファの深さ（語 = sys の周期）。PYNQ の BRAM 140 タイルのうち、
+# fprobe_pynq_cap の使用 11 タイル（C:w51 の util.rpt）を除いた空きの半分（約 64 タイル）以内で最大の 2 の累乗:
+# 16384 語 × 96 ビット（N = 6）= 48 タイル、× 128 ビット（N = 8）= 64 タイル（32768 語は 96 タイルで超える）
+PYNQ_Z2_LANE_WORDS = 16384
+
+# 取り込みのクロック cap_clk / sys（MMCM の 2 本目の出力。VCO 1200 MHz、boards/pynq_z2.py）。
+# fprobe_pynq_cap: 300 MHz（内蔵ロジアナ一式を cap_clk の領域で 1 周期 1 サンプル。2026-10-30-la-capture-clock-design.md）。
+# fprobe_pynq_fast: 400 MHz = ISERDESE2 の CLK（DDR で 1 周期に N = 2 × 4 = 8 サンプル、800 MS/s。試験用の方形波もこれで刻む。
+# docs/superpowers/specs/2026-11-01-la-resolution-design.md の段 2・§11）
+PYNQ_Z2_CAP_RATIO = 3
+PYNQ_Z2_FAST_CAP_RATIO = 4
+
+
+def pynq_z2_iserdes_newest_age(lanes: int) -> int:
+    """PYNQ-Z2 の端子の ISERDESE2（xilinx_la_iserdes）の、1 語の最も新しいレーンの遅れ（細かいサンプルの数。fprobe_core の
+    LA_LANE_IN_AGE）。VHDL の pynq_z2_pkg.iserdes_newest_age と同じ値で、tests/tb/xilinx_la_iserdes_tb.py がこの関数の値を
+    ISERDESE2 の模型で確かめ、pynq_z2_fprobe_top がケイパビリティの生成パッケージの値と VHDL の関数の一致を elaboration で確かめる。"""
+    return lanes - 3
+
+
+# PYNQ-Z2 の深いバッファの垂れ流しを持続できると測った速さ（TLV LA_STREAM_BYTES_PER_S）: RAW 16 ch・25 MS/s（50 MB/s）の 60 秒を
+# 11 回中 11 回欠けなし、8 ch・50 MS/s・4 ch・100 MS/s（50 MB/s）の 60 秒を各 2 回欠けなし（PS 直読み・TCP、Windows 11 の PC、
+# 同じ LAN。docs/superpowers/specs/2026-10-30-la-stream-ps-direct-design.md §10.14・§10.16）。PC・回線・中継の版で変わる測定の値なので、
+# ホストは使う側が明示した上限があればそちらを使う
+PYNQ_Z2_STREAM_BYTES_PER_S = 50_000_000
+
+
+def _pynq(name: str, *, mem_bytes: int = 0, cap: bool = False, lanes: bool = False) -> Design:
     """PYNQ-Z2（Zynq-7020）: 同じ fprobe_core を、PS の Linux の中継（UDP、Ethernet 版と同じ線上の形式）越しに使う。
     Primer では構成に分けている機能（JTAG・サンプラ・故障注入・専用の入力・RTS/CTS）を 1 つに入れる
     （docs/superpowers/specs/2026-10-19-pynq-z2-port-design.md）。mem_bytes > 0 なら深いバッファを PS の DDR に置き
-    （ブロック設計 ps7_hp_bd）、内蔵ロジアナは持たない。0 なら内蔵 BRAM のロジアナ（ps7_bd）。"""
+    （ブロック設計 ps7_hp_bd）、内蔵ロジアナは持たない。0 なら内蔵 BRAM のロジアナ（ps7_bd）。
+    cap なら内蔵ロジアナの取り込みを、sys の整数倍の速いクロック（MMCM の 2 本目の出力）の領域で動かす
+    （docs/superpowers/specs/2026-10-30-la-capture-clock-design.md。深いバッファとは組み合わせない）。
+    lanes なら拡張ヘッダのピン（PMOD JA の 8 本）と専用の入力（PMOD JB の 6 本）を端子の ISERDESE2 で取り、sys の 1 周期に
+    N = 2 × cap_ratio サンプル（CLK = cap_clk の両方の辺、CLKDIV = sys）を内蔵バッファに記録する
+    （docs/superpowers/specs/2026-11-01-la-resolution-design.md の段 1・段 2）。cap とは組み合わせない。
+    lanes かつ深いバッファ（fprobe_pynq_deep_fast）なら、同じ N サンプル/周期を深いバッファの垂れ流しに N 並列で符号にする
+    （RAW の詰め・RLE。内蔵バッファは持たない。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md）。"""
     deep = mem_bytes > 0
+    assert not (cap and deep) and not (lanes and cap)
+    pll = PYNQ_Z2.sync_pll
+    ratio = PYNQ_Z2_FAST_CAP_RATIO if lanes else PYNQ_Z2_CAP_RATIO if cap else 1
+    n = 2 * ratio if lanes else 1                         # DDR: cap_clk の 1 周期に 2 サンプル
     return Design(
         name=name, board=PYNQ_Z2, top="pynq_z2_fprobe_top",
         sources=tuple(dict.fromkeys((
             *rtl(*_COMMON, "boards/pynq_z2/pynq_z2_pkg.vhd", "boards/pynq_z2/xilinx_mmcm.vhd",
+                 "boards/pynq_z2/xilinx_la_iserdes.vhd", "boards/pynq_z2/xilinx_oddr.vhd",
                  "common/sdp_ram.vhd", "common/stream_slice.vhd", "hostlink/frame_mux.vhd",
-                 "hostlink/zynq_frame_link.vhd", "mem/axi_mem_port.vhd"),
+                 "mem/axi_mem_port.vhd"),
             *core_sources(caps_package_path(name)),
-            *rtl("boards/pynq_z2/pynq_z2_fprobe_top.vhd")))),
-        pin_groups=("clk125", "led", "pmod1", "la_in", "obs_jtag", "sync", "ps_pjtag"),
-        clocks=(PYNQ_Z2.input_clock(), PYNQ_Z2.sys_clock()),
+            # zynq_frame_link は窓の定数（コアの生成物 ps_window_pkg）を使う。依存順に並べる（GHDL は並びの順に解析する）
+            *rtl("hostlink/zynq_frame_link.vhd", "boards/pynq_z2/pynq_z2_fprobe_top.vhd")))),
+        pin_groups=("clk125", "led", "pmod1", "la_in", "obs_jtag", "sync", "testgen", "ps_pjtag"),
+        clocks=(PYNQ_Z2.input_clock(), PYNQ_Z2.sys_clock(), *((PYNQ_Z2.cap_clock(ratio),) if ratio > 1 else ())),
         block_designs=(RTL_ROOT / "boards" / "pynq_z2" / ("ps7_hp_bd.tcl" if deep else "ps7_bd.tcl"),),
         capabilities=caps.Capabilities(
             protocol_version=PROTOCOL_VERSION, board=PYNQ_Z2.name, design=name,
             sys_clock_hz=PYNQ_Z2.sync_pll.fout_hz, timebase_hz=PYNQ_Z2.sync_pll.fout_hz,
             host_link=caps.LINK_ETH, channels=(caps.CH_CONTROL, caps.CH_DAP, caps.CH_UART0),
-            la_channels=LA_WIDTH, la_depth=0 if deep else LA_DEPTH, la_sample_hz=PYNQ_Z2.sync_pll.fout_hz,
-            mem_bytes=mem_bytes, la_stream_events=deep, event_ring_bits=0 if deep else 10,
+            la_channels=LA_WIDTH, la_depth=0 if deep else PYNQ_Z2_LANE_WORDS * n if lanes else LA_DEPTH,
+            la_sample_hz=pll.cap_hz(ratio) if cap else pll.fout_hz * n, cap_ratio=ratio,
+            la_lanes=n, la_fine_pins=lanes, la_filter=not lanes, la_pulse=not lanes,
+            la_lane_in_age=pynq_z2_iserdes_newest_age(n) if lanes else 0,
+            mem_bytes=mem_bytes, la_stream_events=deep, la_stream_ps=deep, la_stream_gaps=deep, la_pack=deep, event_ring_bits=0 if deep else 10,
             outputs=PYNQ_Z2.outputs(), uart_flow=PYNQ_Z2.uart_flow(), la_inputs=PYNQ_Z2.la_inputs(),
-            fpga_obs=True, sync=deep))
+            fpga_obs=True, sync=deep, la_testgen=cap or deep or lanes, event_byte_pack=True, sampler_check_max=16,
+            la_stream_bytes_per_s=PYNQ_Z2_STREAM_BYTES_PER_S if deep else 0))
 
 
 # 線（プロトコル）→ その線に使う Primer の製品デザイン。ホストが書き替えに使う（fprobe gen がホスト定数
@@ -159,6 +204,17 @@ DESIGNS: dict[str, Design] = {
     # P3: 深いバッファを PS の DDR に置く（S_AXI_HP0 と axi_mem_port。領域は Linux から外した上端の 32 MB）
     # （docs/superpowers/plans/2026-10-20-pynq-p3-deep-buffer.md）
     "fprobe_pynq_deep": _pynq("fprobe_pynq_deep", mem_bytes=PYNQ_Z2_DEEP_BYTES),
+    # 内蔵ロジアナの取り込みを sys（100 MHz）の 3 倍の 300 MHz で動かす（時間分解能 10 → 3.33 ns。
+    # docs/superpowers/specs/2026-10-30-la-capture-clock-design.md）
+    "fprobe_pynq_cap": _pynq("fprobe_pynq_cap", cap=True),
+    # 拡張ヘッダのピン（PMOD JA、ch 0〜7）と専用の入力（PMOD JB、ch 10〜15）を端子の ISERDESE2 で取り、sys の 1 周期に 8 サンプル
+    # （800 MS/s、1.25 ns。案 B: MMCM の VCO 1200 MHz、cap_clk 400 MHz の両方の辺）。内蔵バッファ 16384 語 = 131072 サンプル（164 µs）。
+    # グリッチフィルタ・パルス幅は無し（docs/superpowers/specs/2026-11-01-la-resolution-design.md の段 1・段 2）
+    "fprobe_pynq_fast": _pynq("fprobe_pynq_fast", lanes=True),
+    # fprobe_pynq_fast と同じ端子の ISERDESE2（800 MS/s、1.25 ns、14 本）を、深いバッファの垂れ流しに N = 8 並列で符号にする
+    # （RAW: サンプルの間隔と ch の詰め、RLE: 1 周期に最大 8 レコード）。内蔵バッファ・トリガ取り込みは無い
+    # （docs/superpowers/specs/2026-11-01-la-deep-fast-design.md）
+    "fprobe_pynq_deep_fast": _pynq("fprobe_pynq_deep_fast", mem_bytes=PYNQ_Z2_DEEP_BYTES, lanes=True),
     # PYNQ-Z2 の P0: LED0 を約 1 Hz で点滅させるだけ（PMOD の端子は口に持たない = 引き下げのまま。安全な状態）
     "pynq_blinky": Design(
         name="pynq_blinky", board=PYNQ_Z2, top="pynq_z2_blinky_top",

@@ -13,6 +13,7 @@ from fprobe.events import EventLog
 from fprobe.mcp_server import Probe
 from fprobe.recording import Recorder, Recording
 from test_events_overwrite import RingDevice
+from caps_fakes import caps_for
 
 HZ = 100_000_000
 
@@ -71,7 +72,7 @@ def test_overwritten_is_reset_by_an_empty_read():
 
 def probe_on(dev):
     p = Probe("unused")
-    dev.capabilities = lambda: SimpleNamespace(timebase_hz=HZ)
+    dev.caps = caps_for(timebase_hz=HZ)
     p._session = SimpleNamespace(device=dev)
     p._la_idle = lambda: None
     return p
@@ -121,12 +122,12 @@ def test_collector_counts_events_overwritten_during_a_read(tmp_path):
 
 
 def test_window_counts_events_overwritten_during_a_read_as_lost():
-    from fprobe.probe_window import EventWindow, WindowTools
+    from fprobe.probe_window import EventWindow, WindowService
 
     dev = RingDevice(capacity=8, written=0, advance=0)
     dev.time = lambda: 1_000_000
     window = EventWindow(0, False, 0)
     dev.written, dev.advance = 8, 5
-    me = SimpleNamespace(session=SimpleNamespace(device=dev))
-    WindowTools._ring_events(me, window, "uart")
+    me = SimpleNamespace(_host=SimpleNamespace(session=SimpleNamespace(device=dev)))
+    WindowService._ring_events(me, window, "uart")
     assert window.lost == 5

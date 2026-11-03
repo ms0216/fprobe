@@ -2,7 +2,7 @@
 （偽の CMSIS-DAP の層の JTAG-DP・APB-AP の向こうのデバッグレジスタ、偽の JTAG のチェーンの ARM11 の TAP）。"""
 
 import pytest
-from arm_a_fakes import HDBGEN, INTDIS, ITREN, ArmCore, arm11_tap, bcm2836
+from arm_a_fakes import HDBGEN, INTDIS, ITREN, ApbAp, ArmCore, V7DebugBlock, arm11_tap, bcm2836
 from dap_fakes import FakeDapLink, FakeMemAp, FakeTarget
 from jtag_fakes import FakeChain, Tap
 from pyocd.core.target import Target
@@ -38,7 +38,7 @@ def test_v7_finds_the_core_through_the_rom_table_unlocks_and_halts_only_that_cor
     cores[1].regs[15] = 0x8000
     conn = connect(link, "bcm2836", core=1)
     info = conn.info()
-    assert info["arch"] == "armv7-a" and info["core"] == 1 and info["cores"] == 4
+    assert info["arch"] == "armv7-a" and info["core"] == 1 and info["core_count"] == 4
     assert info["debug_base"] == 0x80012000 and info["apb_ap"] == 1 and info["discovery"] == "rom_table"
     assert info["breakpoints"] == 5 and info["watchpoints"] == 4 and info["jtag_chain"] == [4]
     assert not blocks[1].os_lock and cores[1].halted and not cores[0].halted
@@ -291,3 +291,43 @@ def test_zynq7000_is_in_the_part_table():
     part = arm_a_part("zynq7000")
     assert part is not None and part.kind == "v7" and part.idcode == 0x0BA00477
     assert part.debug_bases == (0x80090000, 0x80092000)
+
+
+def test_the_parts_jtag_idle_cycles_are_set_on_the_link():
+    link, _, _ = pi2()
+    connect(link, "bcm2836").close()
+    assert link.transfer_idle_cycles == [0, 0] and arm_a_part("bcm2836").jtag_idle_cycles == 0
+    link2, _, _ = pi2()
+    connect(link2, "cortex_a").close()
+    assert link2.transfer_idle_cycles == [] and arm_a_part("cortex_a").jtag_idle_cycles is None   # 測っていない部品は触らない
+
+
+# --- APB-AP が見えない DAP（Zynq-7000 を PJTAG で見たとき。AHB-AP だけ）-----------------------------------------
+
+def zynq_ahb_only(cores: list[ArmCore] | None = None):
+    """AHB-AP（AP 0）だけの DAP。コアのデバッグの窓は、システムのアドレス 0xF8890000 + 0x2000 × n に見える（実機 2026-10-31）。"""
+    cores = cores or [ArmCore(mpidr=0x80000000 | i) for i in range(2)]
+    debug = [V7DebugBlock(c) for c in cores]
+    ap, _ = bcm2836(cores, with_rom=False)                       # ApbAp の流用（窓の番地だけ差し替える）
+    ahb = ApbAp(None, {0xF8890000 + 0x2000 * i: b for i, b in enumerate(debug)})
+    ahb.idr = 0x44770001                                         # AHB3 の MEM-AP
+    target = FakeTarget(dpidr=PI2_IDCODE, swd=False, jtag_dp_index=0, aps={0: ahb}, jtag_chain=FakeChain([Tap(4, PI2_IDCODE)]))
+    return FakeDapLink(target), cores, debug
+
+
+def test_zynq7000_without_an_apb_ap_halts_the_core_through_the_ahb_ap_system_map():
+    link, cores, blocks = zynq_ahb_only()
+    cores[1].regs[15] = 0x8000
+    conn = connect(link, "zynq7000", core=1)
+    info = conn.info()
+    assert info["discovery"] == "ahb_system_map" and info["debug_base"] == 0xF8892000 and info["core_count"] == 2
+    assert cores[1].halted and not cores[0].halted and not blocks[1].os_lock
+    assert conn.target.read_core_register("pc") == 0x8000
+    conn.close()
+
+
+def test_a_part_without_ahb_debug_bases_still_refuses_a_dap_without_an_apb_ap():
+    link, _, _ = zynq_ahb_only()
+    with pytest.raises(ArmDebugError, match="APB-AP が無い"):
+        connect(link, "cortex_a")
+    assert link.closed

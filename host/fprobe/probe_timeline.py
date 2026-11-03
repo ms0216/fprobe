@@ -1,6 +1,6 @@
 """Probe の道具: 共通タイムラインのタイル（G01。画面が毎フレームの間引きに使う材料をバイナリで返す）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _capture_wave（最後の捕捉）・_reading（読む記録）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _capture_wave（最後の捕捉）・_reading（読む記録）を使う。
 機器には触らない（読みだけ）。
 
 仕様: docs/superpowers/specs/2026-10-18-timeline-tiles-design.md
@@ -9,11 +9,20 @@ Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）�
 from .api import NoData
 from .api.binary import BinaryResult
 from .timeline import DEFAULT_MAX_EDGES, DEFAULT_MAX_EVENTS, capture_tile, name_rows, recording_tile
+from .probe_service import HostView
 
-__all__ = ["TimelineTools"]
+__all__ = ["TimelineService"]
 
 
-class TimelineTools:
+class TimelineService:
+    API = ("timeline_tiles",)
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_capture_wave", "_reading", "_sample_name")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+
     def timeline_tiles(self, source: str = "capture", t0: int = 0, t1: int | None = None,
                        channels: list[int] | None = None, streams: list[str] | None = None, bin: int | None = None,
                        max_edges: int = DEFAULT_MAX_EDGES, max_events: int = DEFAULT_MAX_EVENTS) -> BinaryResult:
@@ -22,14 +31,14 @@ class TimelineTools:
         if source == "capture":
             if streams:
                 raise ValueError("捕捉には出来事の段が無い（streams は recording だけ）")
-            wave, info = self._capture_wave()
+            wave, info = self._host._capture_wave()
             return capture_tile(wave, info, t0, t1, channels, bin, max_edges)
-        rec = self._reading()
+        rec = self._host._reading()
         if t1 is None:
             span = rec.span()
             if span is None:
                 raise NoData("記録が空")
             t1 = span[1] + 1
         tile = recording_tile(rec, t0, t1, channels, streams, bin, max_edges, max_events)
-        name_rows(tile.result, "sample", self._sample_name)            # サンプラの語の段は式・変数の名前で
+        name_rows(tile.result, "sample", self._host._sample_name)            # サンプラの語の段は式・変数の名前で
         return tile

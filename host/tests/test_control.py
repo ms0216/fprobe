@@ -7,7 +7,7 @@ import pytest
 from fprobe import ControlError, Device, ProtocolError
 from fprobe import generated as g
 from fprobe.caps import parse
-from fprobe.control import decode_response, encode_exchange, encode_read, encode_write
+from fprobe.control import ControlTimeout, decode_response, encode_exchange, encode_read, encode_write
 from fprobe.device import DeviceMismatch
 
 
@@ -31,7 +31,7 @@ class FakeDevice:
         self.time = 0x1_2345_6789
         self.time_hi = 0
         self.requests: list[bytes] = []
-        self._response = b""
+        self._responses: list[bytes] = []                  # 届いている応答（古い順。受け取ると消える）
         self.tag_offset = 0
         self.flushes = 0
 
@@ -67,15 +67,18 @@ class FakeDevice:
             done += 1
             if op in (g.OP_READ, g.OP_EXCHANGE):
                 data.append(value)
-        self._response = struct.pack(f"<{len(data)}IBBH", *data, tag, status, done)
+        self._responses.append(struct.pack(f"<{len(data)}IBBH", *data, tag, status, done))
 
     def receive(self, max_length):
-        assert len(self._response) <= max_length
-        return self._response
+        if not self._responses:
+            raise TimeoutError("応答が届かない")
+        response = self._responses.pop(0)
+        assert len(response) <= max_length
+        return response
 
     def flush(self):
         self.flushes += 1
-        self._response = b""
+        self._responses.clear()
 
 
 def test_encoding_matches_spec():
@@ -138,15 +141,108 @@ def test_long_transfers_are_split(monkeypatch):
     assert [struct.unpack_from("<H", r, 2)[0] for r in fake.requests] == [1000, 24]
 
 
-def test_tag_mismatch_is_detected():
+def test_a_reply_with_another_tag_is_never_taken_as_this_reply():
     fake = FakeDevice()
     dev = Device(fake)
     fake.tag_offset = 1
-    with pytest.raises(ProtocolError, match="tag"):
+    with pytest.raises(ControlTimeout) as info:            # 違う tag の応答は読み捨て、この要求の応答は届かない
         dev.read32(g.SYSTEM_SCRATCH)
+    assert info.value.executed is None and info.value.op == "READ"   # 実行されたかは分からない（事実）
+    assert isinstance(info.value, TimeoutError)
+    assert dev.control.stale_responses == 1
     assert fake.flushes == 1                                # 古い応答を残さない
     fake.tag_offset = 0
     assert dev.read32(g.SYSTEM_SCRATCH) == 0
+
+
+def test_a_late_reply_of_an_earlier_request_is_dropped_and_the_wait_goes_on():
+    fake = FakeDevice()
+    dev = Device(fake)
+    dev.write32(g.SYSTEM_SCRATCH, 7)
+    stale = struct.pack("<IBBH", 0xDEAD, (dev.control._tag - 3) & 0xFF, g.STATUS_OK, 1)   # 前の要求の遅れた応答
+    original = fake.send
+
+    def send(message):
+        fake._responses.append(stale)                      # この要求の応答より先に、遅れた応答が届く
+        original(message)
+    fake.send = send
+    assert dev.read32(g.SYSTEM_SCRATCH) == 7
+    assert dev.control.stale_responses == 1
+
+
+def test_a_write_whose_reply_does_not_come_is_reported_as_unknown_outcome():
+    fake = FakeDevice()
+    dev = Device(fake)
+    original = fake.send
+
+    def lose_reply(message):
+        original(message)
+        fake._responses.clear()                            # 応答が落ちた（要求は実行された。PC からは区別できない）
+    fake.send = lose_reply
+    with pytest.raises(ControlTimeout, match="実行されたかは分からない") as info:
+        dev.write32(g.SYSTEM_SCRATCH, 5)
+    assert (info.value.op, info.value.address, info.value.count, info.value.executed) == ("WRITE", g.SYSTEM_SCRATCH, 1, None)
+    assert len([r for r in fake.requests if r[0] == g.OP_WRITE]) == 1     # 送り直さない（2 回実行しうる）
+
+
+def _lose_replies(fake, n):
+    """最初の n 個の要求の応答を落とす（要求は実行された。PC からは区別できない）。落とした応答を返す口も返す。"""
+    original, lost, left = fake.send, [], [n]
+
+    def send(message):
+        original(message)
+        if left[0]:
+            left[0] -= 1
+            lost.append(fake._responses.pop())
+    fake.send = send
+    return lost
+
+
+def test_a_read_is_not_resent_unless_the_caller_asks():
+    fake = FakeDevice()
+    dev = Device(fake)
+    _lose_replies(fake, 1)
+    with pytest.raises(ControlTimeout) as info:
+        dev.read(g.SYSTEM_SCRATCH, 1)
+    assert info.value.attempts == 1
+    assert len([r for r in fake.requests if r[0] == g.OP_READ and r[4:8] == struct.pack("<I", g.SYSTEM_SCRATCH)]) == 1
+    assert dev.control.counters() == {"read_retries": 0, "stale_responses": 0}
+
+
+def test_a_read_is_resent_with_a_new_tag_when_the_caller_asks_and_the_late_reply_is_dropped():
+    fake = FakeDevice()
+    dev = Device(fake)
+    dev.write32(g.SYSTEM_SCRATCH, 9)
+    lost = _lose_replies(fake, 1)
+    original = fake.send
+
+    def send(message):
+        if lost and len(fake.requests) and fake.requests[-1][0] == g.OP_READ:
+            fake._responses.append(lost.pop())             # 前の READ の応答が、送り直した READ の応答より先に遅れて届く
+        original(message)
+    fake.send = send
+    assert dev.read(g.SYSTEM_SCRATCH, 1, timeout_retries=2) == [9]
+    reads = [r for r in fake.requests if r[0] == g.OP_READ][-2:]
+    assert reads[0][1] != reads[1][1]                      # 送り直しは新しい tag
+    assert dev.control.counters() == {"read_retries": 1, "stale_responses": 1}
+
+
+def test_a_read_that_never_gets_a_reply_reports_how_many_requests_were_sent():
+    fake = FakeDevice()
+    dev = Device(fake)
+    _lose_replies(fake, 3)
+    with pytest.raises(ControlTimeout) as info:
+        dev.read(g.SYSTEM_SCRATCH, 1, timeout_retries=2)
+    assert (info.value.attempts, info.value.op, info.value.executed) == (3, "READ", None)
+    assert dev.control.read_retries == 2
+    with pytest.raises(ValueError):
+        dev.read(g.SYSTEM_SCRATCH, 1, timeout_retries=-1)
+
+
+def test_writes_and_exchanges_have_no_way_to_be_resent():
+    import inspect
+    for method in (Device.write, Device.exchange, Device.write32):
+        assert "timeout_retries" not in inspect.signature(method).parameters
 
 
 def test_capabilities_and_time():

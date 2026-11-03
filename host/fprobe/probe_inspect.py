@@ -1,7 +1,7 @@
 """Probe の道具: 止まったターゲットをソースの言葉で調べる（C の式・フレームの変数・型・逆アセンブル・
 周辺レジスタ（SVD）・メモリの表示）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_debug・_target_type を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・dbg・_symbols・_debug・_target_type を使う。
 結果はすべて JSON にできる形。仕様: docs/superpowers/specs/2026-10-17-f2-dwarf-design.md、
 docs/superpowers/specs/2026-10-17-f2-disasm-svd-design.md、計画: docs/superpowers/plans/2026-10-17-api-integration-a-d.md
 """
@@ -17,8 +17,9 @@ from .disasm import SYNC_LIMIT, Disassembler, Listing
 from .memview import ElfImage, TargetMemory, diff, format_hexdump, hexdump
 from .svd import Device, Register, find_svd, load_device
 from .symbols import is_network_path
+from .probe_service import HostView
 
-__all__ = ["InspectTools", "SOURCE_LIMIT", "VIEW_LIMIT"]
+__all__ = ["InspectService", "SOURCE_LIMIT", "VIEW_LIMIT"]
 
 SOURCE_LIMIT = 2 << 20               # 画面・混在表示に読むソースの大きさの上限
 VIEW_LIMIT = 4096                    # 1 回に逆アセンブル・表示するメモリの上限（バイト）
@@ -26,18 +27,21 @@ VIEW_HISTORY = 16                    # compare のために覚えておく範囲
 FUNCTION_LIMIT = 64 << 10           # 関数の逆アセンブルの上限（これより大きければ range で）
 
 
-class _NeedsMemory(Exception):
-    """式の番地を決めるのにメモリの値が要る（ポインタをたどる式）。"""
+class InspectService:
+    """止まったターゲットを調べる道具（Probe のサービス）。"""
 
+    API = ("disasm_around", "disasm_function", "disasm_range", "disasm_text", "evaluate", "expression_check",
+           "frame_variables", "memory_view", "peripheral_read", "peripheral_write", "svd_load", "svd_peripherals",
+           "svd_registers", "target_fault", "type_info", "write_expression")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_backtrace", "_bulk_skip_reason", "_device", "_disassembler", "_elf_image", "_forget_elf", "_image",
+              "_names_in", "_svd", "_svd_info", "_view_previous")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_flash_spans", "_linux_view", "_lock", "_offline_target", "_symbols", "dbg", "target",
+             "watch_write")
 
-def _no_register(number: int) -> int:
-    raise NotAvailable("走らせたまま・ELF だけではレジスタ（ローカル変数）は使えない")
-
-
-class InspectTools:
-    """止まったターゲットを調べる道具（Probe の mixin）。"""
-
-    def _init_inspect(self) -> None:
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._svd: Device | None = None
         self._svd_info: dict | None = None
         self._image: ElfImage | None = None                   # 逆アセンブル・メモリの名前に使う ELF の像
@@ -53,9 +57,11 @@ class InspectTools:
         """C の式（変数・メンバー・添字・ポインタ・& と *・キャスト・算術・比較・論理・ビット演算）を評価して読む。frame は backtrace の index
         （0 = いまの関数。そのフレームの引数・ローカル変数も使える）。live: 走らせたまま読む（ライブ ウォッチ。
         レジスタを使わず、大域・静的の変数とメモリだけ。コアを止めない）。"""
-        with self._lock:
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.evaluate(expression=expression, frame=frame, max_elements=max_elements, live=live)
+        with self._host._lock:
             try:
-                return self.dbg.evaluate(expression, frame, max_elements, live)
+                return self._host.dbg.evaluate(expression, frame, max_elements, live)
             except UnknownNameError as e:
                 if live:
                     raise UnknownNameError(f"{e}{LOCAL_HINT}") from None
@@ -66,9 +72,11 @@ class InspectTools:
         式の誤り・名前の無い変数・型の誤りは誤りにする。通れば {"expression", "type"（ポインタをたどる式は読むまで
         分からないので None）, "address"（番地の決まる式）, "live"（走らせたまま読める = 大域・静的の式）,
         "needs_memory"（番地がメモリの値で決まる）}。"""
-        if self._symbols is None:
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.expression_check(expression=expression)
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load を先に）")
-        info = Debugger(None, self._symbols).debug_info()
+        info = Debugger(None, self._host._symbols).debug_info()
         if info is None:
             raise RuntimeError("ELF に DWARF（-g）が無い: 式は調べられない")
         return check_expression(info, expression)
@@ -76,37 +84,55 @@ class InspectTools:
     def target_fault(self) -> dict:
         """止まったコアの故障の解析: 原因（CFSR・HFSR の各ビットの意味と手がかり）、故障の番地（MMFAR・BFAR）、
         故障した命令の場所と、その時のレジスタ（例外のフレーム）。故障していなければ faulted = False。"""
-        with self._lock:
-            return fault.analyze(self.target, self._symbols, self._handler_entry_sp())
+        with self._host._lock:
+            return fault.analyze(self._host.target, self._host._symbols, self._handler_entry_sp())
 
     def _handler_entry_sp(self) -> int | None:
         """ハンドラに入った時の sp（DWARF の CFI。いまのフレームの CFA）。分からなければ None。"""
         try:
-            inspector = self.dbg.inspector()
+            inspector = self._host.dbg.inspector()
             return inspector.frames()[0].cfa if inspector is not None else None
         except Exception:                                         # 巻き戻せない（DWARF が無い・壊れたスタック）
             return None
 
     def frame_variables(self, frame: int = 0, max_elements: int = 64) -> dict:
         """フレームの引数とローカル変数（型付きの値。構造体・配列は入れ子）。"""
-        with self._lock:
-            return self.dbg.frame_variables(frame, max_elements)
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.frame_variables(frame, max_elements)
+        with self._host._lock:
+            return self._host.dbg.frame_variables(frame, max_elements)
 
     def write_expression(self, expression: str, value: int | float | str, frame: int = 0) -> dict:
-        """C の式の指す値（メモリ上の基本型・列挙（名前でも）・ポインタ・ビットフィールド）に書き、読み直して返す。"""
-        with self._lock:
-            self.dbg.write_expression(expression, value, frame)
-            return self.dbg.evaluate(expression, frame)
+        """C の式の指す値（メモリ上の基本型・列挙（名前でも）・ポインタ・ビットフィールド）に書き、読み直して返す。
+        道はターゲットの状態でホストが選ぶ（使う側・画面は状態で API を選ばない）: 止まっていれば frame のフレームで
+        （via = halted）、走行中（RUNNING・SLEEPING）なら止めずに watch_write と同じ道で（via = running。大域・静的の式だけ、
+        frame は 0 だけ。atomic = 1 回の書き込みで書いたか）。ほかの状態（リセット中等）は誤り。Linux のプロセスに
+        attach している間はそのプロセスに（止まっているときだけ。via = halted）。"""
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.write_expression(expression=expression, value=value, frame=frame)
+        with self._host._lock:
+            state = self._host.target.get_state().name
+            if state == "HALTED":
+                self._host.dbg.write_expression(expression, value, frame)
+                return {**self._host.dbg.evaluate(expression, frame), "via": "halted"}
+            if state in ("RUNNING", "SLEEPING"):
+                if frame != 0:
+                    raise ValueError(f"走行中は frame を選べない（frame={frame}。止めてから書く）")
+                written = self._host.watch_write(expression, value)
+                return {**written, "address": int(written["address"], 16), "via": "running"}
+            raise RuntimeError(f"ターゲットが {state}: 式に書けるのは止まっている・走っている間だけ")
 
     def type_info(self, name: str) -> dict:
         """型の名前（"struct Sensor"・typedef 名等）の大きさ・メンバー・列挙子（ターゲットは使わない）。"""
-        with self._lock:
-            if self._symbols is None:
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.type_info(name=name)
+        with self._host._lock:
+            if self._host._symbols is None:
                 raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
-            return Debugger(None, self._symbols).type_info(name)
+            return Debugger(None, self._host._symbols).type_info(name)
 
     def _backtrace(self, variables: bool, max_frames: int, max_elements: int, assume_leaf: bool = False) -> list[dict]:
-        dbg = self.dbg
+        dbg = self._host.dbg
         inspector = dbg.inspector(max_frames, assume_leaf)
         cfi = inspector is not None and len(inspector.unwinder.table) > 0
         frames = dbg.backtrace(max_frames, inspector if cfi else None)
@@ -125,21 +151,21 @@ class InspectTools:
     # --- 逆アセンブル ----------------------------------------------------------------------
 
     def _elf_image(self) -> ElfImage | None:
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
-        if self._image is None or self._image.path != self._symbols.path:
-            self._image = ElfImage(self._symbols.path)
+        if self._image is None or self._image.path != self._host._symbols.path:
+            self._image = ElfImage(self._host._symbols.path)
         return self._image
 
     def _code_reader(self, from_elf: bool):
         """読むメモリ: 接続していればターゲット（from_elf なら ELF）、未接続でスナップショットを開いていればそれ、
         どちらでもなければ ELF。(読み手, "target" / "snapshot" / "elf")。"""
-        if from_elf or self._debug is None and self._offline_target() is None:
+        if from_elf or self._host._debug is None and self._host._offline_target() is None:
             image = self._elf_image()
             if image is None:
                 raise RuntimeError("ターゲット未接続で ELF も無い（target_connect か debug_elf_load）")
             return image, "elf"
-        return TargetMemory(self.target), "target" if self._debug is not None else "snapshot"
+        return TargetMemory(self._host.target), "target" if self._host._debug is not None else "snapshot"
 
     def _disassembler(self, from_elf: bool, branch_tables: list[dict] | None = None,
                       data_ranges: list[dict] | None = None) -> tuple[Disassembler, str]:
@@ -156,16 +182,24 @@ class InspectTools:
                 raise ValueError(f"data_ranges の項目は {{address, size（1 以上）}}: {r!r}")
             ranges.append((int(r["address"]), int(r["size"])))
         memory, origin = self._code_reader(from_elf)
-        return Disassembler(memory, self._symbols, self._elf_image(), tables, ranges), origin
+        return Disassembler(memory, self._host._symbols, self._elf_image(), tables, ranges), origin
 
-    @staticmethod
-    def _listing_dict(listing: Listing, origin: str, offset: int, limit: int) -> dict:
+    def _listing_dict(self, listing: Listing, origin: str, offset: int, limit: int) -> dict:
+        """命令の並び（_lock の中で）。in_flash = 命令のバイトが Flash の領域に掛かるか（書く道を決める事実。未接続・
+        メモリの地図の無いターゲットは None）。"""
         items = listing.instructions[offset:offset + limit]
         pc = listing.pc_index
+        spans = self._host._flash_spans()
+
+        def in_flash(i) -> bool | None:
+            if spans is None:
+                return None
+            end = i.address + max(1, len(i.data))
+            return any(i.address < hi and lo < end for lo, hi in spans)
         return {"memory": origin, "sync": listing.sync, "sync_skipped": listing.sync_skipped,
                 "total": len(listing.instructions), "offset": offset,
                 "pc_index": pc - offset if pc is not None and offset <= pc < offset + limit else None,
-                "instructions": [i.as_dict() for i in items]}
+                "instructions": [{**i.as_dict(), "in_flash": in_flash(i)} for i in items]}
 
     def _function_listing(self, dis: Disassembler, location: str) -> Listing:
         start, size = dis.function_bounds(self._location(location))
@@ -177,21 +211,21 @@ class InspectTools:
         return int(location, 16) if location.lower().startswith("0x") else location
 
     def _pc(self) -> int:
-        return self.target.read_core_register("pc")
+        return self._host.target.read_core_register("pc")
 
     def disasm_range(self, address: int, length: int, from_elf: bool = False, offset: int = 0,
                      limit: int = 256, branch_tables: list[dict] | None = None,
                      data_ranges: list[dict] | None = None) -> dict:
         """番地 address から length バイト（4096 まで）を逆アセンブルする。命令は offset 番目から limit 件。
         branch_tables: tbb / tbh の表の大きさ、data_ranges: データの区間（使う側が明示する。_disassembler）。"""
-        with self._lock:
+        with self._host._lock:
             dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             return self._listing_dict(dis.range(address, address + length), origin, offset, limit)
 
     def disasm_function(self, location: str, from_elf: bool = False, offset: int = 0, limit: int = 256,
                         branch_tables: list[dict] | None = None, data_ranges: list[dict] | None = None) -> dict:
         """関数の全体（関数名か "0x..." の関数の中の番地）を逆アセンブルする。"""
-        with self._lock:
+        with self._host._lock:
             dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             return self._listing_dict(self._function_listing(dis, location), origin, offset, limit)
 
@@ -200,7 +234,9 @@ class InspectTools:
                       sync_limit: int = SYNC_LIMIT, data_ranges: list[dict] | None = None) -> dict:
         """番地（省略時は PC）の前 before 命令・その命令・後ろ after 命令。前は関数の先頭から揃える（PC まで
         sync_limit バイトより遠ければ揃えない。揃えなかった理由は sync_skipped）。"""
-        with self._lock:
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.disasm_around(address=address, before=before, after=after, from_elf=from_elf, branch_tables=branch_tables, sync_limit=sync_limit, data_ranges=data_ranges)
+        with self._host._lock:
             pc = self._pc() if address is None else address
             dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             return {"pc": pc, **self._listing_dict(dis.around(pc, before, after, sync_limit), origin, 0,
@@ -212,7 +248,7 @@ class InspectTools:
                     data_ranges: list[dict] | None = None) -> dict:
         """ソースの行を挟んだ逆アセンブルの文字列（AI 向け）。location なら関数、address と length なら範囲、
         どちらも無ければ address（省略時は PC）の前後（sync・sync_skipped は disasm_around と同じ）。"""
-        with self._lock:
+        with self._host._lock:
             dis, origin = self._disassembler(from_elf, branch_tables, data_ranges)
             if location is not None:
                 listing = self._function_listing(dis, location)
@@ -228,9 +264,9 @@ class InspectTools:
 
     def _source_lines(self):
         """(ファイル名, 行) → ソースの行。ELF が参照するファイルだけを読む（外の共有・大きすぎるものは読まない）。"""
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
-        sources, cache = self._symbols.sources(), {}
+        sources, cache = self._host._symbols.sources(), {}
 
         def line(name: str | None, number: int | None) -> str | None:
             if name is None or number is None:
@@ -250,9 +286,9 @@ class InspectTools:
         """周辺レジスタの定義（CMSIS-SVD）を読む。path（ファイル）か device（SVD のファイル名。拡張子を除いて同じ
         名前のファイルを同梱・~/.fprobe/svd・pyOCD の内蔵から探す）か from_target（接続中のターゲットの pyOCD の定義が
         指す SVD = _svd_location のファイル。定義の事実で、名前から推さない）。ターゲット名から推して選ぶことはしない。"""
-        with self._lock:
+        with self._host._lock:
             if from_target:
-                location = getattr(self.target, "_svd_location", None)
+                location = getattr(self._host.target, "_svd_location", None)
                 member = getattr(getattr(location, "filename", None), "name", None)
                 if not member:
                     raise RuntimeError("接続中のターゲットの定義に SVD が無い（device か path を渡す）")
@@ -284,7 +320,7 @@ class InspectTools:
 
     def svd_peripherals(self, filter: str | None = None) -> dict:
         """SVD の周辺の一覧。filter は名前・グループの一部（大文字小文字を区別しない）。"""
-        with self._lock:
+        with self._host._lock:
             dev = self._device()
             key = (filter or "").upper()
             return {"device": dev.name, "peripherals": [
@@ -294,7 +330,7 @@ class InspectTools:
 
     def svd_registers(self, peripheral: str) -> dict:
         """周辺のレジスタの定義（番地・幅・アクセス・リセット値・フィールド・列挙）。"""
-        with self._lock:
+        with self._host._lock:
             p = self._device().peripheral(peripheral)
             return {"peripheral": p.name, "base_address": p.base_address,
                     "registers": [r.as_dict() for r in p.registers]}
@@ -306,8 +342,8 @@ class InspectTools:
         ほかに読まないものは使う側が skip（"周辺.レジスタ" の glob。大文字小文字を区別しない）で渡す。"""
         if skip and "." in path:
             raise ValueError("skip は周辺の全部を読むときだけ（1 つを名指しで読むときは要らない）")
-        with self._lock:
-            dev, access = self._device(), TargetMemory(self.target)
+        with self._host._lock:
+            dev, access = self._device(), TargetMemory(self._host.target)
             if "." in path:
                 return {"registers": [dev.read_register(access, path, allow_side_effects=allow_side_effects).as_dict()],
                         "skipped": []}
@@ -342,8 +378,8 @@ class InspectTools:
         書く前と後の値を返す（読むと状態が変わる・書くだけのレジスタは読まない）。"""
         if (fields is None) == (value is None):
             raise ValueError("fields か value のどちらか 1 つを指定する")
-        with self._lock:
-            dev, access = self._device(), TargetMemory(self.target)
+        with self._host._lock:
+            dev, access = self._device(), TargetMemory(self._host.target)
             r = dev.register(path)
             readable = r.access not in ("write-only", "writeOnce") and (allow_side_effects or not r.has_read_side_effects)
             if fields is not None and not readable and r.access not in ("write-only", "writeOnce"):
@@ -362,12 +398,14 @@ class InspectTools:
                     from_elf: bool = False) -> dict:
         """メモリの 16 進表示（4096 バイトまで）。unit = 8 / 16 / 32 ビット、width = 1 行のバイト数。compare なら
         同じ範囲の前回の読みと比べ、変わった単位に印を付ける。番地にシンボル・周辺レジスタの名前を付ける。"""
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.memory_view(address=address, length=length, unit=unit, width=width, compare=compare, from_elf=from_elf)
         if not 0 < length <= VIEW_LIMIT:
             raise ValueError(f"length は 1〜{VIEW_LIMIT}")
         if not 0 <= address < 1 << 32:
             raise ValueError(f"番地 0x{address:X} は 32 ビットの番地の空間の外")
         length = min(length, (1 << 32) - address)          # 番地の空間の終わりで止める（折り返して 0 番地を読まない）
-        with self._lock:
+        with self._host._lock:
             memory, origin = self._code_reader(from_elf)
             data = memory.read_memory(address, length)
             key = (address, length)

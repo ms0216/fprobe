@@ -4,7 +4,7 @@
 
 <script lang="ts">
   // 変数の木（Watch・Locals が使う）: 名前・値・型の表。構造体・配列・ポインタは ▸ で開く（開いた行は覚える）。
-  // 書けるとき（via = 書く API。止まっていれば debug.write_expression、走っていれば watch.write）、値のダブルクリックで書ける。
+  // 書けるとき（via = 書く API。debug.write_expression。道はデーモンが状態で選ぶ）、値のダブルクリックで書ける。
   import type { Snippet } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import type { Debugger } from "../../lib/debugger";

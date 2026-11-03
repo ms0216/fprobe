@@ -1,7 +1,7 @@
 """Probe の道具: メモリ・スタックの使用量（U26）。ELF のメモリ使用量（Build Analyzer 相当）、静的な最大のスタック
 （.su と逆アセンブルの呼び出しグラフ）、ベアメタルの MSP のスタックの塗りと実測。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・target・_symbols を使う。機器に触るのは
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・_debug・target・_symbols を使う。機器に触るのは
 必ず _lock の中（elf_size・stack_static は ELF だけを読み、機器に触らない）。
 
 - 領域（MEMORY）: regions（直接）> map_file（GNU ld の -Map）> linker_script > 接続中のターゲットのメモリマップ。
@@ -23,8 +23,9 @@ from .elfsize import ElfLayout, MemoryRegion, StackBounds, parse_linker_regions,
     stack_bounds
 from .stackusage import analyze_stack, load_su, measure_stack, paint_range
 from .symbols import is_network_path
+from .probe_service import HostView
 
-__all__ = ["DEFAULT_FILL", "StackTools"]
+__all__ = ["DEFAULT_FILL", "StackService"]
 
 DEFAULT_FILL = 0xCD                      # IAR と同じ塗りの値
 _CHUNK = 4096
@@ -43,10 +44,17 @@ def _local_file(path: str, what: str) -> Path:
     return Path(path)
 
 
-class StackTools:
-    """メモリ・スタックの使用量（Probe の mixin）。"""
+class StackService:
+    """メモリ・スタックの使用量（Probe のサービス）。"""
 
-    def _init_stack(self) -> None:
+    API = ("elf_size", "stack_paint", "stack_static", "stack_usage")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_call_graph", "_regions")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_elf_image", "_lock", "_symbols", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._stack_paint: _Paint | None = None
         self._stack_graph: tuple[object, tuple, CallGraph] | None = None   # (読んだ Symbols, ベクタ表, グラフ)
 
@@ -55,9 +63,9 @@ class StackTools:
     def _layout_path(self, elf: str | None) -> Path:
         if elf is not None:
             return _local_file(elf, " ELF ")
-        if self._symbols is None:
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load か elf を指定）")
-        return self._symbols.path
+        return self._host._symbols.path
 
     def _regions(self, regions: list[dict] | None, map_file: str | None,
                  linker_script: str | None) -> tuple[list[MemoryRegion], str | None]:
@@ -76,7 +84,7 @@ class StackTools:
             if not found:
                 raise ValueError(f"{linker_script} に MEMORY が無い")
             return found, "linker_script"
-        debug = self._debug
+        debug = self._host._debug
         memory_map = getattr(getattr(debug, "target", None), "memory_map", None) if debug is not None else None
         if memory_map is not None:
             out = [MemoryRegion(r.name or ("flash" if r.is_flash else "ram"), r.start, r.length,
@@ -101,17 +109,17 @@ class StackTools:
 
     def _call_graph(self, vector_table: int | None = None, vector_table_size: int | None = None,
                     branch_tables: list[dict] | None = None) -> CallGraph:
-        if self._symbols is None:
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
         tables = {int(t["address"]): int(t["entries"]) for t in branch_tables or []}
         key = (vector_table, vector_table_size, tuple(sorted(tables.items())))
         cached = self._stack_graph
-        if cached is not None and cached[0] is self._symbols and cached[1] == key:
+        if cached is not None and cached[0] is self._host._symbols and cached[1] == key:
             return cached[2]
-        image = self._elf_image()                          # 読み込み済みの名前・行の表を使い回す（DWARF を読み直さない）
-        graph = CallGraph.build(Disassembler(image, self._symbols, image, tables), vector_table=vector_table,
+        image = self._host._elf_image()                          # 読み込み済みの名前・行の表を使い回す（DWARF を読み直さない）
+        graph = CallGraph.build(Disassembler(image, self._host._symbols, image, tables), vector_table=vector_table,
                                 vector_table_size=vector_table_size)
-        self._stack_graph = (self._symbols, key, graph)
+        self._stack_graph = (self._host._symbols, key, graph)
         return graph
 
     def stack_static(self, su_paths: list[str] | None = None, indirect: dict[str, list[str]] | None = None,
@@ -126,9 +134,9 @@ class StackTools:
         branch_tables: tbb / tbh の表の大きさ [{address, entries}]（使う側が渡す。無い表の分かれ先はたどらない）。"""
         graph = self._call_graph(vector_table, vector_table_size, branch_tables)
         if su_paths is None:
-            su_paths = [str(self._symbols.path.parent)]
+            su_paths = [str(self._host._symbols.path.parent)]
         su = load_su([_local_file(p, " .su ") for p in su_paths])
-        symbols = self._symbols
+        symbols = self._host._symbols
 
         def file_of(name: str) -> str | None:
             try:
@@ -158,10 +166,10 @@ class StackTools:
         """names: top_symbol・vector_table・limit_symbol・size_symbol（使う側が渡す。fprobe.elfsize.stack_bounds）。"""
         if bottom is not None and top is not None:
             return StackBounds(top, bottom, None, "argument", "argument")
-        if self._symbols is None:
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load か bottom・top を指定）")
         found, _ = self._regions(None, None, None)
-        bounds = stack_bounds(ElfLayout.from_elf(self._symbols.path), found, top=top, **names)
+        bounds = stack_bounds(ElfLayout.from_elf(self._host._symbols.path), found, top=top, **names)
         if top is not None:
             bounds.top, bounds.top_source = top, "argument"
         if bottom is not None:
@@ -176,8 +184,8 @@ class StackTools:
         無ければ上端の下の RAM の空き全部）。いまの MSP − margin より上は塗らない。"""
         if not 0 <= fill <= 0xFF:
             raise ValueError("fill は 1 バイト（0〜255）")
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             if target.get_state() != Target.State.HALTED:
                 raise RuntimeError("コアを止めてから塗る（走行中は割り込みが塗る所を使うかもしれない）")
             bounds = self._stack_bounds(bottom, top, {"top_symbol": top_symbol, "vector_table": vector_table,
@@ -199,8 +207,8 @@ class StackTools:
         reached_bottom = 塗りが残っていない、overflow = SP が下端より下、warning は threshold を明示したときだけ）。止まっていれば いまの深さ（current）も。走行中でも読める。
         範囲は stack_paint のもの（無ければ stack_paint と同じ引数の範囲）。塗りの値は fill か、stack_paint の記録の値
         （記録が無く fill も無ければ誤り: 塗りの値を慣習の値で仮定しない）。"""
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             paint = self._stack_paint
             names = {"top_symbol": top_symbol, "vector_table": vector_table, "limit_symbol": limit_symbol,
                      "size_symbol": size_symbol}

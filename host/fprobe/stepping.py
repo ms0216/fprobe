@@ -94,6 +94,8 @@ class Runner:
         self.poll_s = poll_s
         self.temporary: set[int] = set()
         self.dfsr: int | None = None                     # 最後の停止で読んだ DFSR（立っていたビットを全部返すため）
+        self.steps = 0                                   # 発行した 1 命令ステップの数（測った事実。ステップ操作の結果に載せる）
+        self.runs = 0                                    # 踏み台・ブレークポイントまで走らせた（resume した）回数
 
     # --- 読む ----------------------------------------------------------------------------------
 
@@ -124,6 +126,7 @@ class Runner:
 
     def _step_here(self, mask_interrupts: bool) -> str | None:
         target = self.target
+        self.steps += 1
         pc = target.read_core_register("pc")
         lifted = pc in self.breakpoints or pc in self.temporary
         if lifted:                                               # ブレークポイントの上で進めると止まり直す
@@ -162,6 +165,7 @@ class Runner:
                             return Halt(reason, regs)
                         if regs.pc in targets and targets[regs.pc](regs):
                             return Halt("arrived", regs)
+                    self.runs += 1
                     self.target.resume()
                 reason = self._wait()
                 regs = self.regs()

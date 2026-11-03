@@ -1,8 +1,8 @@
 """Probe の道具: 既存のログ・トレースの形式の取り込み（U14・U15）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・target・_symbols・_recorder・_debug と、
-ObserveTools（RTT の受信 `rtt_start`・`_rtt_listen`・`_rtt`）、WindowTools（デバイスの時刻付きの SWO・UART の
-バイトの窓 `_open_window`・`_window_cursor`・`_window_new`・write_registers）、RtosTools（時間軸の結果
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・target・_symbols・_recorder・_debug と、
+ObserveService（RTT の受信 `rtt_start`・`_rtt_listen`・`_rtt`）、WindowService（デバイスの時刻付きの SWO・UART の
+バイトの窓 `_open_window`・`_window_cursor`・`_window_new`・write_registers）、RtosService（時間軸の結果
 `_rtos_last` = 解析の道具が読むもの）を使う。機器に触るのは必ず _lock の中。
 
 - ログ（fprobe.logfmt）: defmt・Trice・compact・memfault・text を RTT（listener）・SWO（ITM のポート）・UART の
@@ -45,8 +45,9 @@ from .tracefmt.stream import (CHANNELS, SNAPSHOT_FORMATS, SNAPSHOT_LIMIT, STREAM
                               decode_trace, snapshot)
 from .tracefmt.systemview import COMMAND_START as SV_START, COMMAND_STOP as SV_STOP
 from .tracefmt.tracealyzer import COMMAND_START as TZ_START, COMMAND_STOP as TZ_STOP, CONTROL_NAME as TZ_CONTROL
+from .probe_service import HostView
 
-__all__ = ["FormatTools", "LOG_LIMIT", "SOURCES"]
+__all__ = ["FormatService", "LOG_LIMIT", "SOURCES"]
 
 SOURCES = ("rtt", "swo", "uart")
 LOG_LIMIT = 10_000                       # 貯めておく行の数（それより古いものは捨てる。全部は記録の stream "log"）
@@ -110,6 +111,7 @@ class _Feed:
     trace: Trace | None = None
     clock: TargetClock | None = None
     written: int = 0                                 # 記録に書いた出来事の数
+    er_init_count: int | None = None                 # Event Recorder の init_count（前の読み。変われば時刻の区切り）
     since: int | None = None                         # eventrecorder: 次に読む通し番号
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -118,10 +120,20 @@ class _Feed:
         return self.stopped is None
 
 
-class FormatTools:
-    """既存のログ・トレースの形式の取り込み（Probe の mixin）。"""
+class FormatService:
+    """既存のログ・トレースの形式の取り込み（Probe のサービス）。"""
 
-    def _init_formats(self) -> None:
+    API = ("log_annotate", "log_decode", "log_read", "log_start", "log_status", "log_stop", "scvd_load", "scvd_view",
+           "trace_events", "trace_import", "trace_snapshot", "trace_start", "trace_status", "trace_stop")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_arrival", "_close_formats", "_log_feed", "_rtt_channel_index")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_close_window", "_debug", "_lock", "_open_window", "_recorder", "_rtos_last", "_rtos_run", "_rtt",
+             "_rtt_listen", "_rtt_unlisten", "_swo_baud", "_symbols", "_window_cursor", "_window_info", "_window_new",
+             "rtt_start", "rtt_stop", "session", "swo_start", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._log_feed: _Feed | None = None
         self._log_last: _Feed | None = None
         self._trace_feed: _Feed | None = None
@@ -149,9 +161,9 @@ class FormatTools:
         elif feed.source == "swo":
             self._feed_start_swo(feed, port, swo_baud, core_clock_hz)
         elif feed.source == "uart":
-            with self._lock:
-                feed.timebase_hz = self.session.device.capabilities().timebase_hz
-                feed.cursor = self._window_cursor(self._open_window(), "uart")
+            with self._host._lock:
+                feed.timebase_hz = self._host.session.device.capabilities().timebase_hz
+                feed.cursor = self._host._window_cursor(self._host._open_window(), "uart")
             feed.pump = threading.Thread(target=self._feed_pump, args=(feed,), name=f"fprobe-{feed.kind}-uart",
                                          daemon=True)
             feed.pump.start()
@@ -159,28 +171,28 @@ class FormatTools:
             raise ValueError(f"source は {' / '.join(SOURCES)}")
 
     def _feed_start_rtt(self, feed: _Feed, channel: int | str | None) -> None:
-        feed.started_rtt = self._rtt is None
+        feed.started_rtt = self._host._rtt is None
         if feed.started_rtt:
-            self.rtt_start()
+            self._host.rtt_start()
         try:
-            with self._lock:
-                up = self._rtt.control_block.up
+            with self._host._lock:
+                up = self._host._rtt.control_block.up
                 feed.rtt_channel = self._rtt_channel_index(up, channel, feed.format)
                 feed.timebase_hz = self._timebase_hz()
-                if self._recorder is None and feed.timebase_hz:
+                if self._host._recorder is None and feed.timebase_hz:
                     feed.host_clock = self._host_clock(feed.timebase_hz)
         except Exception:
             if feed.started_rtt:
-                self.rtt_stop()
+                self._host.rtt_stop()
             raise
 
         def listener(key, data: bytes, host_s: float, feed=feed) -> None:
             if key == feed.rtt_channel and feed.running:
-                if feed.host_clock is not None and self._recorder is None:
+                if feed.host_clock is not None and self._host._recorder is None:
                     self._clock_point(feed.host_clock)            # 背景のスレッドから、_lock の中で
                 self._feed_bytes(feed, data, host_s=host_s)
         feed.listener = listener
-        self._rtt_listen(listener)
+        self._host._rtt_listen(listener)
         if feed.kind == "trace" and feed.format in _START_COMMANDS and feed.settings.get("send_start", True):
             self._send_command(feed, start=True)
 
@@ -207,25 +219,25 @@ class FormatTools:
     def _send_command(self, feed: _Feed, start: bool) -> None:
         """SystemView・Tracealyzer: 下りのチャンネルに開始・停止のコマンドを書く。"""
         name, on, off = _START_COMMANDS[feed.format]
-        with self._lock:
-            if self._rtt is None:
+        with self._host._lock:
+            if self._host._rtt is None:
                 return
-            down = [c for c in self._rtt.control_block.down if c.name == name]
+            down = [c for c in self._host._rtt.control_block.down if c.name == name]
             if not down:
                 feed.warnings.append(f"RTT の下りに {name} が無い: ターゲットが記録を始めていなければ届かない"
                                      "（ターゲット側で開始する設定なら問題ない）")
                 return
-            written = self._rtt.write(down[0].index, on if start else off)
+            written = self._host._rtt.write(down[0].index, on if start else off)
         if written < len(on if start else off):
             feed.warnings.append(f"{name} にコマンドを書き切れなかった（下りのバッファが一杯）")
 
     def _feed_start_swo(self, feed: _Feed, port: int, swo_baud: int | None, core_clock_hz: float | None) -> None:
         if not 0 <= port < 32:
             raise ValueError("port は 0〜31")
-        if swo_baud is None and self._swo_baud is None:
+        if swo_baud is None and self._host._swo_baud is None:
             raise RuntimeError("SWO の受信の速度が分からない（swo_baud を渡すか swo_start を先に）")
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             setup = itm_port_writes(port)[:-1]
             baud = swo_baud
             if swo_baud is not None and core_clock_hz is not None:
@@ -237,16 +249,16 @@ class FormatTools:
             before = write_registers(target, setup + [RegisterWrite(ITM_TER, 0, note="ITM: 全ポートを止める")])
             try:
                 if baud is not None:
-                    self.swo_start(baud)
-                window = self._open_window()
+                    self._host.swo_start(baud)
+                window = self._host._open_window()
                 target.write_memory(ITM_TER, before[ITM_TER] | 1 << port)
             except Exception:
                 target.write_memory(ITM_TER, before[ITM_TER])
                 raise
-            feed.timebase_hz = self.session.device.capabilities().timebase_hz
+            feed.timebase_hz = self._host.session.device.capabilities().timebase_hz
         feed.restore = {ITM_TER: before[ITM_TER]}
-        feed.cursor, feed.itm, feed.port = self._window_cursor(window, "swo"), TimedSwo(), port
-        feed.settings["swo_baud"] = baud or self._swo_baud
+        feed.cursor, feed.itm, feed.port = self._host._window_cursor(window, "swo"), TimedSwo(), port
+        feed.settings["swo_baud"] = baud or self._host._swo_baud
         feed.pump = threading.Thread(target=self._feed_pump, args=(feed,), name=f"fprobe-{feed.kind}-swo", daemon=True)
         feed.pump.start()
 
@@ -264,7 +276,7 @@ class FormatTools:
             if feed.source == "memory":
                 self._er_poll(feed)
                 return
-            events = self._window_new(feed.cursor)
+            events = self._host._window_new(feed.cursor)
             if feed.source == "uart":
                 for t, _, b in events:
                     self._feed_bytes(feed, bytes([b]), t=t)
@@ -278,7 +290,7 @@ class FormatTools:
 
     def _timebase_hz(self) -> float | None:
         try:
-            return self.session.device.capabilities().timebase_hz
+            return self._host.session.device.capabilities().timebase_hz
         except Exception:                                         # 機器が無い（オフライン）
             return None
 
@@ -291,21 +303,23 @@ class FormatTools:
 
     def _clock_point(self, clock: ClockMap) -> None:
         """いまのホストの時刻とタイムベースの組を足す（_lock の中で）。"""
-        device = self.session.device
+        device = self._host.session.device
         h0 = time.monotonic()
         ticks = device.time()
         h1 = time.monotonic()
         clock.add((h0 + h1) / 2, ticks, h1 - h0)
 
     def _arrival(self, feed: _Feed, host_s: float | None, t: int | None) -> tuple[int | None, float | None]:
-        """受けた時刻（タイムベース, 不確かさ）。"""
+        """受けた時刻（タイムベース, 不確かさ）。どちらも対象の出来事の時刻の上限（出来事はそれより前）。
+        - t（デバイスがバイトを受けた時刻。SWO・UART）: 端子の辺からの遅れは方式・分周で決まり（UART 方式と Manchester で
+          違う。8N1 の 10 ビットを仮定しない）、対象の中の遅れは分からないので、不確かさは None（分からない）。
+        - host_s（PC が RTT を読んだ時刻）: 不確かさは PC の時計の写しの分だけ。設定の読みの周期を幅として足さない
+          （実際の間隔は周期と限らず、出来事が読みの何周期前かも分からない）。"""
         if t is not None:
-            byte_s = 10 / feed.settings["swo_baud"] if feed.source == "swo" and feed.settings.get("swo_baud") else 0
-            return t, byte_s * (feed.timebase_hz or 0) or None
+            return t, None
         if host_s is None:
             return None, None
-        poll = self.poll_s * (feed.timebase_hz or 0)              # RTT の読みの周期（ObserveTools の設定）
-        rec = self._recorder
+        rec = self._host._recorder
         try:
             if rec is not None:
                 ticks, unc = rec.clock.to_ticks(host_s)
@@ -315,13 +329,15 @@ class FormatTools:
                 return None, None
         except RuntimeError:                                     # 時計の対応付けの前
             return None, None
-        return ticks, unc + poll
+        return ticks, unc
 
     def _feed_bytes(self, feed: _Feed, data: bytes, host_s: float | None = None, t: int | None = None) -> None:
         feed.bytes += len(data)
         arrival, unc = self._arrival(feed, host_s, t)
         if feed.kind == "log":
-            self._log_received(feed, feed.decoder.feed(data), arrival, unc)
+            # 時刻の印: デバイスが受けた時刻か、PC が読んだ時刻か（どちらも出来事の上限）
+            source = "device_received" if t is not None else "host_received"
+            self._log_received(feed, feed.decoder.feed(data), arrival, unc, source)
         else:
             self._trace_received(feed, feed.decoder.feed(data), arrival, unc)
 
@@ -332,7 +348,7 @@ class FormatTools:
                     channel_levels: dict[str, str] | None = None) -> LogStream:
         if channel_levels is not None and format != "trice":
             raise ValueError("channel_levels は trice だけ（行頭のチャンネルのタグ → 重要度）")
-        symbols = self._symbols if elf is None else None
+        symbols = self._host._symbols if elf is None else None
         return LogStream.create(format, elf=elf, symbols=symbols, til=til, li=li, framing=framing,
                                 big_endian=big_endian, transport=transport, annotate=annotate,
                                 channel_levels=channel_levels)
@@ -362,14 +378,16 @@ class FormatTools:
         self._log_feed = feed
         return self._log_state(feed)
 
-    def _log_received(self, feed: _Feed, records: list[LogRecord], t: int | None, unc: float | None) -> None:
-        rec = self._recorder
+    def _log_received(self, feed: _Feed, records: list[LogRecord], t: int | None, unc: float | None,
+                      source: str = "host_received") -> None:
+        rec = self._host._recorder
         for r in records:
             feed.seq += 1
             feed.counts[r.kind] = feed.counts.get(r.kind, 0) + 1
-            feed.records.append((feed.seq, r, t, unc))
+            feed.records.append((feed.seq, r, t, unc, source))
             if rec is not None and t is not None:
-                rec.add(LOG_STREAM, r.kind, t, a=r.id or 0, body=r.to_dict(), uncertainty=unc)
+                rec.add(LOG_STREAM, r.kind, t, a=r.id or 0, body={**r.to_dict(), "time_source": source},
+                        uncertainty=unc)
 
     def log_stop(self) -> dict:
         """ログの受け取りを止める（貯めた行は log_read で読める）。"""
@@ -390,27 +408,27 @@ class FormatTools:
                 except Exception as e:
                     feed.error = f"{type(e).__name__}: {e}"
         if feed.listener is not None:
-            self._rtt_unlisten(feed.listener)
+            self._host._rtt_unlisten(feed.listener)
         if feed.kind == "trace" and feed.format in _START_COMMANDS and feed.source == "rtt" and \
                 feed.settings.get("send_start", True):
             try:
                 self._send_command(feed, start=False)
             except Exception as e:
                 feed.warnings.append(f"停止のコマンドを送れなかった: {e}")
-        with self._lock:
-            if feed.restore and self._debug is not None:
+        with self._host._lock:
+            if feed.restore and self._host._debug is not None:
                 for address, value in feed.restore.items():
-                    self.target.write_memory(address, value)
+                    self._host.target.write_memory(address, value)
             if feed.cursor is not None:
-                self._close_window(feed.cursor.window)
+                self._host._close_window(feed.cursor.window)
             feed.stopped = time.monotonic()
         if feed.started_rtt:
-            self.rtt_stop()
+            self._host.rtt_stop()
 
     def _log_state(self, feed: _Feed) -> dict:
         out = {"running": feed.running, "format": feed.format, "source": feed.source, "settings": dict(feed.settings),
                "records": feed.seq, "kept": len(feed.records), "kinds": dict(feed.counts), "bytes": feed.bytes,
-               "errors": feed.decoder.errors, "recorded": self._recorder is not None,
+               "errors": feed.decoder.errors, "recorded": self._host._recorder is not None,
                "elapsed_s": (feed.stopped or time.monotonic()) - feed.started, "warnings": list(feed.warnings)}
         return self._with_error_and_window(feed, out)
 
@@ -419,7 +437,7 @@ class FormatTools:
         if feed.error is not None:
             out["error"] = feed.error
         if feed.cursor is not None:
-            out["window"] = self._window_info(feed.cursor.window, feed.timebase_hz or 1.0)
+            out["window"] = self._host._window_info(feed.cursor.window, feed.timebase_hz or 1.0)
         return out
 
     def log_status(self) -> dict:
@@ -436,7 +454,7 @@ class FormatTools:
             raise RuntimeError("ログが無い（log_start）")
         out, last = [], since
         records = list(feed.records)
-        for seq, r, t, unc in records:
+        for seq, r, t, unc, source in records:
             if seq <= since:
                 continue
             if len(out) >= limit:                       # 上限に達した後に、まだ見ていない行がある
@@ -447,6 +465,7 @@ class FormatTools:
             item = {"seq": seq, **r.to_dict()}
             if t is not None:
                 item["t"] = t
+                item["time_source"] = source            # device_received / host_received（どちらも出来事の上限）
             out.append(item)
         more = any(seq > last for seq, *_ in records)
         dropped = max(0, feed.seq - len(feed.records) - since)
@@ -469,7 +488,7 @@ class FormatTools:
         """文字（UART のパニックの出力等）の中の 0x の数のうち、値が ELF の実行区画に入るものを関数・ファイル:行に
         する（機器に触らない。番地として書かれた数かどうかは決めない。fprobe.logfmt.addresses）。"""
         from .symbols import Symbols
-        symbols = Symbols(elf) if elf is not None else self._symbols
+        symbols = Symbols(elf) if elf is not None else self._host._symbols
         if symbols is None:
             raise RuntimeError("ELF が読み込まれていない（elf か debug_elf_load）")
         annotator = AddressAnnotator(symbols)
@@ -480,10 +499,10 @@ class FormatTools:
     # --- トレース（U14） ---------------------------------------------------------------------------
 
     def _elf_strings(self):
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
         from .logfmt.compact import ElfStrings
-        return ElfStrings(self._symbols.path).get
+        return ElfStrings(self._host._symbols.path).get
 
     @staticmethod
     def _text_file(path: str | None) -> str | None:
@@ -493,10 +512,12 @@ class FormatTools:
                     description: str | None = None, metadata: str | None = None, ctf_header: str | None = None,
                     send_start: bool = True, period_s: float = PULL_S, address: int | None = None,
                     swo_baud: int | None = None,
-                    core_clock_hz: float | None = None, string_limit: int = STRING_LIMIT) -> dict:
+                    core_clock_hz: float | None = None, string_limit: int = STRING_LIMIT,
+                    ts_hz: float | None = None) -> dict:
         """トレースの流れの取り込みを始める（すぐ戻る）。format: systemview（RTT の "SysView"。send_start なら
         開始のコマンドを書く）/ ctf（Zephyr。metadata = ビルドの TSDL のファイル、無ければ組み込みの表と ctf_header
-        ts32_id8 / ts32_id16 / ts64_id16 / id16）/ tracealyzer（RTT の "TzData"、開始のコマンドは "TzCtrl"）/
+        ts32_id8 / ts32_id16 / ts64_id16 / id16。時刻の速さは TSDL の clock か ts_hz で明示する。どちらも無ければ
+        時刻をタイムベースに写さない）/ tracealyzer（RTT の "TzData"、開始のコマンドは "TzCtrl"）/
         eventrecorder（source memory: RAM を period_s ごとに止めずに読む。EventRecorderInfo か address。書式は
         scvd_load の SCVD）。source: rtt /
         swo（ITM の port）/ uart / memory。description は SystemView の記述ファイル（SYSVIEW_<OS>.txt）。記録中なら
@@ -513,10 +534,10 @@ class FormatTools:
             raise ValueError(f"source は {' / '.join(SOURCES)}")
         stream = TraceStream.create(format, description=self._text_file(description),
                                     metadata=self._text_file(metadata), ctf_header=ctf_header,
-                                    strings=self._elf_strings())
+                                    strings=self._elf_strings(), ts_hz=ts_hz)
         feed = _Feed("trace", format, source, {"channel": channel, "port": port, "send_start": send_start,
                                                "description": description, "metadata": metadata,
-                                               "ctf_header": ctf_header}, stream, time.monotonic())
+                                               "ctf_header": ctf_header, "ts_hz": ts_hz}, stream, time.monotonic())
         feed.trace = stream.trace
         self._feed_start(feed, channel, port, swo_baud, core_clock_hz)
         self._trace_feed = feed
@@ -530,12 +551,27 @@ class FormatTools:
             del trace.events[:len(trace.events) - EVENTS_LIMIT]
             feed.warnings = [w for w in feed.warnings if not w.startswith("出来事が多い")] + [
                 f"出来事が多い: 最近の {EVENTS_LIMIT} 個だけ持っている（全部は記録の stream \"trace\"）"]
-        if feed.clock is None and trace.ts_hz and t is not None and feed.timebase_hz:
-            feed.clock = TargetClock(trace.ts_hz, feed.timebase_hz, events[-1].ts, t, unc or 0.0)
-        rec = self._recorder
-        if rec is not None and feed.clock is not None:
-            write_trace(rec, trace, feed.clock, events)
-            feed.written += len(events)
+        self._anchor(feed, events[-1], t, unc)                    # 受けた時刻 = 上限
+        self._write_trace(feed, events)
+
+    @staticmethod
+    def _anchor(feed: _Feed, last: TraceEvent, t: int | None, unc: float | None = None) -> None:
+        """最後の出来事を受けた・読んだ時刻（上限）を、その時刻の区切りの対応点にする（区切りごとに最初の 1 つ）。
+        時刻の無い形・速さの分からない形は写さない。"""
+        trace = feed.trace
+        if not (trace.timed and trace.ts_hz and t is not None and feed.timebase_hz):
+            return
+        if feed.clock is None:
+            feed.clock = TargetClock(trace.ts_hz, feed.timebase_hz, last.ts, t, unc, segment=last.segment)
+        else:
+            feed.clock.add_anchor(last.segment, last.ts, t, unc)
+
+    def _write_trace(self, feed: _Feed, events: list[TraceEvent] | None = None) -> None:
+        rec = self._host._recorder
+        if rec is None or feed.clock is None:
+            return
+        events = feed.trace.events if events is None else events
+        feed.written += write_trace(rec, feed.trace, feed.clock, events)
 
     def trace_stop(self, timeline: bool = True, idle_tasks: list[str] | None = None) -> dict:
         """トレースの取り込みを止める。要約（出来事の種類ごとの数・タスク・失った数・時刻の速さ）を返し、timeline なら
@@ -560,11 +596,13 @@ class FormatTools:
                "elapsed_s": (feed.stopped or time.monotonic()) - feed.started}
         out["notes"] = list(trace.notes)
         if feed.clock is not None:
-            out["clock"] = {"anchor_ts": feed.clock.anchor_ts, "anchor_t": feed.clock.anchor_t,
-                            "uncertainty": feed.clock.uncertainty, "timebase_hz": feed.timebase_hz,
-                            "ts_hz": feed.trace.ts_hz, "basis": "one_anchor_declared_rate"}
-            out["notes"].append("時刻は 1 つの対応点（anchor）とトレースが申告した速さ（ts_hz）で写した: 速さの誤差は"
-                                "不確かさに入れていない（対応点から離れるほどずれうる）")
+            out["clock"] = {**feed.clock.describe(), "timebase_hz": feed.timebase_hz,
+                            "ts_hz": feed.trace.ts_hz, "basis": "anchor_per_segment_declared_rate"}
+            out["unplaced_events"] = sum(1 for e in list(feed.trace.events) if e.segment not in feed.clock.anchors)
+            out["notes"].append("時刻は時刻の区切りごとに 1 つの対応点（anchor: その区切りの最後の出来事を受けた・読んだ"
+                                "時刻。出来事はそれより前なので上限）とトレースが申告した速さ（ts_hz）で写した: 出来事までの"
+                                "遅れと速さの誤差は分からず、不確かさに入れていない（clock.unknown）。対応点の無い区切りの"
+                                "出来事は写さない（unplaced_events）")
         elif trace.events:
             out["notes"].append("時刻の対応が無い（ターゲットの時刻の速さか受けた時刻が分からない）: 記録には書かない")
         return self._with_error_and_window(feed, out)
@@ -590,35 +628,42 @@ class FormatTools:
         out = []
         for e in events[offset:offset + limit]:
             item = e.to_dict()
-            if feed.clock is not None:
-                item["t"] = feed.clock.to_timebase(e.ts)
+            t = feed.clock.place(e) if feed.clock is not None else None
+            if t is not None:                                # 対応点の無い区切りは時刻が分からない（t なし）
+                item["t"] = t
             if e.task is not None and e.task in names:
                 item["task_name"] = names[e.task]
             out.append(item)
         return {"format": feed.format, "total": len(events), "offset": offset, "events": out}
 
     def _publish_timeline(self, feed: _Feed, idle_tasks: list[str] | None = None) -> dict:
-        """タスクの出入りを時間軸にし、RtosTools の最後の結果にする（解析の道具が読む）。記録中なら stream "rtos"。
+        """タスクの出入りを時間軸にし、RtosService の最後の結果にする（解析の道具が読む）。記録中なら stream "rtos"。
         idle_tasks: アイドルとして扱うタスクの名前（使う側が明示する。名前の完全一致。無ければアイドルは不明）。"""
         from .probe_rtos import _TimelineResult, _TimelineRun
         trace = feed.trace
         clock = feed.clock
         hz = feed.timebase_hz
         if clock is None:
+            if not trace.timed:
+                return {"made": False, "reason": "時刻の無い形（出来事の順だけ）"}
             if not trace.ts_hz:
                 return {"made": False, "reason": "ターゲットの時刻の速さが分からない（ts_hz）"}
-            clock = TargetClock(trace.ts_hz, trace.ts_hz, 0, 0)          # 機器の無い取り込み: ターゲットの時刻のまま
+            # 機器の無い取り込み: ターゲットの時刻のまま（区切りごとに ts をそのまま。区切りをまたぐ間隔は分からないので
+            # 時間軸では区切りの所が overflow の抜けになり、抜けの長さは意味を持たない）
+            clock = TargetClock(trace.ts_hz, trace.ts_hz, 0, 0)
+            for s in range(1, trace.segment + 1):
+                clock.add_anchor(s, 0, 0)
             hz = trace.ts_hz
         events = task_events(trace.events, clock)
         if not any(e.kind == "task_in" for e in events):
             return {"made": False, "reason": "タスクの切り替えの出来事が無い"}
-        if self._rtos_run is not None:
+        if self._host._rtos_run is not None:
             return {"made": False, "reason": "rtos_timeline_start の時間軸を取っている最中（止めてから）"}
         names = {k: v for k, v in trace.names().items()}
         idle, given = _idle_tasks(names, idle_tasks)
         resolution = max(1.0, clock.ratio)
         tl = timeline_from_events(events, names, resolution=resolution,
-                                  t_end=clock.to_timebase(trace.events[-1].ts) if trace.events else None)
+                                  t_end=clock.place(trace.events[-1]) if trace.events else None)
         tl.method = trace.format
         isr = activations(trace.events, clock) if any(e.kind == "isr_enter" for e in trace.events) else None
         run = _TimelineRun(trace.format, EventWindow(tl.t0, False, t1=tl.t1), names, hz, resolution=resolution,
@@ -629,8 +674,11 @@ class FormatTools:
             run.warnings.append(f"アイドルのタスクは idle_tasks で渡された名前: {', '.join(idle_tasks) or '（なし）'}")
         run.warnings.append(f"取り込んだトレース（{trace.format}）から作った時間軸" +
                             ("" if feed.clock is not None else "（時刻はターゲットの時計のまま）"))
-        self._rtos_last = _TimelineResult(tl, events, run, activations=isr)
-        rec = self._recorder
+        if trace.breaks:
+            run.warnings.append(f"時刻の区切り {len(trace.breaks)} か所（trace の breaks）: 区切りの所は overflow の抜けにした"
+                                + ("" if feed.clock is not None else "（ターゲットの時計のままなので、抜けの長さは意味を持たない）"))
+        self._host._rtos_last = _TimelineResult(tl, events, run, activations=isr)
+        rec = self._host._recorder
         recorded = rec is not None and feed.clock is not None
         if recorded:
             write_timeline(rec, tl, run.idle)
@@ -641,13 +689,13 @@ class FormatTools:
     # --- スナップショット・ファイル ---------------------------------------------------------------
 
     def _symbol_lookup(self, name: str) -> tuple[int, int] | None:
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
         try:
-            s = self._symbols.variable(name)
+            s = self._host._symbols.variable(name)
         except KeyError:
             try:
-                s = self._symbols.symbol(name)
+                s = self._host._symbols.symbol(name)
             except KeyError:
                 return None
         return s.address, s.size
@@ -667,11 +715,11 @@ class FormatTools:
         idle_tasks は trace_stop と同じ。"""
         if format not in SNAPSHOT_FORMATS:
             raise ValueError(f"RAM から吸い出せる形式は {' / '.join(SNAPSHOT_FORMATS)}")
-        with self._lock:
-            memory = PyocdAccess(self.target)
+        with self._host._lock:
+            memory = PyocdAccess(self._host.target)
             if format == "systemview" and rtt_address is None:
-                if self._rtt is not None:
-                    rtt_address = self._rtt.address
+                if self._host._rtt is not None:
+                    rtt_address = self._host._rtt.address
                 else:
                     found = self._symbol_lookup("_SEGGER_RTT")
                     rtt_address = found[0] if found else None
@@ -682,18 +730,17 @@ class FormatTools:
                                    scvd_context=(self._scvd_context(memory, string_limit=string_limit)
                                                  if format == "eventrecorder" else None),
                                    max_bytes=max_bytes)
-            hz = self._timebase_hz() if self._debug is not None else None
-            now = self.session.device.time() if hz else None
+            hz = self._timebase_hz() if self._host._debug is not None else None
+            now = self._host.session.device.time() if hz else None
         feed = _Feed("trace", format, "memory", {"address": info.get("address"), "snapshot": True,
                                                   "string_limit": string_limit if format == "eventrecorder" else None}, None,
                      time.monotonic(), timebase_hz=hz, trace=trace)
         feed.stopped = feed.started
-        if hz and trace.ts_hz and trace.events:
-            feed.clock = TargetClock(trace.ts_hz, hz, trace.events[-1].ts, now, 0.0)
-            feed.warnings.append("時刻の対応は、最後の出来事を読んだ時刻に合わせた近似（読むまでの時間だけ遅れる）")
-            if self._recorder is not None:
-                write_trace(self._recorder, trace, feed.clock)
-                feed.written = len(trace.events)
+        if trace.events:
+            self._anchor(feed, trace.events[-1], now)      # 読んだ後の時刻 = 上限（幅は分からない）
+        if feed.clock is not None:
+            feed.warnings.append("時刻の対応は、最後の出来事をそれを読んだ後の時刻に置いた上限（実際は読むまでの分だけ前。どれだけ前かは分からない）")
+            self._write_trace(feed)
         self._trace_last = feed
         out = {**self._trace_state(feed), "read": info}
         if timeline:
@@ -729,7 +776,7 @@ class FormatTools:
                      {"period_s": period_s, "address": address, "string_limit": string_limit}, None,
                      time.monotonic(),
                      trace=Trace("eventrecorder"))
-        with self._lock:
+        with self._host._lock:
             feed.timebase_hz = self._timebase_hz()
         self._er_poll(feed)                                        # 初めの読み（無ければここで誤り）
         feed.pump = threading.Thread(target=self._er_pump, args=(feed, period_s), name="fprobe-eventrecorder",
@@ -748,13 +795,13 @@ class FormatTools:
                 return
 
     def _er_poll(self, feed: _Feed) -> None:
-        with self._lock:
-            memory = PyocdAccess(self.target)
+        with self._host._lock:
+            memory = PyocdAccess(self._host.target)
             part, info = snapshot("eventrecorder", memory.read_memory, self._symbol_lookup,
                                   address=feed.settings.get("address"), scvd=self._scvd,
                                   scvd_context=self._scvd_context(memory, string_limit=feed.settings["string_limit"]),
                                   since=feed.since)
-            now = self.session.device.time() if feed.timebase_hz else None
+            now = self._host.session.device.time() if feed.timebase_hz else None
         trace = feed.trace
         trace.ts_hz = trace.ts_hz or part.ts_hz
         trace.system = part.system
@@ -763,20 +810,28 @@ class FormatTools:
         for task in part.tasks.values():
             info_t = trace.task(task.id)
             info_t.name = task.name or info_t.name
-        if feed.since is not None and part.events:
-            last = trace.events[-1].ts if trace.events else None
-            if last is not None:                                   # 32 ビットの時刻を前の読みから続ける
-                from .tracefmt.model import unwrap32
-                base = unwrap32(last, part.events[0].ts & 0xFFFFFFFF) - (part.events[0].ts & 0xFFFFFFFF)
-                part.events = [dataclasses.replace(e, ts=e.ts + base) for e in part.events]
+        # 時刻はターゲットの ts_overflow から作った 64 ビットの値（読みをまたいで続く。decode_event_recorder）
+        trace.ts_wraps += part.ts_wraps
+        if part.ts_wrap_min_back is not None:
+            trace.ts_wrap_min_back = min(x for x in (part.ts_wrap_min_back, trace.ts_wrap_min_back) if x is not None)
+        init_count = part.system.get("init_count")
+        if feed.er_init_count not in (None, init_count):
+            # 記録が初期化し直された（init_count が変わった）: ts_overflow と時刻は 0 から数え直し、前とつながらない
+            trace.new_segment("recorder_reinit", init_count=init_count)
+        feed.er_init_count = init_count
+        if part.events and trace.events and part.events[0].ts < trace.events[-1].ts:
+            # 同じ初期化の中で時刻が前の読みより戻った: ts_overflow の数え方と食い違う（事実として区切る）
+            trace.new_segment("ts_went_back", previous_ts=trace.events[-1].ts, ts=part.events[0].ts)
+        part.events = [dataclasses.replace(e, segment=trace.segment) for e in part.events]
         feed.since = info["next"]
+        had_clock = feed.clock is not None
         trace.events.extend(part.events)
-        if feed.clock is None and trace.ts_hz and part.events and now is not None:
-            feed.clock = TargetClock(trace.ts_hz, feed.timebase_hz, part.events[-1].ts, now, 0.0)
-            feed.warnings.append("時刻の対応は、最初に読んだ最後の出来事を読んだ時刻に合わせた近似")
-        if self._recorder is not None and feed.clock is not None and part.events:
-            write_trace(self._recorder, trace, feed.clock, part.events)
-            feed.written += len(part.events)
+        if part.events:
+            self._anchor(feed, part.events[-1], now)
+        if not had_clock and feed.clock is not None:
+            feed.warnings.append("時刻の対応は、最初に読んだ最後の出来事をそれを読んだ後の時刻に置いた上限（実際は読むまでの分だけ前。どれだけ前かは分からない）")
+        if part.events:
+            self._write_trace(feed, part.events)
 
     # --- SCVD（Component Viewer） ----------------------------------------------------------------
 
@@ -792,7 +847,7 @@ class FormatTools:
                 "events": len(scvd.events), "objects": [o.get("name") for o in scvd.objects]}
 
     def _scvd_context(self, memory, list_limit: int = LIST_LIMIT, string_limit: int = STRING_LIMIT) -> ScvdContext:
-        symbols = self._symbols
+        symbols = self._host._symbols
 
         def symbol_name(address: int) -> str | None:
             if symbols is None:
@@ -802,12 +857,12 @@ class FormatTools:
 
         def register(name: str) -> int | None:
             try:
-                return self.target.read_core_register(name.lower())
+                return self._host.target.read_core_register(name.lower())
             except Exception:
                 return None
         running = False
         try:
-            running = not self.target.is_halted() if hasattr(self.target, "is_halted") else False
+            running = not self._host.target.is_halted() if hasattr(self._host.target, "is_halted") else False
         except Exception:
             pass
         return ScvdContext(read=memory.read_memory, symbol=self._symbol_lookup, symbol_name=symbol_name,
@@ -824,8 +879,8 @@ class FormatTools:
             raise ValueError("list_limit は 1 以上")
         if string_limit < 1:
             raise ValueError("string_limit は 1 以上")
-        with self._lock:
-            memory = PyocdAccess(self.target)
+        with self._host._lock:
+            memory = PyocdAccess(self._host.target)
             view = self._scvd.view(self._scvd_context(memory, list_limit, string_limit))
         return {"files": list(self._scvd_files), "objects": view, "list_limit": list_limit,
                 "string_limit": string_limit}

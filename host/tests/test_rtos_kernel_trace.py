@@ -195,9 +195,21 @@ def test_queue_usage_follows_the_messages_and_counts_full_and_empty():
     assert q["points"][:3] == [[10, 0], [40, 1], [50, 0]] and q["sends"] == 1 and q["receives"] == 1
     assert (q["send_failed"], q["receive_failed"], q["waits_send"], q["waits_receive"]) == (1, 1, 0, 1)
     # 時間で重みを付けた平均: 10〜40 は 0、40〜50 は 1、50〜80 は 0、80〜110 は 4 → (10 + 120) / 100
-    assert q["mean"] == pytest.approx(130 / 100)
+    assert q["mean"] == pytest.approx(130 / 100) and q["mean_t1"] == 110
     sem = usage["objects"][f"0x{SEM:08X}"]
     assert sem["length"] is None and sem["max_usage"] is None and sem["max"] == 1
+
+
+def test_queue_usage_without_t1_does_not_extend_the_last_value():
+    # 観測の終わり t1 を渡さなければ、最後の値をトレースの最後の操作まで延ばさない（その間も同じ値だったとは限らない）。
+    # 平均はそのオブジェクトの最後の点まで（使った終わり mean_t1）
+    trace = kernel_trace(producer_consumer().packets)
+    q = queue_usage(trace, NAMES, {QUEUE: {"name": "cmd_queue", "kind": "queue", "length": 4}})["objects"]["cmd_queue"]
+    last_t = q["points"][-1][0]
+    assert q["mean_t1"] == last_t
+    series = q["points"]
+    weighted = sum(v * (nt - t) for (t, v), (nt, _) in zip(series, series[1:]))
+    assert q["mean"] == pytest.approx(weighted / (last_t - series[0][0]))
 
 
 def test_inversion_from_events_is_exact_and_tells_the_inheritance_and_interference():

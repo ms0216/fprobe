@@ -12,7 +12,7 @@
 
   const fatal = $derived($safety.fatal);
   const risk = $derived($safety.risk);
-  const warn = $derived(needsWarning(risk, $app.target) && hidden !== risk?.elf
+  const warn = $derived(needsWarning(risk) && hidden !== risk?.elf
                         && !!$app.target?.state && $app.target.state !== "DISCONNECTED");
   const since = $derived(fatal ? new Date(fatal.since * 1000).toLocaleTimeString() : "");
   // プローブの USB が切れて開き直した（B28）。ターゲットにつなぎ直すまでデーモンが状態に載せる

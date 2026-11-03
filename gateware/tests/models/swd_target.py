@@ -22,6 +22,7 @@
 import random
 from dataclasses import dataclass, field
 
+import cocotb
 from cocotb.triggers import Edge, ReadOnly, RisingEdge, Timer
 
 ACK_OK, ACK_WAIT, ACK_FAULT = 0b001, 0b010, 0b100
@@ -54,7 +55,10 @@ class SwdTarget:
         self.csw = 0x23000002         # 32 ビット、インクリメントなし
         self.tar = 0
         self.wait_next = 0            # 次の n 回の AP アクセスに WAIT を返す
+        self.wait_select_writes = 0   # 次の n 回の DP SELECT の書き込みに WAIT を返す（割り込み書き込みの最初の転送の失敗を作る）
         self.corrupt_next_parity = False
+        self.corrupt_parity_at: int | None = None   # この番号（transactions の長さ）の読みのパリティを壊す
+        self.wait_at: int | None = None             # この番号の AP アクセスに WAIT を返す
         self.line_reset = False
         self.selected: int | None = None        # 複数ドロップ: 選ばれた DP の TARGETSEL の値（None = どれも応答しない）
         self.transactions: list[tuple] = []     # (APnDP, RnW, addr, ack, value)
@@ -71,11 +75,18 @@ class SwdTarget:
         return int(value)
 
     async def _drive_after_edge(self, bit: int | None):
-        """立ち上がりを待ち、その直後から bit を出す（None で解放）。"""
+        """立ち上がりを待ち、その output_delay_ns 後から bit を出す（None で解放）。遅れが 1 ビットより長くても次の立ち上がりを
+        見落とさないよう、出すのは別のタスクに任せて立ち上がりの直後に戻る（遅れが同じなので出す順は保たれる）。"""
         await RisingEdge(self.dut.swclk)
+        value = "Z" if bit is None else str(bit)
         if self.output_delay_ns:
-            await Timer(self.output_delay_ns, "ns")
-        self.dut.target_swdio.value = "Z" if bit is None else str(bit)
+            cocotb.start_soon(self._set_later(self.output_delay_ns, value))
+        else:
+            self.dut.target_swdio.value = value
+
+    async def _set_later(self, delay_ns: float, value: str):
+        await Timer(delay_ns, "ns")
+        self.dut.target_swdio.value = value
 
     # --- 主ループ ------------------------------------------------------------------
 
@@ -110,7 +121,11 @@ class SwdTarget:
         # ターンアラウンド: park を取り込んだ立ち上がりから turnaround 周期後に ACK の 1 ビット目を出す
         for _ in range(self.turnaround - 1):
             await RisingEdge(self.dut.swclk)
-        ack = self._ack(ap)
+        if self.wait_select_writes and not ap and rnw == 0 and addr == 0x8:
+            self.wait_select_writes -= 1
+            ack = ACK_WAIT
+        else:
+            ack = self._ack(ap)
         for i in range(3):
             await self._drive_after_edge(ack >> i & 1)
         if ack != ACK_OK:
@@ -121,7 +136,7 @@ class SwdTarget:
         if rnw:
             value = self._read(ap, addr)
             parity = bin(value).count("1") & 1
-            if self.corrupt_next_parity:
+            if self.corrupt_next_parity or self.corrupt_parity_at == len(self.transactions):
                 self.corrupt_next_parity = False
                 parity ^= 1
             for i in range(32):
@@ -166,6 +181,8 @@ class SwdTarget:
             return ACK_FAULT
         if self.wait_next:
             self.wait_next -= 1
+            return ACK_WAIT
+        if self.wait_at == len(self.transactions):
             return ACK_WAIT
         return ACK_OK
 

@@ -1,6 +1,6 @@
 """1 つの GDB の接続の RSP の処理（all-stop）。
 
-機器には直接触らない: 操作はすべて `GdbHost.run(fn, control=…)` に渡す関数（Probe の GdbTools を呼ぶ）で行い、
+機器には直接触らない: 操作はすべて `GdbHost.run(fn, control=…)` に渡す関数（Probe の GdbService を呼ぶ）で行い、
 デーモンではそれが操作の調停（1 本の作業スレッド・人の一時停止）と記録を通る。API のメソッド（monitor）は
 `GdbHost.call` で、他の利用者と同じ検証・調停・記録を通る。
 

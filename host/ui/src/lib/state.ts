@@ -1,5 +1,5 @@
 // 画面の状態: デーモンの応答と通知から組み立てる。Svelte に依らない（store の約束 subscribe だけを満たす）。
-import { errorText, type CallOptions, type DaemonConnection, type LinkState, type Methods } from "./api";
+import { errorText, type CallOptions, type DaemonConnection, type LinkState, type Methods, type Result } from "./api";
 import { setChannelLayout } from "./waveform";
 
 export interface ActivityEntry {
@@ -79,7 +79,7 @@ export class AppState {
 
   /** 操作する。誤りは error に出し、投げない（画面のボタンから呼ぶ）。誤りの表示は利用者が閉じるか、次の誤りで替わる
    *  （裏の読みの成功で、まだ読んでいない誤りを消さない） */
-  async act<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: CallOptions): Promise<any> {
+  async act<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: CallOptions): Promise<Result<M> | undefined> {
     try {
       return await this.conn.call(method, params, opts);
     } catch (e) {

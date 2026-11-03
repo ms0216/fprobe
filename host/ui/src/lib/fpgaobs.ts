@@ -1,19 +1,14 @@
 // FPGA 観測（パネル FpgaObsPanel）の計算。Svelte に依らない。
 // 信号の定義はデーモンの fprobe.fpga_signals と同じ形。規則（検査）はデーモンだけが持つ（fpga_obs.signals_set が断る）。
 // 仕様: docs/superpowers/specs/2026-10-20-fpga-observation-ui-design.md §4
+import type { FpgaSignalDefs } from "../../../api/generated/fprobe_api";
 import type { Key } from "./i18n";
 import { parseInteger, type Built } from "./valuewrite";
 
-export const HALF_MIN = 2, HALF_MAX = 65535;      // TCK の半周期（sys の周期数）
 export const FORMATS = ["hex", "dec", "bin", "enum"] as const;
 
-export interface SignalDef {
-  name: string;
-  lsb: number;
-  width: number;
-  format: (typeof FORMATS)[number];
-  enum: Record<string, string>;
-}
+/** 信号の定義 1 つ（API の FpgaSignalDefs の要素。仕様から生成した型） */
+export type SignalDef = FpgaSignalDefs["groups"][string][number];
 
 export type Groups = Record<string, SignalDef[]>;
 
@@ -44,14 +39,8 @@ export function formatBits(lsb: number, width: number): string {
   return width === 1 ? String(lsb) : `${lsb + width - 1}:${lsb}`;
 }
 
-/** 求めた TCK（MHz）を超えない最も速い半周期と、その実際の速さ（TCK = sys / (2 × 半周期)） */
-export function tckToHalfPeriod(mhz: number, sysHz: number): { half: number; mhz: number } | null {
-  if (!(Number(mhz) > 0)) return null;                                   // 欄が空・0 以下: 決まらない
-  const half = Math.min(HALF_MAX, Math.max(HALF_MIN, Math.ceil(sysHz / (2 * mhz * 1e6) - 1e-9)));   // 誤差で 1 つ遅くしない
-  return { half, mhz: sysHz / (2 * half) / 1e6 };
-}
-
-/** fpga_obs_open の引数（デーモンが覚えて fpga_obs.status の config で返す） */
+/** fpga_obs_open の引数（デーモンが覚えて fpga_obs.status の config で返す。そのまま渡せば同じ設定で開き直せる）。
+ *  TCK と半周期の換算はデーモンがする（実際の TCK は fpga_obs.status の tck_hz。仕様 2026-11-03-ui-judgments-to-api-design.md E4） */
 export interface OpenConfig {
   chain: { ir_len?: number; ir_before?: number; ir_after?: number; dr_before?: number; dr_after?: number } | null;
   user_ir: number;
@@ -80,28 +69,29 @@ export interface ConnectionFields {
 const given = (v: number | null | undefined): number | null => (v === null || v === undefined || Number.isNaN(v) ? null : v);
 
 /** 開いた設定を接続の欄の値に（別の窓・開き直した画面が、いま動いている設定を見せる）。開いた設定に無い欄は空
- *  （値を仮定して見せない）。sysHz が分からなければ TCK も分からない（null） */
-export function configToFields(c: OpenConfig, sysHz: number | null): ConnectionFields {
+ *  （値を仮定して見せない）。TCK はデーモンの tck_hz（fpga_obs.status。MHz に書き直すだけ。無ければ null） */
+export function configToFields(c: OpenConfig, tckHz: number | null | undefined): ConnectionFields {
   const chain = c.chain ?? {};
   return { irLen: given(chain.ir_len), irBefore: given(chain.ir_before), irAfter: given(chain.ir_after),
            drBefore: given(chain.dr_before), drAfter: given(chain.dr_after),
            userIr: `0x${c.user_ir.toString(16).toUpperCase()}`,
-           tckMhz: sysHz ? sysHz / (2 * c.half_period) / 1e6 : null, halfPeriod: c.half_period,
+           tckMhz: typeof tckHz === "number" ? tckHz / 1e6 : null, halfPeriod: c.half_period,
            words: c.words, syncPeriod: c.sync_period, idScans: given(c.id_scans) };
 }
 
-/** 欄 → fpga_obs.open の引数。半周期は、プローブがシステムのクロック（sysHz）を申告していれば TCK（MHz）から、無ければ
- *  半周期の欄から（クロックを仮定しない）。決まらない・読めない欄があれば null。チェーンは入れた欄だけ（全部空なら null） */
-export function openParams(f: ConnectionFields & { autoReopen: boolean }, sysHz: number | null) {
-  const half = sysHz ? tckToHalfPeriod(f.tckMhz ?? NaN, sysHz)?.half ?? null
-    : Number.isInteger(f.halfPeriod) && f.halfPeriod! >= HALF_MIN && f.halfPeriod! <= HALF_MAX ? f.halfPeriod : null;
+/** 欄 → fpga_obs.open の引数。プローブがシステムのクロックを申告していれば（clockDeclared）TCK の欄を tck_hz で送り
+ *  （半周期への換算はデーモン）、無ければ半周期の欄をそのまま（クロックを仮定しない。範囲はデーモンが確かめる）。
+ *  空・読めない欄があれば null。チェーンは入れた欄だけ（全部空なら null） */
+export function openParams(f: ConnectionFields & { autoReopen: boolean }, clockDeclared: boolean) {
+  const speed = clockDeclared ? (Number(f.tckMhz) > 0 ? { tck_hz: f.tckMhz! * 1e6 } : null)
+    : Number.isInteger(f.halfPeriod) ? { half_period: f.halfPeriod! } : null;
   const ir = Number(f.userIr);
-  if (half === null || !f.userIr.trim() || !Number.isInteger(ir) || ir < 0) return null;
+  if (speed === null || !f.userIr.trim() || !Number.isInteger(ir) || ir < 0) return null;
   const words = given(f.words), syncPeriod = given(f.syncPeriod);
   if (words === null || syncPeriod === null) return null;
   const entries = ([["ir_len", f.irLen], ["ir_before", f.irBefore], ["ir_after", f.irAfter], ["dr_before", f.drBefore],
                     ["dr_after", f.drAfter]] as const).filter(([, v]) => given(v) !== null);
-  return { chain: entries.length ? Object.fromEntries(entries) : null, user_ir: ir, half_period: half, words,
+  return { chain: entries.length ? Object.fromEntries(entries) : null, user_ir: ir, ...speed, words,
            sync_period: syncPeriod, ...(given(f.idScans) !== null ? { id_scans: f.idScans! } : {}), auto_reopen: f.autoReopen };
 }
 
@@ -139,14 +129,6 @@ export function editableGroups(defined: string[], declaredGroups: number | null,
 export function signalsChanged(n: { changed?: string[] }): boolean {
   return Boolean(n.changed?.includes("fpga_signals"));
 }
-
-/** 観測の回路の型ごとの接続の設定。記録型（obs_core。2 クロック版は TCK 12.5 MHz まで）は語数を多く・印を定期的に。
- *  標本型（obs_snap_core）と 1 クロック版は TCK ≤ 対象の clk / 8（Shrike の 25 MHz なら 3.1 MHz）・語 0 だけ・印なし */
-export const PRESETS = {
-  stream: { tckMhz: 10, words: 64, syncPeriod: 20 },
-  snapshot: { tckMhz: 2.5, words: 1, syncPeriod: 0 },
-} as const;
-export type PresetName = keyof typeof PRESETS;
 
 /** 観測の回路（記録型）のレジスタのうち、窓から書くもの（番地は fpga_obs.register_read / register_write の説明: 14 CONTROL の
  *  bit0 = 記録する、15 SELECT = 観測する組）。標本型にはレジスタが無い */

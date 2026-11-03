@@ -2,7 +2,8 @@
 import pytest
 from test_fpga_obs import group_record, mark, snapshot, sync, value
 
-from fprobe.fpga_obs import ObsDecoder, compile_match, fit_line, fit_sync
+from fprobe.clockmap import pair
+from fprobe.fpga_obs import ObsDecoder, SyncSegment, compile_match
 from fprobe.fpga_signals import FpgaSignals
 from fprobe.obs_condition import count_condition
 
@@ -13,7 +14,7 @@ def kinds(out):
 
 def test_after_lost_events_the_same_value_and_the_group_are_reported_again():
     # 欠けた区間の変化は分からない: 欠けの後の最初の値は、同じ値でも「新しい情報」として組と一緒に出す（標本型と同じ）
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     assert [k for k, _ in kinds(d.feed([group_record(0), value(0, 1), mark(5, 1), sync(1, 1000)]))] == ["group", "value"]
     d.events_lost()
     out = d.feed([mark(6, 2), group_record(0), value(3, 1), sync(2, 2000)])
@@ -22,7 +23,7 @@ def test_after_lost_events_the_same_value_and_the_group_are_reported_again():
 
 def test_a_lost_count_before_events_were_lost_does_not_leak_into_the_next_gap():
     from test_fpga_obs import overflow
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     d.feed([group_record(0), value(0, 1), mark(5, 1), sync(1, 1000), overflow(7)])
     d.events_lost()
     out = d.feed([mark(6, 2), group_record(0), value(3, 2), sync(2, 2000)])
@@ -84,15 +85,15 @@ def test_the_span_is_the_real_first_and_last_time_even_if_the_list_is_not_in_tim
 
 
 def test_two_pairs_with_the_same_target_time_do_not_raise():
-    # 同じ対象の時刻の組が 2 つ（傾きが決まらない）: 例外にせず、申告の比に落とす（無ければ直線を作らない）
-    assert fit_sync([(100.0, 5.0), (100.0, 6.0)], nominal_ratio=2.0)[0].ratio == 2.0
-    assert fit_sync([(100.0, 5.0), (100.0, 6.0)]) == []
-    with pytest.raises(ValueError):
-        fit_line([(100.0, 5.0), (100.0, 6.0)])
+    # 同じ対象の時刻の組が 2 つ（傾きが決まらない）: 例外にせず、範囲を出さない（段階 S3: 窓を通る直線の範囲）
+    seg = SyncSegment([pair(100, 5), pair(100, 6)])
+    assert seg.window(150, 150) is None and seg.slope_range() is None
+    one = SyncSegment([pair(100, 5)], (2.0, 2.0))                    # 印が 1 つ: 使う側が選んだ比
+    assert one.window(110, 110) == (25.0, 25.0)
 
 
 def test_the_slope_of_a_previous_chain_is_forgotten_when_the_clock_source_changes():
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     d.feed([group_record(0), value(0, 1), mark(100, 1), value(50, 2), mark(150, 2), sync(1, 1000), sync(2, 1400)])
     assert d._ratio is not None
     d.reset_clock(nominal_ratio=3.0, sync_delay=0.0, sample_delay=0.0)             # FPGA を書き直した / 開き直した
@@ -101,13 +102,14 @@ def test_the_slope_of_a_previous_chain_is_forgotten_when_the_clock_source_change
 
 def test_marks_across_the_48_bit_wrap_keep_a_straight_line():
     wrap = 1 << 48
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     out = d.feed([group_record(0), value(0, 1), mark(100, 1), value(50, 2), mark(150, 2), value(10, 3), mark(30, 3),
                   sync(1, wrap - 100), sync(2, 100), sync(3, 140)])        # 2 つ目の印から、48 ビットの値が折り返した後（生の値は小さくなる）
     times = [s.time_fprobe for s in out if s.kind == "value" and s.time_fprobe is not None]
     assert times == sorted(times) and len(times) == 3
     assert times[-1] - times[0] < 1000                                              # 折り返しを数で飛ばさない
-    assert d._ratio == pytest.approx(1.0, abs=0.05)                                   # 直線の傾き（対象 1 周期 = fprobe 1 刻み）
+    assert d._ratio == pytest.approx((1.0, 1.0), abs=0.05)                            # 比の範囲（対象 1 周期 = fprobe 1 刻み）
+    assert d.restarts == 0                                                          # 一周は時代の切れ目ではない
 
 
 # --- FpgaObs.open の後始末・待ち時間（エンジンのレビュー指摘） ---------------------------------------------------------
@@ -120,9 +122,9 @@ from fprobe.fpga_obs import FpgaObs  # noqa: E402
 class SilentDevice(FakeDevice):
     """ID が揃わず、stuck にもならない（エンジンが答えを出さない）デバイス。"""
 
-    def write32(self, address, v):
-        super().write32(address, v)
-        if address == g.OBS_CONTROL and v & 1:
+    def write32(self, address, value):
+        super().write32(address, value)
+        if address == g.OBS_CONTROL and value & 1:
             self.regs[g.OBS_STATUS] = 1 << g.OBS_STATUS_RUNNING[0]
             self.regs[g.OBS_ID] = 0
 
@@ -178,10 +180,10 @@ def test_reopening_during_a_recording_resets_the_collector_decoder_clock(tmp_pat
     from fprobe.mcp_server import Probe
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
     dev = FakeDevice()
-    dev.caps = Capabilities(fpga_obs=True, timebase_hz=100_000_000)
+    dev.caps = caps_for(fpga_obs=True, timebase_hz=100_000_000)
     probe = Probe("unused")
     probe._session = SimpleNamespace(device=dev)
-    decoder = ObsDecoder(nominal_ratio=9.0)
+    decoder = ObsDecoder(nominal_ratio=9.0, max_pending=None)
     decoder._ratio = 7.0
     probe._collector = SimpleNamespace(obs=decoder)
     probe._open_obs({"chain": {}, "user_ir": 2, "half_period": 5, "words": 8, "sync_period": 10})
@@ -190,7 +192,7 @@ def test_reopening_during_a_recording_resets_the_collector_decoder_clock(tmp_pat
     assert (decoder.sync_delay, decoder.sample_delay) == (6.5, 1.0)
 
 
-from fprobe.caps import Capabilities  # noqa: E402
+from caps_fakes import caps_for  # noqa: E402
 
 
 @pytest.mark.parametrize("ir_len", [0, 33, 63])
@@ -203,7 +205,7 @@ def test_ir_len_outside_1_to_32_is_refused_instead_of_being_clamped_silently(ir_
 def test_a_new_chain_after_the_48_bit_wrap_continues_the_time():
     """別の鎖の最初の印が折り返しの後でも、前の鎖から続く時刻にする（鎖ごとに数え直すと時刻が戻る）"""
     wrap = 1 << 48
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     out = d.feed([group_record(0), value(0, 1), mark(100, 1), sync(1, wrap - 100),
                   value(0, 2), mark(100, 2), sync(2, 100)])                   # 2 本目の鎖の印は折り返しの後
     times = [s.time_fprobe for s in out if s.kind == "value" and s.time_fprobe is not None]
@@ -212,7 +214,38 @@ def test_a_new_chain_after_the_48_bit_wrap_continues_the_time():
 
 def test_snapshots_across_the_48_bit_wrap_keep_the_time_increasing():
     wrap = 1 << 48
-    d = ObsDecoder()
+    d = ObsDecoder(max_pending=None)
     out = d.feed([snapshot(1, 0x11, wrap - 100), snapshot(1, 0x12, 50), snapshot(1, 0x13, 150)])
     times = [s.time_fprobe for s in out]
     assert times == sorted(times) and times[-1] - times[0] == 250
+
+
+def test_a_timebase_that_goes_back_starts_a_new_epoch():
+    # タイムベースが 0 に戻った（ビットストリームの書き込み等。一周ではない戻り）: 前の時代の印と組にしない（N8、段階 S3）
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
+    out = d.feed([group_record(0), value(0, 1), mark(100, 1), sync(1, 1_000_000), mark(100, 2), sync(2, 500)])
+    assert d.restarts == 1
+    times = [s.time_fprobe for s in out if s.kind == "value" and s.time_fprobe is not None]
+    assert all(t > 900_000 for t in times)                                    # 前の時代の値は前の時代の時刻のまま
+
+
+# --- 印を待って持つ数の上限（A2）---------------------------------------------------------------------------
+
+def test_values_waiting_for_a_mark_are_bounded_and_released_untimed_beyond_the_explicit_limit():
+    # 印の来ない鎖の値は時刻が決まらないので持つ。使う側が明示した上限を超えたら、古いものから時刻を決めずに出す（値は正しい）
+    d = ObsDecoder(nominal_ratio=None, max_pending=3)
+    events = [group_record(0), value(0, 0)] + [value(1, k) for k in range(1, 10)]
+    out = d.feed(events)
+    assert all(s.time_fprobe is None and s.time_basis == "hold_limit" for s in out)
+    assert d.untimed_by_limit == len(out) and len(d._pending) == 3
+    released = [(s.value, s.target_cycles) for s in out if s.kind == "value"]
+    assert released == [(k, k) for k in range(len(released))]                # 値と鎖の時刻は正しいまま
+    rest = d.feed([mark(1, 1), sync(1, 5000), mark(1, 2), sync(2, 5002)])    # 印が届けば、残りの時刻は決まる
+    assert [s.value for s in rest] == [7, 8, 9] and all(s.time_fprobe is not None for s in rest)
+
+
+def test_the_pending_limit_must_be_given_explicitly():
+    with pytest.raises(TypeError):
+        ObsDecoder(nominal_ratio=1.0)
+    with pytest.raises(ValueError):
+        ObsDecoder(max_pending=0)

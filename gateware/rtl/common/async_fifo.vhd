@@ -22,6 +22,9 @@ entity async_fifo is
     in_valid  : in  std_logic;
     in_ready  : out std_logic;
     in_data   : in  std_logic_vector(WIDTH - 1 downto 0);
+    -- 書き込み側から見た語の数（書いた − 書き込み側に届いた読み。同期化の遅れの分だけ多めに見える）が DEPTH / 2 未満。
+    -- 使わない側は open（la_deep_buffer の欠けの区間が、下流の空きを見て欠けを閉じる。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12）
+    in_below_half : out std_logic;
     out_clk   : in  std_logic;
     out_rst   : in  std_logic;
     out_valid : out std_logic;
@@ -114,6 +117,7 @@ begin
   end process;
 
   in_ready <= '0' when full else '1';
+  in_below_half <= '1' when wr_bin - from_gray(rd_gray_s2) < DEPTH / 2 else '0';
 
   -- 読み出しドメイン
   empty <= rd_gray = wr_gray_s2;

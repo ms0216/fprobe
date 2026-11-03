@@ -4,7 +4,7 @@ CPU を止めずにデバッグするためのモジュール。ブレークポ�
 ホスト）と優先度の低い割り込み** だけで、BLE のコントローラの割り込みは動き続ける（CPU を 5 秒止めると BLE の
 コントローラの assert で落ちる問題（2026-10-18）を避ける）。
 
-仕様: `C:\Users\M\Desktop\DebugProbe-with-FPGA\docs\superpowers\specs\2026-10-18-u37-monitor-mode-design.md`
+仕様: `<home>\Desktop\DebugProbe-with-FPGA\docs\superpowers\specs\2026-10-18-u37-monitor-mode-design.md`
 
 ## 中身
 
@@ -16,18 +16,18 @@ CPU を止めずにデバッグするためのモジュール。ブレークポ�
 | `src/fprobe_monitor_zephyr.c` | `SYS_INIT(PRE_KERNEL_1)` で `fprobe_monitor_init(CONFIG_FPROBE_MONITOR_PRIORITY)` を呼ぶ（ハンドラは Zephyr のベクタ表の 12 番が指す `z_arm_debug_monitor`（fault_s.S の弱い定義）を置き換える） |
 | `fprobe_monitor.conf` | `CONFIG_FPROBE_MONITOR=y`（`-DEXTRA_CONF_FILE` で足す） |
 
-利用者のリポジトリ（`C:\Users\M\zmk\ws` = hhkb-split）は変えていない。モジュールと設定はビルドの引数で足す。
+利用者のリポジトリ（`<home>\zmk\ws` = hhkb-split）は変えていない。モジュールと設定はビルドの引数で足す。
 
 ## ビルド
 
 ```sh
-<ZMK の作業場>/build_right_mon.sh
+/c/Users/M/zmk/build_right_mon.sh
 ```
 
 `build_right_dbg.sh` と同じ指定（CONFIG_THREAD_MONITOR / THREAD_NAME / INIT_STACKS 付き）に、
 `-DZMK_EXTRA_MODULES=<ws>;<このディレクトリ>` と `-DEXTRA_CONF_FILE=<このディレクトリ>/fprobe_monitor.conf` を足したもの。
 
-出力（`C:\Users\M\zmk\ws\build\right-mon\zephyr\`）:
+出力（`<home>\zmk\ws\build\right-mon\zephyr\`）:
 
 | ファイル | 中身 |
 |---|---|
@@ -74,7 +74,7 @@ nRF52840 は優先度のビットが 3 本（0x20 刻み、8 段）。Zephyr は
 2. 停止方式（既定）のまま書く。書き込みはリセットして止めるので、BLE は一度切れ、再起動で左手とつなぎ直す。
 
    ```
-   target.flash  path="<ZMK の作業場>/ws/build/right-mon/zephyr/zmk.elf"  erase="sector"  verify=true  reset=true
+   target.flash  path="<home>/zmk/ws/build/right-mon/zephyr/zmk.elf"  erase="sector"  verify=true  reset=true
    ```
 
    （MCP なら `target_flash`。ELF なのでシンボルも読まれる。）
@@ -88,20 +88,20 @@ UF2 でもよい（SWD を使わない）: リセットを 2 回押して出る�
 - 今までのデバッグ用の版（right-dbg）に戻す:
 
   ```
-  target.flash  path="<ZMK の作業場>/ws/build/right-dbg/zephyr/zmk.elf"  erase="sector"  verify=true  reset=true
+  target.flash  path="<home>/zmk/ws/build/right-dbg/zephyr/zmk.elf"  erase="sector"  verify=true  reset=true
   ```
 
   （right-mon の方が 704 バイト大きいので、末尾の 1 ページの残りは消えずに残るが、使われない。）
   先にモニタ方式にしていたら `target.debug_mode.set mode="halt"` にしてから書く（Flash の書き込みは停止方式でしかできない）。
-- 元の中身（2026-10-18 のバックアップ `C:\Users\M\zmk\xiao_right_backup_20261018.bin`、1 MiB の全体）から、
+- 元の中身（2026-10-18 のバックアップ `<home>\zmk\xiao_right_backup_20261018.bin`、1 MiB の全体）から、
   **アプリの区画だけ** を切り出して書く:
 
   ```sh
-  python -c "d=open('<ZMK の作業場>/xiao_right_backup_20261018.bin','rb').read(); open('<ZMK の作業場>/xiao_right_backup_app_27000.bin','wb').write(d[0x27000:0xEC000])"
+  python -c "d=open('<home>/zmk/xiao_right_backup_20261018.bin','rb').read(); open('<home>/zmk/xiao_right_backup_app_27000.bin','wb').write(d[0x27000:0xEC000])"
   ```
 
   ```
-  target.flash  path="<ZMK の作業場>/xiao_right_backup_app_27000.bin"  address=0x27000  erase="sector"  verify=true  reset=true
+  target.flash  path="<home>/zmk/xiao_right_backup_app_27000.bin"  address=0x27000  erase="sector"  verify=true  reset=true
   ```
 
   全体（1 MiB）をそのまま書かないこと（ブートローダと、今のペアリングの設定を古い中身で上書きする）。

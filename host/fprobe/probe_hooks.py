@@ -1,6 +1,6 @@
 """Probe の道具: デバッグの出来事のフック（U44）の登録・一覧・実行の記録・保存と読み込み。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。登録簿（hook_table）を持つだけで、実行はデーモン
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。登録簿（hook_table）を持つだけで、実行はデーモン
 （fprobe.api.daemon）が行う（AI・画面・GDB のどの操作でも同じフックが走る）。機器には触らない。
 仕様: docs/superpowers/specs/2026-10-18-u25-u44-rules-hooks-design.md の 3 節。
 """
@@ -9,8 +9,9 @@ import json
 from pathlib import Path
 
 from .hooks import EVENTS, HookError, HookTable
+from .probe_service import HostView
 
-__all__ = ["HookTools"]
+__all__ = ["HookService"]
 
 
 def _api_methods() -> set[str]:
@@ -18,10 +19,16 @@ def _api_methods() -> set[str]:
     return set(load_spec().methods)
 
 
-class HookTools:
-    """フックの登録簿（Probe の mixin）。"""
+class HookService:
+    """フックの登録簿（Probe のサービス）。"""
 
-    def _init_hooks(self) -> None:
+    API = ("hooks_add", "hooks_list", "hooks_load", "hooks_log", "hooks_remove", "hooks_save")
+    SHARED = ("hook_table",)  # デーモンが引く登録簿
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ()
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self.hook_table = HookTable(methods=_api_methods())
 
     def hooks_add(self, event: str, phase: str, actions: list[dict], name: str = "", required: bool = False,

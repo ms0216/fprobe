@@ -280,8 +280,8 @@ class PinOutputs:
     def __init__(self, dev: Device):
         self.dev = dev
         caps = dev.capabilities()
-        self.pins = tuple(getattr(caps, "outputs", ()))
-        self.actions = getattr(caps, "output_actions", 0) if self.pins else 0
+        self.pins = tuple(caps.outputs)
+        self.actions = caps.output_actions if self.pins else 0
 
     def _check(self, action: int) -> None:
         if not 0 <= action < self.actions:

@@ -6,13 +6,16 @@ import random
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
+from fprobe_gw import ps_window
 from tests.tb.axil_master import AxiLiteMaster
 
+R = {r.name: r.addr for r in ps_window.REGS}            # 番地は fprobe_gw/ps_window.py が正
 ID, VERSION, RX_STATUS, RX_COMMIT, TX_HEAD, TX_DONE, DROPS, MEM_BASE, MEM_BYTES, MEM_ERRORS = (
-    0x000, 0x004, 0x008, 0x00C, 0x010, 0x014, 0x018, 0x01C, 0x020, 0x024)
-RX_BUF, TX_BUF = 0x400, 0x800
+    R[n] for n in ("ID", "VERSION", "RX_STATUS", "RX_COMMIT", "TX_HEAD", "TX_DONE", "DROPS", "MEM_BASE", "MEM_BYTES",
+                   "MEM_ERRORS"))
+RX_BUF, TX_BUF = R["RX_BUF"], R["TX_BUF"]
 
 
 class MuxModel:
@@ -55,6 +58,7 @@ async def setup(dut, delay=lambda: 0):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     dut.rst.value = 1
     dut.mem_errors.value = 0
+    dut.ps_bus_rdata.value = 0
     model = MuxModel(dut)
     axi = AxiLiteMaster(dut, dut.clk, delay=delay)
     await ClockCycles(dut.clk, 3)
@@ -83,7 +87,7 @@ async def receive(axi) -> bytes:
 async def id_and_version(dut):
     axi, _ = await setup(dut)
     assert await axi.read(ID) == 0x46504C4B
-    assert await axi.read(VERSION) == 1
+    assert await axi.read(VERSION) == ps_window.LINK_VERSION == 4         # 版 4: 位置の約束を作り直した（fprobe_gw/ps_window.py）
 
 
 @cocotb.test()
@@ -170,3 +174,43 @@ async def mem_bytes_and_errors_are_reported_to_the_ps(dut):
     assert await axi.read(MEM_BYTES) == 32 * 1024 * 1024
     dut.mem_errors.value = 7
     assert await axi.read(MEM_ERRORS) == 7
+
+
+class PortModel:
+    """la_ps_port の代わり: 読みの値は語の番号から決まる値、書きは記録する。1 周期の ps_bus_rd・ps_bus_wr を数える。"""
+
+    def __init__(self, dut):
+        self.dut, self.reads, self.writes = dut, [], []
+        cocotb.start_soon(self._run())
+
+    async def _run(self):
+        dut = self.dut
+        while True:
+            await ReadOnly()
+            addr, rd, wr, wdata = (int(dut.ps_bus_addr.value), int(dut.ps_bus_rd.value), int(dut.ps_bus_wr.value),
+                                   int(dut.ps_bus_wdata.value))
+            if rd:
+                self.reads.append(addr)
+            if wr:
+                self.writes.append((addr, wdata))
+            await RisingEdge(dut.clk)
+
+
+@cocotb.test()
+async def the_ps_stream_range_is_passed_to_the_port_one_access_each(dut):
+    # 0x028〜0x0FC は la_ps_port がそのまま受け持つ（読みも書きも 1 回ずつ。値は la_ps_port がその周期に出すもの）。
+    # それ以外の番地は渡さない
+    axi, _ = await setup(dut)
+    port = PortModel(dut)
+    for addr in (ps_window.PORT_FIRST, R["STREAM_EPOCH"], R["LA_CONSUMED"], ps_window.PORT_LAST):
+        dut.ps_bus_rdata.value = 0xA5000000 | addr
+        assert await axi.read(addr) == 0xA5000000 | addr
+    await axi.write(R["POS_TAG"], 7)
+    await axi.write(R["LA_CONSUMED"], 1234)
+    await axi.read(MEM_BYTES)
+    await axi.write(MEM_BASE, 0x1E000000)
+    assert await axi.read(0x100) == 0                                           # 窓の外（その他）は渡さない・0
+    await ClockCycles(dut.clk, 3)
+    assert port.reads == [ps_window.PORT_FIRST // 4, R["STREAM_EPOCH"] // 4, R["LA_CONSUMED"] // 4,
+                          ps_window.PORT_LAST // 4]
+    assert port.writes == [(R["POS_TAG"] // 4, 7), (R["LA_CONSUMED"] // 4, 1234)]

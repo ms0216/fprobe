@@ -7,9 +7,9 @@ use work.csr_bus_pkg.all;
 use work.build_info_pkg.all;
 
 package design_caps_pkg is
-  constant CAPS_ROM : csr_word_array_t(0 to 35) := (
+  constant CAPS_ROM : csr_word_array_t(0 to 48) := (
     x"50414346",
-    x"00000090",
+    x"000000C4",
     x"00040001",
     x"00000002",
     x"00140002",
@@ -34,9 +34,22 @@ package design_caps_pkg is
     x"0004000C",
     x"00000001",
     x"0004000D",
-    x"0000000B",
+    x"0001000B",
     x"0004000E",
-    x"00000007",
+    x"0000001F",
+    x"00300019",
+    x"01000205",
+    x"00010002",
+    x"02000206",
+    x"00000000",
+    x"05000207",
+    x"00010002",
+    x"05000908",
+    x"00010002",
+    x"02000717",
+    x"00000000",
+    x"02000818",
+    x"00000000",
     x"00140010",
     BUILD_INFO(0),
     BUILD_INFO(1),
@@ -56,6 +69,7 @@ package design_caps_pkg is
   constant LA_FILTER : boolean := false;
   constant LA_PULSE : boolean := false;
   constant LA_STREAM_EVENTS : boolean := false;
+  constant LA_STREAM_GAPS : boolean := false;
   constant OBS_PORT : boolean := false;
   constant SYNC : boolean := false;
   constant XOUT_COUNT : natural := 0;
@@ -64,4 +78,12 @@ package design_caps_pkg is
   constant UART_FLOW : boolean := false;
   constant MEM_ADDR_BITS : natural := 23;
   constant EVENT_RING_BITS : natural := 0;
+  constant CAP_RATIO : natural := 1;
+  constant LA_LANES : positive := 1;
+  constant LA_LANE_ADDR_BITS : positive := 1;
+  constant LA_FINE_PINS : boolean := false;
+  constant LA_LANE_IN_AGE : natural := 0;
+  constant LA_TESTGEN : boolean := false;
+  constant EVENT_BYTE_PACK : boolean := false;
+  constant SAMPLER_CHECK_MAX : positive := 1;
 end package;

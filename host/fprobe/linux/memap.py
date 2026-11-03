@@ -109,3 +109,24 @@ class XsdbMemAp:
         finally:
             if got:
                 self._lock.release()
+
+
+class JtagMemAp:
+    """fprobe の JTAG の口につないだ DAP の MEM-AP（Zynq は AHB-AP）で、物理メモリを止めずに読む（XsdbMemAp と同じ口: info・read_words・close）。
+    dap は開いた RawDap（JTAG、デバッグ電源は上げ済み）。誤り（FAULT・応答なし）は読み手に出す（黙って 0 にしない）。"""
+    CHUNK = 64                                          # 1 往復で読む語数
+
+    def __init__(self, dap, ap: int, info: dict):
+        self._dap, self._ap, self.info, self._closed = dap, ap, info, False
+
+    def read_words(self, address: int, count: int) -> list[int]:
+        if self._closed:
+            raise RuntimeError("止めずに読む口は閉じた。linux.memap.connect_jtag し直す")
+        words: list[int] = []
+        for first in range(0, count, self.CHUNK):
+            n = min(self.CHUNK, count - first)
+            words += self._dap.mem_read32_many(self._ap, [address + 4 * (first + i) for i in range(n)])
+        return words
+
+    def close(self) -> None:
+        self._closed = True

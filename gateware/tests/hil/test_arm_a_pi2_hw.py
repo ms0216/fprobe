@@ -1,6 +1,6 @@
 """実機: Raspberry Pi 2B（BCM2836、Cortex-A7 × 4）を Primer の JTAG で止めて読む（U32 の実機の確かめ・R26 段階 2 の土台）。
 
-FPROBE_PI2_JTAG=1 で走る（配線: docs/linux.md の Pi 2B の節）。FPROBE_PI2_SSH（例 ms0216@<Pi のアドレス>）と FPROBE_PI2_KEY が
+FPROBE_PI2_JTAG=1 で走る（配線: docs/linux.md の Pi 2B の節）。FPROBE_PI2_SSH（例 ms0216@<Pi の LAN のアドレス>）と FPROBE_PI2_KEY が
 あれば、最後に SSH で Pi が生きていることを確かめる。止めるのはコア 3 だけで（割り込みの行き先でない）、どの経路でも最後に再開する。"""
 import os
 import subprocess

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeMarks, hiddenKinds, invalidSettings, isChannelParam, measureCall, measureRange, measuredChannels, missingSettings, newForm,
   patternForm, patternOf, settingValue, settingsOf,
-  stageForms, stageLabel, stageState, stagesOf, type DecoderInfo,
+  stageForms, stageLabel, stageState, stagesOf, type DecoderInfo, type StageState,
 } from "../src/lib/logic";
 
 const DECODERS: DecoderInfo[] = [
@@ -80,7 +80,7 @@ describe("解読器の設定", () => {
   });
 
   it("注釈は区間の印、誤りは tone 1", () => {
-    const a = { start: 10, end: 20, start_rel_s: 0, end_rel_s: 0, kind: "data", text: "'U'", value: 85, error: null, fields: null };
+    const a = { start: 10, end: 20, start_s: 0, end_s: 0, start_rel_s: 0, end_rel_s: 0, kind: "data", text: "'U'", value: 85, error: null, fields: null };
     expect(decodeMarks([a, { ...a, start: 30, end: 30, error: "framing", text: "x" }]))
       .toEqual([{ t: 10, tEnd: 20, label: "'U'" }, { t: 30, label: "x", tone: 1 }]);
   });
@@ -117,7 +117,7 @@ describe("トリガ", () => {
 
   it("段の状態は xtrig.sequence_status の stage_states をそのまま描く（画面で今の段と比べない。b28）", () => {
     // stage・fired と食い違う stage_states を渡し、画面が stage_states だけを見ていることを確かめる
-    const st = { stage: 0, fired: false, armed: true, stage_states: ["done", "current", "waiting"] as const };
+    const st = { stage: 0, fired: false, armed: true, stage_states: ["done", "current", "waiting"] satisfies StageState[] };
     expect([0, 1, 2].map((i) => stageState(i, st))).toEqual(["done", "current", "waiting"]);
     expect(stageState(3, st)).toBe("idle");          // 申告の無い段（設定の外）
     expect(stageState(0, null)).toBe("idle");        // 読めていない

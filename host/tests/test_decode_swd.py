@@ -1,9 +1,9 @@
 """fprobe.decode.swd: 発生器 → 解読の往復、並び、ACK、パリティ、状態の追跡、方向、端の条件（ハードウェア不要）。"""
 
 import random
-import time
 
 import pytest
+from perf_budget import within
 
 from fprobe.decode import decode_swd
 from fprobe.decode.synth import SwdBus, Wave
@@ -193,17 +193,16 @@ def test_low_oversampling_and_jitter(rate, jitter):
     assert d.errors() == []
 
 
+@pytest.mark.perf
 def test_ten_thousand_transfers_decode_quickly():
     rng = random.Random(9)
     w, b = bus(rate=F * 4)
     for _ in range(10_000):                           # 約 100 万の変化点
         b.read(AP, 0xC, rng.getrandbits(32))
     t = w.build(end_s=b.t + 1e-6)
-    t0 = time.process_time()
-    d = decode_swd(t, swclk=SWCLK, swdio=SWDIO, drive=DRIVE, turnaround=1, orundetect=False)
-    elapsed = time.process_time() - t0
+    # 性能の約束（perf_budget）: CPU 5 秒以内。手元で約 0.8 秒
+    _, d = within(5.0, lambda: decode_swd(t, swclk=SWCLK, swdio=SWDIO, drive=DRIVE, turnaround=1, orundetect=False))
     assert len(d.of("transfer")) == 10_000
-    assert elapsed < 5.0, elapsed                     # 手元で約 0.8 秒
 
 
 def test_json_of_a_transfer():

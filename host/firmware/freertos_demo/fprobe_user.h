@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 /* fprobe: ターゲットが出す値とイベント（U16）。ヘッダだけ・RTOS に依らない・Cortex-M3/M4/M7/M33（ITM）。
  * 仕様: docs/superpowers/specs/2026-10-18-u10-u16-trace-hooks-user-events-design.md の 3 節。
  * ホストの解読: host/fprobe/usertrace.py（user.trace.start / get / stats、記録の stream "user"）。

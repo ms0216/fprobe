@@ -4,6 +4,7 @@ ADIv6）・JTAG-DP・MEM-AP・ピンを模す。fprobe.raw_dap・fprobe.diagnose
 線の選択（JTAG→SWD・休眠からの起こし・TARGETSEL）・速度の上限・電源・WAIT の張り付きを設定で再現する。"""
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from pyocd.probe.pydapaccess.dap_access_api import DAPAccessIntf
 
@@ -71,6 +72,11 @@ class FakeDapLink:
         self.jtag_irlens: list[int] | None = None
         self.log: list[str] = []
         self.last_ap = 0                                 # JTAG-DP の RDBUFF（誤りの後に読むと返る古い値）
+        self.flushes = 0                                 # flush（USB の往復）の回数（転送を積んでいたものだけ）
+        self._pending = False
+        self.deferred = False                            # pyOCD の DAPAccessCMSISDAP の初期値（set_deferred_transfer）
+        self.transfer_idle_cycles: list[int] = []        # DAP_TransferConfigure で設定された idle のクロック数（設定した順）
+        self._protocol = SimpleNamespace(transfer_configure=lambda idle_cycles=2, **_: self.transfer_idle_cycles.append(idle_cycles))
 
     # 開閉
     def open(self):
@@ -96,10 +102,13 @@ class FakeDapLink:
         self.jtag_irlens = irlens
 
     def flush(self):
-        pass
+        if self._pending:                                # pyOCD と同じ: 積んだ転送が無ければ往復しない
+            self.flushes += 1
+            self._pending = False
 
     # 線のシーケンス
     def swj_sequence(self, length, bits):
+        self.swj_log = getattr(self, "swj_log", []) + [(length, bits)]
         if length == 51 and bits == (1 << 51) - 1:
             if self.t.multidrop:
                 self.selected = False
@@ -135,7 +144,13 @@ class FakeDapLink:
         return self.pins
 
     # 転送
+    def set_deferred_transfer(self, enable):
+        self.deferred = enable
+
     def _check(self, dap_index):
+        self._pending = True
+        if not self.deferred:                            # pyOCD と同じ: 遅らせない設定なら転送ごとに往復する
+            self.flush()
         t = self.t
         if self.port == PORT.JTAG:
             if t.jtag_dp_index is None or dap_index != t.jtag_dp_index or not t.powered:

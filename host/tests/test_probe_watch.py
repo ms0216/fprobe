@@ -16,6 +16,7 @@ from fprobe.events import KIND_INJECT, KIND_SAMPLE, DapEvent
 from fprobe.mcp_server import Probe
 from fprobe.symbols import Symbols
 from test_sampler import FakeDevice
+from caps_fakes import FakeDeviceBase, caps_for, dap_timing, with_caps
 
 DWARF_O0 = Path(__file__).resolve().parents[1] / "firmware" / "dwarf_demo" / "dwarf_demo_O0.elf"
 
@@ -36,15 +37,27 @@ class FakeEventLog:
         return len(FakeEventLog.events), 0
 
     def read(self, last=None, end=None):
-        return FakeEventLog.events[:end][-last:]
+        out = FakeEventLog.events[:end][-last:]
+        self.records = len(out)  # EventLog.records と同じ（この偽物は 1 記録 1 イベント）
+        return out
+
+
+class WatchDevice(FakeDevice, FakeDeviceBase):
+    """test_sampler の偽の CSR（サンプラのか所の表）に、本物の Capabilities を返す口（属性 caps）を足したもの。"""
+
+    def __init__(self, **caps):
+        super().__init__()
+        self.caps = caps_for(sampler=True, **caps)
+
+    def capabilities(self):
+        return self.caps
 
 
 @pytest.fixture
 def probe(monkeypatch):
     monkeypatch.setattr(probe_watch, "EventLog", FakeEventLog)
     FakeEventLog.events, FakeEventLog.started = [], 0
-    dev = FakeDevice()
-    dev.capabilities = lambda: SimpleNamespace(sampler=True, sys_clock_hz=100_000_000, timebase_hz=100_000_000)
+    dev = WatchDevice()
     p = Probe("unused")
     p._session = SimpleNamespace(device=dev)
     p._symbols = Symbols(DWARF_O0)
@@ -92,8 +105,25 @@ def test_series_follows_one_variable_over_rounds(probe):
     FakeEventLog.events = [sample(100_000 * k, 0x20000000, k) for k in range(5)]
     got = probe.watch_series("0x20000000")["samples"]
     assert [s["value"] for s in got] == ints(0, 1, 2, 3, 4) and got[1]["time_us"] == pytest.approx(1000)
+    assert probe.watch_series("0x20000000")["time_point"] == "value_returned" and "time_lo_us" not in got[0]
     with pytest.raises(KeyError):
         probe.watch_series("nothing")
+
+
+def test_series_on_the_line_time_circuit_says_the_time_is_the_read_request_and_gives_the_window(probe):
+    # DAP の時刻が線上の点の回路（dap_line_time）: 語の時刻は読みを頼んだ転送の点（窓の始め）。値を読んだ瞬間の範囲を返す。
+    # 窓の後端は次のサンプラの件、最後の語は分からない（None）。設定の件（種類 16）が無ければ下限も分からない
+    dev = probe.session.device
+    dev.caps = with_caps(dev.caps, dap_line_time=True, timing=dap_timing(1))
+    probe.watch_set(["0x20000000"], rate_hz=1000)
+    FakeEventLog.events = [sample(100_000 * k, 0x20000000, k) for k in range(3)]
+    out = probe.watch_series("0x20000000")
+    assert out["time_point"] == "read_request"
+    got = out["samples"]
+    assert got[0]["time_hi_us"] == pytest.approx(1000 + 0.01) and got[-1]["time_hi_us"] is None
+    assert all(s["time_lo_us"] is None for s in got)
+    values = probe.watch_values()
+    assert values["time_point"] == "read_request" and values["values"][0]["time_hi_us"] is None
 
 
 def test_series_says_where_the_read_starts_when_older_values_were_not_read(probe):
@@ -220,14 +250,16 @@ class RingLog:
 
     def read(self, last=None, end=None):
         events = RingLog.events[:end]
-        return events[-last:] if last else list(events)
+        out = events[-last:] if last else list(events)
+        self.records = len(out)  # EventLog.records と同じ（この偽物は 1 記録 1 イベント）
+        return out
 
     def cursor(self):
         from fprobe.events import EventCursor
         return EventCursor(self)
 
 
-class ClockDevice(FakeDevice):
+class ClockDevice(WatchDevice):
     def __init__(self):
         super().__init__()
         self.ticks = 0
@@ -235,9 +267,6 @@ class ClockDevice(FakeDevice):
     def time(self):
         self.ticks += 1000                                    # 呼ぶたびに 10 µs 進む
         return self.ticks
-
-    def capabilities(self):
-        return SimpleNamespace(sampler=True, sys_clock_hz=100_000_000, timebase_hz=100_000_000)
 
 
 @pytest.fixture
@@ -365,7 +394,7 @@ def test_a_sampler_left_running_by_a_previous_owner_is_stopped_when_the_device_i
     """B30: 前のデーモン（落ちた・起動し直した）が動かしたままのサンプラは、誰の物でもないのに線を借り続け、
     ターゲットへの接続が No ACK で失敗した。開いたらすぐ止める。"""
     from fprobe import mcp_server
-    dev = FakeDevice()
+    dev = WatchDevice()
     dev.csr[g.SAMPLER_CONTROL] = 1                                 # 前の持ち主が始めたまま
     monkeypatch.setattr(mcp_server.Session, "open", classmethod(lambda cls, serial=None: SimpleNamespace(device=dev)))
     p = Probe("0001")
@@ -392,8 +421,7 @@ def test_names_stay_with_the_recording(probe, tmp_path, monkeypatch):
     monkeypatch.setattr("fprobe.probe_recording.Collector", lambda *a, **k: SimpleNamespace(
         start=lambda: None, stop=lambda: None, poll=lambda: None, obs=None, lost=0))
     probe._symbols = None
-    probe.session.device.capabilities = lambda: SimpleNamespace(sampler=True, sys_clock_hz=100_000_000,
-                                                                timebase_hz=100_000_000, board="b", design="d")
+    probe.session.device.caps = caps_for("d", sampler=True, board="b")
     probe.recording_start(name="named")
     probe.watch_set(["0x20040808"], names=["errors"])
     probe.watch_stop()
@@ -424,7 +452,7 @@ def test_status_counts_every_value_since_watch_set_with_what_was_not_read(probe)
 
 def test_value_stats_counts_enums_and_skips_what_is_not_a_number():
     st = probe_watch.ValueStats()
-    for v in (vint(1), venum("B", 3), vbool(True), vstruct(x=vint(1)), varray(ints(1, 2)), vfloat("nan")):
+    for v in (vint(1), venum("B", 3), vbool(True), vstruct(x=vint(1)), varray(ints(1, 2), element_type="int"), vfloat("nan")):
         st.add(v)
     assert st.as_dict() == {"count": 3, "min": 1, "max": 3, "mean": 5 / 3, "not_numeric": 3}
     assert probe_watch.ValueStats().as_dict()["mean"] is None

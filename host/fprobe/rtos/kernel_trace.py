@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from ..itm import DecodeError, Instrumentation, Overflow, Packet, Sync
+from ..profile.exceptions import exception_name
 from .timeline import TRACE_PORT, decode_trace_word, name_of
 
 __all__ = ["CLASSES", "EVENTS", "KERNEL_PORT", "OBJECT_EVENTS", "PAYLOAD_PORT", "QUEUE_TYPES",
@@ -76,7 +77,8 @@ class KernelOp:
                 isr_names: Mapping[int, str] | None = None) -> dict:
         out: dict = {"t": self.t, "kind": self.kind,
                      "actor": None if self.isr else name_of(names, self.actor) if self.actor is not None else "?",
-                     "isr": None if not self.isr else (isr_names or {}).get(self.isr, self.isr)}
+                     # 割り込みの名前（ベクタ表の名前か番号の名前 IRQn 等。communication_flow の節と同じ。番号の数で返さない）
+                     "isr": None if not self.isr else exception_name(self.isr, isr_names)}
         if self.kind in OBJECT_EVENTS:
             info = (objects or {}).get(self.obj)
             out.update(object=info["name"] if info else (name_of({}, self.obj) if self.obj else None),

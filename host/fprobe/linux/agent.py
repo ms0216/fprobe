@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from .ssh import SshTarget
+from .ssh import SshTarget, TargetHalted
 
 SOURCE = Path(__file__).with_name("agent") / "fprobe_agent.c"
 REMOTE_DIR = ".fprobe"                               # ターゲットの利用者のホームからの相対
@@ -55,6 +55,8 @@ class Agent:
         self._stopping = threading.Event()
         self.watchdog_s: float | None = None         # 効いている watchdog（status に出す）
         self._write_lock = threading.Lock()          # 要求と ping の行を混ぜない
+        # 要求の前に対象が止まっていないかを確かめる（止まっていれば送らずに投げる。止まった対象は答えない）
+        self.guard: Callable[[], None] | None = getattr(ssh, "check", None)
 
     def start(self, watchdog_s: float | None = None) -> dict:
         """起動して hello の返事を返す。watchdog_s を渡すと、エージェントは入力（要求・ping）がその秒数来なければデーモンが
@@ -126,6 +128,8 @@ class Agent:
                     self._stderr_len -= len(self._stderr.popleft())
 
     def request(self, op: str, timeout: float = 10, **args) -> dict:
+        if self.guard is not None:
+            self.guard()
         if self._proc is None or self.exit_code is not None:
             raise RuntimeError(f"エージェントが動いていない（{self._why()}）")
         with self._lock:
@@ -167,6 +171,9 @@ class Agent:
         if self.exit_code is None:
             try:
                 self.request("quit", timeout=3)
+            except TargetHalted:                     # 止まった対象は答えない: 待たずに手元の ssh を終える
+                self._proc.kill()
+                return
             except RuntimeError:
                 pass
         try:

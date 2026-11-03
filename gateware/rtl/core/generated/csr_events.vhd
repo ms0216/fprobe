@@ -21,7 +21,8 @@ entity csr_events is
     control_enable : out std_logic;   -- control.enable（RW）
     written : in  std_logic_vector(31 downto 0);   -- written（RO）
     lost : in  std_logic_vector(31 downto 0);   -- lost（RO）
-    capacity : in  std_logic_vector(31 downto 0)   -- capacity（RO）
+    capacity : in  std_logic_vector(31 downto 0);   -- capacity（RO）
+    written_hi : in  std_logic_vector(31 downto 0)   -- written_hi（RO）
   );
 end entity;
 
@@ -58,6 +59,8 @@ begin
             rdata(31 downto 0) <= lost;
           when 3 =>   -- capacity
             rdata(31 downto 0) <= capacity;
+          when 4 =>   -- written_hi
+            rdata(31 downto 0) <= written_hi;
           when others =>
             err <= '1';
         end case;

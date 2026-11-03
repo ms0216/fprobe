@@ -6,10 +6,9 @@
 lag = 1 は「読みは書く前の端子」（FPGA の同期化の遅れのまね）、0 は「書いた後の端子」。どちらでも正しく動くこと。
 """
 
-from types import SimpleNamespace
-
 from fprobe import generated as g
 from probe_fakes import FakeDevice
+from caps_fakes import with_caps
 
 PULL_UP = 0b0110_1111                 # Primer の J12: 4・7 番だけプル無し
 
@@ -105,8 +104,7 @@ class GpioDevice(FakeDevice):
         self.exchange_calls = 0
 
     def capabilities(self):
-        caps = super().capabilities()
-        return SimpleNamespace(**vars(caps), protocol_version=self.protocol_version)
+        return with_caps(super().capabilities(), protocol_version=self.protocol_version)
 
     def level(self) -> int:
         value = 0
@@ -139,7 +137,7 @@ class GpioDevice(FakeDevice):
                 g.GPIO_IO: self.level()}.get(address, None) if address in (
                     g.GPIO_DRIVE, g.GPIO_ENABLE, g.GPIO_LEVEL, g.GPIO_IO) else super().read32(address)
 
-    def read(self, address, count=1):
+    def read(self, address, count=1, *, timeout_retries=0):
         return [self.read32(address + 4 * i) for i in range(count)]
 
     def exchange(self, address, words):

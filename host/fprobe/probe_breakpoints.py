@@ -1,7 +1,7 @@
 """Probe の道具: ブレークポイントの動作（条件・無視する回数・ログ）。IAR の Log breakpoint・条件付き、GDB の
 condition / ignore / dprintf の相当。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。止まったときの処理はセミホスティングと同じ場所（ObserveTools の
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。止まったときの処理はセミホスティングと同じ場所（ObserveService の
 _run_until_halt と背景の見張り）で行い、続けるときは Debugger.resume（ブレークポイントを 1 命令踏み越える）で再開する。
 
 - condition: C の式（止まった場所のローカル変数も使える）。偽なら止まらずに続ける。
@@ -18,8 +18,9 @@ import time
 from dataclasses import dataclass, field
 
 from .dwarf.values import SCALAR_KINDS, unavailable
+from .probe_service import HostView
 
-__all__ = ["BreakpointActions"]
+__all__ = ["BreakpointService"]
 
 LOG_LIMIT = 10_000
 
@@ -52,8 +53,15 @@ def _truth(value: dict) -> bool:
     raise ValueError(f"条件の値が真偽にできない（{value.get('reason') or kind}）")
 
 
-class BreakpointActions:
-    def _init_breakpoints(self) -> None:
+class BreakpointService:
+    API = ("breakpoint_enable", "breakpoint_log")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_actions", "_break_action", "_break_hooks", "_break_log", "_disabled", "_drop_actions", "_set_action")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_linux_view", "_lock", "_place_of", "_record_host", "_watch_stops", "breakpoint_list", "dbg", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._actions: dict[int, _Action] = {}
         self._break_log: collections.deque = collections.deque(maxlen=LOG_LIMIT)
         self._break_seq = 0
@@ -78,30 +86,32 @@ class BreakpointActions:
         """ブレークポイントを有効・無効にする。無効にすると機器から外し（比較器・Flash の BKPT を空ける）、場所と動作
         （condition・ignore_count・log・message・hits）は覚えておく。有効に戻すと同じ場所に置き直す。返すのは
         breakpoint_list（各項の enabled）。"""
-        with self._lock:
-            address = self.dbg.breakpoint_address(location if not location.startswith("0x") else int(location, 16))
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.breakpoint_enable(location=location, enabled=enabled)
+        with self._host._lock:
+            address = self._host.dbg.breakpoint_address(location if not location.startswith("0x") else int(location, 16))
             if enabled:
                 if address in self._disabled:
                     name, action = self._disabled[address]
-                    self.dbg.breakpoint(address)                         # 解いた番地に置き直し、場所の名前は元のまま
+                    self._host.dbg.breakpoint(address)                         # 解いた番地に置き直し、場所の名前は元のまま
                     del self._disabled[address]                          # 置けてから無効の帳簿を消す（失敗なら無効のまま残る）
-                    self.dbg.breakpoints[address] = name
+                    self._host.dbg.breakpoints[address] = name
                     if action is not None:
                         self._actions[address] = action
-                        self._watch_stops(self.target.get_state().name != "HALTED")
-                elif address not in self.dbg.breakpoints:
+                        self._host._watch_stops(self._host.target.get_state().name != "HALTED")
+                elif address not in self._host.dbg.breakpoints:
                     raise KeyError(f"{location!r} にブレークポイントが無い")
-            elif address in self.dbg.breakpoints:
-                name = self.dbg.breakpoints[address]
-                self.dbg.remove_breakpoint(address)
+            elif address in self._host.dbg.breakpoints:
+                name = self._host.dbg.breakpoints[address]
+                self._host.dbg.remove_breakpoint(address)
                 self._disabled[address] = (name, self._actions.pop(address, None))
             elif address not in self._disabled:
                 raise KeyError(f"{location!r} にブレークポイントが無い")
-            return self.breakpoint_list()
+            return self._host.breakpoint_list()
 
     def _break_action(self) -> bool:
         """止まった場所のブレークポイントの動作（_lock の中で）。True なら止まらずに続ける（呼び手が再開する）。"""
-        pc = self.target.read_core_register("pc")
+        pc = self._host.target.read_core_register("pc")
         hook = self._break_hooks.get(pc)
         if hook is not None:
             handled = hook[1](pc)
@@ -113,7 +123,7 @@ class BreakpointActions:
         action.hits += 1
         if action.hits <= action.ignore_count:
             return True
-        inspector = self.dbg.inspector()
+        inspector = self._host.dbg.inspector()
         if action.condition:
             try:
                 if not _truth(self._read_expression(inspector, action.condition)):
@@ -131,9 +141,10 @@ class BreakpointActions:
                 values[expression] = unavailable(str(e))
         now = time.monotonic()
         self._break_seq += 1
-        entry = {"seq": self._break_seq, "host_s": now, "address": pc, **self._place_of(pc), "hit": action.hits,
-                 "message": action.message, "values": values}
-        t = self._record_host("debug", "log", now, a=pc, body={k: entry[k] for k in ("where", "hit", "message", "values")})
+        # host_s は PC が止まりを処理した時刻（対象が止まったのはそれより前。time_source の印）
+        entry = {"seq": self._break_seq, "host_s": now, "time_source": "host_received", "address": pc,
+                 **self._host._place_of(pc), "hit": action.hits, "message": action.message, "values": values}
+        t = self._host._record_host("debug", "log", now, a=pc, body={k: entry[k] for k in ("where", "hit", "message", "values")})
         if t is not None:
             entry["t"] = t                                        # 記録の時刻（画面が時間軸のその時刻へ飛ぶ）
         self._break_log.append(entry)

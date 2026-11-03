@@ -12,7 +12,8 @@
 - ティックの変数（使う側が名前を渡したもの。名前の慣習で探さない）が、前の見張りから変わっていない（kind =
   tick_stopped。そのときの PC の範囲と関数を添える。正常かどうかは決めない）。ティックが分からなければ返さない。
 
-結果は {"kind", "function"?, "since"（見つけ始めた時刻）, "evidence"（手がかり: {"clue": "lockup"} / {"clue": "pc_in",
+結果は {"kind", "alert"（知らせる種類か: lockup = アーキテクチャの定義、pc_in = 使う側が渡した条件で true。tick_stopped は
+事実だけで正常かは決めないので false）, "function"?, "since"（見つけ始めた時刻）, "evidence"（手がかり: {"clue": "lockup"} / {"clue": "pc_in",
 "function", "valid", "pc_samples"} / {"clue": "pc_range", "function", "bytes", "valid", "pc_samples"} / {"clue":
 "tick_stopped", "tick"}）}。valid = 読めた PC の見本の数、pc_samples = 読んだ数（使った値）。値は状態が続く間は
 変わらない（見張りが変化だけを送るため、経過の秒は入れない）。材料が正常に戻ったら None（リセット・再起動で直った）。
@@ -24,6 +25,7 @@ from .halt_risk import compile_patterns
 
 __all__ = ["Liveness"]
 
+_ALERT = ("lockup", "pc_in")         # 知らせる種類（アーキテクチャの定義・使う側が渡した条件）。tick_stopped は事実だけ
 _INVALID = (0xFFFFFFFF,)             # PCSR が読めない（止まっている・DWT_PCSR が無いときの規格の値。ARMv7-M ARM の DWT_PCSR）
 
 
@@ -82,7 +84,7 @@ class Liveness:
     def _report(self, condition: tuple, now: float, evidence: list[dict]) -> dict:
         if self._condition != condition:
             self._condition, self._since = condition, now
-        out = {"kind": condition[0], "since": self._since, "evidence": evidence}
+        out = {"kind": condition[0], "alert": condition[0] in _ALERT, "since": self._since, "evidence": evidence}
         if condition[1]:
             out["function"] = condition[1]
         return out

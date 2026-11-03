@@ -23,7 +23,7 @@ from fprobe.la import DeepAnalyzer
 from fprobe.merge import merge
 from fprobe.recording import Recorder, Recording
 from fprobe.session import Session
-from fprobe.timesync import fit_parent, interpolator
+from fprobe.timesync import fit_parent, neighbour_converter
 from tests.hil.program import SERIAL, program
 
 HOST = os.environ.get("FPROBE_PYNQ_HOST")
@@ -103,16 +103,16 @@ def test_two_boards_share_one_time(boards, tmp_path):
     assert fit is not None, f"組が足りない（CSR の pairs {pairs_seen}・crc_errors {crc_errors}）"
     locals_ = [p[0] for p in pairs]
     p_edges = rising_edges(Recording.open(tmp_path / "parent"), p_ch, pc.la_delay_deep)
-    to = interpolator(pairs)                                      # 両側の組の間の直線（merge と同じ換算）
-    c_edges = [to(t) for t in rising_edges(c, c_ch, cc.la_delay_deep)]
+    to = neighbour_converter(pairs)                               # 両側の 2 組の窓を通る直線の範囲（merge と同じ換算）
+    c_edges = [to(t)["t"] for t in rising_edges(c, c_ch, cc.la_delay_deep)]   # 範囲の中点（範囲の幅は窓の幅）
     assert p_edges and c_edges, "印の立ち上がりが無い（印の線と信号を確かめる）"
     # 2 枚の取り込みの窓は違う: 両方に写っている所（子の立ち上がりの範囲の中の親の立ち上がり）だけを比べる
     lo, hi = min(c_edges), max(c_edges)
     common = [pe for pe in p_edges if lo - 100 <= pe <= hi + 100][:EDGES]
     assert common, f"窓が重ならない（親 {p_edges[0]:.0f}〜{p_edges[-1]:.0f}、子 {lo:.0f}〜{hi:.0f}）"
     diffs = [min((ce - pe for ce in c_edges), key=abs) for pe in common]
-    print(f"\n組 {len(pairs)}（CSR {pairs_seen}、CRC 異常 {crc_errors}）、残差の最大 {fit.residual_max:.2f} 刻み、"
-          f"傾き {fit.ratio:.9f}、合成 {merged}")
+    print(f"\n組 {len(pairs)}（CSR {pairs_seen}、CRC 異常 {crc_errors}）、全体の 1 本の直線が合うか {fit.feasible}、"
+          f"傾きの範囲 {fit.slope}、合成 {merged}")
     print(f"比べた立ち上がり {len(diffs)}、差（子 - 親、刻み）: {diffs}")
     print(f"立ち上がりの差（子 - 親、刻み）: 最小 {min(diffs):.1f}、最大 {max(diffs):.1f}、中央値 {statistics.median(diffs):.1f}")
     assert crc_errors == 0

@@ -8,6 +8,7 @@
 // - URL のハッシュに視点・カーソル・段・出来事・フレームを載せ、リンクで同じところを開ける（開いたときは URL を優先し、
 //   デーモンへも送る）。ui.state の無いデーモンでは URL だけ。
 // 仕様: docs/superpowers/specs/2026-10-18-ui-framework-evaluation.md §4・§5 段取り 4
+import type { UiPointer } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection } from "./api";
 import type { Debugger, DebugSnapshot } from "./debugger";
 import type { PickedItem } from "./timeline/query";
@@ -18,7 +19,7 @@ export interface ViewRef { source: Source; t0: number; t1: number }
 export interface Cursors { selection: number | null; mouse: number | null; reference: number | null }
 export interface EventRef { stream: string; t: number; t_end?: number; kind?: string; text?: string; row?: string }
 /** ほかの窓・AI のマウスのカーソル（ui.state の pointers。デーモンが name・role を付ける） */
-export interface Pointer { key: string; t: number; source: Source | null; name: string | null; role: string | null; time: number }
+export type Pointer = UiPointer;
 
 export interface ScreenData {
   view: ViewRef | null;
@@ -56,7 +57,7 @@ export function fromHash(hash: string): Partial<ScreenData> {
   return out;
 }
 
-/** 画面の状態をハッシュにする（ほかの項目 = token 等は保つ） */
+/** 画面の状態をハッシュにする（ほかの項目 = layout 等は保つ） */
 export function toHash(hash: string, d: ScreenData): string {
   const p = new URLSearchParams(hash.replace(/^#/, ""));
   for (const k of URL_KEYS) p.delete(k);

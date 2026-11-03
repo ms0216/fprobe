@@ -11,6 +11,7 @@ from cocotb.utils import get_sim_time
 OP_NOP, OP_WRITE, OP_READ, OP_SYNC = 0, 1, 2, 3
 REG_ID_LO, REG_ID_HI, REG_VERSION, REG_GROUPS, REG_FIFO_DEPTH, REG_CLOCK_LO, REG_CLOCK_HI = range(7)
 REG_SYNC_DELAY, REG_SAMPLE_DELAY, REG_LOST_BITS = 7, 8, 9
+REG_SYNC_DELAY_LO, REG_SYNC_DELAY_HI = 10, 11
 REG_CONTROL, REG_SELECT = 14, 15
 T_VALUE, T_MARK, T_OVERFLOW, T_CONTROL = 0, 1, 2, 3
 MARK_SYNC = 1 << 15
@@ -205,6 +206,8 @@ async def id_and_registers(dut):
     assert await tg.read_reg(REG_CLOCK_LO) | await tg.read_reg(REG_CLOCK_HI) << 16 == 50_000_000
     assert await tg.read_reg(REG_SAMPLE_DELAY) == 1
     assert await tg.read_reg(REG_LOST_BITS) == len(dut.lost)
+    assert (await tg.read_reg(REG_SYNC_DELAY_LO), await tg.read_reg(REG_SYNC_DELAY_HI)) == (6, 8)   # 半周期の単位
+    assert await tg.read_reg(REG_SYNC_DELAY) == 7                                                  # 中点
     assert await tg.read_reg(REG_CONTROL) == 0
     await tg.write_reg(REG_SELECT, 1)
     assert await tg.read_reg(REG_SELECT) == 1
@@ -297,12 +300,10 @@ async def a_command_shorter_than_16_bits_does_nothing(dut):
     assert await tg.read_reg(REG_CONTROL) == 0
 
 
-@cocotb.test()
-async def the_sync_mark_is_where_the_core_declares(dut):
-    # 印の瞬間（鎖の時刻 − late）は Update-DR の瞬間より SYNC_DELAY / 2 周期（平均）遅い。クロックの位相で ±0.5 周期。
-    # 鎖の時刻を clk の辺の番号に結ぶには、辺の直後に変えた値（記録は SAMPLE_DELAY 周期後）を使う
-    tg = await setup(dut, probes=0)
-    declared = await tg.read_reg(REG_SYNC_DELAY) / 2
+async def _sync_lags(dut, tg, gaps_ps, n):
+    """印を n 回送り、各印の瞬間（鎖の時刻 − late を clk の辺の番号にしたもの）− その Update-DR を出る TCK の立ち上がり
+    （clk の周期の単位）を返す。gaps_ps(i) = 印の前に待つ時間（TCK と clk の位相を決める）。None = その立ち上がりを
+    clk の立ち上がりに重ねる。鎖の時刻を辺の番号に結ぶには、辺の直後に変えた値（記録は SAMPLE_DELAY 周期後）を使う。"""
     sample = await tg.read_reg(REG_SAMPLE_DELAY)
     await tg.start()
     await ClockCycles(dut.clk, 20)
@@ -310,10 +311,16 @@ async def the_sync_mark_is_where_the_core_declares(dut):
     await Timer(1, "ns")
     dut.probes.value = 7
     edge = round(cycle_at(get_sim_time("ns") - 1))
-    rng = random.Random(3)
     updates = []
-    for seq in range(1, 41):
-        await Timer(rng.randrange(1, 997), "ns")
+    h = tg.dr.half
+    to_update_ns = 10 * h + 32 * (1 + 2 * h)               # UserDr.scan（命令だけ 32 ビット）の始めから Update-DR を出る立ち上がりまで
+    for seq in range(1, n + 1):
+        if gaps_ps is None:
+            await RisingEdge(dut.clk)
+            if (-to_update_ns) % CLK_NS:
+                await Timer(round((-to_update_ns) % CLK_NS * 1000), "ps")
+        else:
+            await Timer(gaps_ps(seq), "ps")
         await tg.dr.scan(command(OP_SYNC, 0, seq))
         updates.append((seq, cycle_at(tg.dr.update_ns)))
         await tg.drain()                                           # 印・組・値の 3 語ずつ（FIFO を溢れさせない）
@@ -321,9 +328,36 @@ async def the_sync_mark_is_where_the_core_declares(dut):
     t7 = next(t for t, k, v in ch if k == "value" and v == 7)
     offset = edge + sample - t7                                    # 鎖の時刻 → 辺の番号
     marks = {v[0]: v[1] + offset for t, k, v in ch if k == "sync"}
-    lag = [marks[s] - u for s, u in updates]
-    assert len(lag) == 40
-    assert abs(sum(lag) / len(lag) - declared) < 0.1 and declared - 0.5 <= min(lag) and max(lag) <= declared + 0.5
+    return [marks[s] - u for s, u in updates]
+
+
+@cocotb.test()
+async def the_sync_mark_is_where_the_core_declares(dut):
+    # 印の瞬間は Update-DR を出る TCK の立ち上がりより [SYNC_DELAY_LO, SYNC_DELAY_HI] / 2 周期遅い（レジスタ 10・11、
+    # 端を含む）。TCK と clk の位相をばらばら（ps 単位）にすると、範囲の中に全部入り、範囲の両端の近くまで出る
+    # （範囲が広すぎない）。SYNC_DELAY（7）は範囲の中点
+    tg = await setup(dut, probes=0)
+    lo, hi = await tg.read_reg(REG_SYNC_DELAY_LO) / 2, await tg.read_reg(REG_SYNC_DELAY_HI) / 2
+    mid = await tg.read_reg(REG_SYNC_DELAY) / 2
+    assert (lo, hi, mid) == (3.0, 4.0, 3.5)
+    rng = random.Random(3)
+    lag = await _sync_lags(dut, tg, lambda seq: rng.randrange(1, 997_000), 60)
+    assert len(lag) == 60
+    dut._log.info(f"sync lag: min {min(lag):.3f} max {max(lag):.3f} declared [{lo}, {hi}]")
+    assert lo - 1e-9 <= min(lag) and max(lag) <= hi + 1e-9, (min(lag), max(lag))
+    assert min(lag) < lo + 0.1 and max(lag) > hi - 0.1, (min(lag), max(lag))
+
+
+@cocotb.test()
+async def a_sync_on_a_clk_edge_lands_on_an_end_of_the_range(dut):
+    # Update-DR を出る TCK の立ち上がりが clk の立ち上がりと重なる（TCK の半周期 = clk の 2 周期、clk の辺から始める）:
+    # 印の遅れは範囲の端（3 か 4 周期。どちらの辺で取り込むかは決まらない）。範囲は端を含む
+    tg = await setup(dut, probes=0)
+    lo, hi = await tg.read_reg(REG_SYNC_DELAY_LO) / 2, await tg.read_reg(REG_SYNC_DELAY_HI) / 2
+    lag = await _sync_lags(dut, tg, None, 8)
+    dut._log.info(f"sync lag on edges: {lag}")
+    assert all(abs(x - round(x)) < 1e-9 for x in lag), lag                 # 辺と重なった
+    assert set(round(x) for x in lag) <= {round(lo), round(hi)}, (lag, lo, hi)
 
 
 @cocotb.test()
@@ -494,6 +528,37 @@ async def a_change_while_restarting_after_an_overflow_is_counted(dut):
     before = [value_of(w) for w in rec[:k] if kind(w) == T_VALUE]
     lost = sum(w & 0xFFFF for w in rec if kind(w) == T_OVERFLOW)
     assert lost + (len(before) - 1) == 40 + 2, (lost, before)      # 起こした変化 = 記録した変化 + 失った数
+
+
+@cocotb.test()
+async def a_change_right_after_the_overflow_record_is_counted(dut):
+    # 溢れの記録を書いた次の周期（S_VALUE: 今の値を書く周期）に値が変わると、その値は値の記録に出るのに、溢れの記録の
+    # lost には入っていなかった（失った数が 1 少ない。tests/test_obs_e2e.py の test_overflow_lost_counts[False-3-2] の
+    # 原因）。今は溢れの記録をもう 1 つ書いて数え、PC は続けて来た溢れの数を足す
+    tg = await setup(dut, probes=0)
+    await tg.start()
+    await ClockCycles(dut.clk, 5)
+    await _overflow(dut, tg)
+
+    async def change_at_value():
+        while True:
+            await FallingEdge(dut.clk)
+            if int(dut.state.value) == 4:                  # 次の立ち上がりは S_VALUE（開始の後に来るのは溢れの後だけ）
+                dut.probes.value = 0x100
+                return
+    task = cocotb.start_soon(change_at_value())
+    rec = []
+    for _ in range(10):
+        rec += await tg.drain()
+        await ClockCycles(dut.clk, 20)
+    await task
+    k = next(i for i, w in enumerate(rec) if kind(w) == T_OVERFLOW)
+    before = [value_of(w) for w in rec[:k] if kind(w) == T_VALUE]
+    after = [w for w in rec[k:] if kind(w) in (T_VALUE, T_OVERFLOW)]
+    lost = sum(w & 0xFFFF for w in rec if kind(w) == T_OVERFLOW)
+    assert [kind(w) for w in after[:3]] == [T_OVERFLOW, T_OVERFLOW, T_VALUE], [hex(w) for w in after]
+    assert value_of(after[2]) == 0x100 and delta_of(after[2]) == 0                # 鎖の始め = 変わった後の値
+    assert lost + (len(before) - 1) == 40 + 1, (lost, before)      # 起こした変化 = 記録した変化 + 失った数
 
 
 @cocotb.test()

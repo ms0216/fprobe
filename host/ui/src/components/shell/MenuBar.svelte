@@ -4,20 +4,22 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n, type Key } from "../../lib/i18n";
+  import { panelMenuLabel } from "../../lib/dock";
+  import { matchEntries } from "../../lib/menusearch";
   import { PANELS } from "../panels/registry";
 
   let { cs }: { cs: CommandState } = $props();
   const ctx = shared();
   const { app, dbg, ui, dock } = ctx;
 
-  type Item = { cmd: string } | { panel: string; title: Key } | { label: Key; run: () => void } | { recent: true } | "sep";
+  type Item = { cmd: string } | { panel: string; title: Key; about?: Key } | { label: Key; run: () => void } | { recent: true } | "sep";
 
   /** View メニューのパネル: まとまり（デバッガの窓・トレース・解析・道具）ごとに区切る */
   function viewItems(): Item[] {
     const out: Item[] = [];
     PANELS.forEach((p, i) => {
       if (i > 0 && PANELS[i - 1].group !== p.group) out.push("sep");
-      out.push({ panel: p.id, title: p.title });
+      out.push({ panel: p.id, title: p.title, about: p.about });
     });
     return out;
   }
@@ -38,6 +40,20 @@
   ];
 
   let open = $state<number | null>(null);
+
+  // パネル・メニューを名前で探す: 画面が持つ名前（メニューの名前・項目名・View の中身の説明）に対する語の一致だけ
+  let query = $state("");
+  const entries = $derived(MENUS.flatMap((menu) => menu.items.flatMap((item) => {
+    if (item === "sep" || "recent" in item) return [];
+    const label = "cmd" in item ? $i18n(command(item.cmd).label) : "panel" in item ? panelMenuLabel(item, $i18n) : $i18n(item.label);
+    return [{ menu: $i18n(menu.label), label, item }];
+  })));
+  const found = $derived(matchEntries(entries, query));
+
+  function pickFound(item: Item) {
+    query = "";
+    run(item);
+  }
 
   function run(item: Item) {
     open = null;
@@ -78,7 +94,7 @@
               <button role="menuitem" disabled={c.blocked(cs) !== null} title={tooltip(c, cs, $i18n)} onclick={() => run(item)}>
                 <span>{$i18n(c.label)}</span><span class="key">{c.shortcut ?? ""}</span></button>
             {:else if "panel" in item}
-              <button role="menuitem" onclick={() => run(item)}><span>{$i18n(item.title)}</span><span class="key"></span></button>
+              <button role="menuitem" onclick={() => run(item)}><span>{panelMenuLabel(item, $i18n)}</span><span class="key"></span></button>
             {:else if "recent" in item}
               <div class="sub">
                 <span class="muted">{$i18n("menu.recent")}</span>
@@ -97,6 +113,21 @@
       {/if}
     </div>
   {/each}
+  <span class="spacer"></span>
+  <div class="find">
+    <input type="search" bind:value={query} placeholder={$i18n("menu.find")} aria-label={$i18n("menu.find")} spellcheck="false"
+           onkeydown={(e) => { if (e.key === "Enter" && found.length) pickFound(found[0].item); else if (e.key === "Escape") query = ""; }} />
+    {#if query.trim()}
+      <div class="drop results" role="menu" aria-label={$i18n("menu.find")}>
+        {#each found as f, k (k)}
+          <button role="menuitem" onclick={() => pickFound(f.item)}>
+            <span>{f.label}</span><span class="key">{f.menu}</span></button>
+        {:else}
+          <span class="muted none">{$i18n("menu.findNone")}</span>
+        {/each}
+      </div>
+    {/if}
+  </div>
 </nav>
 
 <style>
@@ -118,4 +149,8 @@
   .sub > .muted { padding: 2px 10px; font-size: 12px; }
   .path { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block !important; }
   .none { padding: 2px 10px; }
+  .spacer { flex: 1; }
+  .find { position: relative; }
+  .find input { width: 200px; padding: 2px 8px; font-size: 12.5px; }
+  .results { left: auto; right: 0; min-width: 320px; }
 </style>

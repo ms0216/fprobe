@@ -1,0 +1,194 @@
+// JTAG で全コアを止めて Linux のアプリをデバッグする（API の linux.halt.*。CLI python -m fprobe.linux_halt と一対一）の欄 → 引数。
+// 既定の値を持たない: 要る欄が空なら、その欄の名前を返して送らない。書いた欄だけを送る。値の判断（上限の良し悪し等）はしない。
+// 止めずに読む口の JTAG（linux.memap.connect_jtag）の欄もここ。Svelte に依らない
+
+import type { Methods, Params } from "./api";
+
+// 組み立てた引数（メソッド M の引数の型）か、空・誤りの欄の名前。欄を 1 つずつ確かめて詰める（required が必ず送る欄を
+// 全部確かめた後だけ params を返す）ので、詰め終えた表を M の引数の型として返す
+type Built<M extends keyof Methods> = { params: Params<M> } | { error: string };
+
+export const UNMEASURED = "unmeasured";
+
+export interface HaltForm {
+  backend: "" | "fprobe" | "openocd";               // "" = まだ選んでいない
+  jtagKhz: string;
+  offsets: string;
+  pageOffset: string;
+  physOffset: string;
+  linearMapEnd: string;
+  maxTasks: string;
+  maxThreads: string;
+  mmuFormat: "" | "short" | "lpae";
+  journal: string;
+  fpgaRequestTimes: "" | "true" | "false";          // 使う人が選ぶ（チェックの外れを false として送らない）
+  part: string;
+  watchBoundNs: string;                              // ns か unmeasured
+  watchPollS: string;
+  ctiBoard: "" | "zynq7000";
+  ctiRequestBoundNs: string;
+  ctiEventBoundNs: string;                           // ns か unmeasured
+  ctiHwWaitS: string;
+  ctiAckPolls: string;
+  ocdBoard: string;
+  ocdPort: string;
+  ocdTimeoutS: string;
+  hwSlots: string;
+  watchSlots: string;
+}
+
+export const EMPTY_HALT_FORM: HaltForm = {
+  backend: "", jtagKhz: "", offsets: "", pageOffset: "", physOffset: "", linearMapEnd: "", maxTasks: "", maxThreads: "",
+  mmuFormat: "", journal: "", fpgaRequestTimes: "", part: "", watchBoundNs: "", watchPollS: "", ctiBoard: "",
+  ctiRequestBoundNs: "", ctiEventBoundNs: "", ctiHwWaitS: "", ctiAckPolls: "", ocdBoard: "", ocdPort: "", ocdTimeoutS: "",
+  hwSlots: "", watchSlots: "",
+};
+
+export interface GdbServeForm {
+  pid: string;
+  port: string;
+  skewLimitNs: string;
+  threadId: "" | "stack" | "contextidr";
+  kernelIsa: "" | "arm" | "thumb";
+  maxStepRetries: string;
+  bpUnmapped: "" | "error" | "hw";
+  log: string;
+}
+
+export const EMPTY_GDB_FORM: GdbServeForm = { pid: "", port: "", skewLimitNs: "", threadId: "", kernelIsa: "",
+  maxStepRetries: "", bpUnmapped: "", log: "" };
+
+export interface MemapJtagForm {
+  chainIdcode: string;
+  ap: string;
+  frequencyHz: string;
+}
+
+/** 10 進か 0x の 16 進の lo 以上 hi 以下の整数（それ以外・空は null） */
+function int(s: string, lo: number, hi: number): number | null {
+  const t = s.trim();
+  if (!/^(0x[0-9a-fA-F]+|\d+)$/.test(t)) return null;
+  const v = Number(t);
+  return v >= lo && v <= hi ? v : null;
+}
+
+/** 0 以上（strict なら正）の有限の数（それ以外・空は null） */
+function num(s: string, strict = false): number | null {
+  const t = s.trim();
+  const v = Number(t);
+  return t !== "" && Number.isFinite(v) && (strict ? v > 0 : v >= 0) ? v : null;
+}
+
+/** ns の整数か unmeasured */
+function bound(s: string): number | string | null {
+  return s.trim() === UNMEASURED ? UNMEASURED : int(s, 0, Number.MAX_SAFE_INTEGER);
+}
+
+const U32 = 0xFFFFFFFF;
+
+/** 必ず送る欄（空・誤りはその欄の名前） */
+function required(out: Record<string, unknown>, fields: [string, unknown][]): string | null {
+  for (const [k, v] of fields) {
+    if (v === null || v === "") return k;
+    out[k] = v;
+  }
+  return null;
+}
+
+/** 書いたときだけ送る欄（書いて誤りならその欄の名前） */
+function optional(out: Record<string, unknown>, fields: [string, string, (s: string) => unknown][]): string | null {
+  for (const [k, text, parse] of fields) {
+    if (!text.trim()) continue;
+    const v = parse(text);
+    if (v === null) return k;
+    out[k] = v;
+  }
+  return null;
+}
+
+/** linux.halt.open の引数。組（CTI・見張り・OpenOCD）の欠けはデーモンが CLI と同じ文で断る（画面で同じ判断を二重に持たない） */
+export function haltOpenParams(f: HaltForm): Built<"linux.halt.open"> {
+  const out: Record<string, unknown> = {};
+  const bad = required(out, [
+    ["backend", f.backend || null], ["jtag_khz", int(f.jtagKhz, 1, 100000)], ["offsets", f.offsets.trim() || null],
+    ["page_offset", int(f.pageOffset, 0, U32)], ["phys_offset", int(f.physOffset, 0, U32)],
+    ["linear_map_end", int(f.linearMapEnd, 0, U32)], ["max_tasks", int(f.maxTasks, 1, Number.MAX_SAFE_INTEGER)],
+    ["max_threads", int(f.maxThreads, 1, Number.MAX_SAFE_INTEGER)], ["mmu_format", f.mmuFormat || null],
+    ["journal", f.journal.trim() || null],
+    ["fpga_request_times", f.fpgaRequestTimes === "" ? null : f.fpgaRequestTimes === "true"],
+  ]) ?? optional(out, [
+    ["part", f.part, (s) => s.trim()],
+    ["fpga_halt_watch_bound_ns", f.watchBoundNs, bound], ["fpga_halt_watch_poll_s", f.watchPollS, (s) => num(s)],
+    ["cti_board", f.ctiBoard, (s) => s],
+    ["cti_request_bound_ns", f.ctiRequestBoundNs, (s) => int(s, 0, Number.MAX_SAFE_INTEGER)],
+    ["cti_event_bound_ns", f.ctiEventBoundNs, bound], ["cti_hw_wait_s", f.ctiHwWaitS, (s) => num(s)],
+    ["cti_ack_polls", f.ctiAckPolls, (s) => int(s, 1, Number.MAX_SAFE_INTEGER)],
+    ["ocd_board", f.ocdBoard, (s) => s.trim()], ["ocd_port", f.ocdPort, (s) => int(s, 1, 65535)],
+    ["ocd_timeout_s", f.ocdTimeoutS, (s) => num(s, true)], ["hw_slots", f.hwSlots, (s) => int(s, 1, Number.MAX_SAFE_INTEGER)],
+    ["watch_slots", f.watchSlots, (s) => int(s, 0, Number.MAX_SAFE_INTEGER)],
+  ]);
+  return bad ? { error: bad } : { params: out as Params<"linux.halt.open"> };
+}
+
+/** linux.halt.gdb.serve の引数（log は書いたときだけ） */
+export function haltGdbServeParams(f: GdbServeForm): Built<"linux.halt.gdb.serve"> {
+  const out: Record<string, unknown> = {};
+  const bad = required(out, [
+    ["pid", int(f.pid, 1, 2 ** 31 - 1)], ["port", int(f.port, 0, 65535)],
+    ["skew_limit_ns", int(f.skewLimitNs, 0, Number.MAX_SAFE_INTEGER)], ["thread_id", f.threadId || null],
+    ["kernel_isa", f.kernelIsa || null], ["max_step_retries", int(f.maxStepRetries, 0, Number.MAX_SAFE_INTEGER)],
+    ["bp_unmapped", f.bpUnmapped || null],
+  ]) ?? optional(out, [["log", f.log, (s) => s.trim()]]);
+  return bad ? { error: bad } : { params: out as Params<"linux.halt.gdb.serve"> };
+}
+
+/** linux.halt.threads の引数 */
+export function haltThreadsParams(pid: string): Built<"linux.halt.threads"> {
+  const v = int(pid, 1, 2 ** 31 - 1);
+  return v === null ? { error: "pid" } : { params: { pid: v } };
+}
+
+/** linux.memap.connect_jtag の引数（chain_idcode・ap・frequency_hz はすべて明示） */
+export function memapJtagParams(target: string, f: MemapJtagForm): Built<"linux.memap.connect_jtag"> {
+  const out: Record<string, unknown> = { target };
+  const bad = required(out, [["chain_idcode", int(f.chainIdcode, 0, U32)], ["ap", int(f.ap, 0, 255)],
+    ["frequency_hz", int(f.frequencyHz, 1, Number.MAX_SAFE_INTEGER)]]);
+  return bad ? { error: bad } : { params: out as Params<"linux.memap.connect_jtag"> };
+}
+
+/** linux.halt.debug.attach の欄（全コア停止で止めて調べる。人も画面から AI と同じ attach をする） */
+export interface DebugAttachForm {
+  pid: string;
+  elf: string;
+  skewLimitNs: string;
+  threadId: "" | "stack" | "contextidr";
+  kernelIsa: "" | "arm" | "thumb";
+  maxStepRetries: string;
+  bpUnmapped: "" | "error" | "hw";
+  maxHaltS: string;
+  fetchFromTarget: string;                        // linux.connect のターゲットの名前（ELF・PC に無いソースの取り寄せ元）
+  breakpointKind: "" | "sw" | "hw";               // 画面の行のクリックで置く種類
+  stepMaxInstructions: string;                    // 画面のステップの上限
+  stepTimeoutS: string;
+}
+
+export const EMPTY_ATTACH_FORM: DebugAttachForm = { pid: "", elf: "", skewLimitNs: "", threadId: "", kernelIsa: "",
+  maxStepRetries: "", bpUnmapped: "", maxHaltS: "", fetchFromTarget: "", breakpointKind: "", stepMaxInstructions: "",
+  stepTimeoutS: "" };
+
+/** linux.halt.debug.attach の引数（既定なし: 必須の欄が空ならその名前。画面の道の欄は書いたときだけ送る） */
+export function haltDebugAttachParams(f: DebugAttachForm): Built<"linux.halt.debug.attach"> {
+  const out: Record<string, unknown> = {};
+  const bad = required(out, [
+    ["pid", int(f.pid, 1, 2 ** 31 - 1)], ["elf", f.elf.trim() || null],
+    ["skew_limit_ns", int(f.skewLimitNs, 0, Number.MAX_SAFE_INTEGER)], ["thread_id", f.threadId || null],
+    ["kernel_isa", f.kernelIsa || null], ["max_step_retries", int(f.maxStepRetries, 1, Number.MAX_SAFE_INTEGER)],
+    ["bp_unmapped", f.bpUnmapped || null], ["max_halt_s", num(f.maxHaltS, true)],
+  ]) ?? optional(out, [
+    ["fetch_from_target", f.fetchFromTarget, (s) => s.trim()],
+    ["breakpoint_kind", f.breakpointKind, (s) => s],
+    ["step_max_instructions", f.stepMaxInstructions, (s) => int(s, 1, Number.MAX_SAFE_INTEGER)],
+    ["step_timeout_s", f.stepTimeoutS, (s) => num(s)],
+  ]);
+  return bad ? { error: bad } : { params: out as Params<"linux.halt.debug.attach"> };
+}

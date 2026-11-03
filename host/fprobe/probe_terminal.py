@@ -1,10 +1,10 @@
 """Probe の道具: 画面の端末（G04）の口。RTT の上りのチャンネル・SWO の ITM のスティミュラス・ポート・UART・
 セミホスティングの出力を、同じ形（位置 since から読む。ほかの読み手の位置は動かさない）で読む。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ObserveTools の貯め場（_logs・_observe）と受信の口（_tap）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。ObserveService の貯め場（_logs・_observe）と受信の口（_tap）を使う。
 
 - 源の名前: "rtt0"〜（RTT の上り）、"swo0"〜"swo31"（ITM のポート。printf の出力）、"uart"、"semihosting"。
-- RTT・セミホスティングは ObserveTools が背景で貯めている。UART・SWO は、初めて読んだときから背景で受け始める
+- RTT・セミホスティングは ObserveService が背景で貯めている。UART・SWO は、初めて読んだときから背景で受け始める
   （stream_serve と同じ口。UART は uart_read の読みにも残る）。SWO はポートごとに分けて貯める（swo_start は別に呼ぶ）。
 - 書き込みは既存の rtt_write（RTT の下り・"semihosting" の標準入力）と uart_write。UART の速さは uart_configure。
 - 受け取りごとの時刻（times）: 壁時計の秒と、記録中ならタイムベースの時刻（画面は行の時刻を出し、時間軸のその時刻へ
@@ -18,8 +18,9 @@ import time
 
 from .itm import Instrumentation, ItmDecoder
 from .probe_observe import SEMIHOSTING, ByteLog, _incomplete_utf8_tail
+from .probe_service import HostView
 
-__all__ = ["TerminalTools"]
+__all__ = ["TerminalService"]
 
 _SOURCE = re.compile(r"(rtt|swo)(\d{1,2})|uart|semihosting")
 _TERMINAL_MARK = b"\xff"                                      # SEGGER_RTT_SetTerminal: 0xFF の後に番号の文字
@@ -43,10 +44,16 @@ def _split_terminals(data: bytes) -> tuple[bytes, list[tuple[int, int]], list[in
     return bytes(out), switches, removed
 
 
-class TerminalTools:
-    """端末の口（Probe の mixin）。"""
+class TerminalService:
+    """端末の口（Probe のサービス）。"""
 
-    def _init_terminal(self) -> None:
+    API = ("terminal_read", "terminal_sources")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_logs", "_observe", "_recorder", "_rtt", "_stamp", "_swo_on", "_tap", "_uart_baud_now")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._term_itm: ItmDecoder | None = None             # SWO をポートごとに分ける解読器（受信の口 _tap に付ける）
         self._term_ports: dict[int, ByteLog] = {}
         self._term_uart = False                               # UART を背景で受けている
@@ -55,27 +62,27 @@ class TerminalTools:
         """端末に出せる源の一覧（機器には触れない）: id・kind（rtt / swo / uart / semihosting）・name・writable
         （書ける: RTT は同じ番号の下りがあるとき、UART・セミホスティングの標準入力）・received（貯めた量）。"""
         out = []
-        rtt = self._rtt
-        with self._observe:
+        rtt = self._host._rtt
+        with self._host._observe:
             if rtt is not None:
                 cb = rtt.control_block
                 downs = {c.index for c in cb.down}
                 for c in cb.up:
-                    log = self._logs.get(c.index)
+                    log = self._host._logs.get(c.index)
                     out.append({"id": f"rtt{c.index}", "kind": "rtt", "channel": c.index, "name": c.name or f"RTT {c.index}",
                                 "writable": c.index in downs, "received": log.end if log else 0})
-            if self._swo_on or self._term_ports:
+            if self._host._swo_on or self._term_ports:
                 for port in sorted(set(self._term_ports) | {0}):
                     log = self._term_ports.get(port)
                     out.append({"id": f"swo{port}", "kind": "swo", "port": port, "name": f"ITM {port}", "writable": False,
                                 "received": log.end if log else 0})
-            uart = self._logs.get("uart")
+            uart = self._host._logs.get("uart")
             out.append({"id": "uart", "kind": "uart", "name": "UART", "writable": True, "received": uart.end if uart else 0,
-                        "baud": self._uart_baud_now()})
-            sh = self._logs.get(SEMIHOSTING)
+                        "baud": self._host._uart_baud_now()})
+            sh = self._host._logs.get(SEMIHOSTING)
             out.append({"id": SEMIHOSTING, "kind": SEMIHOSTING, "name": "Semihosting", "writable": True,
                         "received": sh.end if sh else 0})
-        return {"sources": out, "rtt": rtt is not None, "swo": self._swo_on}
+        return {"sources": out, "rtt": rtt is not None, "swo": self._host._swo_on}
 
     def terminal_read(self, source: str, since: int = 0, max_bytes: int = 65536, timeout_s: float = 0.0,
                       times: bool = False, terminals: bool = False) -> dict:
@@ -87,12 +94,12 @@ class TerminalTools:
         log_of = self._terminal_log(source)
         terminals = terminals and source.startswith("rtt")
         deadline = time.monotonic() + timeout_s
-        with self._observe:
+        with self._host._observe:
             while True:
                 log = log_of()
                 if (log is not None and since < log.end) or time.monotonic() >= deadline:
                     break
-                self._observe.wait(deadline - time.monotonic())
+                self._host._observe.wait(deadline - time.monotonic())
             if log is None:
                 return {"source": source, "data": "", "start": since, "next": since, "lost": 0,
                         **({"times": [], "timebase_hz": None} if times else {}),
@@ -113,7 +120,7 @@ class TerminalTools:
 
         out = {"source": source, "data": text.decode("utf-8", errors="replace"), "start": start, "next": end, "lost": lost}
         if times:
-            rec = self._recorder
+            rec = self._host._recorder
             out["times"] = [{"at": chars(moved(pos - start)), "wall": round(wall, 6), "t": t} for pos, wall, t in marks]
             out["timebase_hz"] = rec.timebase_hz if rec is not None else None
         if terminals:
@@ -126,28 +133,28 @@ class TerminalTools:
         if m is None:
             raise ValueError(f"源 {source!r} は無い（rtt0〜 / swo0〜swo31 / uart / semihosting）")
         if source == SEMIHOSTING:
-            return lambda: self._logs.get(SEMIHOSTING)
+            return lambda: self._host._logs.get(SEMIHOSTING)
         if source == "uart":
             if not self._term_uart:
                 self._term_uart = True
-                self._tap("uart", lambda data: None)          # 背景で受ける（貯め場 _logs["uart"] に入る）
-            return lambda: self._logs.get("uart")
+                self._host._tap("uart", lambda data: None)          # 背景で受ける（貯め場 _logs["uart"] に入る）
+            return lambda: self._host._logs.get("uart")
         number = int(m[2])
         if m[1] == "rtt":
-            return lambda: self._logs.get(number)
+            return lambda: self._host._logs.get(number)
         if number > 31:
             raise ValueError("ITM のポートは 0〜31")
         if self._term_itm is None:
             self._term_itm = ItmDecoder()
-            self._tap("swo", self._terminal_swo)
+            self._host._tap("swo", self._terminal_swo)
         return lambda: self._term_ports.get(number)
 
     def _terminal_swo(self, data: bytes) -> None:
         """受けた SWO を ITM のパケットにし、スティミュラス・ポートの書き込みをポートごとに貯める（背景のスレッド）。"""
         packets = self._term_itm.feed(data)
-        wall, t = self._stamp(time.monotonic())                # 受けた直後（背景のスレッドの tap の中）
-        with self._observe:
+        wall, t = self._host._stamp(time.monotonic())                # 受けた直後（背景のスレッドの tap の中）
+        with self._host._observe:
             for p in packets:
                 if isinstance(p, Instrumentation):
                     self._term_ports.setdefault(p.port, ByteLog()).append(p.value.to_bytes(p.size, "little"), wall, t)
-            self._observe.notify_all()
+            self._host._observe.notify_all()

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 from pyocd.core.target import Target
 from test_probe_recording import FakeDevice
+from test_sampler import FakeDevice as _SamplerCsr
+from caps_fakes import FakeDeviceBase, caps_for
 
 from fprobe.decode.synth import Wave, uart
 from fprobe.mcp_server import Probe
@@ -197,7 +199,7 @@ def test_rtt_lines_and_data_are_recorded(probe):
     lines = probe.recording_find({"stream": "rtt", "kind": "line"})["events"]
     assert [e["body"]["text"] for e in lines] == ["one"]                       # 改行の来ていない "tw" はまだ
     data = probe.recording_find({"stream": "rtt", "kind": "data"})["events"]
-    assert data[0]["body"] == {"channel": 1, "hex": "ff"}
+    assert data[0]["body"] == {"channel": 1, "hex": "ff", "time_source": "host_received"}
 
 
 def test_disconnect_stops_rtt(probe):
@@ -290,7 +292,7 @@ def test_swo_packets_are_recorded(probe):
     probe.swo_decode(timeout_s=0.02)
     exc = probe.recording_find({"stream": "swo", "kind": "exception"})["events"]
     assert exc[0]["a"] == 15 and exc[0]["body"]["name"] == "SysTick"
-    assert probe.recording_find({"stream": "swo", "kind": "line"})["events"][0]["body"] == {"port": 0, "text": "hi"}
+    assert probe.recording_find({"stream": "swo", "kind": "line"})["events"][0]["body"] == {"port": 0, "text": "hi", "time_source": "host_received"}
     assert len(probe.recording_find({"stream": "swo", "kind": "stimulus"})["events"]) == 5
 
 
@@ -368,6 +370,17 @@ class FakeEventLog:
         return EventCursor(self)
 
 
+class SamplerDevice(_SamplerCsr, FakeDeviceBase):
+    """test_sampler の偽の CSR（サンプラのか所の表）に、サンプラのある本物の Capabilities を足したもの。"""
+
+    def __init__(self):
+        super().__init__()
+        self.caps = caps_for(sampler=True)
+
+    def capabilities(self):
+        return self.caps
+
+
 class CountingCpu(FakeCpu):
     reads = 0
 
@@ -379,13 +392,11 @@ class CountingCpu(FakeCpu):
 @pytest.fixture
 def sampled(tmp_path, monkeypatch):
     from fprobe import probe_observe
-    from test_sampler import FakeDevice as SamplerDevice
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
     monkeypatch.setattr(probe_observe, "EventLog", FakeEventLog)
     monkeypatch.setattr(probe_observe, "RTT_RESYNC_S", 30.0)
     FakeEventLog.events = []
     dev = SamplerDevice()
-    dev.capabilities = lambda: SimpleNamespace(sampler=True, sys_clock_hz=100_000_000, timebase_hz=100_000_000)
     p = Probe("unused")
     p._session = SimpleNamespace(device=dev)
     cpu = CountingCpu(image=RTT_DEMO)

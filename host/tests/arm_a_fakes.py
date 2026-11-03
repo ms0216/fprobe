@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from dap_fakes import FakeMemAp
 from jtag_fakes import Tap
 
-from fprobe.arm_debug import CP15, DSB, ISB, LDC_DTRTX, LOAD_STORE, MOV_PC_R0, MOV_R0_PC, MRS_R0_CPSR, MSR_CPSR_R0
+from fprobe.arm_debug import (CP15, CP15_READABLE, DSB, ISB, LDC_DTRTX, LOAD_STORE, MOV_PC_R0, MOV_R0_PC, MRS_R0_CPSR,
+                              MSR_CPSR_R0)
 
 HALTED, RESTARTED = 1 << 0, 1 << 1
 SDABORT, UND = 1 << 6, 1 << 8
@@ -25,7 +26,8 @@ CPSR_T, CPSR_I = 1 << 5, 1 << 7
 EXTDCC, FAST = 3 << 20, 2 << 20                         # DSCR.ExtDCCmode と速いモード
 _LOADS = {v[0]: k for k, v in LOAD_STORE.items()}
 _STORES = {v[1]: k for k, v in LOAD_STORE.items()}
-_CACHE_OPS = {v: k for k, v in CP15.items() if k not in ("ctr", "mpidr")}
+_CACHE_OPS = {v: k for k, v in CP15.items() if k not in ("ctr", "mpidr", *CP15_READABLE)}
+_CP15_READS = {CP15[k]: k for k in CP15_READABLE}
 
 
 @dataclass
@@ -57,7 +59,19 @@ class ArmCore:
     ignored: list[int] = field(default_factory=list)       # ITR が無効・走っている間に来た命令
     cache_ops: list[tuple[str, int]] = field(default_factory=list)
     restarts: int = 0
+    kernel_only: list[tuple[int, int]] = field(default_factory=list)   # USR モードからは触れない番地の範囲（アボートする）
+    user_cp15_undefined: bool = False                      # USR モードでの CP15 は未定義命令（DSCR.UND）
+    match_on_restart: bool = False                         # 番地一致のブレークポイントの上で再開すると、1 命令も進まずまた止まる
+    cp15: dict[str, int] = field(default_factory=dict)       # ttbr0 等（read_cp15 が読む値）
+    bank_sp: dict[int, int] = field(default_factory=dict)    # モード → そのモードの SP（今のモードの SP は regs[13]）
     latched: int | None = None                             # DCC の速いモードで覚えた命令（DTRTX を読むたびに実行し直す）
+    # 遅い命令（非ブロックのモードの試験）: ITR の命令が終わるまでに要るデバッグの窓の読み書きの数（0 = 書いた時に終わる）。
+    # 終わるまでは DSCR.InstrCompl_l = 0 で、その間の ITR の書きは捨てられる（実機の非ブロックのモードと同じ）
+    latency: int = 0
+    slow: set[int] = field(default_factory=set)            # latency を掛ける命令（空 = すべて）
+    pending: int | None = None                             # 実行中の命令
+    pending_left: int = 0
+    dropped_itr: list[int] = field(default_factory=list)   # 前の命令が終わっていなくて捨てられた ITR の書き
 
     @property
     def thumb(self) -> bool:
@@ -65,8 +79,26 @@ class ArmCore:
 
     def dscr(self) -> int:
         return (HALTED if self.halted else 0) | (RESTARTED if self.restarted else 0) | self.moe << 2 | self.sticky \
-            | self.ctrl | 1 << 24 | (1 << 29 | 1 << 26 if self.txfull else 0) \
+            | self.ctrl | (0 if self.pending is not None else 1 << 24) | (1 << 29 | 1 << 26 if self.txfull else 0) \
             | (1 << 30 | 1 << 27 if self.rxfull else 0)
+
+    def tick(self) -> None:
+        """デバッグの窓への 1 回の読み書き（時間が進む）。実行中の命令が終わる。"""
+        if self.pending is not None:
+            self.pending_left -= 1
+            if self.pending_left <= 0:
+                op, self.pending = self.pending, None
+                self.issue(op)
+
+    def write_itr(self, op: int) -> None:
+        """非ブロックのモードの ITR の書き: 前の命令が終わっていなければ捨てる。latency があれば、終わるまで時間がかかる。"""
+        if self.pending is not None:
+            self.dropped_itr.append(op)
+            return
+        if self.latency and (not self.slow or op in self.slow) and self.halted and self.ctrl & ITREN:
+            self.pending, self.pending_left = op, self.latency
+            return
+        self.issue(op)
 
     def write_dscr(self, value: int) -> None:
         self.ctrl = value & WRITABLE
@@ -87,6 +119,11 @@ class ArmCore:
             return
         self.restarts += 1
         self.halted, self.restarted = False, True
+        if self.match_on_restart:
+            for i in range(self.brps):
+                if self.bcr[i] & 1 and (self.bcr[i] >> 20) & 0xF == 0 and self.bvr[i] == self.regs[15] & ~3:
+                    self.halted, self.moe = True, 1
+                    return
         if getattr(self, "asleep", False):                  # WFI で眠ったまま: 次の命令に進まない
             return
         for i in range(self.brps):                          # mismatch: 今の命令だけを実行して次で止まる
@@ -124,6 +161,8 @@ class ArmCore:
     # --- ITR -------------------------------------------------------------------------------------------
 
     def _fault(self, address: int, size: int) -> bool:
+        if self.cpsr & 0x1F == 0x10 and any(lo <= a < hi for a in range(address, address + size) for lo, hi in self.kernel_only):
+            return True
         return any(lo <= a < hi for a in range(address, address + size) for lo, hi in self.faults)
 
     def issue(self, op: int) -> None:
@@ -143,6 +182,9 @@ class ArmCore:
         elif op == MRS_R0_CPSR:
             r[0] = self.cpsr
         elif op == MSR_CPSR_R0:
+            old, new = self.cpsr & 0x1F, r[0] & 0x1F
+            if old != new:                                  # SP はモードごとに別（バンク）: 入れ替える
+                self.bank_sp[old], r[13] = r[13], self.bank_sp.get(new, 0)
             self.cpsr = r[0]
         elif op == LDC_DTRTX:                               # LDC p14, c5, [r0], #4: メモリの語を DTRTX へ
             if self._fault(r[0], 4):
@@ -169,6 +211,11 @@ class ArmCore:
             if self.arch != 7:
                 self.sticky |= UND
             self.cache_ops.append(("dsb" if op == DSB else "isb", 0))
+        elif self.user_cp15_undefined and self.cpsr & 0x1F == 0x10 and (op in _CP15_READS or op in _CACHE_OPS
+                                                                       or op in (CP15["ctr"], CP15["mpidr"])):
+            self.sticky |= UND                              # CP15 は特権モードだけ
+        elif op in _CP15_READS:
+            r[0] = self.cp15.get(_CP15_READS[op], 0)
         elif op == CP15["ctr"]:
             r[0] = self.ctr
         elif op == CP15["mpidr"]:
@@ -196,11 +243,14 @@ class V7DebugBlock:
 
     def read(self, offset: int) -> int:
         c = self.core
+        c.tick()
         if offset == 0x000:
             return c.didr()
         if offset == 0x088:
             return c.dscr()
         if offset == 0x08C:
+            if c.ctrl & EXTDCC != FAST and not c.txfull:
+                return 0xBAD0BAD0                           # 非ブロックのモード: 空の DTRTX の読みは不定の値（印は変わらない）
             value, c.txfull = c.tx, False
             if c.ctrl & EXTDCC == FAST and c.latched is not None and not c.sticky:
                 c.issue(c.latched)                          # 速いモード: 読むたびに覚えた命令を実行し直す
@@ -218,6 +268,7 @@ class V7DebugBlock:
 
     def write(self, offset: int, value: int) -> None:
         c = self.core
+        c.tick()
         if offset == 0x300:
             self.os_lock = value == 0xC5ACCE55
             return
@@ -225,7 +276,8 @@ class V7DebugBlock:
             self.unlocked = value == 0xC5ACCE55
             return
         if offset == 0x080:
-            c.rx, c.rxfull = value, True
+            if not c.rxfull:                                # 非ブロックのモード: 満ちている DTRRX への書きは捨てられる
+                c.rx, c.rxfull = value, True
             return
         if self.os_lock and offset in (0x084, 0x088, 0x090):
             return
@@ -234,7 +286,7 @@ class V7DebugBlock:
                 c.latched = value
             else:
                 c.latched = None
-                c.issue(value)
+                c.write_itr(value)
         elif offset == 0x088:
             c.write_dscr(value)
         elif offset == 0x090:

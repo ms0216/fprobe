@@ -2,6 +2,7 @@
 // MCU と FPGA を対等に並べる: MCU は止めずに読む番地（ファームウェアのメールボックス等）、FPGA は観測の最新の値。
 // どちらもデーモンの system.status 1 回で読む。表と条件はデーモンの画面の状態（ui.state の system）で別の窓・別の PC・
 // AI と分け合う（SharedSystem）。
+import { readQuiet, type Result } from "./api";
 import type { DaemonConnection } from "./api";
 import type { Confirmer } from "./confirm";
 import { allowed } from "./guard";
@@ -31,57 +32,23 @@ export function sanitizeWatches(raw: unknown): Watch[] {
 export const addressKey = (a: number) => `0x${a.toString(16).toUpperCase().padStart(8, "0")}`;
 
 /** FPGA の値: 信号の名前があれば「名前=値」を並べ、無ければ組の値を 16 進で */
-export function fieldsText(fields: Record<string, number | string> | undefined, value: number): string {
+export function fieldsText(fields: Record<string, number | string> | undefined, value: number | null): string {
   const names = Object.keys(fields ?? {});
-  if (!fields || (names.length === 1 && names[0] === "value")) return `0x${value.toString(16).toUpperCase().padStart(4, "0")}`;
+  if (!fields || (names.length === 1 && names[0] === "value")) {
+    return value === null ? "—" : `0x${value.toString(16).toUpperCase().padStart(4, "0")}`;
+  }
   return names.map((n) => `${n}=${fields[n]}`).join("  ");
 }
 
-/** FPGA の条件の 1 項: 信号が直前の値から変わった（changed）か、信号の値（列挙の名前・数）が value に等しい（=） */
-export interface Term {
-  field: string;
-  op: "changed" | "rose" | "fell" | "=";
-  value?: string;
-}
-
-/** 「restart changed and state=BUSY」「restart が変化 かつ state = BUSY」「flag rose」→ 項の並び。崩れていれば null。
- *  結果の直前に多い出来事（recording.correlate）と同じ書き方: 空白・= を含む名前・値は "…" で囲む。fpga. の前置きは外す */
-export function parseCondition(text: string): Term[] | null {
-  const parts = text.split(/\s+(?:and|かつ)\s+|\s*&&\s*/i).map((s) => s.trim()).filter(Boolean);
-  if (!parts.length) return null;
-  const out: Term[] = [];
-  const field = (quoted: string | undefined, bare: string | undefined) => (quoted ?? bare ?? "").replace(/^fpga\./, "");
-  for (const p of parts) {
-    let m = /^(?:"([^"]+)"|(\S+?))\s*(changed|rose|fell|が変化)$/u.exec(p);
-    if (m) {
-      out.push({ field: field(m[1], m[2]), op: m[3] === "が変化" ? "changed" : (m[3] as Term["op"]) });
-      continue;
-    }
-    m = /^(?:"([^"]+)"|([^\s="]+))\s*=\s*(?:"([^"]+)"|(\S+))$/u.exec(p);
-    if (!m) return null;
-    out.push({ field: field(m[1], m[2]), op: "=", value: m[3] ?? m[4] });
-  }
-  return out;
-}
-
-/** 条件が FPGA の信号（names）だけで書かれていて、変化の項を含むか（システム解析の FPGA の条件の表に足せるか） */
-export function fpgaOnly(expr: string, names: string[]): boolean {
-  const terms = parseCondition(expr);
-  return terms !== null && terms.some((t) => t.op !== "=") && terms.every((t) => names.includes(t.field));
+/** 条件の文字をデーモンに確かめさせる（recording.condition.parse。recording.correlate・fpga_obs.count と同じ書き方。
+ *  画面は構文解析しない）。読めれば null、読めなければデーモンの理由。FPGA の信号だけの条件かは recording.correlate の
+ *  候補の fpga_only */
+export async function conditionError(conn: Pick<DaemonConnection, "call">, text: string): Promise<string | null> {
+  return (await readQuiet(conn, "recording.condition.parse", { condition: text.trim() })).error;
 }
 
 /** 条件の回数（デーモンの fpga_obs.count の条件ごとの結果。数えた範囲の事実を含む。読めない条件は error） */
-export interface ConditionCount {
-  condition: string;
-  count?: number;
-  values?: number;                 // 数えた値の数
-  t0_us?: number | null;           // 最初と最後の値の時刻（fprobe の時刻 µs。値が無ければ null）
-  t1_us?: number | null;
-  span_s?: number | null;
-  gaps?: number;                   // 切れ目の数
-  lost?: number;                   // 失った変化の数
-  error?: string;
-}
+export type ConditionCount = Result<"fpga_obs.count">["conditions"][number];
 
 /** 条件の回数をデーモンに数えさせる（最後の last 件。使う人が欄で入れた値。画面では数えない）。条件・件数が無ければ
  *  問い合わせず null */
@@ -98,6 +65,18 @@ export function parseRate(text: string): number | null {
   if (!/^\d+(\.\d+)?$/.test(s)) return null;
   const n = Number(s);
   return n > 0 ? n : null;
+}
+
+/** ピンの垂れ流し（recording.la_stream.start）の引数。形式・サンプルレート（MS/s）・チャンネル数は使う人が選ぶ（画面で既定を決めない）。
+ * RLE は形式だけ（16 ビットの値の繰り返しなので、詰めない・サンプルレートは指定しない）。RAW はサンプルレートとチャンネル数の両方が要り、
+ * どちらかが空・誤りなら null（始められない）。チャンネル数 16 は詰めない（pack_channels = null）、8・4・2 は詰める（ch 0〜n − 1 だけ） */
+export function pinsStreamStart(format: "" | "rle" | "raw", rateMsText: string, channels: string):
+    { rle: boolean; rate_hz?: number; pack_channels?: 8 | 4 | 2 | null } | null {
+  if (format === "rle") return { rle: true };
+  if (format !== "raw") return null;
+  const rate = parseRate(rateMsText);
+  if (rate === null || !["16", "8", "4", "2"].includes(channels)) return null;
+  return { rle: false, rate_hz: rate * 1e6, pack_channels: channels === "16" ? null : (Number(channels) as 8 | 4 | 2) };
 }
 
 /** 使う人が入れる正の整数（条件を数える件数 = 最後の N 件）。空・誤りは null（数えない） */

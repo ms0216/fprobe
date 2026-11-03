@@ -56,8 +56,10 @@ def make_parser() -> argparse.ArgumentParser:
     d.add_argument("--board", choices=sorted(BOARDS), default="primer20k")
 
     q = sub.add_parser("pynq", help="PYNQ-Z2 の上の中継（fprobe-relay）の据え付け・状態")
-    q.add_argument("action", choices=("install", "status", "reserve", "unreserve"),
-                   help="reserve / unreserve: P3 の深いバッファの DDR の予約を置く / 外して、PYNQ を再起動する")
+    q.add_argument("action", choices=("install", "status", "reserve", "unreserve", "ringmap", "unringmap"),
+                   help="reserve / unreserve: P3 の深いバッファの DDR の予約を置く / 外して、PYNQ を再起動する。"
+                        "ringmap / unringmap: ゼロコピーの道のモジュール fprobe_ringmap を起動時に読み込む設定を置く"
+                        "（再起動の後に効く）/ 外す（読み込まれていれば中継を止めて外す）")
 
     sub.add_parser("gen", help="生成物（USB ディスクリプタ ROM・CSR・ホスト定数・レジスタ表）を再生成する")
 
@@ -137,6 +139,12 @@ def _resources(design, build_dir: Path, depth: int) -> None:
         print(f"{v.name}:\n{summary.describe()}")
 
 
+def _print_local(text: str) -> None:
+    """端末の文字コードで出せない文字は置き換えて出す（PYNQ の journal の文字など）。"""
+    enc = sys.stdout.encoding or "utf-8"
+    print(text.encode(enc, "replace").decode(enc), flush=True)
+
+
 def main(argv=None) -> int:
     args = make_parser().parse_args(argv)
     try:
@@ -148,12 +156,15 @@ def main(argv=None) -> int:
             if args.action == "install":
                 pynq_setup.install(loader)
                 print("据え付け完了（fprobe-relay・fprobe-pl・サービス）")
+            elif args.action in ("ringmap", "unringmap"):
+                pynq_setup.ringmap(loader, undo=args.action == "unringmap", announce=_print_local)
+                print("起動時の読み込みを外した" if args.action == "unringmap" else
+                      "起動時の読み込みを置いた。再起動の後に pynq status で確かめること")
             elif args.action in ("reserve", "unreserve"):
                 pynq_setup.reserve(loader, undo=args.action == "unreserve")
                 print("PYNQ を再起動した。起動の後、PL は未構成: fprobe の回路を書き直すこと")
             else:
-                text = pynq_setup.status(loader)       # PYNQ の日本語のログ（cp932 で出せない文字は置き換える）
-                print(text.encode(sys.stdout.encoding or "utf-8", "replace").decode(sys.stdout.encoding or "utf-8"))
+                _print_local(pynq_setup.status(loader))     # PYNQ の日本語のログ（cp932 で出せない文字は置き換える）
             return 0
         if args.command == "resources":
             _resources(DESIGNS[args.design], Path(args.build_dir or BUILD_ROOT / args.design), args.depth)

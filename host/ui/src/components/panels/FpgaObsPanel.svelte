@@ -8,9 +8,9 @@
   import { errorText } from "../../lib/api";
   import { shared } from "../../lib/context";
   import {
-    configToFields, editableGroups, FORMATS, openParams, formatBits, formatEnum, OBS_REGISTERS, parseBits, parseEnum, PRESETS,
+    configToFields, editableGroups, FORMATS, openParams, formatBits, formatEnum, OBS_REGISTERS, parseBits, parseEnum,
     registerWriteCall, signalsChanged,
-    statusKeys, tckToHalfPeriod, type Groups, type ObsStatus, type OpenConfig, type PresetName,
+    statusKeys, type Groups, type ObsStatus, type OpenConfig,
     type SignalDef,
   } from "../../lib/fpgaobs";
   import { i18n } from "../../lib/i18n";
@@ -38,7 +38,7 @@
   let irAfter = $state<number | null>(saved.irAfter ?? null);
   let drBefore = $state<number | null>(saved.drBefore ?? null);
   let drAfter = $state<number | null>(saved.drAfter ?? null);
-  // User IR・TCK・語数・印の周期も空から（画面の既定を持たない。回路の型の設定はボタンで入れる）
+  // User IR・TCK・語数・印の周期も空から（画面の既定を持たない。目安は docs/guide/fpga-analysis.md の「制限」）
   let userIr = $state<string>(saved.userIr ?? "");
   let tckMhz = $state<number | null>(saved.tckMhz ?? null);
   let halfPeriod = $state<number | null>(saved.halfPeriod ?? null);
@@ -46,13 +46,13 @@
   let syncPeriod = $state<number | null>(saved.syncPeriod ?? null);
   let idScans = $state<number | null>(saved.idScans ?? null);           // 空 = 送らない（上限なし）
   let autoReopen = $state<boolean>(saved.autoReopen ?? false);     // 止まったら（対象の FPGA を書き直した等）自動で開き直す
-  const tck = $derived(sysHz ? tckToHalfPeriod(tckMhz ?? NaN, sysHz) : null);
   const params = $derived(openParams({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, halfPeriod, words,
-                                       syncPeriod, idScans, autoReopen }, sysHz));
+                                       syncPeriod, idScans, autoReopen }, sysHz !== null));
 
   let declared = $state<Declared | null>(null);
   let status = $state<(ObsStatus & { scans: number; id: number; config?: OpenConfig | null;
-                        declared?: Declared | null; auto_reopen?: boolean; reopened?: number }) | null>(null);
+                        declared?: Declared | null; auto_reopen?: boolean; reopened?: number;
+                        tck_hz?: number | null }) | null>(null);
   let shownConfig = "";                        // 欄に写した開いた設定（変わったときだけ写す。編集を上書きしない）
   let error = $state<string | null>(null);
   let observeGroup = $state(0);                // 観測する組（観測の回路の SELECT）
@@ -81,7 +81,7 @@
       const key = JSON.stringify(status?.config ?? null);
       if (status?.config && key !== shownConfig) {
         ({ irLen, irBefore, irAfter, drBefore, drAfter, userIr, tckMhz, halfPeriod, words, syncPeriod, idScans } =
-          configToFields(status.config, sysHz));
+          configToFields(status.config, status.tck_hz));
         declared = status.declared ?? declared;
         autoReopen = Boolean(status.auto_reopen);
       }
@@ -104,8 +104,9 @@
   async function readSignals() {
     try {
       const r = await conn.call("fpga_obs.signals_get", {}, { quiet: true });
-      const defs: { groups?: Record<string, SignalDef[]> } = r?.recording ?? r?.signals ?? {};
-      groups = Object.fromEntries(Object.entries(defs.groups ?? {}).map(([g, sigs]) => [g, sigs.map(toRow)]));
+      const defs = r.recording ?? r.signals;
+      groups = Object.fromEntries(Object.entries(defs?.groups ?? {}).map(([g, sigs]) => [g, sigs.map(toRow)]));
+      error = r.recording_error;
     } catch (e) {
       error = errorText(e);
     }
@@ -113,11 +114,6 @@
 
   const toRow = (s: SignalDef): Row => ({ name: s.name, bits: formatBits(s.lsb, s.width), format: s.format,
                                           enumText: formatEnum(s.enum ?? {}) });
-
-  // 観測の回路の型に合う設定（標本型・1 クロック版は遅い TCK と 1 語）
-  function applyPreset(name: PresetName) {
-    ({ tckMhz, words, syncPeriod } = PRESETS[name]);
-  }
 
   async function connect() {
     error = null;
@@ -223,11 +219,6 @@
       <div class="note bad">{$i18n("fpgaObs.stuckHint", { id: `0x${status.id.toString(16).toUpperCase().padStart(8, "0")}` })}</div>
     {/if}
 
-    <div class="form">
-      <span class="muted">{$i18n("fpgaObs.preset")}</span>
-      <button title={$i18n("fpgaObs.presetStreamTip")} onclick={() => applyPreset("stream")}>{$i18n("system.mode.streamShort")}</button>
-      <button title={$i18n("fpgaObs.presetSnapshotTip")} onclick={() => applyPreset("snapshot")}>{$i18n("system.mode.snapshotShort")}</button>
-    </div>
     <div class="form" title={$i18n("fpgaObs.chainTip")}>
       <label>{$i18n("fpgaObs.irLen")}<input type="number" min="1" max="32" bind:value={irLen} /></label>
       <label>{$i18n("fpgaObs.irBefore")}<input type="number" min="0" max="63" bind:value={irBefore} /></label>
@@ -239,7 +230,9 @@
       {#if sysHz}
         <label title={$i18n("fpgaObs.tckTip")}>{$i18n("fpgaObs.tck")}<span class="req" aria-hidden="true">*</span>
           <input type="number" min="0.001" step="0.5" aria-required="true" bind:value={tckMhz} />
-          <span class="muted">{tck ? $i18n("fpgaObs.tckActual", { mhz: tck.mhz.toFixed(3) }) : "—"}</span></label>
+          <!-- 実際の TCK はデーモンが換算した値（fpga_obs.status の tck_hz）だけを描く -->
+          <span class="muted">{typeof status?.tck_hz === "number"
+            ? $i18n("fpgaObs.tckActual", { mhz: (status.tck_hz / 1e6).toFixed(3) }) : "—"}</span></label>
       {:else}
         <!-- プローブがシステムのクロックを申告しない: MHz に換算できないので、半周期（sys の周期数）を直接 -->
         <label title={$i18n("fpgaObs.halfPeriodTip")}>{$i18n("fpgaObs.halfPeriod")}<span class="req" aria-hidden="true">*</span>

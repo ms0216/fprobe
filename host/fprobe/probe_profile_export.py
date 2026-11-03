@@ -1,9 +1,9 @@
 """Probe の道具: プロファイル・カバレッジの集計と書き出し（U18）。時間の区間に限る集計、関数のグループ、CPU 使用率の
 推移、gmon.out・callgrind・lcov・gcov・dot への書き出し（PC サンプリングとテストポイントの両方）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ProfileTools（いまのプロファイル `_current_profile`・ベクタの名前
-`_vector_names`）、InspectTools（ELF の逆アセンブラ `_disassembler`）、TestpointTools（いまの受け取り `_tp_current`）、
-StackTools（静的な呼び出しグラフ `_call_graph`）を使う。機器に触るのは必ず _lock の中。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。ProfileService（いまのプロファイル `_current_profile`・ベクタの名前
+`_vector_names`）、InspectService（ELF の逆アセンブラ `_disassembler`）、TestpointService（いまの受け取り `_tp_current`）、
+StackService（静的な呼び出しグラフ `_call_graph`）を使う。機器に触るのは必ず _lock の中。
 
 時刻: PC サンプルの時刻は方法 pcsr ならタイムベース（記録・`recording_events` と同じ時間軸。t0 / t1 で指定できる）、
 方法 itm ならローカルのタイムスタンプ（コアのクロック数。timestamps が要る）。t0_s / t1_s は最初のサンプルからの秒。
@@ -19,10 +19,11 @@ from .export.profile_formats import (callgrind_from_profile, callgrind_from_tree
                                      coverage_from_testpoint, dot_from_profile, dot_from_tree, dwarf_declarations,
                                      gmon_bytes, render_lcov, tree_edges, write_gcov)
 from .profile import PcSamples, Profiler, coverage
-from .profile.aggregate import Grouping, call_stats, group_profile, group_rows, timeline, window
+from .profile.aggregate import Grouping, call_stats, group_profile, group_rows, order_rows, timeline, window
 from .symbols import is_network_path
+from .probe_service import HostView
 
-__all__ = ["PROFILE_FORMATS", "ProfileExportTools", "TESTPOINT_FORMATS"]
+__all__ = ["PROFILE_FORMATS", "ProfileExportService", "TESTPOINT_FORMATS"]
 
 PROFILE_FORMATS = ("gmon", "callgrind", "lcov", "gcov", "dot")
 TESTPOINT_FORMATS = ("callgrind", "lcov", "gcov", "dot", "gmon")
@@ -40,8 +41,17 @@ def _check_format(fmt: str, allowed: tuple[str, ...]) -> None:
         raise ValueError(f"format は {', '.join(allowed)} のどれか: {fmt!r}")
 
 
-class ProfileExportTools:
-    """プロファイル・カバレッジの集計と書き出し（Probe の mixin）。"""
+class ProfileExportService:
+    """プロファイル・カバレッジの集計と書き出し（Probe のサービス）。"""
+
+    API = ("profile_aggregate", "profile_export", "profile_timeline", "testpoint_aggregate", "testpoint_export")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_call_graph", "_current_profile", "_disassembler", "_lock", "_symbols", "_tp_current", "_vector_names",
+             "session")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     # --- PC サンプリング: 区間 -------------------------------------------------------------------
 
@@ -49,12 +59,12 @@ class ProfileExportTools:
         """サンプルの時刻の 1 秒あたりの数（itm: コアのクロック、pcsr: タイムベース）。"""
         if result.run.method == "itm":
             return result.run.core_clock_hz
-        with self._lock:
-            return self.session.device.capabilities().timebase_hz
+        with self._host._lock:
+            return self._host.session.device.capabilities().timebase_hz
 
     def _windowed(self, t0_s: float | None, t1_s: float | None, t0: int | None, t1: int | None):
         """(結果, 区間で切ったサンプル, 区間の説明, 時刻の 1 秒あたりの数)。"""
-        result = self._current_profile()
+        result = self._host._current_profile()
         samples = result.samples
         hz = self._sample_clock(result)
         if (t0 is not None or t1 is not None) and result.run.method != "pcsr":
@@ -78,25 +88,28 @@ class ProfileExportTools:
         return result, chosen, info, hz
 
     def _profiler(self) -> Profiler:
-        with self._lock:
-            disassembler, _ = self._disassembler(from_elf=True)
-        return Profiler(self._symbols, disassembler)
+        with self._host._lock:
+            disassembler, _ = self._host._disassembler(from_elf=True)
+        return Profiler(self._host._symbols, disassembler)
 
     def profile_aggregate(self, by: str = "function", groups: dict[str, list[str]] | None = None,
                           t0_s: float | None = None, t1_s: float | None = None, t0: int | None = None,
                           t1: int | None = None, top: int = 20, function: str | None = None,
-                          separator: str | None = None) -> dict:
+                          separator: str | None = None, order: str = "samples") -> dict:
         """プロファイルを区間（t0_s〜t1_s 秒、pcsr はタイムベースの t0〜t1 も）に限って集計する。by: function / line /
         instruction / exception（profile_result と同じ表）、file / directory / prefix（関数名の separator の最初の
         出現より前。separator は使う側が明示する）/ groups（{名前: [関数名の glob か "file:" + ファイルの glob]}）の
-        グループ。rows_total（グループは groups_total）= top で切る前の行の数。"""
+        グループ。rows_total（グループは groups_total）= top で切る前の行の数。order: 選んだ行の並び（order_rows。line は
+        by = line / instruction だけ）。"""
+        if by not in _PLAIN_BY and order != "samples":
+            raise ValueError(f"order = {order} は行の表（by = line / instruction）だけ")
         result, chosen, info, _ = self._windowed(t0_s, t1_s, t0, t1)
-        prof = self._profiler().profile(chosen, names=self._vector_names(result.run.vector_table))
+        prof = self._profiler().profile(chosen, names=self._host._vector_names(result.run.vector_table))
         if by in _PLAIN_BY:
             table = prof.table(by, function)
             return {"by": by, "window": info, "total": prof.total, "active": prof.active,
-                    "categories": prof.category_table(), "rows": table[:top], "rows_total": len(table),
-                    "notes": prof.notes()}
+                    "categories": prof.category_table(), "rows": order_rows(table[:top], order, by),
+                    "rows_total": len(table), "notes": prof.notes()}
         out = group_profile(prof, Grouping(by, groups, separator), top=top)
         out["window"] = info
         return out
@@ -135,15 +148,15 @@ class ProfileExportTools:
                                     high=high)
             out_path.write_bytes(data)
             return {"format": format, "path": str(out_path), "window": info, "rate_source": source, **meta}
-        prof = self._profiler().profile(chosen, names=self._vector_names(result.run.vector_table))
+        prof = self._profiler().profile(chosen, names=self._host._vector_names(result.run.vector_table))
         out = {"format": format, "path": str(out_path), "window": info, "total": prof.total}
         if format == "callgrind":
-            out_path.write_text(callgrind_from_profile(prof, cmd=self._symbols.path.name), encoding="utf-8",
+            out_path.write_text(callgrind_from_profile(prof, cmd=self._host._symbols.path.name), encoding="utf-8",
                                 newline="\n")
         elif format in ("lcov", "gcov"):
-            with self._lock:
-                disassembler, _ = self._disassembler(from_elf=True)
-            info = Debugger(None, self._symbols).debug_info()
+            with self._host._lock:
+                disassembler, _ = self._host._disassembler(from_elf=True)
+            info = Debugger(None, self._host._symbols).debug_info()
             if info is None:
                 raise ValueError("lcov / gcov には ELF の DWARF が要る（関数の所在は DW_AT_decl_file・decl_line）")
             files, undeclared = coverage_from_profile(coverage(prof, disassembler, all_functions=True), prof,
@@ -160,7 +173,7 @@ class ProfileExportTools:
             else:
                 out["written"] = [str(p) for p in write_gcov(files, out_path, source_root=source_root)]
         else:
-            graph = self._call_graph() if static_calls else None
+            graph = self._host._call_graph() if static_calls else None
             out_path.write_text(dot_from_profile(prof, graph, min_fraction=min_fraction), encoding="utf-8",
                                 newline="\n")
         return out
@@ -193,7 +206,7 @@ class ProfileExportTools:
         切る。再帰は外側だけ）・exclusive_s（自分だけ）・started（区間で始まった回数）・active（区間に掛かった回数）。
         by が function 以外なら file / directory / prefix / groups のグループ（exclusive_s と started の合計）。
         使うのは持っている最近の呼び出し（dropped はそれより前に捨てた数）。"""
-        run = self._tp_current()
+        run = self._host._tp_current()
         report = run.live.report(final=False)
         calls, dropped = run.live.calls()
         hz, origin = report.hz, report.t_first or 0
@@ -226,7 +239,7 @@ class ProfileExportTools:
         gmon（gprof の呼び出しの組 arc だけ。番地は読み込んだ ELF から）。"""
         _check_format(format, TESTPOINT_FORMATS)
         out_path = _out_path(path)
-        run = self._tp_current()
+        run = self._host._tp_current()
         report = run.live.report(final=False)
         table = run.live.table
         files, lines, raw = self._tp_names(table)
@@ -246,14 +259,14 @@ class ProfileExportTools:
             out_path.write_text(dot_from_tree(report.tree, report.functions, report.hz, min_fraction=min_fraction),
                                 encoding="utf-8", newline="\n")
         else:
-            if self._symbols is None:
+            if self._host._symbols is None:
                 raise RuntimeError("gmon の呼び出しの組には関数の番地が要る（debug_elf_load）")
             arcs, missing = [], set()
             for (caller, callee), (count, _) in sorted(tree_edges(report.tree).items()):
                 ends = []
                 for shown in (caller, callee):
                     try:
-                        ends.append(self._symbols.symbol(raw.get(shown, shown)).address)
+                        ends.append(self._host._symbols.symbol(raw.get(shown, shown)).address)
                     except KeyError:
                         missing.add(shown)
                 if len(ends) == 2:

@@ -1,7 +1,8 @@
 """ターゲットの時計（CLOCK_MONOTONIC_RAW の ns）→ PC の単調時計（秒）。
 
 組（ターゲットの時刻、PC の往復の中点、往復の半分）の、隣り合う 2 つの間を直線で内挿する（時計の比のゆれに追う。
-timesync.interpolator と同じ考え）。範囲の外は端の 2 つの直線で延ばし、そのことを outside で示す。"""
+timesync.neighbour_converter と同じ考え。往復の窓 ± half_rtt_s を両側の大きい方で返すので、隣り合う 2 組の間で
+比が一定なら本当の時刻はその範囲に入る: 窓をすべて通る直線の範囲（fprobe.clockmap）の外側の確かな範囲。段階 S3 では形を変えていない）。範囲の外は端の 2 つの直線で延ばし、そのことを outside で示す。"""
 from __future__ import annotations
 
 import bisect

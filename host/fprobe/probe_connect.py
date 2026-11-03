@@ -1,7 +1,7 @@
 """Probe の道具: 接続の手順の上書きとロック解除（U30）。J-Link Script Files・LinkServer のスクリプト・pyOCD の user script、
 STM32CubeProgrammer のオプションバイト、保護の解除に当たる。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・target_disconnect と、LowLevelTools の
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・target_disconnect と、LowLevelService の
 _raw_dp（未接続の DP）を使う。機器に触るのは必ず _lock の中。
 
 - 接続の手順: target_connect の script（"builtin:<名前>" かファイル）を pyOCD の user_script に渡す。ここでは
@@ -22,8 +22,9 @@ from . import stm32_option_bytes as ob
 from .connect_scripts import builtin_scripts, check_script
 from .coresight_id import identify_part
 from .raw_dap import DapError
+from .probe_service import HostView
 
-__all__ = ["ConnectTools", "NRF_CTRL_AP_IDR"]
+__all__ = ["ConnectService", "NRF_CTRL_AP_IDR"]
 
 NRF_CTRL_AP_IDR = 0x02880000
 _CTRL_RESET, _CTRL_ERASEALL, _CTRL_ERASEALLSTATUS, _CTRL_APPROTECTSTATUS = 0x00, 0x04, 0x08, 0x0C
@@ -31,8 +32,17 @@ _MASS_ERASE_REFUSAL = ("全消去を伴う（Flash のプログラムもデー�
                        "何もしていない")
 
 
-class ConnectTools:
-    """接続の手順の上書きとロック解除（Probe の mixin）。"""
+class ConnectService:
+    """接続の手順の上書きとロック解除（Probe のサービス）。"""
+
+    API = ("option_bytes_read", "option_bytes_write", "script_check", "script_list", "target_unlock")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_connect_script",)
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_lock", "_raw_dp", "target", "target_disconnect")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     # --- 接続の手順 ---------------------------------------------------------------------------
 
@@ -56,7 +66,7 @@ class ConnectTools:
     # --- オプションバイト --------------------------------------------------------------------------
 
     def _stm32_family(self):
-        target = self.target
+        target = self._host.target
         part = identify_part(target.read32)
         if part is None:
             raise ob.OptionBytesError("部品を判別できない（STM32 の DBGMCU の IDCODE が読めない）")
@@ -64,7 +74,7 @@ class ConnectTools:
 
     def option_bytes_read(self) -> dict:
         """STM32 のオプションバイト（RDP・BOR・ウォッチドッグ・リセット・ブート・書き込み保護）を名前で読む。変えない。"""
-        with self._lock:
+        with self._host._lock:
             target, part, family = self._stm32_family()
             return {"part": part.as_dict(), **ob.decode(family, target.read32(family.option_address))}
 
@@ -74,7 +84,7 @@ class ConnectTools:
         RDP を Level 1 → 0（全消去）には confirm_mass_erase、Level 0 → 1 には confirm_protect が要る。Level 2 は書かない。
         コアを止めてから書く。reset: F4 は書いた後でリセットして止める、L4 / G4 / G0 は OBL_LAUNCH で反映
         （ターゲットがリセットされ切断する: target_connect し直す）。"""
-        with self._lock:
+        with self._host._lock:
             target, part, family = self._stm32_family()
             before = target.read32(family.option_address)
             new, notes = ob.plan_write(family, before, dict(fields), confirm_mass_erase, confirm_protect)
@@ -88,9 +98,9 @@ class ConnectTools:
             if launch:
                 out["planned"] = ob.decode(family, new)
                 try:
-                    self.target_disconnect()
+                    self._host.target_disconnect()
                 except Exception:
-                    self._debug = None
+                    self._host._debug = None
                 notes.append("OBL_LAUNCH でターゲットがリセットされた: target_connect で接続し直す")
                 return out
             after = target.read32(family.option_address)
@@ -107,8 +117,8 @@ class ConnectTools:
     def target_unlock(self, confirm_mass_erase: bool = False, reset: bool = True, timeout_s: float = 60.0) -> dict:
         """保護を全消去で解除する。接続中: STM32 の RDP を Level 0 に（option_bytes_write と同じ手順）。未接続: nRF52 の
         CTRL-AP の ERASEALL（APPROTECT の解除）。confirm_mass_erase が無ければ何もせず断る。"""
-        with self._lock:
-            if self._debug is not None:
+        with self._host._lock:
+            if self._host._debug is not None:
                 target, part, family = self._stm32_family()
                 current = target.read32(family.option_address)
                 level = ob.rdp_level(family.field("RDP").get(current))
@@ -123,7 +133,7 @@ class ConnectTools:
             return self._unlock_nrf(confirm_mass_erase, timeout_s)
 
     def _unlock_nrf(self, confirm_mass_erase: bool, timeout_s: float) -> dict:
-        dap = self._raw_dp()
+        dap = self._host._raw_dp()
         ctrl_ap = next((ap for ap in range(4) if self._read_ap_quiet(dap, ap, 0xFC) == NRF_CTRL_AP_IDR), None)
         if ctrl_ap is None:
             raise RuntimeError("未接続で解除できるのは nRF52 の CTRL-AP だけ: STM32 は target_connect（connect_mode "

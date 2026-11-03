@@ -561,3 +561,61 @@ async def changes_made_during_a_target_reset_are_reported_as_lost(dut):
     after = seq[i + 1:]
     assert any(v == 0x3333 for _, v, _ in after), after            # 再開後の今の値は見える
     assert any(k == "gap" for k, _, _ in after[:2]), f"0x0AAA → 0x3333 の間に失った変化（0x1111・0x2222）の切れ目が無い: {after[:3]}"
+
+
+# IEEE 1149.1 の TAP の移り（TMS = 0 のとき, 1 のとき）
+_TAP = {"TLR": ("RTI", "TLR"), "RTI": ("RTI", "SEL_DR"), "SEL_DR": ("CAP_DR", "SEL_IR"), "CAP_DR": ("SH_DR", "EX1_DR"),
+        "SH_DR": ("SH_DR", "EX1_DR"), "EX1_DR": ("PA_DR", "UP_DR"), "PA_DR": ("PA_DR", "EX2_DR"),
+        "EX2_DR": ("SH_DR", "UP_DR"), "UP_DR": ("RTI", "SEL_DR"), "SEL_IR": ("CAP_IR", "TLR"),
+        "CAP_IR": ("SH_IR", "EX1_IR"), "SH_IR": ("SH_IR", "EX1_IR"), "EX1_IR": ("PA_IR", "UP_IR"),
+        "PA_IR": ("PA_IR", "EX2_IR"), "EX2_IR": ("SH_IR", "UP_IR"), "UP_IR": ("RTI", "SEL_DR")}
+
+
+@cocotb.test()
+@logged
+async def the_event_times_are_the_tck_edges_on_the_pin(dut):
+    """表 17（docs/superpowers/specs/2026-11-01-time-accuracy-design.md）の「+1」を確かめる: 印のイベントの時刻 =
+    Update-DR を出る TCK の立ち上がりの端子（obs_harness の tck = jtag_phy の FF の出力）の fprobe の時刻、標本型の記録の
+    イベントの時刻 = Capture-DR を出る立ち上がりの時刻。どちらも差は 0（エンジンは端子が上がった周期の次の辺で見るが、
+    そのとき写す time_count は端子が上がった辺の値）。端子の TMS から TAP の状態を追って、その立ち上がりを決める。"""
+    snap = os.environ.get("E2E_SNAP") == "1"
+    b = await bring_up(dut, enable=False)
+    rises = {"UP_DR": [], "CAP_DR": []}
+
+    async def follow_tap():
+        state = "TLR"
+        while True:
+            await RisingEdge(dut.tck)
+            if not dut.tms.value.is_resolvable or not b.falls:
+                continue
+            if state in rises:
+                rises[state].append(b.now_f())
+            state = _TAP[state][int(dut.tms.value)]
+    cocotb.start_soon(follow_tap())
+    dut.enable.value = 1
+    await b.wait_for(lambda: dut.id_ok.value == 1 or snap)
+    if not snap:
+        await b.push(START)
+        await b.wait_for(lambda: dut.target_running.value == 1)
+    b.events.clear()
+
+    async def change():                             # 標本型は値が変わった標本だけイベントになる
+        v = 0x00A0
+        while True:
+            await ClockCycles(dut.tgt_clk, 97)
+            v = v + 1 & 0xFFFF
+            dut.probes.value = v
+    changer = cocotb.start_soon(change())
+    await b.scans(40)
+    changer.cancel()
+    if snap:
+        times = [t for s, _, _, t in b.events if not s]
+        edges = rises["CAP_DR"]
+    else:
+        times = [t for s, _, _, t in b.events if s]
+        edges = rises["UP_DR"]
+    assert len(times) >= 5, (len(times), snap)
+    diffs = [min((t - e for e in edges), key=abs) for t in times]
+    log_result("event_edge", snap=snap, n=len(times), diffs=sorted(set(round(d, 6) for d in diffs)))
+    dut._log.info(f"event time - pin edge: {sorted(set(round(d, 6) for d in diffs))} (n = {len(times)})")
+    assert all(abs(d) < 1e-6 for d in diffs), sorted(set(diffs))

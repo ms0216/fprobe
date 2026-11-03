@@ -1,6 +1,6 @@
 """Probe の道具: 実行の制御（ソース行単位のステップ・ベクタキャッチ・ターゲットの関数の呼び出し）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_stop_dict・_service・_break_action・
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・dbg・_stop_dict・_service・_break_action・
 _with_fault を使う。行単位のステップと関数の呼び出しは、run_until_halt と同じく待つ間は機器のロックを放す
 （背景の RTT 等を止めない）。仕様: docs/reports/2026-10-18-gap-analysis.md の U01・U02・U53。
 
@@ -10,12 +10,21 @@ _with_fault を使う。行単位のステップと関数の呼び出しは、ru
   止める。設定と読みを分ける（読みは状態を変えない読みとして操作の記録から外せる）。
 - debug.call: 止まったコアで関数を引数付きで実行し戻り値を得る（GDB の print f(x)、winIDEA testIDEA の土台）。
 """
+from .probe_service import HostView
 
-__all__ = ["ExecutionTools"]
+__all__ = ["ExecutionService"]
 
 
-class ExecutionTools:
-    """実行の制御の道具（Probe の mixin）。"""
+class ExecutionService:
+    """実行の制御の道具（Probe のサービス）。"""
+
+    API = ("call_function", "step_line", "vector_catch", "vector_catch_get")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_break_action", "_linux_view", "_lock", "_service", "_stop_dict", "_watch_stops", "_with_fault", "dbg")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     def step_line(self, mode: str = "over", location: str | None = None, timeout_s: float = 5.0,
                   mask_interrupts: bool = True) -> dict:
@@ -24,39 +33,41 @@ class ExecutionTools:
         （関数名・"ファイル:行"・"0x..."）を指定するとそこまで。いまの関数から戻ればそこでも止まる）。
         mask_interrupts: 1 命令ずつ進める間は割り込みを止める（入らない）。False なら割り込みに入っても踏み越える。
         reason は step（終えた）か、途中で止まった理由（breakpoint / watchpoint / vector_catch / fault / timeout）。"""
-        with self._lock:
-            dbg = self.dbg
-            self._watch_stops(False)                              # ここで処理する（背景の見張りと取り合わない）
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.step_line(mode=mode, location=location, timeout_s=timeout_s, mask_interrupts=mask_interrupts)
+        with self._host._lock:
+            dbg = self._host.dbg
+            self._host._watch_stops(False)                              # ここで処理する（背景の見張りと取り合わない）
         exited: dict = {}
         target = location if location is None or not location.lower().startswith("0x") else int(location, 16)
-        stop = dbg.step_line(mode, target, timeout_s, mask_interrupts, lock=self._lock,
+        stop = dbg.step_line(mode, target, timeout_s, mask_interrupts, lock=self._host._lock,
                              on_breakpoint=lambda: self._continue_after_break(exited))
-        out = self._stop_dict(stop)
+        out = self._host._stop_dict(stop)
         if stop.value is not None:
             out["return_value"] = stop.value
         if exited:
             out.update(reason="exit", exit_code=exited["code"])
         elif stop.reason not in ("step", "timeout"):
-            self._with_fault(out)
+            self._host._with_fault(out)
         return out
 
     def _continue_after_break(self, exited: dict) -> bool:
         """BKPT・ブレークポイントで止まった（ロックの中）: セミホスティングの要求・止まらない動作なら処理して True。"""
-        result = self._service()
+        result = self._host._service()
         if result is not None:
             if result.exited:
                 exited["code"] = result.exit_code
                 return False
             return True
-        return self._break_action()
+        return self._host._break_action()
 
     def vector_catch(self, catch: list[str] | None = None) -> dict:
         """ベクタキャッチ（例外の入口でコアを止める。DEMCR の VC_*）。catch を渡すとその集合にする（"all" ですべて、
         [] で無し）。省略すると読むだけ。名前: core_reset / mem_manage / no_coprocessor / check_error / state_error /
         bus_fault / interrupt_error / hard_fault / secure_fault。ARMv6-M は hard_fault と core_reset だけ
         （unsupported に入る）。止まると debug.run_until_halt の reason が vector_catch になり、故障なら要約が付く。"""
-        with self._lock:
-            return self.dbg.vector_catch(catch)
+        with self._host._lock:
+            return self._host.dbg.vector_catch(catch)
 
     def vector_catch_get(self) -> dict:
         """いまのベクタキャッチを読む（enabled・available）。状態を変えない。"""
@@ -68,12 +79,12 @@ class ExecutionTools:
         スタックの下のメモリを元に戻す）。function: 関数名か "0x..."。arguments: 数、C の式（文字列。例 "&sensors[1]"、
         "MODE_RUN"）、{"string": "文字"}・{"bytes": "16 進"}（メモリに置いてその番地を渡す。呼んだ後の中身を
         buffers に返す）。呼んだ関数の中のブレークポイントでは止まらない。disable_interrupts: 呼ぶ間は割り込みを止める。"""
-        with self._lock:
-            dbg = self.dbg
-            self._watch_stops(False)
+        with self._host._lock:
+            dbg = self._host.dbg
+            self._host._watch_stops(False)
         exited: dict = {}
         location = int(function, 16) if function.lower().startswith("0x") else function
-        out = dbg.call(location, arguments or [], timeout_s, disable_interrupts, lock=self._lock,
+        out = dbg.call(location, arguments or [], timeout_s, disable_interrupts, lock=self._host._lock,
                        on_breakpoint=lambda: self._continue_after_break(exited))
         if exited:
             out["exit_code"] = exited["code"]

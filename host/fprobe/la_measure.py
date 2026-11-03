@@ -11,6 +11,8 @@
   作らない。
 - 時刻の分解能は 1 サンプル（各エッジ ±1 サンプル）。結果の resolution_ns。
 - 統計は件数・最小・最大・平均・標準偏差（母）と、最小・最大の位置（min_at / max_at。at_unit がサンプルかタイムベースか）。
+- ch ごとの時刻のずれ（channel_skew）が分からない ch は、ずらさずに置き、skew_unknown に番号を返す（その ch の位置と、
+  ほかの ch との時間差は、そのずれの分だけ分からない）。
 
 チャンネル間（relations の要素）:
 - {"type": "delay", "from": ch, "from_edge": "rise"|"fall"|"any", "to": ch, "to_edge": …}: from のエッジから、次の from の
@@ -112,8 +114,11 @@ class _SetupHold:
 class _Edges:
     """範囲 (start, end) のチャンネルごとのエッジ（サンプル番号と、立ち上がりか）。"""
 
-    def __init__(self, tr: Transitions, start: int, end: int, channels: set[int]):
+    def __init__(self, tr: Transitions, start: int, end: int, channels: set[int],
+                 ticks_per_sample: float | None = None):
+        # ticks_per_sample があれば、ch ごとの時刻のずれ（tr.channel_skew）でエッジを置き直す（位置は小数のサンプル）
         self.start, self.end = start, end
+        shift = tr.skew_samples(ticks_per_sample)
         first = max(bisect_right(tr.starts, start) - 1, 0)
         last = bisect_left(tr.starts, end)
         self.initial = {ch: (tr.values[first] >> ch & 1) if len(tr.values) else 0 for ch in channels}
@@ -127,7 +132,7 @@ class _Edges:
             while changed:
                 bit = changed & -changed
                 ch = bit.bit_length() - 1
-                self.at[ch].append(s)
+                self.at[ch].append(s + shift[ch] if shift[ch] else s)
                 self.rising[ch].append(bool(value & bit))
                 changed ^= bit
             previous = value
@@ -149,6 +154,7 @@ class _Measurement:
         self.relations = [self._relation(r, channel_count) for r in relations or []]
         self.per = {ch: _Channel() for ch in self.channels}
         self.resolution_s = 0.0
+        self.skew_unknown: set[int] = set()     # ずれが分からず、ずらさずに置いた ch（測った ch・relations の ch のうち）
 
     @staticmethod
     def _relation(r: dict, channel_count: int):
@@ -185,11 +191,16 @@ class _Measurement:
             out |= {s["from"], s["to"]} if s["type"] == "delay" else {s["clock"], *s["data"]}
         return out
 
-    def add(self, tr: Transitions, start: int, end: int, locate: Callable[[int], float]) -> None:
-        """1 つの捕捉の範囲 [start, end)（サンプル）を測って積む。locate はサンプル番号 → 報告する位置。"""
+    def add(self, tr: Transitions, start: int, end: int, locate: Callable[[int], float],
+            ticks_per_sample: float | None = None) -> None:
+        """1 つの捕捉の範囲 [start, end)（サンプル）を測って積む。locate はサンプル番号 → 報告する位置。
+        ticks_per_sample があれば ch ごとの時刻のずれ（channel_skew）を入れる。"""
         dt = tr.sample_period_s
         self.resolution_s = max(self.resolution_s, dt)
-        edges = _Edges(tr, start, end, self._needed())
+        needed = self._needed()
+        edges = _Edges(tr, start, end, needed, ticks_per_sample)
+        if ticks_per_sample:
+            self.skew_unknown |= needed & set(tr.skew_unknown())
         for ch in self.channels:
             self._channel(self.per[ch], edges, ch, dt, locate)
         for r in self.relations:
@@ -267,20 +278,21 @@ class _Measurement:
         channels = {ch: c.report() for ch, c in self.per.items()
                     if self.explicit or c.rises or c.falls}
         return {"at_unit": unit, "resolution_ns": self.resolution_s * 1e9, "channels": channels,
-                "relations": [r.report() for r in self.relations]}
+                "relations": [r.report() for r in self.relations], "skew_unknown": sorted(self.skew_unknown)}
 
 
 # --- 入口 --------------------------------------------------------------------------------------------
 
 def measure(tr: Transitions, start: int = 0, end: int | None = None, channels: Sequence[int] | None = None,
-            relations: Sequence[dict] | None = None) -> dict:
-    """捕捉の範囲 [start, end)（サンプル番号。end 省略で最後まで）を測る。位置（*_at・violations の at）はサンプル番号。"""
+            relations: Sequence[dict] | None = None, timebase_hz: float | None = None) -> dict:
+    """捕捉の範囲 [start, end)（サンプル番号。end 省略で最後まで）を測る。位置（*_at・violations の at）はサンプル番号。
+    timebase_hz を渡せば、ch ごとの時刻のずれ（channel_skew）を入れる（ずらした ch の位置は小数のサンプル番号）。"""
     end = tr.length if end is None else min(end, tr.length)
     start = max(0, start)
     if end <= start:
         raise ValueError(f"測る範囲が空（start={start}, end={end}）")
     m = _Measurement(channels, relations, tr.channels)
-    m.add(tr, start, end, lambda s: s)
+    m.add(tr, start, end, lambda s: s, tr.sample_period_s * timebase_hz if timebase_hz else None)
     out = m.report("sample")
     out.update(start=start, end=end)
     return out
@@ -299,7 +311,7 @@ def measure_recording(recording, t0: int | None = None, t1: int | None = None,
         s0 = 0 if t0 is None else max(0, math.ceil((t0 - base) / tps))
         s1 = tr.length if t1 is None else min(tr.length, math.ceil((t1 - base) / tps))
         if s1 > s0:
-            m.add(tr, s0, s1, lambda s, base=base, tps=tps: base + round(s * tps))
+            m.add(tr, s0, s1, lambda s, base=base, tps=tps: base + round(s * tps), tps)
     out = m.report("timebase")
     out.update(t0=t0, t1=t1, chunks=len(chunks))
     return out

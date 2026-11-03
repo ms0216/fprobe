@@ -1,7 +1,7 @@
 """Probe の道具: 画面からの ELF・書き込むファイル。ブラウザで選んだファイルをデーモンへ送って読む・置く（遠隔の画面でも使える）、同梱のデモの
 ELF を読む（機器・ELF が無くても各パネルの働きが見える）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の elf_load を使う。機器には触らない。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の elf_load を使う。機器には触らない。
 仕様: docs/superpowers/specs/2026-10-18-ui-layout-design.md §4
 """
 
@@ -12,8 +12,9 @@ from pathlib import Path
 
 from .home import fprobe_home
 from .flash import image_format
+from .probe_service import HostView
 
-__all__ = ["DEMO_ELF", "ElfFileTools", "UPLOAD_LIMIT"]
+__all__ = ["DEMO_ELF", "ElfFileService", "UPLOAD_LIMIT"]
 
 DEMO_ELF = Path(__file__).resolve().parents[1] / "firmware" / "sram_demo" / "sram_demo.elf"
 UPLOAD_LIMIT = 64 << 20                     # 送れるファイルの大きさの上限（バイト）
@@ -24,16 +25,24 @@ def _uploads() -> Path:
     return fprobe_home() / "uploads"
 
 
-class ElfFileTools:
+class ElfFileService:
+    API = ("elf_load_demo", "elf_upload", "flash_upload")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("elf_load",)
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+
     def elf_load_demo(self) -> dict:
         """同梱のデモの ELF（host/firmware/sram_demo/sram_demo.elf。RAM で動く STM32 の小さなプログラム）を読む。"""
-        return self.elf_load(str(DEMO_ELF))
+        return self._host.elf_load(str(DEMO_ELF))
 
     def elf_upload(self, name: str, data_base64: str) -> dict:
         """画面で選んだ ELF（中身を base64）を FPROBE_HOME/uploads/<名前> に置いて読む。名前の中の場所は捨てる。"""
         path = _store_upload(name, data_base64,
                              lambda data: data.startswith(b"\x7fELF") or "ELF でない（先頭が \\x7fELF でない）")
-        return self.elf_load(str(path))
+        return self._host.elf_load(str(path))
 
     def flash_upload(self, name: str, data_base64: str) -> dict:
         """画面で選んだ書き込むファイル（ELF / HEX / BIN）を FPROBE_HOME/uploads/<名前> に置き、その場所・大きさ・形式を

@@ -150,3 +150,74 @@ async def uart_speed_and_tolerance(dut):
         for _ in range(8):
             ok = await uart_trial(dut, got, divisor, rate_error, rng)
             assert ok, f"divisor={divisor} rate_error={rate_error}: {got.items}"
+
+
+async def count_time(dut):
+    """time を毎周期 1 進める（timebase と同じ: 立ち上がりの直後に変わる）。"""
+    while True:
+        await RisingEdge(dut.clk)
+        dut.time.value = (int(dut.time.value) + 1) % (1 << 48)
+
+
+async def send_on_edges(dut, levels: list[int], cycles_per_level: int) -> int:
+    """線のレベルを、立ち上がりの直後に cycles_per_level 周期ずつ出す。最初のレベルを出した辺の時刻（その周期の time）を返す。"""
+    await RisingEdge(dut.clk)
+    await ReadOnly()
+    t = int(dut.time.value) + 1                              # 次の辺の後の time
+    await RisingEdge(dut.clk)
+    for level in levels:
+        dut.swo.value = level
+        await ClockCycles(dut.clk, cycles_per_level)
+    return t
+
+
+async def byte_with_time(dut, timeout: int = 400) -> tuple[int, int]:
+    for _ in range(timeout):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if dut.out_valid.value == 1:
+            return int(dut.out_data.value), int(dut.out_time.value)
+    raise AssertionError("バイトが来ない")
+
+
+@cocotb.test()
+async def the_byte_time_is_declared_by_the_timing_table(dut):
+    """時刻の表（fprobe_gw.timing）と回路の一致（docs/superpowers/specs/2026-11-01-time-accuracy-design.md の R3）。
+    UART 方式: 時刻が T になる辺の直後に開始ビットを下げると、バイトの時刻 = T + UART_RX_START_DELAY（divisor に依らない）。
+    Manchester 方式（R4、段階 S3）: 時刻 = そのバイトの最初（LSB）のデータビットの中央の変化の辺 + SWO_MANCHESTER_BIT_DELAY
+    （1 フレームの 2 バイト目以降も、そのバイトの最初のビット。送り手の速さ・divisor に依らない）。"""
+    from fprobe_gw.timing import SWO_MANCHESTER_BIT_DELAY, UART_RX_START_DELAY
+    dut.time.value = 5000
+    await setup(dut, 8, manchester=False, idle=1)
+    cocotb.start_soon(count_time(dut))
+    for divisor in (8, 7, 12):
+        dut.divisor.value = divisor
+        await ClockCycles(dut.clk, 4 * divisor)
+        for byte in (0x96, 0x01):
+            waiter = cocotb.start_soon(byte_with_time(dut))
+            t = await send_on_edges(dut, uart_bits(byte), divisor)
+            got, when = await waiter
+            assert got == byte and when == t + UART_RX_START_DELAY, (divisor, hex(got), when, t)
+    if not has_manchester(dut):
+        return
+    dut.run.value = 0
+    dut.swo.value = 0
+    dut.manchester.value = 1
+    await ClockCycles(dut.clk, 4)
+    dut.run.value = 1
+    await ClockCycles(dut.clk, FLUSH + 4)
+    dut.divisor.value = 8
+    # 送り手の半ビット（4 = divisor どおり、3 = 送り手が 25% 速い）で、1 フレーム 1〜2 バイト
+    for half, frame in ((4, bytes([0x96])), (4, bytes([0x00])), (3, bytes([0x5A, 0x01])), (4, bytes([0xFF, 0x80]))):
+        got = []
+
+        async def collect(n=len(frame)):
+            for _ in range(n):
+                got.append(await byte_with_time(dut))
+        waiter = cocotb.start_soon(collect())
+        t = await send_on_edges(dut, manchester_halves(frame), half)
+        await waiter
+        for k, byte in enumerate(frame):
+            center = t + (2 * (1 + 8 * k) + 1) * half             # バイト k の最初のデータビット（開始ビットの後）の中央の辺
+            assert got[k] == (byte, center + SWO_MANCHESTER_BIT_DELAY), (half, k, got[k], center)
+        await ClockCycles(dut.clk, 8 * 4)

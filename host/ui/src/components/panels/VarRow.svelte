@@ -5,7 +5,7 @@
   import type { Debugger } from "../../lib/debugger";
   import { i18n } from "../../lib/i18n";
   import { childrenOf, derefExpr, display, editable, expandable, inputText, kindOf, parseInput, pointerChildren, structType,
-           pointeeType, truncated, type VarNode } from "../../lib/vartree";
+           truncated, type VarNode } from "../../lib/vartree";
   import type { Seen } from "./VarTree.svelte";
   import VarRow from "./VarRow.svelte";
 
@@ -50,7 +50,7 @@
   });
   // 構造体のメンバーの型
   $effect(() => {
-    const type = isOpen && kind === "struct" ? structType(node.type) : null;
+    const type = isOpen ? structType(value, node.type) : null;
     if (type) void dbg.typeMembers(type).then((m) => (members = m));
   });
   // ポインタの先（開いている間、止まり直すたび）
@@ -60,8 +60,8 @@
     dbg.evaluate(derefExpr(node.expr)).then(async (r) => {
       target = r;
       loadError = null;
-      const type = structType(r.type ?? pointeeType(node.type));
-      targetMembers = type && kindOf(r.value) === "struct" ? await dbg.typeMembers(type) : {};
+      const type = structType(r.value, r.type);
+      targetMembers = type ? await dbg.typeMembers(type) : {};
     }).catch((e) => {
       target = null;
       loadError = String((e as Error)?.message ?? e);

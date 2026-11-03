@@ -23,12 +23,13 @@ import struct
 import threading
 import time
 
+from fake_probe_contract import unsupported_arg
 from fprobe.dwarf.cexpr import evaluate
 from fprobe.dwarf.info import FrameView
 from fprobe.dwarf.location import NotAvailable
 from fprobe.dwarf.typesys import type_name
 from fprobe.dwarf.values import encode
-from fprobe.probe_watch import _RAW, ValueStats, WatchTools, _read_value, measure, pair_latest, rates, xy_result
+from fprobe.probe_watch import _RAW, ValueStats, WatchService, _read_value, measure, pair_latest, rates, xy_result
 from fprobe.sampler import plan_slots
 from fprobe.voltage import VoltageHistory
 from fprobe.watch_trigger import Capture, Condition
@@ -146,12 +147,14 @@ class SamplingDemo:
             v = evaluate(w.name, self._values.info, FrameView(None, self._mem.read, _no_register))
         return _read_value(v, self._mem.read)
 
-    def watch_set(self, expressions, rate_hz=1000.0, ap=0, chase_rate_hz=100.0, jitter=0, caller=None):
+    def watch_set(self, expressions, rate_hz=1000.0, ap=0, chase_rate_hz=100.0, jitter=0, names=None, caller=None):
+        if names is not None:
+            raise unsupported_arg("watch_set", "names", names)
         if not 0 < chase_rate_hz <= 10_000:
             raise ValueError("chase_rate_hz は 0 より大きく 10000 以下")
         if not 0 <= jitter <= 15:
             raise ValueError("jitter は 0〜15")
-        watches, rejected = WatchTools._watch_targets(self, expressions)     # 誤った式は外して残りを取る（本物と同じ）
+        watches, rejected = WatchService._watch_targets(self, expressions)     # 誤った式は外して残りを取る（本物と同じ）
         sampled = [w for w in watches if not w.chase]
         slots = plan_slots([(w.address, w.size) for w in sampled]) if sampled else []
         if sampled and not 1 <= round(100e6 / rate_hz) < 1 << 32:

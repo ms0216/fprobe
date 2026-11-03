@@ -1,19 +1,23 @@
 """API の仕様（host/api/fprobe_api.json）の読み込みと引数の検証。"""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
-__all__ = ["SPEC_PATH", "InvalidParams", "Method", "Spec", "load_spec"]
+__all__ = ["SPEC_PATH", "InvalidParams", "InvalidResult", "Method", "Spec", "load_spec", "result_schema_problems"]
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "api" / "fprobe_api.json"
 
 
 class InvalidParams(Exception):
     """引数が仕様に合わない。"""
+
+
+class InvalidResult(Exception):
+    """実装の応答が仕様の result に合わない（実装と仕様のずれ。試験が見つける）。"""
 
 
 @dataclass(frozen=True)
@@ -23,13 +27,16 @@ class Method:
     summary: str
     impl: str            # Probe のメソッド名（session.* は ""）
     params: dict
-    result: dict
+    result: dict         # 応答の JSON Schema（daemon.jsonable を通した後の形。共通の形は Spec.defs を "#/$defs/名前" で引く）
     record: bool = True  # 操作の記録に残すか（画面の表示用の頻繁な読みは残さない）
     observes: bool = False  # control だが状態を変えない読み（要求の quiet で記録から外せる）
     binary: bool = False    # 応答をバイナリのフレームで返す（fprobe.api.binary。WebSocket の利用者だけ、MCP には出さない）
     caller: bool = False    # デーモンが呼び出し元 caller = {id, name, role} を実装へ渡す（引数の仕様には出さない）
     offline: bool = False   # 機器に触らない（記録・画面の状態を読むだけ）: 機器の作業スレッドでなく読みのスレッドで実行
     irreversible: bool = False  # 取り返しのつかない操作（Flash・オプションバイトの書き込み・消去等。画面は赤く確かめる）
+    # PC のパスの引数: 名前 → (access = "exec" / "write", when = 真のときだけ確かめる真偽の引数の名前か None)。
+    # デーモンが許可の表（fprobe.api.permissions）で確かめる（仕様の "x-path"・"x-path-when"）
+    paths: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,22 @@ class Spec:
     api_version: int
     methods: dict[str, Method]
     notifications: dict[str, dict]
+    defs: dict[str, dict] = field(default_factory=dict)     # 応答の共通の形（仕様の "$defs"）
+    _result_validators: dict = field(default_factory=dict, repr=False, compare=False)
+
+    def result_schema(self, name: str) -> dict:
+        """メソッド name の応答のスキーマ（$defs を含めた、それだけで検証できる形）。"""
+        return {**self.methods[name].result, "$defs": self.defs}
+
+    def validate_result(self, name: str, value: Any) -> None:
+        """応答 value（daemon.jsonable を通した後の形）が仕様に合うか。合わなければ InvalidResult（最初の誤りの場所と理由）。"""
+        validator = self._result_validators.get(name)
+        if validator is None:
+            validator = self._result_validators[name] = Draft202012Validator(self.result_schema(name))
+        error = min(validator.iter_errors(value), key=lambda e: len(e.absolute_path), default=None)
+        if error is not None:
+            where = "".join(f"[{p!r}]" for p in error.absolute_path) or "(応答)"
+            raise InvalidResult(f"{name}: {where}: {error.message}")
 
     def validate_params(self, name: str, params: dict) -> None:
         method = self.methods[name]                     # 未知のメソッドは KeyError
@@ -70,10 +93,112 @@ def _integral(schema: dict, value: Any):
     return value
 
 
+_PATH_ACCESS = ("exec", "write")
+
+
+def _paths(method: str, params: dict) -> dict:
+    """引数の "x-path"（exec / write）と "x-path-when"（真偽の引数の名前）。形が違えば仕様の誤り（ValueError）。"""
+    props = params.get("properties", {})
+    out = {}
+    for name, schema in props.items():
+        access = schema.get("x-path")
+        if access is None:
+            continue
+        when = schema.get("x-path-when")
+        if access not in _PATH_ACCESS or (when is not None and props.get(when, {}).get("type") != "boolean"):
+            raise ValueError(f"{method}.{name}: x-path は {_PATH_ACCESS} のどれか、x-path-when は真偽の引数の名前")
+        out[name] = (access, when)
+    return out
+
+
 def load_spec(path: Path | None = None) -> Spec:
     data = json.loads((path or SPEC_PATH).read_text(encoding="utf-8"))
     methods = {name: Method(name, m["kind"], m.get("summary", ""), m.get("impl", ""), m["params"], m.get("result", {}),
                             m.get("record", True), m.get("observes", False), m.get("binary", False),
-                            m.get("caller", False), m.get("offline", False), m.get("irreversible", False))
+                            m.get("caller", False), m.get("offline", False), m.get("irreversible", False),
+                            _paths(name, m["params"]))
                for name, m in data["methods"].items()}
-    return Spec(data["api_version"], methods, data.get("notifications", {}))
+    return Spec(data["api_version"], methods, data.get("notifications", {}), data.get("$defs", {}))
+
+
+_LEAF_TYPES = {"integer", "number", "string", "boolean", "null"}
+_ANNOTATIONS = {"description", "title", "default", "examples", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                "minLength", "maxLength", "pattern", "format", "minItems", "maxItems", "uniqueItems"}
+
+
+def result_schema_problems(spec: Spec) -> list[str]:
+    """応答のスキーマが「形をすべて書いた」約束になっているかの点検（違反の一覧。空なら良い）。
+    約束: どの節も型を持つ（type・enum・const・anyOf・$ref のどれか。何でもよい値は $defs の Json を明示して引く）。
+    object は 2 つの形のどちらか: 欄の決まった記録（properties と additionalProperties: false）か、名前 → 値の表
+    （properties なしの additionalProperties: スキーマ）。array は items（固定の組は prefixItems と items: false）。
+    required は properties にある名前だけ。$ref は $defs にある名前だけ。使われない $defs は残さない。"""
+    problems: list[str] = []
+    used: set[str] = set()
+
+    def walk(schema, where: str) -> None:
+        if not isinstance(schema, dict):
+            problems.append(f"{where}: スキーマが辞書でない")
+            return
+        keys = set(schema)
+        if "$ref" in schema:
+            ref = schema["$ref"]
+            name = ref.removeprefix("#/$defs/")
+            if not ref.startswith("#/$defs/") or name not in spec.defs:
+                problems.append(f"{where}: 知らない $ref {ref}")
+            used.add(name)
+            if keys - {"$ref", "description"}:
+                problems.append(f"{where}: $ref と並べた {sorted(keys - {'$ref', 'description'})}")
+            return
+        if "anyOf" in schema:
+            for i, sub in enumerate(schema["anyOf"]):
+                walk(sub, f"{where}.anyOf[{i}]")
+            if keys - {"anyOf"} - _ANNOTATIONS:
+                problems.append(f"{where}: anyOf と並べた {sorted(keys - {'anyOf'} - _ANNOTATIONS)}")
+            return
+        if "enum" in schema or "const" in schema:
+            return
+        kind = schema.get("type")
+        kinds = kind if isinstance(kind, list) else [kind]
+        if kind is None:
+            problems.append(f"{where}: 型が無い（type・enum・const・anyOf・$ref のどれか）")
+            return
+        if isinstance(kind, list) and not set(kinds) <= _LEAF_TYPES:
+            problems.append(f"{where}: 型の並び {kinds} は葉の型（{sorted(_LEAF_TYPES)}）だけ。組み合わせは anyOf で")
+        if "object" in kinds:
+            props, extra = schema.get("properties"), schema.get("additionalProperties")
+            if props is not None:
+                if extra is not False:
+                    problems.append(f"{where}: 欄の決まった object は additionalProperties: false")
+                for k, sub in props.items():
+                    walk(sub, f"{where}.{k}")
+                missing = set(schema.get("required", [])) - set(props)
+                if missing:
+                    problems.append(f"{where}: required に properties に無い名前 {sorted(missing)}")
+            elif isinstance(extra, dict):
+                walk(extra, f"{where}.*")
+                if "required" in schema:
+                    problems.append(f"{where}: 名前 → 値の表に required")
+            else:
+                problems.append(f"{where}: object は properties か additionalProperties のスキーマで中身を書く")
+        elif "array" in kinds:
+            if "prefixItems" in schema:
+                for i, sub in enumerate(schema["prefixItems"]):
+                    walk(sub, f"{where}[{i}]")
+                if schema.get("items") is not False:
+                    problems.append(f"{where}: 固定の組（prefixItems）は items: false")
+            elif isinstance(schema.get("items"), dict):
+                walk(schema["items"], f"{where}[]")
+            else:
+                problems.append(f"{where}: array は items（要素のスキーマ）")
+        else:
+            unknown = set(kinds) - _LEAF_TYPES
+            if unknown:
+                problems.append(f"{where}: 知らない型 {sorted(unknown)}")
+
+    for name, schema in spec.defs.items():
+        walk(schema, f"$defs.{name}")
+    for m in spec.methods.values():
+        walk(m.result, f"{m.name}.result")
+    # 定義どうしの参照も使われたとみなす（walk が $defs も歩いて used に入れている）
+    problems += [f"$defs.{name}: どこからも使われない" for name in sorted(set(spec.defs) - used)]
+    return problems

@@ -1,19 +1,21 @@
 """ロジアナの連続ストリーミング（LaStream）: 逐次の復号・VCD・停止と出し切り・溢れ（偽のデバイス。ハードウェア不要）。"""
 
 import random
+import struct
 from array import array
 from collections import deque
-from types import SimpleNamespace
 
 import pytest
 
 from fprobe import generated as g
+from fprobe.control import ControlChannel, ControlTimeout
 from fprobe.la import (DeepAnalyzer, Transitions, decode_beats, decode_transitions, write_vcd)
+from caps_fakes import FakeDeviceBase, caps_for
 
 MPS = 512
 
 
-class FakeStreamDevice:
+class FakeStreamDevice(FakeDeviceBase):
     """ストリーミング中の fprobe の振る舞いを真似る。
 
     - status を読むたびに（走っていれば）source の拍を 0〜per_poll 拍書く（stream_beats が増える）。
@@ -38,7 +40,7 @@ class FakeStreamDevice:
     # --- Device の API ----------------------------------------------------------------
 
     def capabilities(self):
-        return SimpleNamespace(mem_bytes=128 << 20, la_channels=16, la_sample_hz=100_000_000)
+        return caps_for(mem_bytes=128 << 20, la_channels=16, la_sample_hz=100_000_000)
 
     def write(self, address, words):
         pass
@@ -57,6 +59,11 @@ class FakeStreamDevice:
             self.drain_polls = 3
         self.running = run
 
+    def read(self, address, count, *, timeout_retries=0):
+        """CONTROL の READ: 番地の順に 1 語ずつ（実機と同じ順。status を読むと拍が書かれるのもその順）。la_deep の窓だけ。"""
+        assert g.LA_DEEP_BASE <= address and address + 4 * count <= g.LA_DEEP_BASE + g.LA_DEEP_SIZE, hex(address)
+        return [self.read32(address + 4 * i) for i in range(count)]
+
     def read32(self, address):
         if address == g.LA_DEEP_RING_BEATS:
             return self.ring
@@ -70,6 +77,8 @@ class FakeStreamDevice:
             return self.written
         if address == g.MEM_STATUS:
             return int(self.mem_ready) << g.MEM_STATUS_READY[0]
+        if g.LA_DEEP_BASE <= address < g.LA_DEEP_BASE + g.LA_DEEP_SIZE:
+            return 0                                       # この偽物が持たない la_deep の語（まとめた READ の途中）
         raise AssertionError(f"想定外の読み 0x{address:X}")
 
     def read_stream_some(self, size, timeout_ms=2000):
@@ -192,17 +201,23 @@ def test_overrun_stops_and_keeps_received_data():
     assert b"".join(c.data for c in chunks) == got and stats.bytes == len(got)
 
 
-def test_breaking_out_stops_and_drains():
+def test_breaking_out_stops_without_reading_and_the_next_stream_discards_the_rest():
+    # 抜ける（close・GC）側は書き込みを止めるだけで、残りを読まない（閉じる側で時間のかかる読みをしない）。残りは次の流れの
+    # 開始（DeepAnalyzer._discard_stream）が読み捨てる
     rng = random.Random(5)
     source = raw_source(rng, 20000)
     dev = FakeStreamDevice(source, rng=rng)
     stream = DeepAnalyzer(dev).stream(rle=False)
-    for _ in stream.chunks(10.0):
-        break
-    assert not dev.running and dev.received == dev.written * 16 and not dev.packets
+    gen = stream.chunks(10.0)
+    next(gen)
+    reads = dev.received
+    gen.close()
+    assert not dev.running and dev.control_writes[-1] == 0 and dev.received == reads
     assert stream.stats().elapsed_s < 5.0
     with pytest.raises(RuntimeError):
         next(stream.chunks(1.0))
+    second = DeepAnalyzer(dev).stream(rle=False)                       # 前の流れの残りを読み捨ててから始める
+    assert dev.received == 0 and not dev.packets and second is not None
 
 
 @pytest.mark.parametrize("rle", [False, True])
@@ -249,3 +264,150 @@ def test_leftovers_of_an_earlier_stream_are_discarded_before_starting(was_runnin
     dev.running = was_running                                           # 前の流れが走ったまま（落ちたデーモン）
     stream, chunks = run_stream(dev, False)
     assert b"".join(c.data for c in chunks) == source[:dev.written * 16]
+
+
+# --- 見回りの READ の時間切れ（A11。docs/superpowers/specs/2026-11-03-host-link-correctness-design.md §4） ------------------------
+
+class _CsrTransport:
+    """本物の ControlChannel の相手: READ を偽の機器の read32 で答える。lose 個の READ の応答を落とす（要求は実行された）。"""
+
+    max_packet = 512
+
+    def __init__(self, dev):
+        self.dev, self.lose, self.replies = dev, 0, deque()
+
+    def send(self, message):
+        op, tag, count, address = struct.unpack_from("<BBHI", message)
+        assert op == g.OP_READ
+        words = [self.dev.read32(address + 4 * i) for i in range(count)]
+        if self.lose:
+            self.lose -= 1
+            return
+        self.replies.append(struct.pack(f"<{count}IBBH", *words, tag, g.STATUS_OK, count))
+
+    def receive(self, max_length):
+        if not self.replies:
+            raise TimeoutError("応答が届かない")
+        return self.replies.popleft()
+
+    def flush(self):
+        pass
+
+
+class ControlledStreamDevice(FakeStreamDevice):
+    """CSR の READ を本物の ControlChannel で運ぶ偽の機器。lose_on_poll 回目の見回りの READ の応答を落とす。"""
+
+    def __init__(self, *args, lose_on_poll: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.transport = _CsrTransport(self)
+        self.control = ControlChannel(self.transport)
+        self.polls, self.lose_on_poll = 0, lose_on_poll
+
+    def read(self, address, count, *, timeout_retries=0):
+        if address == g.LA_DEEP_STATUS:
+            self.polls += 1
+            if self.polls == self.lose_on_poll:
+                self.transport.lose = 1
+        return self.control.read(address, count, timeout_retries=timeout_retries)
+
+    def control_counters(self):
+        return self.control.counters()
+
+
+def test_a_poll_whose_reply_does_not_come_stops_the_stream_unless_the_caller_allows_resending():
+    rng = random.Random(11)
+    dev = ControlledStreamDevice(raw_source(rng, 4000), rng=rng, lose_on_poll=3)
+    with pytest.raises(ControlTimeout):
+        list(DeepAnalyzer(dev).stream(rle=False).chunks(0.05))
+    assert dev.control_writes[-1] == 0                                    # 止める書きはした
+    assert dev.control.read_retries == 0                                  # 既定では送り直さない
+
+
+def test_a_poll_is_resent_when_the_caller_allows_and_the_fact_is_returned():
+    rng = random.Random(12)
+    source = raw_source(rng, 4000)
+    dev = ControlledStreamDevice(source, rng=rng, lose_on_poll=3)
+    stream = DeepAnalyzer(dev).stream(rle=False, control_read_retries=1)
+    chunks = list(stream.chunks(0.05))
+    assert b"".join(c.data for c in chunks) == source[:dev.written * 16]  # 欠けずに最後まで
+    assert stream.stats().control == {"read_retries": 1, "stale_responses": 0}
+    with pytest.raises(ValueError):
+        DeepAnalyzer(dev).stream(rle=False, control_read_retries=-1)
+
+
+# --- 取り込みと書き出しの分離（docs/superpowers/specs/2026-11-03-la-raw-capture-design.md） ---------------------------
+
+def test_stream_to_raw_keeps_the_received_bytes_and_stream_to_vcd_exports_the_same(tmp_path):
+    from fprobe.la_raw import RawCapture, raw_to_vcd
+    rng = random.Random(21)
+    source = rle_source(rng, 4000)
+    dev = FakeStreamDevice(source, rng=random.Random(99), per_poll=100)
+    stats = DeepAnalyzer(dev).stream_to_raw(tmp_path / "s.fplaraw", 0.05, rle=True)
+    raw = RawCapture(tmp_path / "s.fplaraw")
+    got = source[:dev.written * 16]
+    assert raw.complete and b"".join(c.data for c in raw.chunks()) == got
+    assert raw.samples == stats.samples == decode_transitions(got, True)[2]
+    assert raw.meta.rle and raw.meta.channels == 16 and raw.meta.sample_period_s == stats.sample_period_s
+    raw_to_vcd(raw, tmp_path / "later.vcd")                                   # 後から書き出せる
+    values, starts, length = decode_transitions(got, True)
+    write_vcd(Transitions(values, starts, length, 0, 0, stats.sample_period_s, 16), tmp_path / "w.vcd")
+    trigger_id = chr(33 + 16)
+    expected = _changes(tmp_path / "w.vcd", trigger_id)                       # test_stream_to_vcd_matches_write_vcd と同じ比べ方
+    expected = [line for i, line in enumerate(expected)
+                if not (line.startswith("#") and (i + 1 == len(expected) or expected[i + 1].startswith("#")))]
+    assert _changes(tmp_path / "later.vcd") == expected
+
+
+def test_stream_to_vcd_leaves_no_temporary_file_and_keeps_raw_path_when_given(tmp_path):
+    from fprobe.la_raw import RawCapture
+    rng = random.Random(22)
+    source = raw_source(rng, 3000)
+    DeepAnalyzer(FakeStreamDevice(source, rng=rng)).stream_to_vcd(tmp_path / "a.vcd", 0.05)
+    assert [p.name for p in tmp_path.iterdir()] == ["a.vcd"]                    # 一時ファイルは消える
+    DeepAnalyzer(FakeStreamDevice(source, rng=random.Random(22))).stream_to_vcd(tmp_path / "b.vcd", 0.05, raw_path=tmp_path / "b.fplaraw")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.vcd", "b.fplaraw", "b.vcd"]
+    assert RawCapture(tmp_path / "b.fplaraw").complete
+    from fprobe.la_raw import raw_to_vcd
+    raw_to_vcd(RawCapture(tmp_path / "b.fplaraw"), tmp_path / "again.vcd")
+    assert (tmp_path / "again.vcd").read_bytes() == (tmp_path / "b.vcd").read_bytes()    # 取り込みと同時の書き出しと、後からの書き出しは同じ
+
+
+def test_stream_to_vcd_exports_what_was_captured_before_an_error_and_raises(tmp_path, monkeypatch):
+    from fprobe.la import LaStream
+    rng = random.Random(23)
+    source = raw_source(rng, 6000)
+    dev = FakeStreamDevice(source, rng=rng, per_poll=300)
+    real = LaStream.chunks
+
+    def failing(self, duration_s, timeout_ms=2000):
+        for i, chunk in enumerate(real(self, duration_s, timeout_ms)):
+            if i == 2:
+                raise RuntimeError("リンクが落ちた")
+            yield chunk
+    monkeypatch.setattr(LaStream, "chunks", failing)
+    with pytest.raises(RuntimeError, match="リンクが落ちた"):
+        DeepAnalyzer(dev).stream_to_vcd(tmp_path / "p.vcd", 1.0)
+    assert [p.name for p in tmp_path.iterdir()] == ["p.vcd"]
+    text = (tmp_path / "p.vcd").read_text()
+    assert "$enddefinitions" in text and any(line.startswith("#") for line in text.splitlines())   # 途中までの分は残る
+
+
+@pytest.mark.perf
+def test_stream_to_raw_does_not_depend_on_the_export_speed(tmp_path, monkeypatch):
+    from fprobe import la_vcd
+    from perf_budget import within
+    rng = random.Random(24)
+    source = raw_source(rng, 20000)
+    real = la_vcd.VcdWriter.write
+
+    def slow(self, values, starts):
+        import time
+        time.sleep(0.05)
+        real(self, values, starts)
+    monkeypatch.setattr(la_vcd.VcdWriter, "write", slow)
+
+    def capture():
+        dev = FakeStreamDevice(source, rng=random.Random(24), per_poll=2000)
+        return DeepAnalyzer(dev).stream_to_raw(tmp_path / "c.fplaraw", 0.2)
+    seconds, stats = within(0.5, capture, clock="wall")                           # 書き出しが遅くても待たない
+    assert stats.samples > 0 and not stats.overrun

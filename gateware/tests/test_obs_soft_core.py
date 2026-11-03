@@ -8,7 +8,8 @@ SOURCES = ("fprobe_obs/rtl/obs_async_fifo.vhd", "fprobe_obs/rtl/obs_core.vhd", "
 
 
 @pytest.mark.parametrize("one_clock", [True, False])
-def test_obs_soft_core(tmp_path, one_clock):
+def test_obs_soft_core(tmp_path, monkeypatch, one_clock):
+    monkeypatch.setenv("OBS_ONE_CLOCK", "1" if one_clock else "0")      # 印の遅れの申告の範囲を試験が確かめる
     run_cocotb(parallel=True, toplevel="obs_soft_core", sources=target_ip(*SOURCES),
                generics={"FIFO_DEPTH": 16, "ONE_CLOCK": one_clock}, test_module="tests.tb.obs_soft_core_tb",
                build_dir=tmp_path)

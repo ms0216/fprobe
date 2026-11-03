@@ -8,12 +8,14 @@ from test_api_daemon import _serve
 
 from fake_daemon import FakeProbe
 from fprobe.api.client import DaemonClient
-from fprobe.probe_ui_state import UiStateTools
+from fprobe.probe_service import expose
+from fprobe.probe_ui_state import UiStateService
 
 
-class Holder(UiStateTools):
+@expose("_svc_ui_state", UiStateService)
+class Holder:
     def __init__(self):
-        self._init_ui_state()
+        self._svc_ui_state = UiStateService(self)
         self.sent = []
         self._publish = lambda topic, data: self.sent.append((topic, data))
 
@@ -22,7 +24,7 @@ def test_set_merges_and_reports_what_changed():
     h = Holder()
     assert h.ui_state_get() == {"rev": 0, "view": None, "cursors": {"selection": None, "mouse": None, "reference": None},
                                 "rows": None, "event": None, "frame": 0, "sampling": None, "dashboard": None,
-                                "fpga_signals": None, "system": None, "pointers": []}
+                                "fpga_signals": None, "system": None, "panel": None, "pointers": []}
     out = h.ui_state_set(view={"source": "recording", "t0": 10, "t1": 20}, cursors={"selection": 12}, origin="w1")
     assert out["changed"] == ["view", "cursors"] and out["rev"] == 1
     out = h.ui_state_set(cursors={"reference": 11})
@@ -213,3 +215,17 @@ def test_one_bad_saved_item_does_not_drop_the_others(tmp_path):
     assert h.ui_state_get()["fpga_signals"]["groups"]["0"][0]["name"] == "state"
     h.ui_state_set(sampling={"expressions": [{"expr": "x"}], "rate_hz": 10})
     assert json.loads(path.read_text(encoding="utf-8"))["fpga_signals"]["groups"]["0"][0]["name"] == "state"
+
+
+def test_the_ai_opens_or_brings_a_panel_to_the_front_like_the_view_menu():
+    """人は View メニューでパネルを開く。AI も ui.state.set の panel で同じことができる（各窓が通知で開く）。同じパネルを
+    もう一度頼んでも変化として届く（seq）。無い名前は断る。"""
+    from fprobe.probe_ui_state import PANELS
+    h = Holder()
+    out = h.ui_state_set(panel="threads")
+    assert out["panel"] == {"id": "threads", "seq": 1} and out["changed"] == ["panel"]
+    assert h.sent[-1][1]["changed"] == ["panel"] and h.sent[-1][1]["state"]["panel"]["id"] == "threads"
+    assert h.ui_state_set(panel="threads")["panel"]["seq"] == 2
+    assert "source" in PANELS and "linuxHalt" in PANELS
+    with pytest.raises(ValueError, match="panel"):
+        h.ui_state_set(panel="nope")

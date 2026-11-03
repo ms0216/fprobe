@@ -1,6 +1,6 @@
 """Probe の道具: 生のバイトの流れの TCP での公開とファイルへの記録（U05）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。ObserveTools の受信の口（_tap / _untap。RTT の上り・セミホスティング・
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。ObserveService の受信の口（_tap / _untap。RTT の上り・セミホスティング・
 SWO・UART）と書き込み（rtt_write・uart_write）を使う。
 
 流れの名前: "rtt0"〜（RTT の上りの番号。書き込みは同じ番号の下りへ）、"swo"（読むだけ）、"uart"、"semihosting"
@@ -16,8 +16,9 @@ import re
 from pathlib import Path
 
 from .streams import PROTOCOLS, StreamLogger, StreamServer
+from .probe_service import HostView
 
-__all__ = ["StreamTools", "stream_key"]
+__all__ = ["StreamService", "stream_key"]
 
 _RTT = re.compile(r"rtt(\d{1,2})")
 _NAMED = ("swo", "uart", "semihosting")
@@ -33,10 +34,17 @@ def stream_key(name: str) -> int | str:
     raise ValueError(f"流れ {name!r} は無い（rtt0〜rtt63 / swo / uart / semihosting）")
 
 
-class StreamTools:
-    """流れの公開と記録（Probe の mixin）。"""
+class StreamService:
+    """流れの公開と記録（Probe のサービス）。"""
 
-    def _init_streams(self) -> None:
+    API = ("attach_stream_host", "stream_close", "stream_list", "stream_log_start", "stream_log_stop", "stream_serve")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_close_streams",)
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_pump_errors", "_rtt", "_swo_on", "_tap", "_untap", "rtt_write", "uart_write")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._servers: dict[str, StreamServer] = {}
         self._stream_loggers: dict[str, StreamLogger] = {}
         self._stream_host = None                              # デーモン（書き込みを調停に通す）
@@ -69,7 +77,8 @@ class StreamTools:
         if host is not None and client is not None:
             result = host.call(client, method, params)
         else:
-            result = getattr(self, impl)(**params)
+            write = self._host.uart_write if impl == "uart_write" else self._host.rtt_write
+            result = write(**params)
         written = result.get("written", len(data)) if isinstance(result, dict) else result
         if written < len(data):                                # ターゲットが読まず、下りが空かなかった
             raise RuntimeError(f"{name}: {len(data)} バイトのうち {written} バイトしか書けなかった")
@@ -92,7 +101,7 @@ class StreamTools:
         self._servers[stream] = server
         if writable and self._stream_host is not None:
             self._stream_clients[stream] = self._stream_host.join(f"tcp:{stream}")
-        self._tap(key, server.publish)
+        self._host._tap(key, server.publish)
         return {"stream": stream, **server.info()}
 
     def stream_close(self, stream: str) -> dict:
@@ -100,7 +109,7 @@ class StreamTools:
         server = self._servers.pop(stream, None)
         if server is None:
             raise KeyError(f"{stream} は公開していない")
-        self._untap(stream_key(stream), server.publish)
+        self._host._untap(stream_key(stream), server.publish)
         server.close()
         client = self._stream_clients.pop(stream, None)
         if client is not None:
@@ -115,7 +124,7 @@ class StreamTools:
             raise RuntimeError(f"{stream} は記録中（{self._stream_loggers[stream].path}。stream_log_stop を先に）")
         logger = StreamLogger(Path(path), timestamps=timestamps, append=append)
         self._stream_loggers[stream] = logger
-        self._tap(key, logger.write)
+        self._host._tap(key, logger.write)
         return {"stream": stream, **logger.info()}
 
     def stream_log_stop(self, stream: str) -> dict:
@@ -123,16 +132,16 @@ class StreamTools:
         logger = self._stream_loggers.pop(stream, None)
         if logger is None:
             raise KeyError(f"{stream} は記録していない")
-        self._untap(stream_key(stream), logger.write)
+        self._host._untap(stream_key(stream), logger.write)
         logger.close()
         return {"stream": stream, **logger.info()}
 
     def stream_list(self) -> dict:
         """公開中の流れ（ポート・相手ごとの送ったバイトと捨てたバイト・書き込みの誤り）とファイルへの記録、
         流れの出どころの様子（RTT の上りのチャンネル・SWO の受信中か・背景の読みの誤り）。"""
-        rtt = self._rtt
+        rtt = self._host._rtt
         sources = {"rtt": [f"rtt{c.index}" for c in rtt.control_block.up if c.in_use] if rtt is not None else [],
-                   "swo": self._swo_on, "errors": dict(self._pump_errors)}
+                   "swo": self._host._swo_on, "errors": dict(self._host._pump_errors)}
         return {"served": [{"stream": name, **s.info()} for name, s in list(self._servers.items())],
                 "logs": [{"stream": name, **lg.info()} for name, lg in list(self._stream_loggers.items())],
                 "sources": sources}

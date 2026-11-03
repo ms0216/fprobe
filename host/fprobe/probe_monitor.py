@@ -1,6 +1,6 @@
 """Probe の道具: デバッグの方式（停止方式 halt / モニタ方式 monitor）。J-Link の Monitor Mode Debugging の相当（U37）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。モニタ方式のとき、Probe.target は fprobe.monitor.MonitorTarget（pyOCD の
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。モニタ方式のとき、Probe.target は fprobe.monitor.MonitorTarget（pyOCD の
 CortexM の口を、ターゲットのモニタの箱の読み書きで実現する包み）を返す。止める・再開・ステップ・レジスタ・ブレーク
 ポイント・行単位のステップ・呼び出し履歴・関数の呼び出し・セミホスティング・GDB サーバは、すべて Probe.target を使う
 ので、方式に関係なく同じ道具がそのまま使える。
@@ -19,15 +19,23 @@ from .flash_bp import FlashBreakpoints
 from .monitor import (DEMCR, MON_EN, MON_PEND, TRCENA, MonitorError, MonitorTarget, check_architecture, enter_monitor,
                       find_box, keeps_running, leave_monitor, read_priority, write_priority)
 from .xtrig import DHCSR, HALT, CrossTrigger
+from .probe_service import HostView
 
-__all__ = ["MODES", "MonitorModeTools"]
+__all__ = ["MODES", "MonitorModeService"]
 
 MODES = ("halt", "monitor")
 MONITOR_HALT = TRCENA | MON_EN | MON_PEND                 # クロストリガの停止（モニタ方式）: DEMCR に書く値
 
 
-class MonitorModeTools:
-    def _init_monitor(self) -> None:
+class MonitorModeService:
+    API = ("debug_mode_get", "debug_mode_set")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_halt_inject", "_monitor", "_monitor_detach", "_monitor_wrap", "_require_halt_mode")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_dbg", "_debug", "_flash_bp_wrap", "_lock", "_watch_stops", "session", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._monitor: MonitorTarget | None = None
 
     # --- Probe.target から ---------------------------------------------------------------------------
@@ -61,8 +69,8 @@ class MonitorModeTools:
 
     def _switch_halt_inject(self, old: tuple[int, int], new: tuple[int, int]) -> bool:
         """割り込み書き込みが old（既定の停止）なら new にする。利用者が替えたものには触らない。"""
-        device = self.session.device
-        if not getattr(device.capabilities(), "inject", False):
+        device = self._host.session.device
+        if not device.capabilities().inject:
             return False
         address, value = device.read(g.XTRIG_INJECT_ADDR, 2)
         if (address, value) != old:
@@ -77,10 +85,10 @@ class MonitorModeTools:
         DebugMon の中で止まり、優先度の高い割り込みは動き続ける）。available: ファームにモニタがあるか（無ければ
         reason）。モニタがあれば box（箱の番地）・priority（DebugMon の優先度）・prio_bits・keeps_running（止まって
         いる間も動く例外・割り込み）、モニタ方式なら state・stops・stack_overflow も。"""
-        with self._lock:
-            if self._debug is None:
+        with self._host._lock:
+            if self._host._debug is None:
                 raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
-            raw = self.target if self._monitor is None else self._monitor.inner
+            raw = self._host.target if self._monitor is None else self._monitor.inner
             out: dict = {"mode": "monitor" if self._monitor is not None else "halt"}
             try:
                 box = self._monitor.box if self._monitor is not None else find_box(raw)
@@ -101,11 +109,11 @@ class MonitorModeTools:
         ほど高い。これより高い割り込みは止まっている間も動く）。結果は debug_mode_get と同じ。"""
         if mode not in MODES:
             raise ValueError(f"mode は {' / '.join(MODES)}（{mode!r}）")
-        with self._lock:
-            if self._debug is None:                            # スナップショットの読み手には方式が無い
+        with self._host._lock:
+            if self._host._debug is None:                            # スナップショットの読み手には方式が無い
                 raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
-            self.target
-            raw = self._debug.target
+            self._host.target
+            raw = self._host._debug.target
             left = None
             if mode == "monitor" and self._monitor is None:
                 self._enter_monitor_mode(raw, priority)
@@ -120,7 +128,7 @@ class MonitorModeTools:
 
     def _enter_monitor_mode(self, raw, priority: int | None) -> None:
         check_architecture(raw)
-        target = self.target
+        target = self._host.target
         if isinstance(target, FlashBreakpoints):
             if target.status()["flash"]:
                 raise MonitorError("Flash の BKPT のブレークポイントがある（モニタ方式では Flash を書き換えられない）: "
@@ -130,15 +138,15 @@ class MonitorModeTools:
         box = find_box(raw)
         if priority is not None:
             write_priority(raw, priority)
-        self._watch_stops(False)
+        self._host._watch_stops(False)
         enter_monitor(raw, box)
-        self._monitor = MonitorTarget(self._flash_bp_wrap(raw), box)
+        self._monitor = MonitorTarget(self._host._flash_bp_wrap(raw), box)
         self._switch_halt_inject((DHCSR, HALT), (DEMCR, MONITOR_HALT))
         self._repoint_debugger()
 
     def _leave_monitor_mode(self, raw) -> dict:
         monitor = self._monitor
-        self._watch_stops(False)
+        self._host._watch_stops(False)
         left = leave_monitor(monitor, raw)
         self._monitor = None
         self._switch_halt_inject((DEMCR, MONITOR_HALT), (DHCSR, HALT))
@@ -147,6 +155,6 @@ class MonitorModeTools:
 
     def _repoint_debugger(self) -> None:
         """Debugger（置いたブレークポイントの名前を持つ）を作り直さずに、新しい Probe.target に向ける。"""
-        if self._dbg is not None:
-            self._dbg.target = self.target
+        if self._host._dbg is not None:
+            self._host._dbg.target = self._host.target
 

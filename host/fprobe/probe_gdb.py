@@ -1,9 +1,9 @@
 """Probe の道具: GDB サーバ（fprobe.gdb）の粒度の操作。レジスタ・メモリ・ブレークポイント・実行と停止の判定・
 RTOS のタスク（GDB のスレッド）・Flash の書き込み。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_debug・_symbols・target_connect・
-target_halt・target_reset・target_fault・_kernel（RtosTools）・_watch_stops・_service_in_background・_sh_watch・
-_sh_exit・_logs（ObserveTools）を使う。機器に触るのは必ず _lock の中。API（JSON-RPC・MCP）には出さない
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・dbg・_debug・_symbols・target_connect・
+target_halt・target_reset・target_fault・_kernel（RtosService）・_watch_stops・_service_in_background・_sh_watch・
+_sh_exit・_logs（ObserveService）を使う。機器に触るのは必ず _lock の中。API（JSON-RPC・MCP）には出さない
 （呼ぶのはデーモンの GDB サーバだけ。調停と記録はデーモンが行う）。
 
 - ブレークポイント・ウォッチポイントは Debugger の表（debug.breakpoint.list で見える）に入れる。GDB が置いた
@@ -25,8 +25,9 @@ from .debug import _REASONS
 from .flash import Image, Segment
 from .gdb.description import Region
 from .probe_observe import SEMIHOSTING
+from .probe_service import HostView
 
-__all__ = ["BASE_REGISTERS", "GDB_MARK", "GdbTools", "TRACE_MARK"]
+__all__ = ["BASE_REGISTERS", "GDB_MARK", "GdbService", "TRACE_MARK"]
 
 BASE_REGISTERS = frozenset([f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "xpsr", "msp", "psp", "primask", "control"])
 GDB_MARK = "gdb:"                       # GDB が置いたブレークポイントの場所の名前の頭
@@ -63,10 +64,22 @@ def _combine(names: list[str], raw: dict[str, int | None]) -> list[int | None]:
     return values
 
 
-class GdbTools:
-    """GDB サーバの操作（Probe の mixin）。"""
+class GdbService:
+    """GDB サーバの操作（Probe のサービス）。"""
 
-    def _init_gdb(self) -> None:
+    API = ("gdb_attach", "gdb_breakpoint", "gdb_flash", "gdb_halt", "gdb_poll", "gdb_read_memory",
+           "gdb_read_registers", "gdb_release", "gdb_reset", "gdb_resume", "gdb_step", "gdb_stop", "gdb_threads",
+           "gdb_write_memory", "gdb_write_registers")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_gdb_breaks", "_gdb_read_core", "_gdb_regions", "_gdb_step_over")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_flash_bp_active", "_gdb_trace_adopt", "_gdb_trace_release", "_gdb_trace_wants", "_kernel",
+             "_lock", "_logs", "_observe", "_require_halt_mode", "_service_in_background", "_sh_exit", "_sh_watch",
+             "_symbols", "_watch_stops", "dbg", "target", "target_connect", "target_fault", "target_halt",
+             "target_reset")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._gdb_breaks: dict[int, set[str]] = {}      # 番地 → GDB の持ち主（接続）
         self._gdb_watches: dict[int, dict[str, set[tuple[str, int]]]] = {}
         self._gdb_exit_seen = None                       # 最後に GDB へ返したセミホスティングの終了（_sh_exit）
@@ -76,20 +89,20 @@ class GdbTools:
     def gdb_attach(self, target: str = "cortex_m", frequency_hz: int = 4_000_000) -> dict:
         """GDB がつながった: 未接続なら接続して止め、動いていれば止める（all-stop の GDB は止まった状態から始まる）。
         GDB に見せるレジスタ（コアにある pyOCD の名前）とメモリの区画を返す。"""
-        with self._lock:
-            if self._debug is None:
-                self.target_connect(target, frequency_hz, "halt")
-            elif self.target.get_state() != Target.State.HALTED:
-                self.target_halt()
+        with self._host._lock:
+            if self._host._debug is None:
+                self._host.target_connect(target, frequency_hz, "halt")
+            elif self._host.target.get_state() != Target.State.HALTED:
+                self._host.target_halt()
             return {"registers": sorted(self._gdb_core_names()), "regions": self._gdb_regions()}
 
     def _gdb_core_names(self) -> set[str]:
-        index = getattr(self.target, "core_registers", None)
+        index = getattr(self._host.target, "core_registers", None)
         return set(index.by_name) if index is not None else set(BASE_REGISTERS)
 
     def _gdb_regions(self) -> list[Region]:
         regions = []
-        for r in getattr(self.target, "memory_map", None) or []:
+        for r in getattr(self._host.target, "memory_map", None) or []:
             kind = _MEMORY_KINDS.get(r.type.name)
             if kind is None or not r.length:
                 continue                                       # 周辺（DEVICE）等は書かない: GDB は区画の外も読める
@@ -100,8 +113,8 @@ class GdbTools:
     def gdb_release(self, owner: str) -> None:
         """その接続が置いたブレークポイント・ウォッチポイントを外す（detach・切断）。その接続が始めたトレースは、
         切断しても続ける設定（QTDisconnected:1）でなければ止める。"""
-        with self._lock:
-            self._gdb_trace_release(owner)
+        with self._host._lock:
+            self._host._gdb_trace_release(owner)
             for address in [a for a, owners in self._gdb_breaks.items() if owner in owners]:
                 self._gdb_unbreak(owner, address)
             for address in [a for a, owners in self._gdb_watches.items() if owner in owners]:
@@ -112,7 +125,7 @@ class GdbTools:
     def gdb_read_registers(self, names: list[str], thread: int | None = None) -> list[int | None]:
         """レジスタ（GDB の名前）を読む。読めないものは None。thread（TCB の番地）が実行中のタスクでなければ、
         そのタスクの保存された文脈から。"""
-        with self._lock:
+        with self._host._lock:
             context = self._gdb_context(thread)
             if context is not None:
                 values = []
@@ -128,18 +141,18 @@ class GdbTools:
         """コアのレジスタ（GDB の名前）を読む（_lock の中で）。読めないものは None。"""
         raw = _raw_names(names)
         try:
-            read = dict(zip(raw, self.target.read_core_registers_raw(raw)))
+            read = dict(zip(raw, self._host.target.read_core_registers_raw(raw)))
         except Exception:                                      # どれかが読めない: 1 つずつ
             read = {}
             for name in raw:
                 try:
-                    read[name] = self.target.read_core_register_raw(name)
+                    read[name] = self._host.target.read_core_register_raw(name)
                 except Exception:
                     read[name] = None
         return _combine(names, read)
 
     def gdb_write_registers(self, values: dict[str, int], thread: int | None = None) -> None:
-        with self._lock:
+        with self._host._lock:
             if self._gdb_context(thread) is not None:
                 raise RuntimeError("止まっているタスクのレジスタ（保存された文脈）は書けない。実行中のタスクを選ぶ")
             names, words = [], []
@@ -151,17 +164,17 @@ class GdbTools:
                 else:
                     names.append(name)
                     words.append(value)
-            self.target.write_core_registers_raw(names, words)
-            self.target.flush()
+            self._host.target.write_core_registers_raw(names, words)
+            self._host.target.flush()
 
     def gdb_read_memory(self, address: int, length: int) -> bytes:
-        with self._lock:
-            return bytes(self.target.read_memory_block8(address, length))
+        with self._host._lock:
+            return bytes(self._host.target.read_memory_block8(address, length))
 
     def gdb_write_memory(self, address: int, data: bytes) -> None:
-        with self._lock:
-            self.target.write_memory_block8(address, list(data))
-            self.target.flush()
+        with self._host._lock:
+            self._host.target.write_memory_block8(address, list(data))
+            self._host.target.flush()
 
     # --- ブレークポイント・ウォッチポイント ----------------------------------------------------------
 
@@ -169,7 +182,7 @@ class GdbTools:
         """kind: break（Z0）/ hbreak（Z1）/ write（Z2）/ read（Z3）/ access（Z4）。"""
         if kind not in _KINDS:
             raise ValueError(f"kind {kind!r}")
-        with self._lock:
+        with self._host._lock:
             if kind in ("break", "hbreak"):
                 if insert:
                     self._gdb_break(owner, address, kind == "hbreak")
@@ -181,10 +194,10 @@ class GdbTools:
                 self._gdb_unwatch(owner, address, _KINDS[kind])
 
     def _gdb_break(self, owner: str, address: int, hardware: bool) -> None:
-        dbg = self.dbg
+        dbg = self._host.dbg
         if address not in dbg.breakpoints:
             if hardware:
-                if not self.target.set_breakpoint(address, Target.BreakpointType.HW):
+                if not self._host.target.set_breakpoint(address, Target.BreakpointType.HW):
                     raise RuntimeError(f"0x{address:08X} にハードのブレークポイントを置けない（比較器が足りない）")
             else:
                 dbg.breakpoint(address)
@@ -201,17 +214,17 @@ class GdbTools:
         if owners:
             return
         del self._gdb_breaks[address]
-        dbg = self.dbg
+        dbg = self._host.dbg
         if dbg.breakpoints.get(address, "").startswith(GDB_MARK):   # 後から AI・画面が置き直していれば残す
-            if self._gdb_trace_wants(address):
-                self._gdb_trace_adopt(address)                 # トレースポイントが使い続ける
+            if self._host._gdb_trace_wants(address):
+                self._host._gdb_trace_adopt(address)                 # トレースポイントが使い続ける
             else:
                 dbg.remove_breakpoint(address)
 
     def _gdb_watch(self, owner: str, address: int, length: int, kind: str) -> None:
         """Z2/Z3/Z4。同じ番地に種類・長さの違うものが重なるなら、全部を満たす 1 つ（読みと書きなら access・長い方の長さ）
         を置く（比較器は番地ごとに 1 つの表）。持ち主ごとに（種類・長さ）を覚え、外すときは残りで置き直す。"""
-        dbg = self.dbg
+        dbg = self._host.dbg
         if address in dbg.watches and address not in self._gdb_watches:
             return                                             # AI・画面が置いたもの: 共有する（持ち主にならない）
         wants = self._gdb_watches.setdefault(address, {})
@@ -234,12 +247,12 @@ class GdbTools:
         kinds = {k for k, _ in wants}
         kind = kinds.pop() if len(kinds) == 1 else "access"
         length = max(n for _, n in wants)
-        current = self.dbg.watches.get(address)
+        current = self._host.dbg.watches.get(address)
         if current is not None and (current.kind, current.size) == (kind, length):
             return
         if current is not None:
-            self.dbg.remove_watchpoint(address)
-        self.dbg.watchpoint(address, length, kind)
+            self._host.dbg.remove_watchpoint(address)
+        self._host.dbg.watchpoint(address, length, kind)
 
     def _gdb_unwatch(self, owner: str, address: int, kind: str | None = None) -> None:
         """kind を渡せばその種類の求めだけ外す（z2/z3/z4）。持ち主が残る求めがあれば置き直す。"""
@@ -256,28 +269,28 @@ class GdbTools:
             self._gdb_watch_apply(address)
             return
         del self._gdb_watches[address]
-        self.dbg.remove_watchpoint(address)
+        self._host.dbg.remove_watchpoint(address)
 
     # --- 実行 ------------------------------------------------------------------------------------
 
     def gdb_resume(self) -> None:
         """再開する（いまの PC のブレークポイントは 1 命令踏み越える。セミホスティング・動作のあるブレークポイントは
         背景の見張りと gdb_poll が処理する）。"""
-        with self._lock:
-            self._gdb_exit_seen = self._sh_exit
-            self.dbg.resume()
-            self._watch_stops(True)
+        with self._host._lock:
+            self._gdb_exit_seen = self._host._sh_exit
+            self._host.dbg.resume()
+            self._host._watch_stops(True)
 
     def gdb_step(self) -> dict:
         """1 命令進める（割り込みは止めたまま。いまの PC のブレークポイントは外して進め、置き直す）。止まった様子を返す。"""
-        with self._lock:
-            self._watch_stops(False)
+        with self._host._lock:
+            self._host._watch_stops(False)
             self._gdb_step_over()
             return self._gdb_stop()
 
     def _gdb_step_over(self) -> None:
         """1 命令進める（_lock の中で）。いまの PC のブレークポイントは外して進め、置き直す。"""
-        target, dbg = self.target, self.dbg
+        target, dbg = self._host.target, self._host.dbg
         pc = target.read_core_register("pc")
         if pc in dbg.breakpoints:
             bp = target.find_breakpoint(pc)
@@ -291,40 +304,40 @@ class GdbTools:
             target.step()
 
     def gdb_halt(self) -> None:
-        with self._lock:
-            self.target.halt()
-            self._watch_stops(False)
+        with self._host._lock:
+            self._host.target.halt()
+            self._host._watch_stops(False)
 
     def gdb_reset(self, halt: bool) -> dict:
-        with self._lock:
-            return self.target_reset(halt)
+        with self._host._lock:
+            return self._host.target_reset(halt)
 
     def gdb_poll(self, console_from: int = 0) -> dict:
         """実行中の見張り: {"stop": 止まっていれば様子（gdb_stop と同じ）/ None, "console": console_from より後の
         セミホスティングの出力, "console_next": 次に渡す位置}。"""
-        with self._lock:
-            target = self.target
+        with self._host._lock:
+            target = self._host.target
             stop = None
             if target.get_state() == Target.State.HALTED:
-                if self._sh_watch:
-                    self._service_in_background()              # 続けるべき停止なら再開される
+                if self._host._sh_watch:
+                    self._host._service_in_background()              # 続けるべき停止なら再開される
                 if target.get_state() == Target.State.HALTED:
                     stop = self._gdb_stop()
-                    if self._sh_exit is not None and self._sh_exit is not self._gdb_exit_seen:
-                        stop["exit"] = self._sh_exit["code"] or 0
-                        self._gdb_exit_seen = self._sh_exit
-        with self._observe:
-            log = self._logs.get(SEMIHOSTING)
+                    if self._host._sh_exit is not None and self._host._sh_exit is not self._gdb_exit_seen:
+                        stop["exit"] = self._host._sh_exit["code"] or 0
+                        self._gdb_exit_seen = self._host._sh_exit
+        with self._host._observe:
+            log = self._host._logs.get(SEMIHOSTING)
             data, start, _ = log.read(console_from) if log is not None else (b"", console_from, 0)
         return {"stop": stop, "console": data, "console_next": start + len(data)}
 
     def gdb_stop(self) -> dict:
         """いま止まっている様子（GDB の '?'）。"""
-        with self._lock:
+        with self._host._lock:
             return self._gdb_stop()
 
     def _gdb_stop(self) -> dict:
-        target = self.target
+        target = self._host.target
         pc, sp = target.read_core_registers_raw(["pc", "sp"])
         reason = _REASONS.get(target.get_halt_reason(), "unknown")
         stop = {"reason": reason, "pc": pc, "sp": sp, "thread": self._gdb_running_task()}
@@ -338,7 +351,7 @@ class GdbTools:
                 stop["breakpoint"] = kind
         elif reason != "step":
             try:
-                report = self.target_fault()
+                report = self._host.target_fault()
             except Exception:                                  # 故障レジスタが読めない: 原因を添えないだけ
                 report = {"faulted": False}
             if report.get("faulted"):
@@ -349,7 +362,7 @@ class GdbTools:
     def _gdb_break_kind(self, address: int) -> str | None:
         """その番地のデバッガのブレークポイントの種類: sw（BKPT 命令を書いた）/ hw（比較器）/ None（無い。
         プログラムの中の BKPT 命令等）。"""
-        bp = self.target.find_breakpoint(address)
+        bp = self._host.target.find_breakpoint(address)
         if bp is None:
             return None
         return "sw" if bp.type == Target.BreakpointType.SW else "hw"
@@ -358,13 +371,13 @@ class GdbTools:
         """どのウォッチポイントが成立したか（DWT の FUNCTION の MATCHED と COMP）。MATCHED が無ければ None（ウォッチ
         ポイントが 1 つだけでも、それと決めない: MATCHED は読むと消え、ほかの DWT の比較器が止めることもある）。
         GDB には番地の無い停止（T05）で伝わる。"""
-        watches = self.dbg.watches
+        watches = self._host.dbg.watches
         if not watches:
             return None
         try:
-            for n in range(self.target.read32(DWT_CTRL) >> 28):
-                if self.target.read32(DWT_FUNCTION0 + 16 * n) & DWT_MATCHED:
-                    comp = self.target.read32(DWT_COMP0 + 16 * n)
+            for n in range(self._host.target.read32(DWT_CTRL) >> 28):
+                if self._host.target.read32(DWT_FUNCTION0 + 16 * n) & DWT_MATCHED:
+                    comp = self._host.target.read32(DWT_COMP0 + 16 * n)
                     for w in watches.values():
                         if w.address <= comp < w.address + w.size:
                             return w
@@ -377,11 +390,11 @@ class GdbTools:
     def gdb_threads(self) -> dict:
         """止まっているターゲットのタスクの一覧 {"threads": [{"id"（TCB の番地）, "name", "state", "priority",
         "current"}], "note"}。RTOS が無い・ELF が無い・読めないなら threads は空で、note に理由。"""
-        with self._lock:
-            if self._symbols is None:
+        with self._host._lock:
+            if self._host._symbols is None:
                 return {"threads": [], "note": "ELF が読み込まれていない（monitor elf <path>）"}
             try:
-                kernel = self._kernel()
+                kernel = self._host._kernel()
                 current = kernel.current()
                 tasks = kernel.tasks()
             except Exception as e:                             # RTOS が無い・スケジューラの前・壊れたリスト
@@ -390,10 +403,10 @@ class GdbTools:
                                  "current": t.handle == current} for t in tasks], "note": None}
 
     def _gdb_running_task(self) -> int | None:
-        if self._symbols is None:
+        if self._host._symbols is None:
             return None
         try:
-            return self._kernel().current() or None
+            return self._host._kernel().current() or None
         except Exception:
             return None
 
@@ -401,7 +414,7 @@ class GdbTools:
         """thread が実行中でないタスクなら、その保存された文脈の読み手。実レジスタで読むなら None。"""
         if thread is None:
             return None
-        kernel = self._kernel()
+        kernel = self._host._kernel()
         if kernel.current() == thread:
             return None
         return kernel.task_access(thread)
@@ -411,12 +424,12 @@ class GdbTools:
     def gdb_flash(self, blocks: list[tuple[int, bytes]]) -> dict:
         """GDB の load（vFlashWrite で集めた番地とデータ）を Flash に書く。消去は書く区画（セクタ）ごとで、書かない
         部分は消えたまま（GDB の vFlashErase と同じ結果）。リセットしない（GDB が PC を入口に置く）。"""
-        with self._lock:
+        with self._host._lock:
             started = time.monotonic()
-            self.target                                        # 未接続ならここで失敗する
-            self._require_halt_mode("Flash の書き込み")
-            loader = MemoryLoader(self._debug, keep_unwritten=False)
-            fbp = self._flash_bp_active()
+            self._host.target                                        # 未接続ならここで失敗する
+            self._host._require_halt_mode("Flash の書き込み")
+            loader = MemoryLoader(self._host._debug, keep_unwritten=False)
+            fbp = self._host._flash_bp_active()
             image = Image([Segment(a, bytes(d)) for a, d in blocks if d], "bin", "gdb")
             if fbp is not None:
                 image = fbp.fold(image)                        # 書くセクタの BKPT は元の中身にして一緒に書く（flash() と同じ）

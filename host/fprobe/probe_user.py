@@ -1,8 +1,8 @@
 """Probe の道具: ターゲットが出す値とイベント（U16）。ITM のポート・RTT のチャンネルを型で解釈した値と、fprobe_user.h の
 名前付きイベント（mark / start / stop / value）を集め、区間を対にして集計する。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・swo_start・_swo_baud、
-WindowTools（出来事の窓）、ObserveTools（RTT の受信の横取り _rtt_listen）を使う。機器に触るのは必ず _lock の中。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・session・_symbols・_recorder・swo_start・_swo_baud、
+WindowService（出来事の窓）、ObserveService（RTT の受信の横取り _rtt_listen）を使う。機器に触るのは必ず _lock の中。
 
 - ITM: SWO のバイト（イベント記録・記録の stream swo。デバイスの時刻）を窓で読む。SWO の受信のエンドポイント
   （swo_read / swo_decode）は読まない（取り合わない。rtos.timeline の方法 itm と同時に使える）。
@@ -26,8 +26,9 @@ from .rtos.kernel_trace import KERNEL_PORT, PAYLOAD_PORT
 from .rtos.timeline import TRACE_PORT, itm_packets
 from .usertrace import (EVENT_PORT, VALUE_PORT, Channel, UserDecoder, elf_strings, interval_stats, pair_intervals,
                         record_rows, value_stats)
+from .probe_service import HostView
 
-__all__ = ["UserTools"]
+__all__ = ["UserService"]
 
 RECORDS_LIMIT = 500                      # user_trace_get が 1 回に返す数の既定
 _RESERVED = {TRACE_PORT: "RTOS のトレースフック", KERNEL_PORT: "RTOS のトレースフック",
@@ -51,10 +52,17 @@ class _UserRun:
     stopped: bool = False
 
 
-class UserTools:
-    """ターゲットが出す値とイベント（Probe の mixin）。"""
+class UserService:
+    """ターゲットが出す値とイベント（Probe のサービス）。"""
 
-    def _init_user(self) -> None:
+    API = ("user_trace_get", "user_trace_start", "user_trace_stats", "user_trace_stop")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_close_window", "_debug", "_lock", "_open_window", "_recorder", "_rtt", "_rtt_listen", "_rtt_unlisten",
+             "_swo_baud", "_symbols", "_window_events", "_window_info", "session", "swo_start", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._user_run: _UserRun | None = None
 
     def user_trace_start(self, channels: list[dict] | None = None, events: bool = True,
@@ -75,12 +83,12 @@ class UserTools:
                 raise ValueError(f"ITM のポート {c.index} は{_RESERVED[c.index]}が使う")
             if c.source == "itm" and events and c.index in (EVENT_PORT, VALUE_PORT):
                 raise ValueError(f"ITM のポート {EVENT_PORT}・{VALUE_PORT} は名前付きイベントが使う（events=false なら使える）")
-        with self._lock:
+        with self._host._lock:
             if self._user_run is not None and not self._user_run.stopped:
                 raise RuntimeError("値とイベントを取っている（user_trace_stop を先に）")
-            if rtt_channels and self._rtt is None:
+            if rtt_channels and self._host._rtt is None:
                 raise RuntimeError("RTT の受信を始めていない（rtt_start を先に）")
-            device = self.session.device
+            device = self._host.session.device
             hz = device.capabilities().timebase_hz
             run = _UserRun(parsed, events, event_rtt_channel, itm_ports, rtt_channels, hz, ClockMap(hz))
             self._user_clock(run)
@@ -91,15 +99,15 @@ class UserTools:
                     if key in run.rtt_channels:
                         run.received.append((host_s, key, bytes(data)))
                 run.listener = listener
-                self._rtt_listen(listener)
-            if self._symbols is None:
+                self._host._rtt_listen(listener)
+            if self._host._symbols is None:
                 run.warnings.append("ELF が読み込まれていない（debug_elf_load）: 名前付きイベントの名前は番地で出る")
             self._user_run = run
             return self._user_state(run)
 
     def _user_start_itm(self, run: _UserRun, swo_baud: int | None, core_clock_hz: float | None) -> None:
         """受信を始め、窓を開いてから ITM（・TPIU）を設定する（_lock の中で）。"""
-        target = self.target
+        target = self._host.target
         writes = list(itm_port_writes(run.itm_ports[0]))[:3]          # DEMCR・鍵・TCR
         mask = sum(1 << p for p in run.itm_ports)
         writes.append(RegisterWrite(ITM_TER, mask, mask, f"ITM: ポート {run.itm_ports} を有効に"))
@@ -110,40 +118,40 @@ class UserTools:
             run.warnings += swo.warnings
             baud = round(swo.baud)
         if baud is not None:
-            self.swo_start(baud)
-        elif self._swo_baud is None:
+            self._host.swo_start(baud)
+        elif self._host._swo_baud is None:
             run.warnings.append("SWO の受信を始めていない（swo_start か swo_baud）: ITM の値は届かない")
-        run.window = self._open_window()
+        run.window = self._host._open_window()
         before = write_registers(target, writes)
         run.added_ter = mask & ~before.get(ITM_TER, 0)
 
     def _user_clock(self, run: _UserRun) -> None:
         """ホストの時刻とデバイスの時刻の組を 1 つ足す（_lock の中で。RTT の受信の時刻を写すため）。"""
         h0 = time.monotonic()
-        ticks = self.session.device.time()
+        ticks = self._host.session.device.time()
         h1 = time.monotonic()
         run.clock.add((h0 + h1) / 2, ticks, h1 - h0)
 
     def user_trace_stop(self) -> dict:
         """取るのを止め（足した ITM のポートを戻す）、要約を返す。記録中なら stream "user" に書く
         （value / mark / start / stop / interval）。"""
-        with self._lock:
+        with self._host._lock:
             run = self._user_run
             if run is None or run.stopped:
                 raise RuntimeError("値とイベントを取っていない（user_trace_start）")
             try:
                 self._user_clock(run)
-                if run.added_ter and self._debug is not None:
-                    current = self.target.read_memory(ITM_TER)
-                    self.target.write_memory(ITM_TER, current & ~run.added_ter)
+                if run.added_ter and self._host._debug is not None:
+                    current = self._host.target.read_memory(ITM_TER)
+                    self._host.target.write_memory(ITM_TER, current & ~run.added_ter)
             finally:
                 if run.listener is not None:
-                    self._rtt_unlisten(run.listener)
+                    self._host._rtt_unlisten(run.listener)
                 if run.window is not None:
-                    self._close_window(run.window)
+                    self._host._close_window(run.window)
                 run.stopped = True
         records, pairing, errors = self._user_build(run)
-        rec = self._recorder
+        rec = self._host._recorder
         if rec is not None:
             rec.add_many(record_rows(records, pairing.intervals))
         out = self._user_summary(run, records, pairing, errors)
@@ -158,13 +166,13 @@ class UserTools:
     def _user_build(self, run: _UserRun):
         """窓の SWO と RTT の受信を始めから解読し直す（取っている最中は、いまの時計の対応付けで）。"""
         if not run.stopped:
-            with self._lock:
+            with self._host._lock:
                 self._user_clock(run)
-        decoder = UserDecoder(run.channels, elf_strings(self._symbols) if self._symbols is not None else (lambda a: None),
+        decoder = UserDecoder(run.channels, elf_strings(self._host._symbols) if self._host._symbols is not None else (lambda a: None),
                               event_port=EVENT_PORT if run.events else None, event_rtt_channel=run.event_rtt_channel)
         records = []
         if run.window is not None:
-            data = [(t, b) for t, _, b in self._window_events(run.window, "swo")]
+            data = [(t, b) for t, _, b in self._host._window_events(run.window, "swo")]
             records += decoder.feed_itm(itm_packets(data))
         for host_s, channel, chunk in list(run.received):
             t, unc = run.clock.to_ticks(host_s)
@@ -183,7 +191,7 @@ class UserTools:
                    unmatched_stops=pairing.unmatched_stops, open_intervals=pairing.open,
                    stops_before_first_start=pairing.stops_before_first_start)
         if run.window is not None:
-            out["window"] = self._window_info(run.window, run.timebase_hz)
+            out["window"] = self._host._window_info(run.window, run.timebase_hz)
         if errors.get("lost"):
             out["warnings"].append("ITM があふれた・解読を誤った（errors の lost）: その間の値・イベントは無い")
         return out

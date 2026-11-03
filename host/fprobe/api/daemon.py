@@ -14,20 +14,25 @@ import asyncio
 import contextlib
 import contextvars
 import functools
+import html
 import dataclasses
 import enum
+import hashlib
+import hmac
 import itertools
 import json
 import math
+import os
 import re
 import secrets
 import time
+import urllib.parse
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
 from starlette.applications import Starlette
-from starlette.responses import FileResponse, HTMLResponse
+from starlette.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -38,6 +43,7 @@ from . import (API_VERSION, DEFAULT_PORT, E_DEVICE, E_INTERNAL, E_INVALID_PARAMS
 from .activity import ActivityLog, summarize
 from .arbiter import Arbiter, Client, HoldExpired, NotAllowed
 from .binary import BinaryResult, encode_frame
+from .permissions import FILE_NAME as PERMISSIONS_FILE, Permissions, prepare_permissions
 from .spec import InvalidParams, Spec, load_spec
 from ..gdb.server import GdbServer
 from ..home import fprobe_home
@@ -58,7 +64,16 @@ _IN_HOOK = contextvars.ContextVar("fprobe_in_hook", default=False)   # フック
 # 変えても届く。操作の記録の文字列に頼ると、読み直しが記録に残る場合に止まらなくなる）。値は通知の action
 RECORDING_METHODS = {"recording.open": "open", "recording.start": "start", "recording.stop": "stop"}
 RUN_METHODS = {"target.connect", "target.halt", "target.resume", "target.step", "target.reset", "target.flash",
-               "target.program_ram", "target.debug_mode.set", "debug.run_until_halt", "debug.step", "debug.call"}
+               "target.program_ram", "target.debug_mode.set", "debug.run_until_halt", "debug.step", "debug.call",
+               # Linux のプロセスの全コア停止デバッグ（attach している間、target.state はそのプロセスの止まった場所）
+               "linux.halt.debug.attach", "linux.halt.debug.run", "linux.halt.debug.halt", "linux.halt.debug.step",
+               "linux.halt.debug.close", "linux.halt.debug.select", "linux.halt.close"}
+# 止める操作: 受けた時点で（作業スレッドの順番を待たずに）機器の実装へ止める要求だけを渡す（backend.request_halt_now。
+# 長い待ち（linux.halt.debug.run 等）の中で全コアを止める）。保留される要求（一時停止中の human 以外）は渡さない
+INTERRUPT_METHODS = {"target.halt", "linux.halt.debug.halt"}
+# 状態の読み: 機器の実装が「作業スレッドを通さずに答えられる」と言えば（backend.read_unqueued が None 以外）、長い操作の
+# 後ろに並ばずに答える（Linux のプロセスの全コア停止デバッグ: 機器の錠だけを短く取る。attach の取り寄せ・長い run の間も）
+UNQUEUED_READS = {"target.status", "system.status"}
 BUILD_HELP = ("<!doctype html><meta charset=utf-8><title>fprobe</title>"
               "<p>画面がまだビルドされていません。<pre>cd host/ui\nnpm install\nnpm run build</pre>"
               "<p>API（ws://…/api）はこのままでも使えます。")
@@ -148,17 +163,20 @@ class _Connection:
         self.sending = 0                                   # 送り途中の通知の数（NOTIFY_LIMIT まで）
         self.dropped = 0                                   # 読まないので捨てた通知の数
         self.tasks: set[asyncio.Task] = set()
+        self.authed = False                                # 画面の cookie が合った（hello の token は要らない）
 
 
 class Daemon:
     def __init__(self, backend: Any, token: str | None, activity_dir: Path, spec: Spec, device: dict,
-                 watch_s: float = 1.0):
+                 watch_s: float = 1.0, permissions: Permissions | None = None):
         self.backend, self.token, self.spec, self.device, self.watch_s = backend, token, spec, device, watch_s
+        self.permissions = permissions                         # 許可の表（None = パスを確かめない。試験・ライブラリの使い方）
         self.target_state: dict | None = None                # 見張りが最後に見たターゲットの状態
         self.link_lost: dict | None = None                   # USB が切れて開き直した（B28）。ターゲットにつなぎ直すまで状態に出す
         self.boot = secrets.token_hex(4)                       # この起動の識別（記録の番号の振り直しを利用者が見分ける）
         self._wake: asyncio.Event | None = None
         self.runs = 0                                          # RUN_METHODS が終わった回数
+        self._moved = False                                    # RUN_METHODS が終わった後、まだ状態を読み直していない
         self.connections: set[_Connection] = set()
         self.guests: dict[int, Client] = {}                    # WebSocket でない利用者（GDB の接続）
         self.gdb_port: int | None = None                       # GDB サーバの待ち受けのポート
@@ -273,7 +291,39 @@ class Daemon:
         self._validate(method, params)
         return await self._invoke(client, method, params)
 
+    def _permit(self, method: str, params: dict) -> dict:
+        """PC のパスの引数（仕様の x-path）を許可の表で確かめ、解いた絶対パスに置き換えた引数を返す。表に無ければ _Rpc。"""
+        if self.permissions is None:
+            return params
+        rules = self.spec.methods[method].paths
+        if not rules:
+            return params
+        props = self.spec.methods[method].params.get("properties", {})
+        out = dict(params)
+        for name, (access, when) in rules.items():
+            value = params.get(name)
+            if value is None:
+                continue
+            if when is not None and not params.get(when, props.get(when, {}).get("default", False)):
+                continue
+            resolved = self.permissions.check(access, value)
+            if resolved is None:
+                shown = str(Path(value).expanduser().resolve())
+                what = "実行する" if access == "exec" else "書く"
+                raise _Rpc(E_NOT_ALLOWED,
+                           f"{method}: {name} の {shown} は許可の表に無い（{what}パスは {self.permissions.file} の "
+                           f"\"{access}\" に利用者が書く。API からは変えられない）",
+                           {"reason": "path_not_permitted", "param": name, "access": access, "path": shown,
+                            "permissions_file": None if self.permissions.file is None else str(self.permissions.file)})
+            out[name] = str(resolved)
+        return out
+
     async def _invoke(self, client: Client, method: str, params: dict, quiet: bool = False) -> Any:
+        if method == "session.permissions":
+            if self.permissions is None:
+                return {"checked": False, "file": None, "loaded": False, "created": False, "exec": [], "write": []}
+            return self.permissions.as_dict()
+        params = self._permit(method, params)
         if method == "session.status":
             return {"api_version": API_VERSION, "boot": self.boot, "device": self.device, "control": self.arbiter.state(),
                     "clients": self.clients(), "target": self.target_state, "gdb": {"port": self.gdb_port}}
@@ -290,8 +340,11 @@ class Daemon:
     def _hello(self, conn: _Connection, params: dict) -> dict:
         if conn.client is not None:
             raise _Rpc(E_NOT_ALLOWED, "session.hello は 1 回だけ（名乗り直すと一時停止・保留の持ち主が分からなくなる）")
-        if self.token is not None and not secrets.compare_digest(str(params.get("token") or ""), self.token):
-            raise _Rpc(E_NOT_ALLOWED, "トークンが違う（--lan のデーモンにはトークンが要る）")
+        # バイト列で比べる（compare_digest は ASCII でない str で TypeError を投げ、誤りの答えが内部の誤りになる）
+        if self.token is not None and not conn.authed and not secrets.compare_digest(
+                str(params.get("token") or "").encode("utf-8", "surrogatepass"), self.token.encode("utf-8", "surrogatepass")):
+            raise _Rpc(E_NOT_ALLOWED, "トークンが違う（このデーモンの合言葉は、起動した利用者の ~/.fprobe/daemon_token。"
+                                      "画面は /login で入れる）", {"reason": "token"})
         if params["api_version"] != API_VERSION:
             raise _Rpc(E_VERSION, f"API の版 {params['api_version']} はこのデーモン（{API_VERSION}）と合わない")
         conn.client = Client(next(self._ids), params["name"], params["role"], automated=params.get("automated"))
@@ -325,8 +378,8 @@ class Daemon:
             result = await asyncio.wrap_future(future)
             if event is not None and event != "halt":                 # halt の after は止まりを見つけたとき
                 await self._run_hooks(event, "after", client, operation)
-            if inline:
-                await self._observe(client, inline=True)
+            if moves:                    # 応答の前に状態を読み直す: 直後の session.status がこの操作の結果を返す
+                await self._observe(client, inline=inline)
         finally:
             if inline:
                 self._inline -= 1
@@ -354,10 +407,24 @@ class Daemon:
 
     async def _call(self, client: Client, method, params: dict, quiet: bool = False) -> Any:
         fn = getattr(self.backend, method.impl)
+        interrupt = getattr(self.backend, "request_halt_now", None)
+        if method.name in INTERRUPT_METHODS and interrupt is not None                 and not (self.arbiter.state()["paused"] and client.role != "human"):
+            interrupt()
         if method.caller:                                # 呼び出し元を実装へ（引数の仕様・記録には出さない）
             fn = functools.partial(fn, caller=_who(client))
         # quiet（画面の自動の読み）は状態を変えない読みにだけ効く。操作は必ず記録する
         record = method.record and not (quiet and (method.kind == "read" or method.observes))
+        unqueued = getattr(self.backend, "read_unqueued", None) if method.name in UNQUEUED_READS else None
+        if unqueued is not None:
+            try:
+                result = await asyncio.to_thread(unqueued, method.name, params)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as e:
+                code = E_NOT_CONNECTED if isinstance(e, NotConnected) else E_DEVICE
+                raise _Rpc(code, f"{type(e).__name__}: {e}", {"exception": type(e).__name__, "detail": str(e)}) from None
+            if result is not None:
+                return jsonable(result)
         try:
             if method.offline:
                 result = await self._read_offline(client, method.name, lambda: fn(**params), record, params)
@@ -427,14 +494,19 @@ class Daemon:
     def announce_clients(self) -> None:
         self.publish("clients", {"clients": self.clients()})
 
-    def _note(self, stream: str, kind: str, body: dict) -> None:
-        """機能の実装が共通の時間軸の記録（F3）を持っていれば、操作とターゲットの状態の変化を渡す（記録中だけ書かれる）。"""
+    def _note(self, stream: str, kind: str, body: dict, time_source: str = "host",
+              started_host_s: float | None = None) -> None:
+        """機能の実装が共通の時間軸の記録（F3）を持っていれば、操作とターゲットの状態の変化を渡す（記録中だけ書かれる）。
+        時刻は PC の時計（time_source: "host" = PC の出来事、"host_received" = PC が読んだターゲットの状態）。
+        started_host_s = 操作を受けた PC の単調時計の秒（記録が始まりも写す）。"""
         note = getattr(self.backend, "record_host_event", None)
         if note is not None:
-            note(stream, kind, body)
+            extra = {} if started_host_s is None else {"started_host_s": started_host_s}
+            note(stream, kind, body, time_source=time_source, **extra)
 
     def _ran(self) -> None:
         self.runs += 1
+        self._moved = True                               # 購読が無くても読み直す（session.status の target を古くしない）
         self._poke()
 
     def _poke(self) -> None:
@@ -446,13 +518,15 @@ class Daemon:
 
     async def watch(self) -> None:
         """ターゲットの状態の見張り: control の操作が終わるたびと watch_s ごとに、target.state の購読者か止まりの
-        フックがあれば、作業スレッドで状態を読み、変わったときだけ送る。読みは read なので一時停止中も動き、記録しない。"""
+        フックがあれば（コアを動かし得る操作の後は購読が無くても: session.status の target を古くしない）、作業スレッドで
+        状態を読み、変わったときだけ送る。読みは read なので一時停止中も動き、記録しない。"""
         self._wake = asyncio.Event()
         while True:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), self.watch_s)
             self._wake.clear()
-            if not any("target.state" in c.topics for c in self.connections) and not self._wants_stops():
+            moved, self._moved = self._moved, False
+            if not moved and not any("target.state" in c.topics for c in self.connections) and not self._wants_stops():
                 continue
             await self._observe()
 
@@ -464,7 +538,13 @@ class Daemon:
             self._observe_lock = asyncio.Lock()
         async with self._observe_lock:
             try:
-                state = jsonable(await asyncio.wrap_future(self.arbiter.submit(WATCHER, "read", self._guarded(self.backend.target_status))))
+                # 作業スレッドを通さずに読める状態（Linux のプロセスの全コア停止デバッグ: 長い待ちの間も配る）があればそれ
+                unqueued = getattr(self.backend, "target_status_unqueued", None)
+                state = await asyncio.to_thread(unqueued) if unqueued is not None else None
+                if state is None:
+                    state = await asyncio.wrap_future(self.arbiter.submit(WATCHER, "read",
+                                                                          self._guarded(self.backend.target_status)))
+                state = jsonable(state)
             except asyncio.CancelledError:
                 raise
             except BaseException as e:                   # 見張りは止めない
@@ -480,7 +560,7 @@ class Daemon:
             if state != previous:
                 self.target_state = state
                 self.publish("target.state", state)
-                self._note("target", "state", state)
+                self._note("target", "state", state, time_source="host_received")
                 stopped = (previous is not None and state.get("state") == "HALTED"
                            and (previous.get("state") != "HALTED" or previous.get("run") != state["run"]))
             if not self._wants_stops():
@@ -568,7 +648,7 @@ class Daemon:
             else:
                 outcome = {"error": str(error)}
             recorded = self.activity.record({**entry, **outcome, "seconds": seconds, "held_s": held})
-            self._note("host", "call", recorded)
+            self._note("host", "call", recorded, started_host_s=started)
         return record
 
 class StreamHost:
@@ -632,11 +712,19 @@ def _host_name(host: str) -> str:
 def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spec | None = None,
                device: dict | None = None, ui_dir: Path = UI_DIR, watch_s: float = 1.0, gdb_port: int | None = None,
                gdb_options: GdbOptions | None = None, gdb_role: str = "human", streams: list[dict] = (),
-               stream_logs: list[dict] = ()) -> Starlette:
+               stream_logs: list[dict] = (), permissions: Permissions | None = None) -> Starlette:
     """gdb_port を渡すと GDB サーバも開く（0 なら空いているポート。実際のポートは daemon.gdb_port）。GDB の接続の
     利用者の role は gdb_role（既定 human: IDE を操作するのは人。人の一時停止中も GDB の操作は通る）。
-    streams（stream_serve の引数の並び）・stream_logs（stream_log_start の引数の並び）は起動時に始める。"""
-    daemon = Daemon(backend, token, activity_dir, spec or load_spec(), device or device_of(None, None, None), watch_s)
+    streams（stream_serve の引数の並び）・stream_logs（stream_log_start の引数の並び）は起動時に始める。
+    permissions: 許可の表（None ならパスを確かめない。CLI は必ず読んで渡す）。token: 合言葉（None なら無し。CLI は必ず持つ）。"""
+    daemon = Daemon(backend, token, activity_dir, spec or load_spec(), device or device_of(None, None, None), watch_s,
+                    permissions)
+    session_value = None if token is None else session_cookie(token)
+
+    def has_session(cookies) -> bool:
+        given = cookies.get(SESSION_COOKIE)
+        return session_value is not None and given is not None and hmac.compare_digest(
+            given.encode("ascii", "replace"), session_value.encode("ascii"))
 
     async def api(ws: WebSocket) -> None:
         # ブラウザは WebSocket に同一生成元の制限をかけないので、訪れた Web ページがプローブを操作できてしまう。
@@ -652,6 +740,7 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
         if daemon.loop is None:                          # 起動の手順（lifespan）を通らない起動でも通知を配る
             daemon.loop = asyncio.get_running_loop()
         conn = _Connection(ws)
+        conn.authed = has_session(ws.cookies)
         daemon.connections.add(conn)
         tasks: set[asyncio.Task] = set()
 
@@ -684,7 +773,7 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
                                         "error": {"code": E_INVALID_PARAMS,
                                                   "message": f"JSON に無い字句 {e.args[0]} は使えない（数は有限の値）"}})
                     continue
-                except ValueError:
+                except (ValueError, RecursionError):        # 深すぎる入れ子は RecursionError（受信の輪から漏らさない）
                     await ws.send_json({"jsonrpc": "2.0", "id": None,
                                         "error": {"code": E_PARSE, "message": "JSON として読めない"}})
                     continue
@@ -706,10 +795,30 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
             for task in tasks:
                 task.cancel()
 
-    async def index(request) -> FileResponse | HTMLResponse:
+    async def index(request) -> FileResponse | HTMLResponse | RedirectResponse:
+        if token is not None and not has_session(request.cookies):
+            return RedirectResponse("/login", status_code=303)
         page = ui_dir / "index.html"
         # 作り直すと assets の名前が変わるので、ページは毎回確かめさせる（古いページが消えた資産を指して白くならない）
         return FileResponse(page, headers={"Cache-Control": "no-cache"}) if page.exists() else HTMLResponse(BUILD_HELP)
+
+    async def login(request) -> HTMLResponse | RedirectResponse:
+        """画面の合言葉を 1 回だけ入れてもらい、HttpOnly の cookie にする（URL に合言葉を載せない）。"""
+        if token is None:
+            return RedirectResponse("/", status_code=303)
+        if request.method == "GET":
+            return HTMLResponse(_login_page(""))
+        origin, host = request.headers.get("origin"), request.headers.get("host", "")
+        if origin is not None and origin not in (f"http://{host}", f"https://{host}"):
+            return HTMLResponse(_login_page("ほかのページからの送信は受けない"), status_code=403)
+        body = (await request.body()).decode("utf-8", "replace")
+        given = urllib.parse.parse_qs(body).get("token", [""])[0].strip()
+        if not secrets.compare_digest(given.encode("utf-8", "surrogatepass"), token.encode("utf-8", "surrogatepass")):
+            return HTMLResponse(_login_page("合言葉が違う"), status_code=403)
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(SESSION_COOKIE, session_value, max_age=SESSION_MAX_AGE_S, path="/", httponly=True,
+                            samesite="strict", secure=request.url.scheme == "https")
+        return response
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -728,27 +837,56 @@ def create_app(backend: Any, *, token: str | None, activity_dir: Path, spec: Spe
             await gdb.close()
         watcher.cancel()
 
-    app = Starlette(routes=[WebSocketRoute("/api", api), Route("/", index),
+    app = Starlette(routes=[WebSocketRoute("/api", api), Route("/", index), Route("/login", login, methods=["GET", "POST"]),
                             Mount("/assets", StaticFiles(directory=ui_dir / "assets", check_dir=False))],
                     lifespan=lifespan)
     app.state.daemon = daemon
     return app
 
 
-def lan_token(given: str | None, home: Path, renew: bool = False) -> str:
-    """--lan の合言葉。指定があればそれ（保存は変えない）。無ければ home/lan_token に保存したものを使い回し、無いか
-    renew なら作って保存する（デーモンを起動し直しても画面の URL が変わらない）。"""
+SESSION_COOKIE = "fprobe_session"
+SESSION_MAX_AGE_S = 365 * 24 * 3600
+TOKEN_FILE = "daemon_token"
+
+
+def session_cookie(token: str) -> str:
+    """画面の cookie の値（合言葉そのものでなく、合言葉から導いた値）。"""
+    return hmac.new(token.encode("utf-8", "surrogatepass"), b"fprobe-session", hashlib.sha256).hexdigest()
+
+
+def _login_page(message: str) -> str:
+    note = f"<p style=color:#b00>{html.escape(message)}</p>" if message else ""
+    return ("<!doctype html><meta charset=utf-8><title>fprobe</title>"
+            "<p>このデーモンの合言葉を入れてください（初めて開くときだけ。ブラウザが覚えます）。"
+            f"<p>合言葉は、デーモンを起動した利用者の <code>~/.fprobe/{TOKEN_FILE}</code> にあります。{note}"
+            "<form method=post action=/login><input name=token type=password autofocus size=40> "
+            "<button>開く</button></form>")
+
+
+def daemon_token(given: str | None, home: Path, renew: bool = False) -> str:
+    """デーモンの合言葉（127.0.0.1 でも --lan でも）。指定があればそれ（保存は変えない）。無ければ home/daemon_token に
+    保存したものを使い回し、無いか renew なら作って保存する（同じ利用者の Python・MCP はこのファイルを読む）。"""
     if given:
         return given
-    path = home / "lan_token"
+    path = home / TOKEN_FILE
     if not renew and path.is_file():
         saved = path.read_text(encoding="ascii").strip()
         if saved:
             return saved
     token = secrets.token_urlsafe(16)
     home.mkdir(parents=True, exist_ok=True)
-    path.write_text(token, encoding="ascii")
+    # 持ち主だけが読める（同じ PC のほかの利用者が読めばデーモンを操作できる）。前からあるファイルも狭める
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(f.fileno(), 0o600)
+        f.write(token)
     return token
+
+
+# Ethernet で開くとき、リンクの確立（ボードの書き込み直後の自動ネゴシエーション等）を待つ秒数（この入口の値。識別の READ を
+# この間だけ送り直し、送り直した回数は probe.info の link_open で返す。--eth-link-up-wait で変えられる）
+ETH_LINK_UP_WAIT_S = 15.0
 
 
 def main() -> None:
@@ -760,11 +898,16 @@ def main() -> None:
     parser.add_argument("--port", help="SerialLink の COM ポート")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     parser.add_argument("--eth", help="EthLink のボードの IP アドレス")
+    parser.add_argument("--eth-link-up-wait", type=float, default=ETH_LINK_UP_WAIT_S, metavar="SECONDS",
+                        help=f"--eth で開くとき、リンクの確立を待つ秒数（識別の READ をこの間だけ送り直す。既定 {ETH_LINK_UP_WAIT_S:g}）")
     parser.add_argument("--listen", type=int, default=DEFAULT_PORT, help="待ち受けるポート")
     parser.add_argument("--bitstreams", help="Primer の構成のビットストリームの置き場所（<dir>/<design>/top.fs。"
                                              "既定は FPROBE_BITSTREAMS か gateware/build）")
-    parser.add_argument("--lan", action="store_true", help="LAN にも開く（トークンが要る）")
-    parser.add_argument("--token", help="--lan のトークン（省略時は生成して表示）")
+    parser.add_argument("--lan", action="store_true", help="LAN にも開く（平文。暗号化するなら docs/guide/remote.md の SSH の転送）")
+    parser.add_argument("--token", help="合言葉（省略時は ~/.fprobe/daemon_token を使い回す。無ければ作る）")
+    parser.add_argument("--permissions", type=Path, help="許可の表（PC で実行してよいファイル・書いてよい場所。"
+                                                         f"既定 ~/.fprobe/{PERMISSIONS_FILE}。無ければ ~/.fprobe/out "
+                                                         "だけに書いてよい表を作る）")
     parser.add_argument("--gdb", type=int, metavar="PORT", help="GDB サーバを開くポート（例 3333。127.0.0.1 だけ）")
     parser.add_argument("--gdb-target", default="cortex_m",
                         help="GDB がつながったときにターゲットが未接続なら接続する pyOCD のターゲット名")
@@ -776,27 +919,38 @@ def main() -> None:
                              "例 rtt0=19021:telnet。RTT・SWO の受信は API で始める）")
     parser.add_argument("--stream-log", action="append", default=[], type=parse_stream_log, metavar="NAME=PATH[:time]",
                         help="流れをファイルに書く（繰り返せる。:time なら行の頭に時刻。例 rtt0=rtt0.log:time）")
-    parser.add_argument("--new-token", action="store_true", help="--lan の保存した合言葉を作り直す（URL が変わる）")
+    parser.add_argument("--new-token", action="store_true", help="保存した合言葉を作り直す（画面は /login で入れ直す）")
     args = parser.parse_args()
     from .. import probe_names
     try:
         probe_names.apply_to_args(args)
     except probe_names.ProbeNameError as e:
         parser.error(str(e))
-    token = lan_token(args.token, fprobe_home(), renew=args.new_token) if args.lan else None
-    if token:
-        print(f"トークン: {token}")
-    print(f"画面: http://127.0.0.1:{args.listen}/" + (f"#token={token}" if token else ""), flush=True)
+    from .permissions import PermissionsFileError
+    try:
+        permissions = prepare_permissions(args.permissions or fprobe_home() / PERMISSIONS_FILE, fprobe_home())
+    except PermissionsFileError as e:
+        parser.error(str(e))
+    # 合言葉は出力に出さない（MCP が起動したデーモンの出力は daemon.log に残る）。場所だけを出す
+    token = daemon_token(args.token, fprobe_home(), renew=args.new_token)
+    print(f"画面: http://127.0.0.1:{args.listen}/（初めては合言葉を入れる: "
+          f"{'--token で渡したもの' if args.token else fprobe_home() / TOKEN_FILE}）", flush=True)
+    if permissions.created:
+        print(f"許可の表を作った: {permissions.file}（初めての起動。書いてよい: {', '.join(map(str, permissions.write))}。"
+              "実行: なし。足すときはこのファイルを直してデーモンを起動し直す）", flush=True)
+    else:
+        print(f"許可の表: {permissions.file}", flush=True)
     if args.gdb is not None:
         print(f"GDB: target remote 127.0.0.1:{args.gdb}", flush=True)
     for s in args.stream:
         print(f"流れ {s['stream']}: 127.0.0.1:{s['port']}（{s['protocol']}）", flush=True)
-    backend = Probe(args.serial, args.port, args.baud, args.eth, bitstreams=args.bitstreams)
+    backend = Probe(args.serial, args.port, args.baud, args.eth, bitstreams=args.bitstreams,
+                    link_up_wait_s=args.eth_link_up_wait if args.eth else None)
     backend.ui_state_persist(fprobe_home() / "ui_state.json")   # 信号の定義・システム解析の表等を再起動を越えて
     app = create_app(backend, token=token, activity_dir=fprobe_home() / "activity",
                      device=device_of(args.serial, args.port, args.eth), gdb_port=args.gdb,
                      gdb_options=GdbOptions(args.gdb_target, args.gdb_frequency), gdb_role=args.gdb_role,
-                     streams=args.stream, stream_logs=args.stream_log)
+                     streams=args.stream, stream_logs=args.stream_log, permissions=permissions)
     try:
         uvicorn.run(app, host="0.0.0.0" if args.lan else "127.0.0.1", port=args.listen, log_level="warning")
     finally:

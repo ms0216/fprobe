@@ -44,7 +44,8 @@ def recording(tmp_path):
         ("annotation", "mark", o + 280, 0, 0, {"text": "ここで化けた"}, None, 12.0),
         ("annotation", "uart.byte", o + 50, 0x41, 0, {"protocol": "uart", "text": "A", "value": 0x41,
                                                       "error": None, "fields": None}, o + 150),
-        ("host", "call", o + 950, 0, 0, {"client": "mcp", "method": "target.halt", "seconds": 0.0000005}, None, 30.0),
+        ("host", "call", o + 950, 0, 0, {"client": "mcp", "method": "target.halt", "seconds": 0.0000005,
+                                           "t_start": o + 900}, None, 30.0),
         ("target", "state", o + 960, 0, 0, {"state": "halted"}),
     ])
     rec.add_waveform(_wave("0011100"), start_ticks=o + 10)

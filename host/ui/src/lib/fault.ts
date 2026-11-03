@@ -1,5 +1,7 @@
-// Fault Analyzer（STM32CubeIDE）・Fault exception viewer（IAR）の計算（Svelte に依らない）: 止まった場所が故障の
-// ハンドラかの判定、故障で止まったら開く見張り、target.fault の結果の整理（原因のレジスタ・積まれたレジスタ・文字の要約）。
+// Fault Analyzer（STM32CubeIDE）・Fault exception viewer（IAR）の見せ方（Svelte に依らない）: 故障で止まったら開く見張り、
+// target.fault の結果の整理（原因のレジスタ・積まれたレジスタ・文字の要約）。故障かどうかは API の事実（faulted・
+// exception.fault）を読むだけで、画面は例外名の表を持たない。
+import type { FaultReport } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection } from "./api";
 
 export interface FaultCause {
@@ -27,25 +29,11 @@ export interface FaultFrame {
 }
 
 /** target.fault の結果（fprobe.fault.analyze） */
-export interface FaultReport {
-  architecture: string;
-  exception: { number: number; name: string } | null;
-  causes: FaultCause[];
-  faulted: boolean;
-  halt_reasons?: FaultCause[];
-  registers?: Record<string, number | null>;   // CFSR・HFSR・DFSR・MMFAR・BFAR・CPACR（ARMv7-M / v8-M Mainline）
-  locations?: Record<string, { address: number; size: number }>;   // それらの番地（target.memory.write で書ける）
-  write_one_to_clear?: string[];               // 1 を書いたビットが消えるレジスタ（CFSR・HFSR・DFSR）
-  fault_address?: FaultPlace;
-  frame?: FaultFrame | null;
-}
+export type { FaultReport };
 
-/** 故障の例外（IPSR 3〜7） */
-export const FAULT_EXCEPTIONS = new Set(["HardFault", "MemManage", "BusFault", "UsageFault", "SecureFault"]);
-
-/** target.fault の結果が故障を示す（故障のビットが立っている、または故障の例外の中） */
+/** target.fault の結果が故障を示す（API の faulted = 故障のビット、または exception.fault = 故障の例外の中） */
 export function isFault(report: FaultReport | null | undefined): boolean {
-  return !!report && (report.faulted || (!!report.exception && FAULT_EXCEPTIONS.has(report.exception.name)));
+  return !!report && (report.faulted || !!report.exception?.fault);
 }
 
 type Call = Pick<DaemonConnection, "call">["call"];
@@ -54,7 +42,7 @@ interface TargetSource {
 }
 
 /** 故障で止まったら open() を呼ぶ（IAR の Fault exception viewer の自動で開く動き）。止まるたびに target.fault（quiet）で
- *  確かめ、今いる例外（IPSR）が故障の例外なら開く。関数の名前では決めない。CFSR の故障のビットは消すまで残るので、
+ *  確かめ、API が故障の例外の中（exception.fault）と返したら開く。関数の名前では決めない。CFSR の故障のビットは消すまで残るので、
  *  それだけでは開かない。同じ止まり（pc と実行の番号）では 1 回だけ。やめる関数を返す */
 export function watchFaults(call: Call, app: TargetSource, open: () => void): () => void {
   let last: string | undefined;
@@ -67,7 +55,7 @@ export function watchFaults(call: Call, app: TargetSource, open: () => void): ()
     if (key === last) return;
     last = key;
     call("target.fault", {}, { quiet: true }).then((r: FaultReport) => {
-      if (key === last && !!r?.exception && FAULT_EXCEPTIONS.has(r.exception.name)) open();
+      if (key === last && !!r?.exception?.fault) open();
     }, () => {});
   });
 }

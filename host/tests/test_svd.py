@@ -199,3 +199,36 @@ def test_find_svd_in_pyocd_builtin_zip(tmp_path, monkeypatch):
     found = find_svd("MINI1")
     assert (found.origin, found.member) == ("pyocd", "MINI1.svd")
     assert load_device("MINI1").name == "MINI1"
+
+
+def test_a_missing_svd_error_lists_the_names_found_in_every_searched_place(tmp_path, monkeypatch):
+    # 見つからないとき、探した場所ごとに、そこにある SVD の名前を全部載せる（使う側が正しい名前を選べる。使いやすさの評価
+    # 2026-11-03: STM32F401xe を渡した担当は、同梱が STM32F401 だと知る手がかりが無かった）。近い名前を選んで当てはめはしない
+    archive = tmp_path / "svd_data.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("MINI1.svd", MINI.read_bytes())
+        z.writestr("readme.txt", b"x")                                      # SVD でないものは載せない
+    user = tmp_path / "svd"
+    user.mkdir()
+    (user / "MY_PART.svd").write_text(MINI.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("FPROBE_SVD_PATH", str(user))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")             # 利用者の場所が無い
+    monkeypatch.setattr("fprobe.svd._pyocd_zip", lambda: archive)
+    with pytest.raises(FileNotFoundError) as caught:
+        load_device("STM32F401xe")                                          # 同梱は STM32F401: 前方一致では選ばない
+    text = str(caught.value)
+    assert "STM32F401xe" in text
+    assert f"{user}: MY_PART" in text                                       # 環境変数の場所の名前
+    assert f"{BUNDLED_DIR}: STM32F401" in text                              # 同梱の名前
+    assert "pyOCD の内蔵: MINI1（1 件）" in text and "readme" not in text
+    assert str(tmp_path / "home" / ".fprobe" / "svd") + "（無い）" in text    # 無い場所は無いと書く
+
+
+def test_available_svds_returns_the_same_names_as_the_error(tmp_path, monkeypatch):
+    from fprobe.svd import available_svds
+    monkeypatch.delenv("FPROBE_SVD_PATH", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr("fprobe.svd._pyocd_zip", lambda: None)
+    places = dict((str(p), names) for _, p, names in available_svds())
+    assert places[str(BUNDLED_DIR)] == ["STM32F401"]
+    assert places[str(tmp_path / "home" / ".fprobe" / "svd")] is None

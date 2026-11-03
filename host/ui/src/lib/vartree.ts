@@ -3,10 +3,11 @@
 // 値の形（debug.evaluate / debug.frame_variables / watch.*）: どの値も kind（値の種類。デーモンが DWARF の型で決めた
 // 事実）を持つ object。画面は kind を読むだけで、キーの有無・型の名前から種類を推さない:
 //   int・float・bool → {kind, value}（float の NaN・無限大は value が "nan" "inf" "-inf"）、bytes → {kind, hex}、
-//   enum → {kind, name, value}、pointer → {kind, address, to, symbol?, string?}、struct → {kind, members}、
-//   array → {kind, length, items, string?}（items が length より少なければ max_elements で切った）、
+//   enum → {kind, name, value}、pointer → {kind, address, to, deref（先を読めるか）, symbol?, string?}、struct → {kind, members}、
+//   array → {kind, element_type, length, items, string?}（items が length より少なければ max_elements で切った）、
 //   unavailable → {kind, reason}
 // kind の無いもの（古い形で残った記録の値等）は "none": JSON のまま出す（形を推して読み替えない）。
+// 型の文字（"uint32_t[4]" 等）は解釈しない: 要素の型・先を読めるかはデーモンの欄（element_type・deref）を読む。
 //
 // 構造体・配列の中身は値に入っているのでその場で子にする。ポインタの先は展開したときに `*式` を読む（遅延。
 // VS Code・Ozone と同じ）。子の式（`a.b`・`a[2]`・`p->x`）はそのまま debug.evaluate / debug.write_expression に渡せる。
@@ -101,11 +102,6 @@ function brief(v: unknown): string {
   }
 }
 
-/** void・関数へのポインタは先を読まない */
-function derefable(p: { address: number; to: string }): boolean {
-  return p.address !== 0 && !/^(const |volatile )*void$/.test(p.to.trim()) && !/\(/.test(p.to);
-}
-
 export function expandable(v: unknown): boolean {
   switch (kindOf(v)) {
     case "struct":
@@ -113,7 +109,7 @@ export function expandable(v: unknown): boolean {
     case "array":
       return (v as { length: number }).length > 0;
     case "pointer":
-      return derefable(v as { address: number; to: string });
+      return (v as { deref?: boolean }).deref === true;      // デーモンの事実（0 番地・void・関数は false。古い値には無い）
     default:
       return false;
   }
@@ -134,17 +130,6 @@ export function derefExpr(expr: string): string {
   return `*${wrap(expr)}`;
 }
 
-/** 型の文字から要素・指す先の型（"uint32_t[4]" → "uint32_t"、"struct S *" → "struct S"） */
-export function elementType(type: string | undefined): string | undefined {
-  const m = type ? /^(.*?)\s*\[\d*\]$/.exec(type.trim()) : null;
-  return m ? m[1] : undefined;
-}
-
-export function pointeeType(type: string | undefined): string | undefined {
-  const m = type ? /^(.*?)\s*\*\s*(const\s*)?$/.exec(type.trim()) : null;
-  return m ? m[1] : undefined;
-}
-
 const ANONYMOUS = /^<anonymous@\d+>$/;
 
 /** 値に入っている子（構造体のメンバー・配列の要素。切った配列は読んだ分）。
@@ -152,11 +137,11 @@ const ANONYMOUS = /^<anonymous@\d+>$/;
 export function childrenOf(node: VarNode, members: Record<string, string> = {}): VarNode[] {
   const v = node.value as Record<string, any>;
   const base = node.expr;
-  const element = elementType(node.type);
   switch (kindOf(v)) {
     case "array":
       return (v.items as unknown[]).map((x, i) => ({
-        key: `${node.key}[${i}]`, name: `[${i}]`, expr: base === null ? null : `${wrap(base)}[${i}]`, type: element, value: x,
+        key: `${node.key}[${i}]`, name: `[${i}]`, expr: base === null ? null : `${wrap(base)}[${i}]`,
+        type: v.element_type as string | undefined, value: x,
       }));
     case "struct":
       return Object.entries(v.members as object).map(([name, x]) => ({
@@ -178,13 +163,13 @@ export function pointerChildren(node: VarNode, target: { type?: string; value: u
     }));
   }
   return [{ key: `${node.key}*`, name: `*${node.name}`, expr: expr === null ? null : derefExpr(expr),
-            type: target.type ?? pointeeType(node.type), value: target.value }];
+            type: target.type, value: target.value }];
 }
 
-/** 構造体の型の名前（メンバーの型を debug.type_info で引く）。配列・ポインタは null */
-export function structType(type: string | undefined): string | null {
-  if (!type || elementType(type) || pointeeType(type)) return null;
-  return type.trim();
+/** メンバーの型を debug.type_info で引く型の名前: 値が構造体（デーモンの kind）ならその型（API が返した名前のまま）。
+ *  ほかは null（型の文字は解釈しない） */
+export function structType(value: unknown, type: string | undefined): string | null {
+  return kindOf(value) === "struct" && type ? type : null;
 }
 
 /** 書く値の文字 → debug.write_expression の value（整数・小数・真偽は 1/0、ほかは列挙の名前として文字のまま） */

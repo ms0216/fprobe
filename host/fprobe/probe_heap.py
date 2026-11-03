@@ -1,8 +1,8 @@
 """Probe の道具: ヒープの解析（U27）。走査（使用量・断片化・壊れ）と、malloc / free の記録（ブレークポイント）からの
 呼び出し元ごとの生きている確保（リークかは判定しない）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・dbg・_symbols・_where / _place_of・
-_record_host・_watch_stops と、BreakpointActions の _break_hooks（道具が置くブレークポイントの処理）を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・dbg・_symbols・_where / _place_of・
+_record_host・_watch_stops と、BreakpointService の _break_hooks（道具が置くブレークポイントの処理）を使う。
 機器に触るのは必ず _lock の中。
 
 記録の方法（ブレークポイント）: 確保の関数（FreeRTOS は pvPortMalloc、newlib は _malloc_r）の入口で大きさと戻り先を
@@ -24,8 +24,9 @@ from pyocd.core.target import Target
 
 from .debug import PyocdAccess
 from .heap import ALLOCATORS, ISSUES_LIMIT, SERIES_POINTS, AllocationTracker, SymbolTable, detect, scan
+from .probe_service import HostView
 
-__all__ = ["HeapTools"]
+__all__ = ["HeapService"]
 
 TOOL = "heap_trace"
 EVENT_LIMIT = 10_000
@@ -58,15 +59,22 @@ class _HeapTrace:
     notes: list[str] = field(default_factory=list)
 
 
-class HeapTools:
-    def _init_heap(self) -> None:
+class HeapService:
+    API = ("heap_scan", "heap_trace_events", "heap_trace_report", "heap_trace_start", "heap_trace_stop")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_heap_trace_detached",)
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_break_hooks", "_lock", "_place_of", "_record_host", "_symbols", "_watch_stops", "dbg", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._heap_trace: _HeapTrace | None = None
         self._heap_last: dict[str, dict[int, int]] = {}          # アロケータ → 前回の走査の使用中 {番地: 大きさ}
 
     def _heap_symbols(self) -> SymbolTable:
-        if self._symbols is None:
+        if self._host._symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load）")
-        return SymbolTable(self._symbols)
+        return SymbolTable(self._host._symbols)
 
     # --- 走査 ----------------------------------------------------------------------------------
 
@@ -81,14 +89,14 @@ class HeapTools:
         compare の増減（changes）の new・gone は changes_limit 個まで（総数・切ったか・使った上限も changes に）。"""
         if changes_limit < 0:
             raise ValueError("changes_limit は 0 以上")
-        with self._lock:
+        with self._host._lock:
             syms = self._heap_symbols()
             names = [allocator] if allocator else detect(syms)
             if allocator is not None and allocator not in ALLOCATORS:
                 raise ValueError(f"allocator は {' / '.join(ALLOCATORS)}")
             if not names:
                 raise RuntimeError("ELF に既知のアロケータ（FreeRTOS heap_4/5・newlib・newlib-nano）が無い")
-            target = self.target
+            target = self._host.target
             halted = target.get_state() == Target.State.HALTED
             if not halted and not live:
                 raise RuntimeError("ターゲットが動いている: 止めてから（target_halt）。live=true で走行中にも読める"
@@ -108,7 +116,7 @@ class HeapTools:
                     d["changes"] = _changes(self._heap_last.get(name), used, changes_limit)
                 self._heap_last[name] = used
                 heaps.append(d)
-                self._record_host(STREAM, "scan", time.monotonic(), a=d["used"], b=d["free"],
+                self._host._record_host(STREAM, "scan", time.monotonic(), a=d["used"], b=d["free"],
                                   body={"allocator": name, "largest_free": d["largest_free"],
                                         "issues": len(d["issues"])})
             return {"heaps": heaps, "halted": halted, "consistent": halted}
@@ -122,7 +130,7 @@ class HeapTools:
         呼び出し元は戻り先の関数。skip_functions（関数の名前）を渡すと、戻り先がその関数なら呼び出し履歴で外へ辿り、
         最初の skip_functions に無い関数を呼び出し元にする（飛ばしたフレームは出来事の skipped）。
         issues_limit: 持つ誤り（二重の解放等）の数の上限（総数は数え、heap_trace_report の issues_total に）。"""
-        with self._lock:
+        with self._host._lock:
             if self._heap_trace is not None and self._heap_trace.active:
                 raise RuntimeError("記録している（heap_trace_stop を先に）")
             syms = self._heap_symbols()
@@ -139,7 +147,7 @@ class HeapTools:
                         entries[address] = _Entry(function, op, register, key)
             if not entries:
                 raise RuntimeError("確保・解放の関数（pvPortMalloc / _malloc_r / malloc 等）が ELF に無い")
-            dbg = self.dbg
+            dbg = self._host.dbg
             taken = [a for a in entries if a in dbg.breakpoints]
             if taken:
                 raise RuntimeError(f"確保・解放の関数の入口にブレークポイントがある（{', '.join(hex(a) for a in taken)}）:"
@@ -156,21 +164,21 @@ class HeapTools:
             trace = _HeapTrace(entries, time.monotonic(), tuple(skip_functions or ()), AllocationTracker(issues_limit))
             self._heap_trace = trace
             for address in entries:
-                self._break_hooks[address] = (TOOL, self._heap_entry_hit)
-            self._watch_stops(self.target.get_state() != Target.State.HALTED)
+                self._host._break_hooks[address] = (TOOL, self._heap_entry_hit)
+            self._host._watch_stops(self._host.target.get_state() != Target.State.HALTED)
             return {"functions": [{"function": e.function, "op": e.op, "address": a} for a, e in entries.items()],
                     "skip_functions": list(trace.skip), "notes":["当たるたびにコアを数 ms 止める（確保の多いファームでは遅くなる）"]}
 
     def heap_trace_stop(self) -> dict:
         """記録を止める（ブレークポイントを外す。記録した出来事と要約は heap_trace_report で読める）。"""
-        with self._lock:
+        with self._host._lock:
             trace = self._heap_trace
             if trace is None or not trace.active:
                 raise RuntimeError("記録していない（heap_trace_start を先に）")
             for address in list(trace.entries) + list(trace.owned):
-                self._break_hooks.pop(address, None)
-                if address in self.dbg.breakpoints:
-                    self.dbg.remove_breakpoint(address)
+                self._host._break_hooks.pop(address, None)
+                if address in self._host.dbg.breakpoints:
+                    self._host.dbg.remove_breakpoint(address)
             trace.owned.clear()
             if trace.pending:
                 trace.notes.append(f"止めたときに戻っていない確保が {sum(map(len, trace.pending.values()))} 件あった")
@@ -185,7 +193,7 @@ class HeapTools:
         trace = self._heap_trace
         if trace is not None and trace.active:
             for address in list(trace.entries) + list(trace.owned):
-                self._break_hooks.pop(address, None)
+                self._host._break_hooks.pop(address, None)
             trace.active = False
             trace.notes.append("breakpoint_clear でブレークポイントが外れたので記録が止まった")
 
@@ -198,7 +206,7 @@ class HeapTools:
         元の点の数、series_downsampled = 間引いたか）。誤りは issues_total = 総数、issues_truncated = 持つ上限で切ったか、
         issues_limit = 上限。skip_functions = 呼び出し元を探すとき飛ばした関数。
         時刻は記録を始めてからの秒。"""
-        with self._lock:
+        with self._host._lock:
             trace = self._heap_trace
             if trace is None:
                 raise RuntimeError("記録が無い（heap_trace_start を先に）")
@@ -211,14 +219,16 @@ class HeapTools:
                 c["oldest_age_s"] = round(now - c.pop("oldest_t"), 3)
                 c["live_counts"] = [(round(t - t0, 6), n) for t, n in c["live_counts"]]
             out["series"] = [(round(t - t0, 6), b) for t, b in out["series"]]
-            out.update(active=trace.active, elapsed_s=round(now - t0, 3), notes=list(trace.notes),
+            # 時刻は PC の時計（確保・解放のブレークポイントの止まりを PC が処理した時刻。対象の出来事はそれより前）
+            out.update(active=trace.active, elapsed_s=round(now - t0, 3), time_source="host_received",
+                       notes=list(trace.notes),
                        functions=sorted({e.function for e in trace.entries.values()}), skip_functions=list(trace.skip))
             return out
 
     def heap_trace_events(self, since: int = 0, limit: int = 200) -> dict:
         """記録した確保・解放の出来事（seq が since より後を古い順に limit 件）。next を次の since に。
         出来事は新しい kept_limit 件だけ持つ: dropped = since より後で、持つ数を超えて捨てた出来事の数。"""
-        with self._lock:
+        with self._host._lock:
             trace = self._heap_trace
             if trace is None:
                 raise RuntimeError("記録が無い（heap_trace_start を先に）")
@@ -227,14 +237,14 @@ class HeapTools:
             return {"events": items, "next": items[-1]["seq"] if items else since,
                     "dropped": max(0, oldest - max(since, 0) - 1), "kept_limit": EVENT_LIMIT}
 
-    # --- ブレークポイントの処理（_lock の中で。BreakpointActions._break_action から） ---------------------------
+    # --- ブレークポイントの処理（_lock の中で。BreakpointService._break_action から） ---------------------------
 
     def _heap_entry_hit(self, pc: int) -> bool | None:
         trace = self._heap_trace
         entry = trace.entries.get(pc) if trace is not None and trace.active else None
         if entry is None:
             return None
-        target = self.target
+        target = self._host.target
         value = target.read_core_register(entry.register)
         lr = target.read_core_register("lr")
         caller = self._heap_caller(lr, trace.skip)
@@ -245,13 +255,13 @@ class HeapTools:
             return True
         ret = lr & ~1
         trace.pending.setdefault(ret, []).append((now, value, caller, entry.allocator))
-        if ret not in trace.owned and ret not in self._break_hooks:
-            if ret in self.dbg.breakpoints:                       # 使う人のブレークポイント: 処理だけ足す
-                self._break_hooks[ret] = (TOOL, self._heap_return_hit)
+        if ret not in trace.owned and ret not in self._host._break_hooks:
+            if ret in self._host.dbg.breakpoints:                       # 使う人のブレークポイント: 処理だけ足す
+                self._host._break_hooks[ret] = (TOOL, self._heap_return_hit)
             else:
-                self.dbg.breakpoint(ret)
+                self._host.dbg.breakpoint(ret)
                 trace.owned.add(ret)
-                self._break_hooks[ret] = (TOOL, self._heap_return_hit)
+                self._host._break_hooks[ret] = (TOOL, self._heap_return_hit)
         return True
 
     def _heap_return_hit(self, pc: int) -> bool | None:
@@ -260,15 +270,15 @@ class HeapTools:
         if not waiting:
             return None
         started, size, caller, allocator = waiting.pop()
-        pointer = self.target.read_core_register("r0")
+        pointer = self._host.target.read_core_register("r0")
         trace.tracker.alloc(started, pointer, size, caller["where"])
         self._heap_event(trace, started, "alloc", pointer, size, caller, _Entry("", "alloc", "r0", allocator))
         if not waiting:
             del trace.pending[pc]
-            self._break_hooks.pop(pc, None)
+            self._host._break_hooks.pop(pc, None)
             if pc in trace.owned:
                 trace.owned.discard(pc)
-                self.dbg.remove_breakpoint(pc)
+                self._host.dbg.remove_breakpoint(pc)
                 return True
             return None                                           # 使う人のブレークポイント: ふつうの動作へ
         return True
@@ -278,20 +288,20 @@ class HeapTools:
         呼び出し履歴で外へ辿り、skip に無い最初のフレームにする。skipped = 飛ばしたフレームの関数。巻き戻せない・
         履歴のフレームがすべて skip のときは戻り先のまま、unwind_error にその事実。"""
         ret = lr & ~1
-        here = {"address": ret, **self._place_of(max(ret - 2, 0)), "skipped": []}
-        syms = self._symbols
+        here = {"address": ret, **self._host._place_of(max(ret - 2, 0)), "skipped": []}
+        syms = self._host._symbols
         function = syms.function_at(ret) if syms is not None else None
         if function is None or function.name not in skip:
             return here
         try:
-            frames = self.dbg.backtrace()[1:]                     # 0 = 確保の関数の入口
+            frames = self._host.dbg.backtrace()[1:]                     # 0 = 確保の関数の入口
         except Exception as e:
             return {**here, "unwind_error": f"{type(e).__name__}: {e}"}
         skipped = []
         for frame in frames:
             f = syms.function_at(frame.pc)
             if f is None or f.name not in skip:
-                return {"address": frame.pc, **self._place_of(max(frame.pc - 2, 0)), "skipped": skipped}
+                return {"address": frame.pc, **self._host._place_of(max(frame.pc - 2, 0)), "skipped": skipped}
             skipped.append(f.name)
         return {**here, "skipped": skipped,
                 "unwind_error": f"呼び出し履歴の {len(frames)} 個のフレームがすべて skip_functions の関数"}
@@ -304,7 +314,7 @@ class HeapTools:
         if "unwind_error" in caller:
             event["unwind_error"] = caller["unwind_error"]
         trace.events.append(event)
-        self._record_host(STREAM, op, t, a=pointer, b=size, body={"caller": caller["where"],
+        self._host._record_host(STREAM, op, t, a=pointer, b=size, body={"caller": caller["where"],
                                                                   "allocator": entry.allocator})
 
 

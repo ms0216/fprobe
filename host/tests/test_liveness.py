@@ -44,14 +44,14 @@ def test_normal_execution_is_not_reported():
 def test_lockup_is_reported_at_once():
     live = Liveness(function_at)
     r = live.observe(lockup=True, pcs=[], tick=None, now=10.0)
-    assert r == {"kind": "lockup", "since": 10.0, "evidence": [{"clue": "lockup"}]}
+    assert r == {"kind": "lockup", "alert": True, "since": 10.0, "evidence": [{"clue": "lockup"}]}
 
 
 def test_being_in_a_given_function_is_reported_at_once_with_since_and_the_samples():
     # 「何秒いたら」の待ちをしない: PC の見本がすべて渡された関数の中なら、その事実をすぐに（since = 最初に見た時刻）
     live = Liveness(function_at, functions=["my_fault_loop", "arch_system_halt"])
     r = live.observe(lockup=False, pcs=[0x7004, 0x7006, None], tick=7, now=0.0)
-    assert r == {"kind": "pc_in", "function": "my_fault_loop", "since": 0.0,
+    assert r == {"kind": "pc_in", "alert": True, "function": "my_fault_loop", "since": 0.0,
                  "evidence": [{"clue": "pc_in", "function": "my_fault_loop", "valid": 2, "pc_samples": 3}]}
     r = run(live, 2, lockup=False, pcs=[0x7004, 0x7006, 0x7004], tick=7)
     assert r["since"] == 0.0
@@ -87,7 +87,7 @@ def test_a_tick_that_did_not_change_is_reported_with_the_pc_range_and_a_running_
     live = Liveness(function_at)
     assert live.observe(lockup=False, pcs=[0x3100, 0x3104], tick=500, now=0.0) is None      # 1 回では変化が分からない
     r = live.observe(lockup=False, pcs=[0x3100, 0x6000], tick=500, now=1.0)
-    assert r == {"kind": "tick_stopped", "function": "main, uart_poll", "since": 0.0,
+    assert r == {"kind": "tick_stopped", "alert": False, "function": "main, uart_poll", "since": 0.0,
                  "evidence": [{"clue": "pc_range", "function": "main, uart_poll", "bytes": 0x6000 - 0x3100 + 2,
                                "valid": 2, "pc_samples": 2},
                               {"clue": "tick_stopped", "tick": 500}]}
@@ -125,3 +125,15 @@ def test_reset_forgets_the_history():
     live.observe(lockup=False, pcs=[0x3100], tick=5, now=0.0)
     live.reset()
     assert live.observe(lockup=False, pcs=[0x3100], tick=5, now=50.0) is None
+
+
+def test_alert_is_true_only_for_the_architecture_and_the_callers_conditions():
+    """alert: lockup（アーキテクチャの定義）と pc_in（使う側が渡した関数）は true、tick_stopped（事実だけで正常かは
+    決めない）は false。画面は kind で色を決めず alert を読む（E2）。"""
+    assert Liveness(function_at).observe(lockup=True, pcs=[], tick=None, now=0.0)["alert"] is True
+    live = Liveness(function_at, functions=["my_fault_loop"])
+    assert live.observe(lockup=False, pcs=[0x7004], tick=None, now=0.0)["alert"] is True
+    live = Liveness(function_at)
+    live.observe(lockup=False, pcs=[0x3010], tick=5, now=0.0)
+    r = live.observe(lockup=False, pcs=[0x3010], tick=5, now=1.0)
+    assert r["kind"] == "tick_stopped" and r["alert"] is False

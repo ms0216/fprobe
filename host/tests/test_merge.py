@@ -6,7 +6,9 @@ from fprobe.merge import merge
 from fprobe.recording import Recorder, Recording
 
 HZ = 100_000_000
-RX, TX = g.SYNC_RX_LATENCY_TICKS + g.SYNC_RX_PHASE_SPAN_TICKS, g.SYNC_TX_LATENCY_TICKS
+# 子の回路: 線が周期 [T, T + 1) の中で 1 になる → 子の時刻 T + RX（sync_link_tb。時刻の約束は gateware/fprobe_gw/timing.py の
+# 冒頭）。試験は辺を子の刻みの頭の直後に置く（2026-11-02 の S1b までは RX + 位相の幅で、ホストの換算が 1 刻み遅かった）
+RX, TX = g.SYNC_RX_LATENCY_TICKS, g.SYNC_TX_LATENCY_TICKS
 OFFSET = 5_000                                  # 子の時刻 = 親の時刻 + OFFSET（同じ速さ）
 
 
@@ -32,9 +34,13 @@ def test_child_events_move_to_the_parent_time(tmp_path):
     events = [(e.t, e.stream, e.kind, e.b) for e in Recording.open(tmp_path / "m").events(streams=["dap", "b.uart"])]
     assert events == [(1_234_567, "b.uart", "rx", 0x41), (1_500_000, "dap", "ap_read", 1)]
     assert got["pairs"] == 11 and got["segments"] == 1 and got["outside"] == 0
-    assert got["uncertainty"] == {"quantization_ticks": 1, "residual_max_ticks": 0.0}
-    (u,) = [e.uncertainty for e in Recording.open(tmp_path / "m").events(streams=["b.uart"])]
-    assert u == 1.0                                                   # 量子化 1 + 残差の最大 0
+    u = got["uncertainty"]
+    assert (u["assumption"], u["phase_span_ticks"]) == ("constant_ratio_between_neighbouring_pairs", 1)
+    assert 1.0 <= u["window_max_ticks"] < 1.001            # 子が辺を取り込む位相の幅 1 刻み + 比の不確かさ（段階 S3 の B4）
+    (e,) = Recording.open(tmp_path / "m").events(streams=["b.uart"])
+    lo, hi = e.body["sync_window_ticks"]                      # 範囲と、それを覆う ±（行の時刻は範囲の中点を丸めた値）
+    assert lo <= 1_234_567 - 0.5 and hi >= 1_234_567 - 0.5 and lo >= 1_234_565.9 and hi <= 1_234_567.1
+    assert e.t - e.uncertainty <= lo and hi <= e.t + e.uncertainty
 
 
 def test_child_events_outside_pairs_are_counted(tmp_path):
@@ -69,7 +75,9 @@ def test_events_carry_the_distance_to_the_nearest_pair(tmp_path):
                                                                      {"text": "a"})])
     merge(parent, child, tmp_path / "m", child_name="b")
     got = [e.body for e in Recording.open(tmp_path / "m").events(streams=["b.uart", "b.note"])]
-    assert got == [{"sync_nearest_pair_ticks": 30_000}, {"text": "a", "sync_nearest_pair_ticks": 50_000}]
+    assert [{k: v for k, v in b.items() if k != "sync_window_ticks"} for b in got] == [
+        {"sync_nearest_pair_ticks": 30_000}, {"text": "a", "sync_nearest_pair_ticks": 50_000}]
+    assert all(len(b["sync_window_ticks"]) == 2 for b in got)
 
 
 def test_the_largest_gap_between_pairs_is_reported(tmp_path):

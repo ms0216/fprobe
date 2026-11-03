@@ -4,27 +4,18 @@
 -- 「フレームの橋渡し」のリンク: プロセッサがフレーム（ch(1) | payload）をそのまま運ぶ。PC との線上の形式（UDP の
 -- ch | seq | payload）は中継が受け持ち、ここはフレームを 4 バイトずつ受け渡すだけ。
 --
--- レジスタ（番地はバイト、12 ビット）:
---   0x000 ID        読み: 0x46504C4B（"FPLK"）。中継はこれを確かめてから受け渡しを始める
---   0x004 VERSION   読み: 1
---   0x008 RX_STATUS 読み: bit0 = busy（frame_mux が前のフレームを流し中。RX_BUF に書かない・COMMIT しない）
---   0x00C RX_COMMIT 書き: [9:0] = 長さ（ch を含むバイト数、1〜MAX_PAYLOAD+1）。書くと RX_BUF の 1 フレームを渡す
---   0x010 TX_HEAD   読み: [9:0] = 送るフレームの長さ（ch を含む。無ければ 0）
---   0x014 TX_DONE   書き: 何を書いても、今の送るフレームを読み終えた
---   0x018 DROPS     読み: 捨てた COMMIT の数（busy の間・長さが範囲外）。busy の間の RX_BUF の書きは無視する
---   0x01C MEM_BASE  読み書き: 深いバッファに使う DDR の領域の物理番地（PS の中継が書く。リセットの後は 0 = 使えない）。
---                   mem_base に出す（深いバッファの無い構成ではつながない）
---   0x020 MEM_BYTES 読み: PL が MEM_BASE から使う大きさ（generic。深いバッファの無い構成は 0）。中継はこの範囲が Linux の
---                   メモリと重ならないことを確かめてから MEM_BASE を書く
---   0x024 MEM_ERRORS 読み: 深いバッファの AXI の誤りの応答の数（mem_errors。DDR の外の番地など）
---   0x400〜0x7FF RX_BUF 書き: 4 バイトずつ（リトルエンディアン）。バイト番地 0 = ch、1〜 = payload
---   0x800〜0xBFF TX_BUF 読み: 4 バイトずつ（TX_HEAD の長さより後ろのバイトは 0）
---   その他      読みは 0、書きは無視。どの番地にも必ず OKAY を返す（返さないと ARM が固まる）
+-- レジスタの表は fprobe_gw/ps_window.py が正（ps_window_pkg・docs/ps-window.md・中継の window_regs.h を生成する）。
+-- 0x028〜0x0FC（WIN_PORT_FIRST〜LAST）は PS が DDR を直接読む流れの範囲で、la_ps_port（fprobe_core の中）にそのまま渡す
+-- （ps_bus_*: 読み・書きとも 1 周期。読みの値は ps_bus_rdata をその周期に取る）。つながない構成は読みが 0、書きは無視。
+-- RX_BUF（0x400〜0x7FF）は書きの 4 バイトずつ（リトルエンディアン。バイト番地 0 = ch、1〜 = payload）、TX_BUF（0x800〜0xBFF）は
+-- 読みの 4 バイトずつ（TX_HEAD の長さより後ろのバイトは 0）。その他は読みが 0、書きは無視。どの番地にも必ず OKAY を返す
+-- （返さないと ARM が固まる）。
 --
 -- 1 度に 1 つの取引だけを扱う（書きの AW と W はどちらの順でも受ける）。書きを読みより先に片付ける。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.ps_window_pkg.all;
 
 entity zynq_frame_link is
   generic (
@@ -66,13 +57,17 @@ entity zynq_frame_link is
     tx_rdata      : in  std_logic_vector(7 downto 0);
     tx_done       : out std_logic;
     mem_base      : out unsigned(31 downto 0);
-    mem_errors    : in  unsigned(15 downto 0) := (others => '0')
+    mem_errors    : in  unsigned(15 downto 0) := (others => '0');
+    -- PS が DDR のリングを直接読む流れのレジスタ（fprobe_core の la_ps_port。語の番号 WIN_PORT_FIRST〜LAST）
+    ps_bus_rd      : out std_logic;
+    ps_bus_wr      : out std_logic;
+    ps_bus_addr    : out unsigned(7 downto 0);
+    ps_bus_wdata   : out std_logic_vector(31 downto 0);
+    ps_bus_rdata   : in  std_logic_vector(31 downto 0) := (others => '0')
   );
 end entity;
 
 architecture rtl of zynq_frame_link is
-  constant LINK_ID      : std_logic_vector(31 downto 0) := x"46504C4B";
-  constant LINK_VERSION : std_logic_vector(31 downto 0) := x"00000001";
 
   type state_t is (S_IDLE, S_WRITE, S_WBYTES, S_BRESP, S_READ, S_RBYTES, S_RRESP);
   signal state : state_t;
@@ -97,6 +92,12 @@ architecture rtl of zynq_frame_link is
     full := unsigned(a(9 downto 2)) & l;
     return resize(full, RAM_BITS);
   end function;
+  -- la_ps_port の受け持つ語か（番地の [11:10] = 00 の窓の中）
+  function in_port(a : std_logic_vector(11 downto 0)) return boolean is
+  begin
+    return a(11 downto 10) = "00" and to_integer(unsigned(a(9 downto 2))) >= WIN_PORT_FIRST
+           and to_integer(unsigned(a(9 downto 2))) <= WIN_PORT_LAST;
+  end function;
 begin
   awready_i <= '1' when state = S_IDLE and aw_got = '0' else '0';
   wready_i  <= '1' when state = S_IDLE and w_got = '0' else '0';
@@ -112,6 +113,11 @@ begin
   s_axi_rvalid  <= '1' when state = S_RRESP else '0';
   s_axi_rdata   <= rdata;
   mem_base      <= mem_base_r;
+  -- la_ps_port へ: 書きは S_WRITE の周期、読みは S_READ の周期（その周期の ps_bus_rdata を rdata に取る）
+  ps_bus_wr    <= '1' when state = S_WRITE and in_port(waddr) else '0';
+  ps_bus_rd    <= '1' when state = S_READ and in_port(raddr) else '0';
+  ps_bus_addr  <= unsigned(waddr(9 downto 2)) when state = S_WRITE else unsigned(raddr(9 downto 2));
+  ps_bus_wdata <= wdata;
 
   process (clk)
     variable len : natural range 0 to 1023;
@@ -168,7 +174,7 @@ begin
                   state <= S_WBYTES;
                 end if;
               when "00" =>
-                if waddr(9 downto 2) = x"03" then            -- RX_COMMIT
+                if to_integer(unsigned(waddr(9 downto 2))) = WIN_RX_COMMIT then
                   len := to_integer(unsigned(wdata(9 downto 0)));
                   if rx_busy = '0' and len >= 1 and len <= MAX_PAYLOAD + 1 then
                     rx_len <= len;
@@ -176,11 +182,11 @@ begin
                   else
                     drops <= drops + 1;
                   end if;
-                elsif waddr(9 downto 2) = x"05" then         -- TX_DONE
+                elsif to_integer(unsigned(waddr(9 downto 2))) = WIN_TX_DONE then
                   tx_done <= tx_valid;
-                elsif waddr(9 downto 2) = x"07" then         -- MEM_BASE
+                elsif to_integer(unsigned(waddr(9 downto 2))) = WIN_MEM_BASE then
                   mem_base_r <= unsigned(wdata);
-                end if;
+                end if;                                      -- la_ps_port の語は ps_bus_wr で渡す
               when others =>
                 null;
             end case;
@@ -209,20 +215,24 @@ begin
                 tx_raddr <= byte_addr(raddr, "00");
                 state <= S_RBYTES;
               when "00" =>
-                case raddr(9 downto 2) is
-                  when x"00" => rdata <= LINK_ID;
-                  when x"01" => rdata <= LINK_VERSION;
-                  when x"02" => rdata <= (0 => rx_busy, others => '0');
-                  when x"04" =>
-                    if tx_valid = '1' then
-                      rdata <= std_logic_vector(to_unsigned(tx_len, 32));
-                    end if;
-                  when x"06" => rdata <= std_logic_vector(drops);
-                  when x"07" => rdata <= std_logic_vector(mem_base_r);
-                  when x"08" => rdata <= std_logic_vector(to_unsigned(MEM_BYTES, 32));
-                  when x"09" => rdata <= std_logic_vector(resize(mem_errors, 32));
-                  when others => null;
-                end case;
+                if in_port(raddr) then
+                  rdata <= ps_bus_rdata;                     -- la_ps_port（ps_bus_rd と同じ周期）
+                else
+                  case to_integer(unsigned(raddr(9 downto 2))) is
+                    when WIN_ID        => rdata <= WIN_LINK_ID;
+                    when WIN_VERSION   => rdata <= std_logic_vector(to_unsigned(WIN_LINK_VERSION, 32));
+                    when WIN_RX_STATUS => rdata <= (0 => rx_busy, others => '0');
+                    when WIN_TX_HEAD   =>
+                      if tx_valid = '1' then
+                        rdata <= std_logic_vector(to_unsigned(tx_len, 32));
+                      end if;
+                    when WIN_DROPS      => rdata <= std_logic_vector(drops);
+                    when WIN_MEM_BASE   => rdata <= std_logic_vector(mem_base_r);
+                    when WIN_MEM_BYTES  => rdata <= std_logic_vector(to_unsigned(MEM_BYTES, 32));
+                    when WIN_MEM_ERRORS => rdata <= std_logic_vector(resize(mem_errors, 32));
+                    when others => null;
+                  end case;
+                end if;
               when others =>
                 null;
             end case;

@@ -4,9 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIONS, actionAvailability, cellBlock, defaultText, formCall, formValues, hexText, injectFacts, methodFields, outputColumns,
   outputSourcesCall, routeChanged, routeOf, routeParams, sourceAvailability, sourceFacts, toggleRoute,
-  type OutputPin, type Route,
+  type LaTriggerStatus, type OutputPin, type Route, type Statuses, type XtrigStatus,
 } from "../src/lib/crosstrigger";
 import { SOURCES } from "../src/lib/logic";
+
+/** 契約（API の応答の型）の外の応答: 古い・新しいデーモンが返しうる形。型を外して渡し、画面が落ちないことを見る */
+const outOfContract = <T>(v: unknown) => v as T;
+type Capture = NonNullable<LaTriggerStatus["internal"]>;
+/** la.trigger_status の捕捉の状態（本物の応答と同じ欄。c で変える欄だけを渡す） */
+const capture = (c: Partial<Capture>): Capture => ({
+  capturing: false, triggered: false, done: false, trigger_time: null, trigger_time_raw: null, trigger_time_hi: null,
+  trigger_fine_sample: null, xtrig_source_time: null, trigger_time_from: null, trigger_time_unknown: [], ...c });
 
 const FULL = { xtrig: true, trig_seq: true, inject: true, la_channels: 10, obs_match: true, sampler_match: true,
                output_actions: 2 };
@@ -52,9 +60,10 @@ describe("構成（ケイパビリティ）で使える源・行き先", () => {
 
 describe("経路の表", () => {
   it("xtrig.status の route（レジスタの事実）をそのまま。知らない名前は落とさず unknown に分ける", () => {
-    expect(routeOf({ route: { to_la: ["dap_match", "obs_match"], to_inject: ["sampler_match", "future_bit"] } }))
+    expect(routeOf(outOfContract<XtrigStatus>({ route: { to_la: ["dap_match", "obs_match"],
+                                                         to_inject: ["sampler_match", "future_bit"] } })))
       .toEqual({ to_la: ["dap_match", "obs_match"], to_inject: ["sampler_match"], unknown: ["future_bit"] });
-    expect(routeOf({ match: { count: 0, time: 0 } as any })).toBeNull();          // 古いデーモン: 経路を返さない
+    expect(routeOf(outOfContract<XtrigStatus>({ match: { count: 0, time: 0 } }))).toBeNull();   // 古いデーモン: 経路を返さない
     expect(routeOf(null)).toBeNull();
   });
 
@@ -124,17 +133,25 @@ describe("出力の端子", () => {
 });
 
 describe("回数・時刻（機器のレジスタの事実だけ。回路に無いものは unreadable、まだ無いものは null）", () => {
+  const xtrig: XtrigStatus = {
+    inject: { busy: false, result: "ok", ack: 1, count: 2, time: 500, ap: 0, address: 0xE000EDF0, value: 0xA05F0003 },
+    match: { count: 3, time: 1234, address: 0x20000010, address_mask: 0xFFFFFFFF, data: 0, data_mask: 0,
+             on_write: true, on_read: false },
+    route: { to_la: [], to_inject: [] } };
+  const la: LaTriggerStatus = {
+    mask: 0, value: 0, rise: 0, fall: 0, external_only: false, rate_hz: 25e6, rate_raw: 4, rate_used: true, pretrigger: 1024,
+    internal: capture({ triggered: true, done: true, trigger_time: 4321 }) };
   const st = {
-    xtrig: { inject: { busy: false, result: "ok", ack: 1, count: 2, time: 500, ap: 0, address: 0xE000EDF0, value: 0xA05F0003 },
-             match: { count: 3, time: 1234, address: 0x20000010, address_mask: 0xFFFFFFFF, data: 0, data_mask: 0,
-                      on_write: true, on_read: false } },
-    sequence: { stage: 1, fired: true, time: 777, armed: true, stages: 2, stage_states: ["done", "done"] as const },
+    xtrig,
+    sequence: { stage: 1, fired: true, time: 777, armed: true, stages: 2, stage_states: ["done", "done"],
+                config: { stages: [{ when: ["host"], count: 1, within_us: null }, { when: ["dap_match"], count: 1, within_us: null }],
+                          pattern_a: { mask: 0, value: 0, rise: 0, fall: 0 }, pattern_b: { mask: 0, value: 0, rise: 0, fall: 0 } },
+                fire_windows: [] },
     obs: { condition: "state=BUSY", halt: true, la: false, count: 5 },
     sampler: { enabled: true, address: 0xE000EDF0, mask: 0x20000, value: 0x20000, halt: false, la: true, matched: false,
                seen_any: true, seen: 40, count: 1, time: 900, prev_time: 880 },
-    la: { mask: 0, value: 0, rise: 0, fall: 0, external_only: false, rate_hz: 25e6, pretrigger: 1024,
-          internal: { capturing: false, triggered: true, done: true, trigger_time: 4321 } },
-  };
+    la,
+  } satisfies Statuses;
 
   it("源ごと。回数・時刻のレジスタが回路に無いものは unreadable（推さない）", () => {
     expect(sourceFacts("la_trigger", st)).toEqual({ count: "unreadable", time: null, laTimes: { internal: 4321, deep: null } });
@@ -146,7 +163,8 @@ describe("回数・時刻（機器のレジスタの事実だけ。回路に無�
   });
 
   it("0 回なら時刻は無い。読めていなければ null", () => {
-    expect(sourceFacts("dap_match", { xtrig: { match: { count: 0, time: 0 } as any } })).toEqual({ count: 0, time: null });
+    expect(sourceFacts("dap_match", { xtrig: { ...xtrig, match: { ...xtrig.match, count: 0, time: 0 } } }))
+      .toEqual({ count: 0, time: null });
     expect(sourceFacts("sequence", { sequence: { ...st.sequence, fired: false } })).toEqual({ count: "unreadable", time: null });
     expect(sourceFacts("obs_match", { obs: { condition: null } })).toEqual({ count: null, time: "unreadable" });
     expect(sourceFacts("sampler_match", {})).toEqual({ count: null, time: null });
@@ -154,15 +172,15 @@ describe("回数・時刻（機器のレジスタの事実だけ。回路に無�
   });
 
   it("ロジアナのトリガの時刻: 内蔵と深いバッファのそれぞれ（両方なら両方。新しい方だけを選ばない）", () => {
-    const deep = { capturing: false, triggered: true, done: true, trigger_time: 9000 };
+    const deep = capture({ triggered: true, done: true, trigger_time: 9000 });
     expect(sourceFacts("la_trigger", { la: { ...st.la, deep } }).laTimes).toEqual({ internal: 4321, deep: 9000 });
-    expect(sourceFacts("la_trigger", { la: { ...st.la, internal: { ...st.la.internal, triggered: false, trigger_time: null } } })
+    expect(sourceFacts("la_trigger", { la: { ...la, internal: capture({ done: true }) } })
       .laTimes).toEqual({ internal: null, deep: null });
   });
 
   it("割り込み書き込みの結果・回数・時刻", () => {
     expect(injectFacts(st.xtrig)).toEqual({ result: "ok", busy: false, count: 2, time: 500 });
-    expect(injectFacts({ inject: { busy: false, result: "ok", ack: 0, count: 0, time: 0, ap: 0, address: 0, value: 0 } }))
+    expect(injectFacts({ ...xtrig, inject: { busy: false, result: "ok", ack: 0, count: 0, time: 0, ap: 0, address: 0, value: 0 } }))
       .toEqual({ result: "ok", busy: false, count: 0, time: null });
     expect(injectFacts(null)).toBeNull();
   });

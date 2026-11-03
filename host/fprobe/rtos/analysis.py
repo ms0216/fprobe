@@ -366,7 +366,8 @@ class MemorySlot:
 def memory_series(samples: Iterable[tuple[int, int, int]], slots: Mapping[int, MemorySlot], points: int = 200,
                   hz: float | None = None) -> dict:
     """(時刻, 番地, 値) のサンプルから、タスクごとのスタックの使用量（end − 保存された SP）とヒープの残量の推移。
-    点は全体の時間を points 個の窓に分け、窓ごとに、その窓に入ったサンプルの最悪の値（スタックは最大、ヒープは最小）。
+    点は全体の時間を points 個の窓に分け、窓ごとに、その窓に入ったサンプルの最悪の値（スタックは最大、ヒープは最小）を、
+    そのサンプルの時刻で（窓の始めの時刻にしない）。
     サンプルの無い窓には点を置かない（値が次のサンプルまで続いたとは仮定しない）。"""
     rows = sorted((t, a, v) for t, a, v in samples if a in slots)
     out: dict = {"stacks": {}, "heap": None}
@@ -382,11 +383,12 @@ def memory_series(samples: Iterable[tuple[int, int, int]], slots: Mapping[int, M
     for address, series in per.items():
         slot = slots[address]
         pick = max if slot.kind == "stack" else min
-        buckets: dict[int, int] = {}
+        buckets: dict[int, tuple[int, int]] = {}            # 窓 → (そのサンプルの時刻, 値)
         for t, value in series:                            # 窓に入ったサンプルだけ（前の値を続けて入れない）
             k = (t - t_first) // width
-            buckets[k] = value if k not in buckets else pick(buckets[k], value)
-        points_out = [[t_first + k * width, v] for k, v in sorted(buckets.items())]
+            if k not in buckets or pick(buckets[k][1], value) != buckets[k][1]:
+                buckets[k] = (t, value)
+        points_out = [[t, v] for _, (t, v) in sorted(buckets.items())]       # 点の時刻 = その値を読んだサンプルの時刻
         values = [v for _, v in series]
         extreme_t, extreme_v = pick(series, key=lambda x: x[1])
         if slot.kind == "stack":
@@ -482,29 +484,40 @@ def inversion_episodes(tl: Timeline, samples: Iterable[tuple[int, int, int]], wa
     rows = sorted(samples)
     for w in watches:
         holder = head = None
+        holder_t = head_t = None                                # それぞれの語を最後に読んだ時刻
         opened: tuple[int, int, int] | None = None              # (始め, 持ち主, 待ち手)
         seen = 0                                                # 逆転を最後に見たサンプルの時刻
+        reads: dict = {}                                        # 開いた区間の、組にした読みの時刻の事実
+
+        def close(t1: int, **kw) -> None:
+            ep = inversion_episode(w.name, opened, t1, per, urgency, names, certain=(opened[0], seen), edges=edges,
+                                   **kw)
+            # 2 つの語は別々の時刻に読んだ（同時の状態とは限らない）: 組にした読みの時刻の差の最大と、開いた読み
+            ep.update(reads)
+            if hz:
+                ep["pair_read_span_us"] = ep["pair_read_span"] * 1e6 / hz
+            episodes.append(ep)
         for t, a, v in rows:
             if a == w.holder_word:
-                holder = v or None
+                holder, holder_t = v or None, t
             elif a == w.head_word:
-                head = None if v in (w.empty, 0) else v - w.delta
+                head, head_t = (None if v in (w.empty, 0) else v - w.delta), t
             else:
                 continue
             hu, wu = urgency(holder), urgency(head)
             inverted = hu is not None and wu is not None and holder != head and wu > hu
             key = (holder, head)
             if opened is not None and (not inverted or (opened[1], opened[2]) != key):
-                episodes.append(inversion_episode(w.name, opened, t, per, urgency, names,
-                                                  certain=(opened[0], seen), edges=edges))
+                close(t)
                 opened = None
             if inverted and opened is None:
                 opened = (t, holder, head)
+                reads = {"opened_reads": {"holder_t": holder_t, "head_t": head_t}, "pair_read_span": 0}
             if inverted:
                 seen = t
+                reads["pair_read_span"] = max(reads["pair_read_span"], abs(holder_t - head_t))
         if opened is not None:
-            episodes.append(inversion_episode(w.name, opened, tl.t1, per, urgency, names, truncated=True,
-                                              certain=(opened[0], seen), edges=edges))
+            close(tl.t1, truncated=True)
     out = inversion_summary(episodes, hz)
     out["notes"] = ["サンプラの周期より短い逆転は見えないことがある（回数は下限、区間の端は ± 周期）"]
     return out
@@ -542,7 +555,9 @@ def inversion_episode(mutex: str, opened: tuple[int, int, int], t1: int, per: di
         if h not in (holder, waiter) and u is not None and hu < u < wu:
             a, b = certain or (t0, t1)
             if edges is not None and certain is not None:
-                spent = sum(_overlap(r.t0, r.t1, a + math.ceil(r.uncertainty), b - math.ceil(r.uncertainty))
+                # 両端とも観測の端・抜けで切った区間（uncertainty None）の端はサンプルの時刻そのもので、切り替えの
+                # 時刻の幅は無い（縮めない）
+                spent = sum(_overlap(r.t0, r.t1, a + math.ceil(r.uncertainty or 0), b - math.ceil(r.uncertainty or 0))
                             for r in edges.get(h, ()))
             else:
                 spent = iv.overlap(a, b) if a < b else 0

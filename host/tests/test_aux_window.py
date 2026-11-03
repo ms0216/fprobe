@@ -1,24 +1,21 @@
 """補助マイコンの電圧の live: 「待った間に計測値の数が増えたか」の事実に、待った時間 window_s と前後の数を添える
 （点検 2 回目 ?: aux_mcu.py:42-47。live の判定の窓が暗黙にならないように）。"""
 
-from types import SimpleNamespace
-
 import pytest
 
 from fprobe.aux_mcu import Aux
+from caps_fakes import FakeDeviceBase, caps_for
 
 
-class FakeDevice:
+class FakeDevice(FakeDeviceBase):
     def __init__(self, before: int, after: int):
         self.before, self.after = before, after
-
-    def capabilities(self):
-        return SimpleNamespace(aux=True)
+        self.caps = caps_for(aux=True)
 
     def read32(self, address):
         return self.before
 
-    def read(self, address, count):
+    def read(self, address, count=1, *, timeout_retries=0):
         return [3300, self.after, 0]
 
 

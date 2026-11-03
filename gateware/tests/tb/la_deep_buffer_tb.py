@@ -35,6 +35,7 @@ async def setup(dut, mem_beats=CAP):
             dut.probes.value = value
             dut.time.value = int(dut.time.value) + 1
     cocotb.start_soon(counter())
+    return mem
 
 
 async def wait_for(dut, name, timeout=200_000):
@@ -212,6 +213,39 @@ async def stream_survives_host_stalls_without_gaps(dut):
     assert int(dut.stream_beats.value) * 8 == len(samples) or int(dut.stream_beats.value) * 8 >= len(samples) - 64
 
 
+async def packed_stream_keeps_every_selected_sample(dut, pack):
+    """使うチャンネルだけ詰めたストリーム（la_pack）: 毎周期 1 ずつ増えるカウンタの下位 16 >> pack ビットが、展開すると欠けも重複も
+    無く 1 ずつ増える（受け手は時々止まる）。詰めたぶん、同じ周期数で出る拍が 1 / (1 << pack)。"""
+    from fprobe.la import _expand_words
+    await setup(dut)
+    dut.rle.value, dut.rate.value, dut.stream.value, dut.pack.value = 0, 0, 1, pack
+    dut.trig_mask.value, dut.trig_value.value = 0, 0
+    dut.run.value = 1
+    data = await stream_until(dut, beats=300, stall=lambda n: (n // 37) % 5 == 0)
+    samples = _expand_words(decode_beats(data, False), pack)
+    width = 16 >> pack
+    mask = (1 << width) - 1
+    assert len(samples) >= 300 * 8 * (1 << pack)
+    gaps = [(i, a, b) for i, (a, b) in enumerate(zip(samples[1:], samples[2:])) if (b - a) & mask != 1]
+    assert not gaps, (pack, len(samples), gaps[:5])
+    assert dut.overrun.value == 0
+
+
+@cocotb.test()
+async def packed_stream_8_bit_keeps_every_sample(dut):
+    await packed_stream_keeps_every_selected_sample(dut, 1)
+
+
+@cocotb.test()
+async def packed_stream_4_bit_keeps_every_sample(dut):
+    await packed_stream_keeps_every_selected_sample(dut, 2)
+
+
+@cocotb.test()
+async def packed_stream_2_bit_keeps_every_sample(dut):
+    await packed_stream_keeps_every_selected_sample(dut, 3)
+
+
 @cocotb.test()
 async def stream_stops_and_reports_overrun_when_the_host_falls_behind(dut):
     # 受け手が止まったまま（100 MS/s の RAW = 8 周期に 1 拍）: 未読がリング - 256 拍を超えると書き込みを止めて
@@ -263,3 +297,109 @@ async def pretrigger_samples_are_recorded_exactly(dut):
         t = trigger_sample(data, False, beat, slot)
         assert t == pre, (pre, t)
         await ClockCycles(dut.clk, 50)
+
+
+@cocotb.test()
+async def stream_start_time_places_every_sample_on_the_trigger_time_axis(dut):
+    """R1（docs/superpowers/specs/2026-11-01-time-accuracy-design.md）: 連続記録のサンプル 0 の時刻 start_time を回路が記録する。
+    setup のカウンタ（probes と time を同じ辺で進める）で、サンプル i の値が probes に出ていた周期の time は
+    start_time + i × (rate + 1) − LA_DEEP_DELAY（トリガ時刻と同じ段: fprobe_gw.timing）。start_valid は run の 0→1 で 0 に戻る。
+    その周期 [T, T + 1) の頭の辺の直後に probes が変わったので、ホストの式 fprobe.timing.stream_start_recorded が返すサンプル 0 の
+    ピンの時刻（下限）+ i × (rate + 1) が T と一致する（時刻の正しさ S1b の §10.4 の 2: 変化は T 以上 T + 1 未満）。"""
+    from fprobe.timing import stream_start_recorded
+    from fprobe_gw.timing import LA_DEEP_DELAY, LA_PHASE_SPAN_TICKS
+    await setup(dut)
+    await ClockCycles(dut.clk, 3)
+    await ReadOnly()
+    offset = (int(dut.time.value) - int(dut.probes.value)) & 0xFFFF       # time − probes（カウンタの差、一定）
+    await RisingEdge(dut.clk)
+    for rate in (0, 3):
+        dut.rle.value, dut.rate.value, dut.stream.value = 0, rate, 1
+        dut.trig_mask.value, dut.trig_value.value = 0, 0
+        dut.run.value = 1
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        assert dut.start_valid.value == 0                                  # 前の流れの値は見せない
+        await RisingEdge(dut.clk)
+        data = await stream_until(dut, beats=40)
+        assert dut.start_valid.value == 1                                  # 止めた後も次の run まで残る
+        t0 = int(dut.start_time.value)
+        samples = decode_beats(data, False)
+        assert len(samples) >= 40 * 8
+        p0 = stream_start_recorded(t0, LA_DEEP_DELAY, LA_PHASE_SPAN_TICKS)["t_lo"]
+        assert p0 == t0 - LA_DEEP_DELAY
+        for i, v in enumerate(samples[:64]):
+            t_true = (v + offset) & 0xFFFF                                 # その値が probes に出ていた周期の time（下位 16 ビット）
+            want = (p0 + i * (rate + 1)) & 0xFFFF
+            assert t_true == want, (rate, i, hex(v), t0, t_true, want)
+        await ClockCycles(dut.clk, 50)
+
+
+async def _watch_triggered(dut, out: dict):
+    """triggered（クロストリガの源 bit0）が 0 → 1 になった周期の time を out["at"] に。"""
+    prev = 0
+    while True:
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        now = int(dut.triggered.value)
+        if now and not prev:
+            out["at"] = int(dut.time.value)
+        prev = now
+
+
+@cocotb.test()
+async def an_external_trigger_lands_on_the_sample_of_its_cycle(dut):
+    """時刻の正しさ S1b の N3・B7: 外部トリガが 1 の周期 X → トリガ時刻のピンの時間軸の時刻（fprobe.la.pin_time）が X（rate = 0）、
+    rate > 0 なら X 以後の最初のサンプル（X は pin_time − rate 以上 pin_time 以下）。クロストリガの源（triggered の立ち上がり）は
+    トリガ時刻の周期そのもの（LA_DEEP_XTRIG_DELAY）。"""
+    from fprobe.la import pin_time
+    from fprobe_gw.timing import LA_DEEP_DELAY, LA_DEEP_XTRIG_DELAY, LA_PHASE_SPAN_TICKS
+    await setup(dut)
+    seen: dict = {}
+    cocotb.start_soon(_watch_triggered(dut, seen))
+    for rate in (0, 3):
+        for wait in range(rate + 2):
+            dut.rle.value, dut.rate.value, dut.post_beats.value = 0, rate, 4
+            dut.trig_mask.value, dut.trig_value.value, dut.trig_fall.value = 1, 1, 1   # 成り立たない: 外部トリガだけ
+            dut.run.value = 1
+            await ClockCycles(dut.clk, 40 + wait)
+            dut.ext_trigger.value = 1
+            await ReadOnly()
+            x = int(dut.time.value)                                        # 外部トリガが 1 の周期の time
+            await RisingEdge(dut.clk)
+            dut.ext_trigger.value = 0
+            await wait_for(dut, "done")
+            tt = int(dut.trigger_time.value)
+            p = pin_time(tt, LA_DEEP_DELAY, LA_PHASE_SPAN_TICKS)
+            assert p - rate <= x <= p, (rate, wait, x, p)
+            if rate == 0:
+                assert p == x, (x, p)
+            assert seen["at"] == tt + LA_DEEP_XTRIG_DELAY, (seen, tt)
+            dut.run.value = 0
+            dut.trig_fall.value = 0
+            await ClockCycles(dut.clk, 30)
+
+
+@cocotb.test()
+async def packing_delays_the_trigger_by_the_rest_of_the_word(dut):
+    """B7: 詰め（la_pack、1 語 = k サンプル）では、トリガのサンプルが語の j 番目なら、トリガ時刻（と源）は詰めない場合より
+    LA_DEEP_PACK_DELAY + (k − 1 − j) × (rate + 1) 周期遅い。条件なしのトリガは最初のサンプル（j = 0）なので
+    trigger_time − start_time = LA_DEEP_PACK_DELAY + (k − 1) × (rate + 1)（詰めない場合は 0。start_time はトリガと同じ段）。"""
+    from fprobe_gw.timing import LA_DEEP_PACK_DELAY, LA_DEEP_XTRIG_DELAY
+    await setup(dut)
+    seen: dict = {}
+    cocotb.start_soon(_watch_triggered(dut, seen))
+    for pack in (0, 1, 2, 3):
+        for rate in (0, 2):
+            dut.rle.value, dut.rate.value, dut.stream.value, dut.pack.value = 0, rate, 1, pack
+            dut.trig_mask.value, dut.trig_value.value = 0, 0
+            dut.run.value = 1
+            await ClockCycles(dut.clk, 2)
+            await stream_until(dut, beats=8)
+            k = 1 << pack
+            extra = 0 if pack == 0 else LA_DEEP_PACK_DELAY + (k - 1) * (rate + 1)
+            tt, t0 = int(dut.trigger_time.value), int(dut.start_time.value)
+            assert tt - t0 == extra, (pack, rate, tt, t0)
+            assert seen["at"] == tt + LA_DEEP_XTRIG_DELAY
+            await ClockCycles(dut.clk, 50)
+    dut.pack.value = 0

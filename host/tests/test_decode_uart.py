@@ -1,9 +1,9 @@
 """fprobe.decode.uart: 発生器 → 解読の往復、誤り、端の条件、ボーレートの推定（ハードウェア不要）。"""
 
 import random
-import time
 
 import pytest
+from perf_budget import within
 
 from fprobe.decode import decode_uart
 from fprobe.decode.synth import Wave, uart, uart_break
@@ -141,14 +141,13 @@ def test_bad_parameters_are_rejected():
             decode_uart(t, 5, **({"baud": BAUD} | F8N1 | kw))
 
 
+@pytest.mark.perf
 def test_a_hundred_thousand_bytes_decode_quickly():
     rng = random.Random(7)
     data = bytes(rng.randrange(256) for _ in range(100_000))
     w = wave(rate=BAUD * 8)
     end = uart(w, 5, data, T0, baud=BAUD, **F8N1)
     t = w.build(end_s=end)
-    t0 = time.process_time()
-    d = decode_uart(t, 5, baud=BAUD, **F8N1)
-    elapsed = time.process_time() - t0
+    # 性能の約束（perf_budget）: CPU 5 秒以内（送るのにかかる 8.7 秒より速い）。手元で約 2 秒
+    _, d = within(5.0, lambda: decode_uart(t, 5, baud=BAUD, **F8N1))
     assert bytes(data_of(d)) == data
-    assert elapsed < 5.0, elapsed                     # 手元で約 2 秒（送るのにかかる 8.7 秒より速い）

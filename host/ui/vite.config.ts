@@ -6,6 +6,7 @@ const daemon = process.env.FPROBE_DAEMON ?? "ws://127.0.0.1:7820";
 
 export default defineConfig({
   plugins: [svelte()],
-  server: { proxy: { "/api": { target: daemon, ws: true } }, fs: { allow: [".", "../api"] } },
+  server: { proxy: { "/api": { target: daemon, ws: true }, "/login": { target: daemon.replace(/^ws/, "http") } },
+            fs: { allow: [".", "../api"] } },
   test: { include: ["tests/**/*.test.ts"], globalSetup: ["tests/global-setup.ts"] },
 });

@@ -7,8 +7,9 @@
   以外をすべて断る。PRAGMA・ATTACH・一時表・トランザクションも断る。文は 1 つだけ。
 - 時間の上限（進みの関数で打ち切る）と件数の上限（それ以上は読まずに truncated）。
 
-表（recording.py の _SCHEMA が正）:
-- events(t, t_end, stream, kind, a, b, body, unc): 出来事。時刻はタイムベース、body は JSON（json_extract で読む）。
+表（fprobe.recording_table が正。記録の版によらず同じ形）:
+- events(t, t_end, stream, kind, a, b, body, unc, rowid): 出来事。時刻はタイムベース、body は JSON（json_extract で読む）、
+  rowid は入れた順（同じ時刻の並びの鍵）。
 - chunks(t0, t1, path, ticks_per_sample, channels, length): 波形のかたまりの索引。
 関数: timebase_hz()（記録のタイムベースの Hz）、seconds(ticks)（タイムベース → 秒）。
 
@@ -23,6 +24,8 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any
+
+from .recording_table import event_view_sql, version_of
 
 __all__ = ["DEFAULT_LIMIT", "DEFAULT_TIMEOUT_S", "MAX_LIMIT", "MAX_SEGMENTS", "MAX_TIMEOUT_S", "QueryError", "query"]
 
@@ -75,13 +78,13 @@ def _segmented(directory: Path, t0: int | None, t1: int | None, max_segments: in
         db.execute(f"ATTACH DATABASE ? AS s{i}", (_ro(directory / path / "recording.sqlite"),))
     if chosen:
         db.execute("CREATE TEMP VIEW events AS " + " UNION ALL ".join(
-            f"SELECT t, t_end, stream, kind, a, b, body, unc FROM s{i}.events" for i in range(len(chosen))))
+            event_view_sql(f"s{i}") for i in range(len(chosen))))
         db.execute("CREATE TEMP VIEW chunks AS " + " UNION ALL ".join(
             f"SELECT t0, t1, '{path}/waveform/' || path AS path, ticks_per_sample, channels, length FROM s{i}.chunks"
             for i, (_, path, *_r) in enumerate(chosen)))
     else:
         db.execute("CREATE TEMP VIEW events AS SELECT NULL AS t, NULL AS t_end, NULL AS stream, NULL AS kind, "
-                   "NULL AS a, NULL AS b, NULL AS body, NULL AS unc WHERE 0")
+                   "NULL AS a, NULL AS b, NULL AS body, NULL AS unc, NULL AS rowid WHERE 0")
         db.execute("CREATE TEMP VIEW chunks AS SELECT NULL AS t0, NULL AS t1, NULL AS path, NULL AS ticks_per_sample, "
                    "NULL AS channels, NULL AS length WHERE 0")
     db.execute("CREATE TEMP VIEW segments AS SELECT * FROM idx.segments")
@@ -106,6 +109,8 @@ def query(directory: Path, sql: str, params: list | dict | None = None, *, limit
         db, extra = _segmented(directory, t0, t1, max_segments)
     else:
         db = sqlite3.connect(_ro(directory / "recording.sqlite"), uri=True, check_same_thread=False)
+        if version_of(db) == 1:                             # 古い版の表 events: rowid も列に出す（新しい版のビューと同じ形）
+            db.execute("CREATE TEMP VIEW events AS " + event_view_sql("main"))
     try:
         db.create_function("timebase_hz", 0, lambda: hz, deterministic=True)
         db.create_function("seconds", 1, lambda t: None if t is None else t / hz, deterministic=True)

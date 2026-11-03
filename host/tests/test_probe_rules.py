@@ -82,6 +82,23 @@ def test_rules_last_keeps_the_last_check_with_when_and_who(probe, tmp_path):
     assert last["inject"] is None
 
 
+def test_the_last_results_belong_to_one_probe(probe, tmp_path):
+    """直前の結果（rules・inject と、いつ・だれ）はその Probe のもの。前はクラスの属性の表で、Probe を 2 つ作ると同じ表を
+    共有していた（今のコードは表を置き換えて書くので漏れていなかったが、表に書き足すと別の Probe の rules_last に出た）"""
+    other = Probe("unused")
+    rules, other_rules = probe._svc_rules, other._svc_rules
+    for name in ("_last_rules", "_last_inject", "_last_runs"):
+        assert name in vars(rules), name                                           # インスタンスの状態（クラスの属性ではない）
+    assert rules._last_runs is not other_rules._last_runs
+    rules._last_runs["rules"] = {"at": 1.0, "caller": None}                         # 表に書き足しても
+    assert other.rules_last() == {"rules": None, "inject": None}                     # ほかの Probe には出ない
+    _recording(tmp_path, "slow", [tp("enter", 0), tp("exit", 100 * 100)])
+    probe.recording_open("slow")
+    probe.rules_check(rules=LATENCY)
+    assert probe.rules_last()["rules"] is not None
+    assert other.rules_last() == {"rules": None, "inject": None}
+
+
 def test_rules_load_from_a_yaml_file_and_bad_rules_are_errors(probe, tmp_path):
     _recording(tmp_path, "r", [tp("enter", 0), tp("exit", 100)])
     probe.recording_open("r")

@@ -1,6 +1,7 @@
 // Flash のパネル（J-Flash Lite の型）の計算（Svelte に依らない）: 書き込みの設定と target.flash の引数と
 // 番地、進捗の通知（flash.progress）、結果の段ごとの時間・速度の表、Flash の領域のセクタの並び。
 import { formatDuration } from "./time";
+import type { Params } from "./api";
 
 export type EraseMode = "auto" | "sector" | "chip";
 
@@ -141,10 +142,10 @@ export const emptyAlgo = (): AlgoForm => ({ flm: "", address: "", size: "", ramA
 
 /** target.flash.algo.add の引数。空の欄は省く（番地・大きさは FLM の値、RAM は既定の RAM、名前は FLM のファイル名）。
  *  FLM が空・数が読めなければ、その欄の名前（flm / address / size / ram_address / ram_size）で RangeError を投げる */
-export function algoParams(f: AlgoForm): Record<string, string | number> {
+export function algoParams(f: AlgoForm): Params<"target.flash.algo.add"> {
   const flm = f.flm.trim();
   if (!flm) throw new RangeError("flm");
-  const out: Record<string, string | number> = { flm };
+  const out: Params<"target.flash.algo.add"> = { flm };
   for (const [key, text] of [["address", f.address], ["size", f.size], ["ram_address", f.ramAddress],
                              ["ram_size", f.ramSize]] as const) {
     if (!text.trim()) continue;

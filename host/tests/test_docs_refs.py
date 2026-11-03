@@ -17,16 +17,17 @@ DOCS = [ROOT / "README.md", *sorted((ROOT / "docs" / "guide").glob("*.md"))]
 # 道具の形ではないが `_` を含む識別子（設計名・generic・環境変数・関数名・引数名・レジスタ名など）。文書に出るものだけを列挙し、
 # 増やすときは理由が説明できるものに限る
 NOT_TOOLS = {
-    "fprobe_pynq", "fprobe_pynq_deep", "fprobe_core_m", "fprobe_la", "fprobe_eth", "fprobe_jtag", "fprobe_serial",
+    "fprobe_pynq", "fprobe_pynq_deep", "fprobe_pynq_fast", "fprobe_pynq_cap", "fprobe_pynq_deep_fast", "fprobe_core_m", "fprobe_la", "fprobe_eth", "fprobe_jtag", "fprobe_serial",
     "fprobe_nano9k", "fprobe_core", "fprobe_obs", "fprobe_gw", "obs_target_primer", "obs_core", "obs_soft_core",
     "obs_soft_tap", "obs_snap_core", "obs_tck_sampler", "obs_async_fifo", "obs_match", "obs_mark", "obs_jtag",
     "ir_length_source",                                   # jtag.scan の応答の項目名（道具名ではない）
+    "la_pack",                                            # ケイパビリティの名前（チャンネルを詰めて流せる。道具名ではない）
     "fpga_obs", "target_ip", "half_period", "id_scans", "auto_reopen", "sync_period", "ir_len", "ir_before", "ir_after",
     "dr_before", "dr_after", "user_ir", "id_ok", "id_timeout", "time_us", "time_basis", "target_cycles", "previous_ratio",
     "nominal_ratio", "window_s", "gap_s", "post_s", "rate_hz", "frequencies_hz", "design_switch", "causes_total",
     "fpga_hidden", "fpga_lost", "reads_missing", "read_failed", "pins_missing", "events_error", "recording_dropped",
     "watch_running", "events_errors", "lost_lines", "lost_frames", "ONE_CLOCK", "FIFO_DEPTH", "CLOCK_HZ", "LOST_BITS",
-    "SYNC_DELAY", "SAMPLE_DELAY", "EVENTS_WRITTEN", "FPROBE_GOWIN_HOME", "FPROBE_VIVADO_HOME", "FPROBE_GHDL_HOME",
+    "SYNC_DELAY", "SAMPLE_DELAY", "EVENTS_WRITTEN", "written_hi", "FPROBE_GOWIN_HOME", "FPROBE_VIVADO_HOME", "FPROBE_GHDL_HOME",
     "FPROBE_PYNQ_HOST", "FPROBE_PYNQ_SUDO_PASSWORD", "user_ir", "tdo_oe", "tck_ce", "value_untimed", "gap_untimed",
     "group_untimed", "g_errors", "g_scenario", "ui_state", "max_coverage", "no_values", "lost_bits", "stop_after",
     "is_available", "open_eth", "write_vcd", "dut_dbg", "la_inputs", "ps_axi", "sample_hz", "decimate_after_s",
@@ -39,6 +40,7 @@ NOT_TOOLS = {
     "cs_active_low", "data_bits", "errors_only", "lsb_first", "msb_first", "stop_bits", "word_bits",   # la_decode の設定・引数の名前
     "la_in", "sys_clock_hz", "trigger_time",                                  # ボード定義の資源名・ケイパビリティ・応答の項目名
     "probe_drives_swdio", "dap_busy",                                         # ロジアナの内部の ch の名前
+    "path_not_permitted", "dot_path", "local_path", "map_path", "out_dir", "raw_path",   # 許可の表の拒否の理由・パスの引数名
     # Python の関数・プラグイン名・RTL の entity 名
 }
 

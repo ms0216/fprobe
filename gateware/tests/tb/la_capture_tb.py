@@ -39,6 +39,13 @@ async def capture(dut, *, rate=0, pretrigger=8, mask=0, value=0, rise=0, fall=0,
     dut.trig_rise.value = rise
     dut.trig_fall.value = fall
     dut.run.value = 1
+    for _ in range(10):                                                      # 前の結果の done が下がるのを待つ（FAST は run の 1 周期後に始まる）
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if not int(dut.done.value):
+            break
+    else:
+        raise AssertionError("run を立てても done が下がらない")
     for _ in range(timeout):
         await RisingEdge(dut.clk)
         await ReadOnly()
@@ -75,7 +82,7 @@ async def edge_trigger_and_slow_rate(dut):
     samples, trigger = await capture(dut, rate=2, pretrigger=4, rise=0b1000)  # 3 周期ごと、bit3 の立ち上がり
     assert trigger == 4
     assert samples[3] & 0b1000 == 0 and samples[4] & 0b1000
-    assert all((b - a) % 16 == 3 for a, b in zip(samples, samples[1:]))
+    assert all((b - a) % 16 == 3 for a, b in zip(samples, samples[1:])), samples
 
 
 @cocotb.test()
@@ -155,3 +162,113 @@ async def with_no_pretrigger_the_first_sample_can_trigger(dut):
         await capture(dut, pretrigger=pre)                                  # 条件なし（常に成立）
         assert int(dut.trigger_index.value) == pre, pre
         await ClockCycles(dut.clk, 5)
+
+
+# --- 時刻の正しさ S1b（docs/superpowers/specs/2026-11-01-time-accuracy-design.md §9・§10.4 の 2） ----------------------------
+
+async def setup_timebase(dut):
+    """カウンタを入れない準備: プローブはテストが置き、time はタイムベースと同じ（辺の直後に 1 増える。辺の ps を記録する）。"""
+    from tests.tb.common import TimebaseClock
+    for name in ("run", "rate", "pretrigger", "trig_mask", "trig_value", "trig_rise", "trig_fall",
+                 "ext_trigger", "rd_addr", "probes", "pw_enable", "pw_event"):
+        getattr(dut, name).value = 0
+    await start_clock_and_reset(dut)
+    tb = TimebaseClock(dut)
+
+    async def watch_triggered():
+        prev = 0
+        while True:
+            await RisingEdge(dut.clk)
+            await ReadOnly()
+            now = int(dut.triggered.value)
+            if now and not prev:
+                tb.triggered_at = int(dut.time.value)          # triggered が 1 になった周期の time（クロストリガの源のパルス）
+            prev = now
+    cocotb.start_soon(watch_triggered())
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+    return tb
+
+
+async def arm(dut, *, rate=0, rise=0, mask=0, value=0, fall=0, pretrigger=4):
+    await RisingEdge(dut.clk)
+    dut.run.value = 0
+    await ClockCycles(dut.clk, 3)
+    dut.rate.value, dut.pretrigger.value = rate, pretrigger
+    dut.trig_mask.value, dut.trig_value.value, dut.trig_rise.value, dut.trig_fall.value = mask, value, rise, fall
+    dut.run.value = 1
+    await ClockCycles(dut.clk, (pretrigger + 2) * (rate + 1) + 6)     # 前の結果が消え、プリトリガが溜まってトリガ待ち
+    await ReadOnly()
+    assert int(dut.capturing.value) and not int(dut.triggered.value)
+    await RisingEdge(dut.clk)
+
+
+async def wait_done(dut):
+    for _ in range(3000):
+        await RisingEdge(dut.clk)
+        await ReadOnly()
+        if int(dut.done.value):
+            break
+    else:
+        raise AssertionError("捕捉が終わらない")
+    await RisingEdge(dut.clk)
+
+
+@cocotb.test()
+async def the_host_pin_window_contains_the_true_edge(dut):
+    """§10.4 の 2: 周期の中の色々な位置（シミュレーションの ps）でピンを変え、ホストの式 fprobe.la.pin_time が返す範囲
+    [pin_time, pin_time + span)（刻み）が、本当の変化の位置（時刻 T の周期 [T, T + 1) の中）を含むこと。"""
+    from cocotb.triggers import Timer
+    from cocotb.utils import get_sim_time
+    from fprobe.la import pin_time
+    from fprobe_gw.timing import LA_INTERNAL_DELAY, LA_PHASE_SPAN_TICKS
+    tb = await setup_timebase(dut)
+    for offset_ps in (1, 2500, 5000, 7500, 9999):
+        dut.probes.value = 0
+        await arm(dut, rise=1)
+        await Timer(offset_ps, unit="ps")
+        dut.probes.value = 1
+        t_ps = get_sim_time("ps")
+        await wait_done(dut)
+        t_in = tb.tick_at(t_ps)
+        lo = pin_time(int(dut.trigger_time.value), LA_INTERNAL_DELAY, LA_PHASE_SPAN_TICKS)
+        assert lo <= t_in < lo + LA_PHASE_SPAN_TICKS, (offset_ps, t_in, lo)
+
+
+@cocotb.test()
+async def an_external_trigger_lands_on_the_sample_of_its_cycle(dut):
+    """N3: 外部トリガが 1 の周期 X → トリガのサンプルのピンの時間軸の時刻（pin_time）が X（rate = 0）。rate > 0 なら
+    X 以後の最初のサンプル: X は pin_time − rate 以上 pin_time 以下（パターンのトリガと同じ式・同じ意味）。"""
+    from cocotb.triggers import Timer
+    from fprobe.la import pin_time
+    from fprobe_gw.timing import LA_INTERNAL_DELAY, LA_PHASE_SPAN_TICKS
+    tb = await setup_timebase(dut)
+    for rate in (0, 3):
+        for wait in range(rate + 2):
+            await arm(dut, rate=rate, mask=1, value=1, fall=1)               # パターンは成り立たない: 外部トリガだけ
+            for _ in range(wait):
+                await RisingEdge(dut.clk)
+            await Timer(1, unit="ps")
+            dut.ext_trigger.value = 1
+            x = tb.value                                                     # この周期の time
+            await RisingEdge(dut.clk)
+            dut.ext_trigger.value = 0
+            await wait_done(dut)
+            p = pin_time(int(dut.trigger_time.value), LA_INTERNAL_DELAY, LA_PHASE_SPAN_TICKS)
+            assert p - rate <= x <= p, (rate, wait, x, p)
+            if rate == 0:
+                assert p == x, (x, p)
+
+
+@cocotb.test()
+async def the_cross_trigger_source_follows_the_trigger_time(dut):
+    """B7: ロジアナのトリガをクロストリガの源にしたとき、源のパルス（triggered の立ち上がりの周期）= trigger_time + LA_XTRIG_DELAY。
+    ピンの時刻からは LA_INTERNAL_DELAY + LA_XTRIG_DELAY（時刻の表 la_xtrig）。"""
+    from fprobe_gw.timing import LA_XTRIG_DELAY
+    tb = await setup_timebase(dut)
+    for rate in (0, 2):
+        dut.probes.value = 0
+        await arm(dut, rate=rate, rise=1)
+        dut.probes.value = 1
+        await wait_done(dut)
+        assert tb.triggered_at == int(dut.trigger_time.value) + LA_XTRIG_DELAY

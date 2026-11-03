@@ -20,6 +20,7 @@
   import { load, save } from "../../lib/prefs";
   import { locationOf, memoryWriteCall, writeBuilt, type Location } from "../../lib/valuewrite";
   import EditValue from "./EditValue.svelte";
+  import LinuxThreads from "./LinuxThreads.svelte";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
 
@@ -38,8 +39,9 @@
   let mspBottom = $state(load("stack.bottom", ""));
   let mspTop = $state(load("stack.top", ""));
 
-  const halted = $derived($app.target?.state === "HALTED");
-  const running = $derived(isRunning($app.target?.state));
+  const linux = $derived(Boolean($app.target?.linux));      // Linux のプロセスに attach している（API の事実）
+  const halted = $derived($app.target?.state === "HALTED" && !linux);
+  const running = $derived(isRunning($app.target?.state) && !linux);
   const key = $derived(halted ? `${$app.target?.pc}/${$app.target?.run}` : "");
 
   $effect(() => {
@@ -150,6 +152,9 @@
 </script>
 
 <div class="pane">
+  {#if linux}
+    <LinuxThreads />
+  {:else}
   {#if $tl.source === "recording"}
     <div class="pane-bar codeat">
       <CodeAtToggle panel="threads" bind:linked />
@@ -249,6 +254,7 @@
       {#each msp.notes ?? [] as n, k (k)}<div class="muted note">{n}</div>{/each}
     {/if}
   </details>
+  {/if}
 </div>
 
 <style>

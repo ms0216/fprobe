@@ -1,6 +1,6 @@
 """Probe の道具: 記録の stream "rtos" から、タスクの表・CPU 負荷の推移・割り込みの統計（記録だけがあるとき）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。記録（_reading）だけを読み、機器には触らない。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。記録（_reading）だけを読み、機器には触らない。
 
 取っている最中・止めた後の時間軸（rtos_timeline_get / rtos_timeline_load）と同じ定義・同じ形で返す（画面・AI が
 記録から自分で数えないように。行の上限で黙って欠けない: 記録の行を全部読む）。
@@ -15,11 +15,16 @@ from .profile.exceptions import Activation, ExceptionProfile
 from .profile.stats import Distribution
 from .rtos.analysis import load_series
 from .rtos.timeline import Gap, Run, Timeline
+from .probe_service import HostView
 
-__all__ = ["RecordingRtosTools", "isr_activations_of", "timeline_of"]
+__all__ = ["RecordingRtosService", "isr_activations_of", "timeline_of"]
 
 STREAM = "rtos"
 WINDOWS_LIMIT = 1000                     # recording_cpu_load が返す窓の数の既定の上限
+
+
+def _us(ticks: float | None, hz: float) -> float | None:
+    return None if ticks is None else ticks * 1e6 / hz
 
 
 def timeline_of(events) -> tuple[Timeline, set[int], list[tuple[int, int]]] | None:
@@ -28,18 +33,19 @@ def timeline_of(events) -> tuple[Timeline, set[int], list[tuple[int, int]]] | No
     recorded_gaps: list[tuple[int, int, str]] = []
     isr: list[tuple[int, int]] = []
     idle: set[int] = set()
-    method, resolution = None, 0.0
+    method, resolution = None, None
     for e in events:
         if e.t_end is None:
             continue
         body = e.body or {}
         if e.kind == "run":
-            runs.append(Run(e.a, str(body.get("task") or f"0x{e.a:08X}"), e.t, e.t_end, e.uncertainty or 0,
-                            body.get("samples")))
+            runs.append(Run(e.a, str(body.get("task") or f"0x{e.a:08X}"), e.t, e.t_end, e.uncertainty,
+                            body.get("samples"), bool(body.get("start_cut")), bool(body.get("end_cut"))))
             if body.get("idle"):
                 idle.add(e.a)
             method = method or body.get("method")
-            resolution = resolution or float(body.get("resolution") or 0)
+            if resolution is None and body.get("resolution") is not None:     # None = 分からない（0 と混ぜない）
+                resolution = float(body["resolution"])
         elif e.kind == "gap":
             recorded_gaps.append((e.t, e.t_end, str(body.get("reason") or "gap")))
         elif e.kind == "isr":
@@ -114,14 +120,22 @@ def isr_activations_of(events) -> tuple[list[Activation], dict[int, str], tuple[
     return acts, names, span
 
 
-class RecordingRtosTools:
-    """記録からのタスクの表・CPU 負荷・割り込み（Probe の mixin）。"""
+class RecordingRtosService:
+    """記録からのタスクの表・CPU 負荷・割り込み（Probe のサービス）。"""
+
+    API = ("recording_cpu_load", "recording_interrupts")
+    SHARED = ()
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_reading",)
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     def recording_cpu_load(self, window_us: float | None = None, limit: int = WINDOWS_LIMIT) -> dict:
         """記録の stream rtos の run・gap・isr から、タスクの表（stats: rtos_timeline_get の stats と同じ形）と、
         window_us を渡せば窓ごとの CPU 負荷の推移（rtos_timeline_load と同じ形。窓が limit を超えたら先頭の limit 個、
         windows_total に全体の数）。情報のある時間 = run のある時間 − 抜け（run の無い時間は抜け not_recorded）。"""
-        view = self._reading()
+        view = self._host._reading()
         hz = view.meta["timebase_hz"]
         built = timeline_of(view.iter_events(streams=[STREAM], kinds=["run", "gap", "isr"]))
         if built is None:
@@ -129,7 +143,7 @@ class RecordingRtosTools:
         tl, idle, isr = built
         stats = tl.stats()
         for row in stats["tasks"].values():
-            row.update({f"{k}_us": row[k] * 1e6 / hz for k in ("total", "max_run", "min_run", "mean_run")})
+            row.update({f"{k}_us": _us(row[k], hz) for k in ("total", "max_run", "min_run", "mean_run", "max_cut_run")})
         out = {"recording": view.directory.name, "method": tl.method, "timebase_hz": hz, "t0": tl.t0, "t1": tl.t1,
                "lower_bound": tl.lower_bound, "stats": stats,
                "gaps_not_recorded": sum(1 for g in tl.gaps if g.reason == "not_recorded")}
@@ -149,7 +163,7 @@ class RecordingRtosTools:
         （profile_exceptions と同じ形。負荷の分母は stream rtos の最初から最後まで。clock_hz = タイムベース）。
         number・bins・longest を渡すと、その割り込みの含む時間の分布（bins 個の等しい幅の箱）と長い順の上位 longest 回
         （t・t_end・inclusive・bin）。at（タイムベース）を渡すと、その時刻に処理していた割り込みの番号（at_numbers）。"""
-        view = self._reading()
+        view = self._host._reading()
         hz = view.meta["timebase_hz"]
         acts, names, span = isr_activations_of(view.iter_events(streams=[STREAM]))
         profile = ExceptionProfile(acts, None if span is None else span[1] - span[0], hz, names=names)

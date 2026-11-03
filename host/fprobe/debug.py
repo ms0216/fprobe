@@ -67,6 +67,8 @@ class Stop:
     elapsed_s: float
     value: dict | None = None     # step_line の out: 出た関数の戻り値（{"type", "value"}）
     halt_bits: list[str] | None = None   # 最後の停止の DFSR の立っていたビット全部（読んだときだけ。reason は 1 語）
+    steps: int | None = None      # step_line: ホストが発行した 1 命令ステップの数（測った事実。行が変わらなくても進んだと分かる）
+    runs: int | None = None       # step_line: 踏み台・ブレークポイントまで走らせた（resume した）回数
 
 
 @dataclass(frozen=True)
@@ -289,12 +291,13 @@ class Debugger:
         if mode == "out" and halt.reason == "arrived":
             with lock:
                 value = self._returned_value(pc)
-        return self._halt_stop(halt, start, value, runner.dfsr)
+        return self._halt_stop(halt, start, value, runner.dfsr, runner.steps, runner.runs)
 
-    def _halt_stop(self, halt: Halt, start: float, value: dict | None = None, dfsr: int | None = None) -> Stop:
+    def _halt_stop(self, halt: Halt, start: float, value: dict | None = None, dfsr: int | None = None,
+                   steps: int | None = None, runs: int | None = None) -> Stop:
         reason = "step" if halt.reason in ("stepped", "arrived") else halt.reason
         return Stop(reason, halt.regs.pc, self.where(halt.regs.pc), round(time.monotonic() - start, 4), value,
-                    None if dfsr is None else dfsr_bits(dfsr))
+                    None if dfsr is None else dfsr_bits(dfsr), steps, runs)
 
     def _frame_cfa(self) -> int | None:
         """いまのフレームの CFA（CFI。無ければ None）。CFA は呼び出し元へ 1 段巻き戻すときに決まるので 2 段まで。"""

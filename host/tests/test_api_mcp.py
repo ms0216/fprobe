@@ -21,7 +21,10 @@ def test_tools_are_generated_from_the_spec():
     server = build_client_server(FakeClient(), spec)
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert "debug_run_until_halt" in names and "target_halt" in names
-    assert not any(n.startswith("session_") for n in names)            # セッションの操作は道具にしない
+    # セッションの操作は道具にしない。読むだけのもの（許可の表・デーモンの状態・操作の記録）は人と同じく AI にも見せる
+    # （断られた理由・人が止めた等を AI が確かめられる。点検 A4）
+    assert {n for n in names if n.startswith("session_")} == {"session_permissions", "session_status",
+                                                               "session_activity_list"}
 
 
 def test_binary_methods_are_not_tools():
@@ -145,3 +148,52 @@ def test_parameters_marked_not_for_mcp_are_hidden_from_the_ai():
     assert set(inspect.signature(fn).parameters) == {"enabled", "cmdline"}
     tools = {t.name: t for t in asyncio.run(build_client_server(FakeClient(), spec).list_tools())}
     assert "file_root" not in tools["debug_semihosting_configure"].input_schema["properties"]
+
+
+def _call_error(client, tool, args):
+    """道具を呼んで、AI（MCP の利用者）に返る誤りの文面。SDK は ToolError なら文面を結果に載せ、それ以外の例外は
+    UnexpectedToolError（文面は道具名だけ）にする。"""
+    import pytest
+    from mcp.server.mcpserver.exceptions import MCPServerError
+    server = build_client_server(client, load_spec())
+    with pytest.raises(MCPServerError) as caught:
+        asyncio.run(server.call_tool(tool, args))
+    return caught.value
+
+
+def test_a_daemon_error_reaches_the_ai_with_its_exception_type_and_message():
+    # デーモンが返した誤り（例外の種類とメッセージ）は、そのまま AI に返す。MCP の SDK は ToolError 以外の例外の文面を
+    # 隠して「Error executing tool <名前>」だけにするため、AI は原因を知れず同じ道具を繰り返した（使いやすさの評価 2026-11-03）
+    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+    from fprobe.api.client import ApiError
+
+    class Failing:
+        def call(self, method, **params):
+            raise ApiError(-32000, "KeyError: 'sram_demo.c:29 に対応する命令が無い（最適化で消えたか、行が違う）'")
+
+    error = _call_error(Failing(), "debug_step", {"mode": "until", "location": "sram_demo.c:29"})
+    assert not isinstance(error, UnexpectedToolError)          # 想定した誤り（文面を載せる）。UnexpectedToolError は ToolError の派生
+    assert "KeyError" in str(error) and "sram_demo.c:29 に対応する命令が無い" in str(error)
+
+
+def test_a_lost_connection_message_also_reaches_the_ai():
+    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+
+    class Lost:
+        def call(self, method, **params):
+            raise ConnectionError("fprobe-daemon との接続が切れた（x）。次の呼び出しでつなぎ直す")
+
+    error = _call_error(Lost(), "target_halt", {})
+    assert not isinstance(error, UnexpectedToolError) and "接続が切れた" in str(error)
+
+
+def test_an_unexpected_bug_in_a_tool_stays_a_crash_not_a_message():
+    # 想定した誤り（デーモンの応答・接続）だけを文面にする。道具の側のバグ（想定外の例外）の内部の文面は AI に出さない
+    from mcp.server.mcpserver.exceptions import UnexpectedToolError
+
+    class Buggy:
+        def call(self, method, **params):
+            raise RuntimeError("内部の事情")
+
+    error = _call_error(Buggy(), "target_halt", {})
+    assert isinstance(error, UnexpectedToolError) and "内部の事情" not in str(error)

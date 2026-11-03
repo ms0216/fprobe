@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 // fprobe のモニタ（../../fprobe_monitor.c）を Zephyr で起動する。
 //
 // ベクタ 12: Zephyr のベクタ表（arch/arm/core/cortex_m/vector_table.S）は DebugMonitor に z_arm_debug_monitor を

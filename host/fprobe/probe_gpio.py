@@ -6,16 +6,18 @@
 状態）なので、使い終えたら gpio.release する。
 
 機器固有の手順（SPI Flash の JEDEC の命令等）は本体に入れない: fprobe.plugins.spiflash がこの API の上に載る。
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
+頼る相手（NEEDS）: 核（Probe の _lock・session）と、ターゲットに接続していないことの確かめ
+（LowLevelService の _require_disconnected）。機器に触るのは必ず _lock の中。
 仕様: docs/superpowers/specs/2026-10-19-u42-spi-flash-design.md
 """
 
 import time
 
 from .gpio import ALL_PINS, Gpio, GpioState
+from .probe_service import HostView
 from .spi import SpiConfig, SpiMaster, SpiPins
 
-__all__ = ["GpioTools", "SEQUENCE_LIMIT", "decode_words", "encode_words"]
+__all__ = ["GpioService", "SEQUENCE_LIMIT", "decode_words", "encode_words"]
 
 SEQUENCE_LIMIT = 1 << 20              # gpio.sequence の 1 回の状態の数の上限
 TRANSFER_LIMIT = 1 << 20              # spi.transfer の 1 回の語の数の上限
@@ -47,25 +49,34 @@ def _state_dict(st: GpioState) -> dict:
     return {"drive": st.drive, "enable": st.enable, "level": st.level}
 
 
-class GpioTools:
+class GpioService:
+    """拡張ヘッダの汎用入出力と SPI。"""
+
+    API = ("gpio_read", "gpio_set", "gpio_release", "gpio_sequence", "spi_transfer")
+
+    NEEDS = ("_lock", "_require_disconnected", "session")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
+
     def _gpio(self) -> Gpio:
-        return Gpio(self.session.device)
+        return Gpio(self._host.session.device)
 
     def gpio_read(self) -> dict:
         """拡張ヘッダの 8 本の状態: drive（出力の値）・enable（出力にしている端子）・level（端子の値）。ビット n = ch n。"""
-        with self._lock:
+        with self._host._lock:
             return _state_dict(self._gpio().state())
 
     def gpio_set(self, drive: int, enable: int, mask: int = ALL_PINS) -> dict:
         """mask の端子だけ、出力の値を drive、出力にするかを enable のビットにする（ほかの端子は変えない）。
         出力にした端子は普段の機能（デバッグの線・UART 等）より優先して駆動する。ターゲットに接続中は断る。"""
-        with self._lock:
-            self._require_disconnected("拡張ヘッダの端子を駆動する操作")
+        with self._host._lock:
+            self._host._require_disconnected("拡張ヘッダの端子を駆動する操作")
             return _state_dict(self._gpio().set(drive, enable, mask))
 
     def gpio_release(self, mask: int = ALL_PINS) -> dict:
         """mask の端子を出力にしない（普段の機能に戻す）。"""
-        with self._lock:
+        with self._host._lock:
             return _state_dict(self._gpio().release(mask))
 
     def gpio_sequence(self, states: list[int]) -> dict:
@@ -73,8 +84,8 @@ class GpioTools:
         gpio_set で決める。levels[i] は states[i] を書いた頃の端子（同期化の分、書く前の値のことがある）。"""
         if len(states) > SEQUENCE_LIMIT:
             raise ValueError(f"states は {SEQUENCE_LIMIT} 個まで")
-        with self._lock:
-            self._require_disconnected("拡張ヘッダの端子を駆動する操作")
+        with self._host._lock:
+            self._host._require_disconnected("拡張ヘッダの端子を駆動する操作")
             return {"levels": self._gpio().sequence(states)}
 
     def spi_transfer(self, sck: int, mosi: int | None = None, miso: int | None = None, cs: int | None = None,
@@ -90,8 +101,8 @@ class GpioTools:
         words = decode_words(data, bits)
         if len(words) + read_length > TRANSFER_LIMIT:
             raise ValueError(f"1 回の転送は {TRANSFER_LIMIT} 語まで（分けて keep_cs でつなぐ）")
-        with self._lock:
-            self._require_disconnected("拡張ヘッダの端子を駆動する操作")
+        with self._host._lock:
+            self._host._require_disconnected("拡張ヘッダの端子を駆動する操作")
             spi = SpiMaster(self._gpio(), pins, config)
             started = time.perf_counter()
             received = spi.transfer(words, read_length, fill=fill, keep_cs=keep_cs)

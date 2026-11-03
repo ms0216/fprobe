@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fieldsText, parseAddress, sanitizeWatches } from "../src/lib/system";
 import * as system from "../src/lib/system";
 import { FakeConn } from "./fake-conn";
+import type { AppState } from "../src/lib/state";
 
 describe("番地の書き方", () => {
   it("16 進・10 進。32 ビットの語なので 4 の倍数だけ", () => {
@@ -76,14 +77,19 @@ describe("FPGA の値の書き方", () => {
 });
 
 describe("FPGA の条件", () => {
-  it("「変化」と「= 値」を and / かつ でつなぐ", async () => {
-    const { parseCondition } = await import("../src/lib/system");
-    expect(parseCondition("restart changed and state=BUSY")).toEqual(
-      [{ field: "restart", op: "changed" }, { field: "state", op: "=", value: "BUSY" }]);
-    expect(parseCondition("restart が変化 かつ state = BUSY")).toEqual(
-      [{ field: "restart", op: "changed" }, { field: "state", op: "=", value: "BUSY" }]);
-    expect(parseCondition("")).toBeNull();
-    expect(parseCondition("state >= 2")).toBeNull();
+  it("書き方はデーモン（recording.condition.parse）が確かめる。画面は構文解析しない", async () => {
+    const { conditionError } = await import("../src/lib/system");
+    const conn = new FakeConn({
+      "recording.condition.parse": ({ condition }: { condition: string }) => {
+        if (condition === "state >= 2") throw new Error("項 'state >= 2' が読めない");
+        return { condition, terms: [] };
+      },
+    });
+    expect(await conditionError(conn, " restart changed and state=BUSY ")).toBeNull();
+    expect(conn.calls.at(-1)).toEqual(["recording.condition.parse", { condition: "restart changed and state=BUSY" }]);
+    expect(await conditionError(conn, "state >= 2")).toContain("読めない");
+    expect(conn.quiet).toEqual(["recording.condition.parse", "recording.condition.parse"]);
+    expect("parseCondition" in system || "fpgaOnly" in system).toBe(false);
   });
 });
 
@@ -149,23 +155,6 @@ describe("変数名で MCU のメモリを足す", () => {
   });
 });
 
-describe("FPGA の条件を結果の直前に多い出来事と同じ書き方に", () => {
-  it("rose / fell と \"…\" で囲んだ名前・値も読める", async () => {
-    const { parseCondition } = await import("../src/lib/system");
-    expect(parseCondition("restart rose")).toEqual([{ field: "restart", op: "rose" }]);
-    expect(parseCondition('"my flag" fell and state="WAIT ACK"')).toEqual(
-      [{ field: "my flag", op: "fell" }, { field: "state", op: "=", value: "WAIT ACK" }]);
-  });
-  it("FPGA の信号だけの条件か（条件の表に足せるか）", async () => {
-    const { fpgaOnly } = await import("../src/lib/system");
-    const names = ["state", "restart", "addr"];
-    expect(fpgaOnly("restart changed and state=BUSY", names)).toBe(true);
-    expect(fpgaOnly("誤り changed", names)).toBe(false);
-    expect(fpgaOnly("in0 rose", names)).toBe(false);
-    expect(fpgaOnly("fpga.restart rose", names)).toBe(true);
-  });
-});
-
 describe("記録の欠けと分解能はデーモンの事実を描く（b18・b19）", () => {
   it("記録中にメモリの読みが止まった = recording.status の watch_running が false（watch.status を別に読まない）", () => {
     const { memoryStopped } = system;
@@ -185,7 +174,9 @@ describe("記録の欠けと分解能はデーモンの事実を描く（b18・b
 describe("MCU の番地の語を書く（target.memory.write。走行中も）", () => {
   const fakeApp = (ai: boolean) => {
     const calls: [string, unknown][] = [];
-    return { calls, aiConnectedUnpaused: ai, act: async (m: string, p: unknown) => { calls.push([m, p]); return {}; } };
+    // 書きの応答（target.memory.write）は使わない: 形は API の応答の型のまま（{} を返す偽物）
+    return { calls, aiConnectedUnpaused: ai,
+             act: (async (m: string, p: unknown) => { calls.push([m, p]); return {}; }) as AppState["act"] };
   };
   const answer = (ok: boolean) => ({ ask: async () => ok }) as any;
 
@@ -227,5 +218,26 @@ describe("結果の直前に多い出来事の引数（recording.correlate）", 
   });
   it("自動の候補は返す数（上位の数）を使う人が入れたときだけ（API の既定の 20 を暗黙に使わない）", () => {
     expect(system.correlateParams("err changed", [], true, 5, null)).toBeNull();
+  });
+});
+
+describe("ピンの垂れ流しの始め方（形式・サンプルレート・チャンネル数は使う人が選ぶ。画面で既定を決めない）", () => {
+  it("RLE は、これまでどおり形式だけ（サンプルレートとチャンネル数は送らない）", () => {
+    expect(system.pinsStreamStart("rle", "", "")).toEqual({ rle: true });
+    expect(system.pinsStreamStart("rle", "50", "8")).toEqual({ rle: true });              // RAW の欄は無視（RLE は 16 ビットの値の繰り返し）
+  });
+  it("RAW は、サンプルレート（MS/s）とチャンネル数の両方が要る。片方でも空・誤りなら始められない（null）", () => {
+    expect(system.pinsStreamStart("raw", "", "16")).toBeNull();
+    expect(system.pinsStreamStart("raw", "50", "")).toBeNull();
+    expect(system.pinsStreamStart("raw", "0", "8")).toBeNull();
+    expect(system.pinsStreamStart("raw", "abc", "8")).toBeNull();
+    expect(system.pinsStreamStart("raw", "50", "5")).toBeNull();                          // 詰められない数
+    expect(system.pinsStreamStart("", "50", "8")).toBeNull();                             // 形式が未選択
+  });
+  it("RAW: 16 ch は詰めない（pack_channels = null）、8・4・2 は詰める。MS/s は Hz にして送る", () => {
+    expect(system.pinsStreamStart("raw", "25", "16")).toEqual({ rle: false, rate_hz: 25e6, pack_channels: null });
+    expect(system.pinsStreamStart("raw", "50", "8")).toEqual({ rle: false, rate_hz: 50e6, pack_channels: 8 });
+    expect(system.pinsStreamStart("raw", " 100 ", "4")).toEqual({ rle: false, rate_hz: 100e6, pack_channels: 4 });
+    expect(system.pinsStreamStart("raw", "12.5", "2")).toEqual({ rle: false, rate_hz: 12.5e6, pack_channels: 2 });
   });
 });

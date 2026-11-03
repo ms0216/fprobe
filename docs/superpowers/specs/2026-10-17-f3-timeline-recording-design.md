@@ -42,6 +42,11 @@ TRACE32（PowerIntegrator との共通時刻）と DT+（テストポイント�
   `sample`（変数の値。F4）、`clock`（時計の対応付けの点）。
 - 1 件の出来事 = 時刻（開始、必要なら終了）・ストリーム・種類・小さな値（整数 2 つ）・本体（JSON。小さなもの）・
   不確かさ（ホストの出来事だけ）。SQLite の表 1 つに入れ、（ストリーム, 時刻）の索引。
+  - 表の版（2026-11-03。`fprobe/recording_table.py` が正。SQLite の `user_version`）: 版 2 は表 `event` に (stream, kind) の
+    組の番号 `key`、組の辞書の表 `names`（区間の長さの上限 `longest` も）、索引は (t)・(key, t)・(t_end) の 3 つ。読みの口
+    `events`（t, t_end, stream, kind, a, b, body, unc, rowid）はビュー。版 1（stream・kind の文字列、索引 4 つ）の古い記録は
+    移さずにそのまま読み書きし、SQL の問い合わせにはどちらの版も同じ列で見える。1 件の書き込みは版 1 の約 0.7 倍の時間・
+    約 6 割の大きさ（`tools/bench/recording_bench.py`）。
 - 書き込みはまとめて（例: 0.2 秒か 1 万件ごと）トランザクションで。
 
 ## 4. 取り込み（記録器 `Recorder`）

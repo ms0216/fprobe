@@ -171,3 +171,125 @@ def test_demo_system_status_has_the_real_shape(demo):
     out = demo.system_status(addresses=[0x20000000])
     assert set(out) == {"time_us", "mcu", "fpga"} and out["fpga"] == {"available": False}
     assert out["mcu"]["connected"] is True and "0x20000000" in out["mcu"]["memory"]
+
+
+# --- 偽の機器が本物の Probe の引数・メソッドに追いつく（使いやすさの評価 2026-11-03で MCP の課題 4・7 が落ちた原因） ---
+
+def _valid(method, result):
+    from fprobe.api.daemon import jsonable
+    from fprobe.api.spec import load_spec
+    load_spec().validate_result(method, jsonable(result))
+
+
+def test_run_until_halt_stops_at_a_breakpoint_like_the_real_probe():
+    d = DemoProbe()
+    d.breakpoint_set("sram_demo.c:19")
+    stop = d.run_until_halt(timeout_s=3.0)
+    _valid("debug.run_until_halt", stop)
+    assert stop["reason"] == "breakpoint" and (stop["function"], stop["line"]) == ("tick", 19)
+    assert (d.target_status()["function"], d.target_status()["line"]) == ("tick", 19)
+
+
+def test_run_until_halt_times_out_and_halts_when_nothing_stops_it():
+    d = DemoProbe()
+    stop = d.run_until_halt(timeout_s=0.05)
+    _valid("debug.run_until_halt", stop)
+    assert stop["reason"] == "timeout" and d.target_status()["state"] == "HALTED"
+
+
+def test_peripheral_read_skip_leaves_the_named_registers_out(demo):
+    out = demo.peripheral_read("GPIOA", skip=["GPIOA.MODER"])
+    _valid("target.peripheral.read", out)
+    assert "GPIOA.MODER" not in {r["path"] for r in out["registers"]} and [x["path"] for x in out["skipped"]] == ["GPIOA.MODER"]
+
+
+def test_the_demo_answers_the_methods_the_evaluation_called(demo):
+    _valid("debug.semihosting.status", demo.semihosting_status())
+    _valid("probe.pins.read", demo.pins_read())
+    _valid("debug.disasm.text", demo.disasm_text())
+    _valid("debug.disasm.around", demo.disasm_around(before=1, after=1, data_ranges=[], sync_limit=1024))
+    _valid("debug.backtrace", demo.backtrace(assume_leaf=False))
+
+
+def test_an_argument_the_demo_cannot_honour_is_refused_not_ignored(demo):
+    from fake_probe_contract import NotInDemo
+    with pytest.raises(NotInDemo, match="core"):
+        demo.target_resume(core=1)
+    with pytest.raises(NotInDemo, match="from_target"):
+        demo.svd_load(from_target=True)
+
+
+def test_terminal_read_with_terminals_returns_the_switch_list_for_rtt_only(demo):
+    # 画面の Terminal は terminals=True で読む。偽の機器が受けないと、画面は黙って読みに失敗して空のままだった
+    # （使いやすさの評価 2026-11-03 の課題 8: 画面の担当が RTT の出力に辿り着けなかった一因）
+    rtt = demo.terminal_read("rtt0", terminals=True)
+    _valid("terminal.read", rtt)
+    assert rtt["terminals"] == [] and "tick counter" in rtt["data"]
+    assert "terminals" not in demo.terminal_read("uart", terminals=True)
+
+
+def test_step_over_the_call_that_returns_to_the_same_line_still_shows_progress():
+    # 3 行ステップが同じ行（28）に戻る: 位置は同じでも、API は steps・runs（測った事実）で進んだことを返す。counter も増える
+    d = DemoProbe()
+    d._go("reset_handler", 28)
+    before = d.counter
+    out = d.step_line("over")
+    _valid("debug.step", out)
+    assert (out["function"], out["line"]) == ("reset_handler", 28)
+    assert out["steps"] == 1 and out["runs"] == 1 and d.counter == before + 1
+
+
+# --- 本物の機器に合わせる: 止まっている間は端末の出力を増やさない・同じ番地は同じ値（使いやすさの評価 2026-11-03） ---
+
+def test_terminal_output_grows_only_while_the_target_runs():
+    # 止まったターゲットは出力を出さない。偽の機器が止まっていても時刻で足していたため、画面の担当は「最後の 1 行が決まらない」と
+    # あきらめた。走っている時間（止めている間は進まない）で足す
+    from fake_demo_io import DemoStreams
+    now = [0.0]
+    streams = DemoStreams(lambda: 42, clock=lambda: now[0])
+    start = streams.size("rtt0")
+    now[0] = 0.4
+    assert streams.size("rtt0") == start                           # 周期（0.5 s）に満たない
+    now[0] = 2.0
+    grown = streams.size("rtt0")
+    assert grown > start
+    assert streams.size("rtt0") == grown                           # 時計が進まなければ増えない（止まっている間）
+    now[0] = 4.0
+    assert streams.size("rtt0") > grown
+
+
+def test_a_halted_demo_target_does_not_add_output_and_a_running_one_does():
+    import time
+    d = DemoProbe()
+    d.target_halt()
+    before = d.terminal_read("rtt0")["next"]
+    time.sleep(0.7)
+    assert d.terminal_read("rtt0")["next"] == before               # 止まっている間は増えない
+    d.target_resume()
+    time.sleep(0.7)
+    assert d.terminal_read("rtt0")["next"] > before               # 走り出したら増える
+    d.target_halt()
+
+
+def _word(d, address):
+    return int.from_bytes(bytes.fromhex(d.read_memory(address, 4)), "little")
+
+
+def test_a_peripheral_register_reads_the_same_through_the_peripheral_and_memory_paths():
+    # 同じ番地は同じ値: 周辺レジスタの読みとメモリの読みが別の値（メモリは 0）だと、画面の担当は MCU 欄の 0 を答えにした
+    d = DemoProbe()
+    reg = d.peripheral_read("GPIOA.MODER")["registers"][0]
+    assert reg["value"] != 0
+    assert _word(d, reg["address"]) == reg["value"]
+    row = d.memory_view(reg["address"], 16)["rows"][0]
+    assert row["address"] == reg["address"] and row["values"][:4] == list(reg["value"].to_bytes(4, "little"))
+    d.peripheral_write("GPIOA.MODER", value=0x12345678)
+    assert _word(d, reg["address"]) == 0x12345678                   # 周辺の書きがメモリの読みに出る
+    d.write_memory(reg["address"], (0xA5A5A5A5).to_bytes(4, "little").hex())
+    assert d.peripheral_read("GPIOA.MODER")["registers"][0]["value"] == 0xA5A5A5A5     # メモリの書きが周辺の読みに出る
+
+
+def test_memory_at_an_address_with_no_register_is_zero_and_ram_is_unchanged():
+    d = DemoProbe()
+    assert d.read_memory(0x5FFFFFF0, 4) == "00000000"                       # どのレジスタにも当たらない周辺の番地は 0
+    assert d.read_memory(0x20000000, 4) == d._mem.read(0x20000000, 4).hex()

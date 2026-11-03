@@ -112,3 +112,22 @@ def test_three_unknown_devices_split_when_the_boundaries_match_the_count():
     chain = FakeChain([Tap(4, 0x11111111, ir_capture=0b0001), Tap(3, 0x22222223, ir_capture=0b001),
                        Tap(5, 0x33333333, ir_capture=0b00001)])
     assert jc.scan_chain(chain).chain == [4, 3, 5]
+
+
+class _Link:
+    """What pyOCD's DAPAccessCMSISDAP.jtag_sequence returns differs by version: bytes up to 0.45, an int from 0.46."""
+
+    def __init__(self, chain, as_int):
+        self.chain, self.as_int = chain, as_int
+
+    def jtag_sequence(self, cycles, tms, read_tdo, tdi):
+        out = self.chain.sequence(cycles, tms, tdi, True)
+        if not read_tdo:
+            return None
+        return out if self.as_int else out.to_bytes((cycles + 7) // 8, "little")
+
+
+@pytest.mark.parametrize("as_int", [False, True])
+def test_the_dap_link_wire_works_with_both_the_bytes_of_pyocd_0_45_and_the_int_of_0_46(as_int):
+    scan = jc.scan_chain(jc.dap_link_wire(_Link(FakeChain([Tap(4, DP)]), as_int)))
+    assert [d.idcode for d in scan.devices] == [DP] and scan.chain == [4]

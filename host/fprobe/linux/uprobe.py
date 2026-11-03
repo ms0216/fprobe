@@ -9,7 +9,7 @@ from pathlib import Path
 
 from elftools.elf.elffile import ELFFile
 
-NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")       # \Z: $ は末尾の改行の前にも合う（名前はシェルの命令に入る）
 GROUP = "fprobe"                                     # uprobe_events のグループ（fprobe が付けたものだけを外す）
 _HEAD = re.compile(r"^\s*(?P<comm>.+?)-(?P<pid>\d+)\s+(?:\(\s*[\d-]+\)\s+)?\[(?P<cpu>\d+)\]\s+(?:\S+\s+)?"
                    r"(?P<sec>\d+)\.(?P<frac>\d+):\s+(?P<rest>.*)$")

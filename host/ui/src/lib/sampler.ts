@@ -1,17 +1,12 @@
 // DAP サンプラ（変数を止めずに読む FPGA の回路。1 つだけ）の取り合いを画面の言葉で: いま使っている道具をパネルの名前に、
 // 使い始めた利用者（デーモンが記録した事実 probe.sampler.status の client。操作の記録から推さない）と止める操作（API）を
 // 添える。Svelte に依らない。
-import type { DaemonConnection } from "./api";
+import type { DaemonConnection, Result } from "./api";
 import type { Key } from "./i18n";
 
-export type SamplerUser = "watch" | "rtos" | "profile" | "rtt" | "clock";
-
-export interface SamplerStatus {
-  user: SamplerUser | null;
-  release: string | null;            // 止める API（clock は自分で終わる）
-  since: number | null;
-  client?: { id: number; name: string; role: string } | null;   // 使い始めた呼び出し元（古いデーモンは無い）
-}
+/** probe.sampler.status の応答（仕様から生成した型）。release = 止める API（clock は自分で終わる）、client = 使い始めた呼び出し元 */
+export type SamplerStatus = Result<"probe.sampler.status">;
+export type SamplerUser = NonNullable<SamplerStatus["user"]>;
 
 /** 道具 → それを使うパネル（dock の id と表示の名前）と、使い始める API */
 export const SAMPLER_USERS: Record<SamplerUser, { panel: string | null; title: Key; start: string }> = {

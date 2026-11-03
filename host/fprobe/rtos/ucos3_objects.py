@@ -178,7 +178,8 @@ class UCOS3Objects:
 
     def timer_remaining(self, s: StructLayout, h: int) -> int | None:
         """動いているタイマの残りの OS のティック。OSTmrRemainGet と同じく OSTmrListPtr の差分（Remain）を自分まで足し、
-        時間のタスクがまだ反映していない経過（OSTickCtr − OSTmrTaskTickBase）を引く。列に無ければ None。"""
+        時間のタスクがまだ反映していない経過（OSTickCtr − OSTmrTaskTickBase、OSTickCtr の幅で回す）を引く。列に無い・
+        経過が読めない（どちらかの変数が無い）なら None（経過を 0 とみなさない）。"""
         head = self.rtos._variable("OSTmrListPtr")
         if head is None:
             return None
@@ -187,8 +188,10 @@ class UCOS3Objects:
             total += self._u(s, node, "Remain")
             if node == h:
                 tick, base = self.rtos.tick_count(), self.rtos._variable("OSTmrTaskTickBase")
-                elapsed = (tick - base) & 0xFFFF_FFFF if tick is not None and base is not None else 0
-                return max(total - elapsed, 0)
+                mask = self.rtos.tick_mask()
+                if tick is None or base is None or mask is None:
+                    return None
+                return max(total - ((tick - base) & mask), 0)
         return None
 
     def _function_name(self, address: int) -> str | None:

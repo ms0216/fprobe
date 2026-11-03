@@ -123,18 +123,19 @@ def test_structures_decode_to_nested_values(elf):
     assert sensors["kind"] == "array" and sensors["length"] == 2
     alpha, beta = (s["members"] for s in sensors["items"])
     assert all(s["kind"] == "struct" for s in sensors["items"])
-    assert alpha["name"] == varray(ints(97, 108, 112, 104, 97, 0, 0, 0), string="alpha")
+    assert alpha["name"] == varray(ints(97, 108, 112, 104, 97, 0, 0, 0), element_type="char", string="alpha")
     assert alpha["pos"] == vstruct(x=vint(10), y=vint(-20))
     assert alpha["mode"] == venum("MODE_RUN", 1) and beta["mode"] == venum("MODE_FAULT", -2)
     assert alpha["flags"] == vstruct(ready=vint(1), mode=vint(5), level=vint(-3), wide=vint(0x123), raw=vint(0xAB))
     assert beta["flags"] == vstruct(ready=vint(0), mode=vint(7), level=vint(7), wide=vint(0xFFF), raw=vint(1))
-    assert alpha["word"] == vstruct(u32=vint(0x3F800000), bytes=varray(ints(0, 0, 0x80, 0x3F)), f=vfloat(1.0))
+    assert alpha["word"] == vstruct(u32=vint(0x3F800000), bytes=varray(ints(0, 0, 0x80, 0x3F), element_type="uint8_t"), f=vfloat(1.0))
     assert alpha["gain"] == vfloat(1.5) and alpha["scale"] == vfloat(-2.25) and beta["scale"] == vfloat(1e10)
-    assert alpha["samples"] == varray([varray(ints(1, 2, 3)), varray(ints(-4, -5, -6))])
-    assert alpha["next"] == vptr(syms.variable("sensors").address + 80, "struct Sensor")
-    assert beta["next"] == vptr(0, "struct Sensor")
-    assert alpha["reg"] == vptr(0xE000E010, "const volatile uint32_t")
-    assert alpha["raw16"] == vint(0xBEEF) and alpha["pair"] == varray(ints(-17, -66))   # 無名の共用体は外側に展開
+    assert alpha["samples"] == varray([varray(ints(1, 2, 3), element_type="int32_t"),
+                                       varray(ints(-4, -5, -6), element_type="int32_t")], element_type="int32_t[3]")
+    assert alpha["next"] == vptr(syms.variable("sensors").address + 80, "struct Sensor", deref=True)
+    assert beta["next"] == vptr(0, "struct Sensor", deref=False)                   # 0 番地は先を読まない
+    assert alpha["reg"] == vptr(0xE000E010, "const volatile uint32_t", deref=True)
+    assert alpha["raw16"] == vint(0xBEEF) and alpha["pair"] == varray(ints(-17, -66), element_type="int8_t")   # 無名の共用体は外側に展開
 
 
 def test_scalars_strings_pointers_and_large_arrays(elf):
@@ -142,15 +143,17 @@ def test_scalars_strings_pointers_and_large_arrays(elf):
     assert read_global(info, syms, "negative") == vint(-5)
     assert read_global(info, syms, "big") == vint(0x123456789ABCDEF0)
     assert read_global(info, syms, "enabled") == vbool(True)
-    assert read_global(info, syms, "matrix") == varray([varray(ints(0, 1, 2, 3)), varray(ints(10, 11, 12, 13)),
-                                                        varray(ints(20, 21, 22, 23))])
+    row = dict(element_type="uint16_t")
+    assert read_global(info, syms, "matrix") == varray([varray(ints(0, 1, 2, 3), **row), varray(ints(10, 11, 12, 13), **row),
+                                                        varray(ints(20, 21, 22, 23), **row)], element_type="uint16_t[4]")
     assert read_global(info, syms, "greeting")["string"] == "hello, fprobe"
     message = read_global(info, syms, "message")
     assert message["kind"] == "pointer" and message["string"] == "hello, fprobe"
     assert message["address"] == syms.variable("greeting").address
-    assert read_global(info, syms, "callback") == vptr(syms.symbol("square").address | 1, "int (int)", symbol="square")
+    assert read_global(info, syms, "callback") == vptr(syms.symbol("square").address | 1, "int (int)", deref=False,
+                                                       symbol="square")                  # 関数へのポインタは先を読まない
     ramp = read_global(info, syms, "ramp", max_elements=4)
-    assert ramp == varray(ints(1, 2, 0, 0), length=100)                       # 切った: items が length より少ない
+    assert ramp == varray(ints(1, 2, 0, 0), length=100, element_type="uint8_t")                       # 切った: items が length より少ない
     assert read_global(info, syms, "s_ticks") == vint(7)
     head = read_global(info, syms, "head")
     assert head["address"] == syms.variable("sensors").address and head["to"] == "Sensor"

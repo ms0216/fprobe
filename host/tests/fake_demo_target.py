@@ -152,6 +152,7 @@ class TargetDemo:
         if self._fatal_after_s is not None:
             extra = [Symbol("RADIO_IRQHandler", 0, 0, "function"), Symbol("_kernel", 0, 0, "object")]
             out.update(scan([*self._elf._symbols.names(), *extra], self._elf._halt_names, self._elf._halt_patterns))
+            out["confirm_before_halt"] = out["matched"] and out["debug_mode"] == "halt"   # 足したシンボルで（本物と同じ規則）
         return out
 
     def liveness_set(self, functions=None, patterns=None, pc_samples=None, tick_variable=None):

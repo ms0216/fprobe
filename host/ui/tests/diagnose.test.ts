@@ -54,3 +54,25 @@ describe("mhzToHz（接続の周波数の欄）", async () => {
     expect(mhzToHz("")).toBeNull();
   });
 });
+
+describe("JTAG のチェーン（jtag.scan・jtag_chain の欄）", async () => {
+  const { chainFromText, chainText, scanChain } = await import("../src/lib/diagnose");
+  it("欄: 空は送らない（undefined）、0 以上の整数のカンマ区切りだけ受ける（ほかは欄の誤り null）", () => {
+    expect(chainFromText("")).toBeUndefined();
+    expect(chainFromText(" 4, 5 ")).toEqual([4, 5]);
+    expect(chainFromText("4,x")).toBeNull();
+    expect(chainFromText("4,-1")).toBeNull();
+    expect(chainText([4, 5])).toBe("4, 5");
+  });
+
+  it("接続の速さを渡して走査（空ならデーモンの既定）。誤りは文で", async () => {
+    const scan = { devices: [], count: 0, total_ir_length: null, ir_capture: null, jtag_chain: null, tdo: "stuck_low",
+                   notes: ["TDO がずっと 0"] };
+    const conn = new FakeConn({ "jtag.scan": scan });
+    expect(await scanChain(conn, 1_000_000)).toEqual({ scan, error: null });
+    expect(await scanChain(conn, null)).toEqual({ scan, error: null });
+    expect(conn.calls).toEqual([["jtag.scan", { frequency_hz: 1_000_000 }], ["jtag.scan", {}]]);
+    const bad = new FakeConn({ "jtag.scan": () => { throw deviceError("接続中は走査しない"); } });
+    expect(await scanChain(bad, null)).toEqual({ scan: null, error: "接続中は走査しない" });
+  });
+});

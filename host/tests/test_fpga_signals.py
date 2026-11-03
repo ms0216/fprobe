@@ -3,7 +3,8 @@
 import pytest
 
 from fprobe.fpga_signals import FpgaSignals
-from fprobe.probe_ui_state import UiStateTools
+from fprobe.probe_service import expose
+from fprobe.probe_ui_state import UiStateService
 
 DEFS = {"groups": {"0": [
     {"name": "mark", "lsb": 0, "width": 1},
@@ -46,9 +47,10 @@ def test_round_trip_normalizes_the_defaults():
     assert FpgaSignals.from_dict(d).to_dict() == d
 
 
-class Holder(UiStateTools):
+@expose("_svc_ui_state", UiStateService)
+class Holder:
     def __init__(self):
-        self._init_ui_state()
+        self._svc_ui_state = UiStateService(self)
         self.sent = []
         self._publish = lambda topic, data: self.sent.append((topic, data))
 

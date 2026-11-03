@@ -18,8 +18,8 @@
   │ method.impl の名前で  getattr(Probe, impl)(**params)  を呼ぶ
   └───────────────────────────┬────────────────────────────┘
                               ▼
-                     probe.py  Probe（mixin 群を継承）
-                              │ probe_*.py の XxxTools mixin
+                     probe.py  Probe（核の状態と、サービスへの委譲）
+                              │ probe_*.py の XxxService（領域ごとのサービス）
                               ▼
         解析・ターゲット操作の部品（debug / flash / rtos / profile / recording / correlate / obs_* / la / …）
                               ▼
@@ -33,10 +33,10 @@
 - 公開口 → Probe → 部品 → 低レベル、の一方向。`mcp_client.py` は `Probe` を import しない
   （MCP は薄い転送のクライアントで、機器には触らない。`probe.py` の docstring）。
   `probe.py`（Probe 本体）を import するのは `api/daemon.py` と `mcp_server.py`（入口の別名）だけ。部品（`probe_*` 以外のファイル）は `probe_*` を import しない
-  （`probe_names.py` は mixin でなく `mcp_client` / `daemon` / `probe_device` が使う普通のモジュール）。mixin どうしの import は一部にある
+  （`probe_names.py` はサービスでなく `mcp_client` / `daemon` / `probe_device` が使う普通のモジュール）。サービスのモジュールどうしの import は一部にある
   （`probe_window`・`probe_inspect`・`probe_observe` の定数や部品を `probe_cycles` / `probe_formats` / `probe_debug` / `probe_gdb` が使う等）。
-- `probe_host.py` の `ProbeHost`（`typing.Protocol`）は、mixin が頼る共通の属性（`_lock`・`session`・`target`・`dbg`・`_caps()`・`_recorder` など）を
-  型で並べたもの。実行時は何もしない（継承しない）。他の `probe_*` を import しない（輪を作らない）。
+  サービスどうしはクラスを直接持たず、ホスト（Probe）越しに名前で使う（下の §3）。
+- `probe_service.py` はサービスの基盤（`expose`・`delegate`・`HostView`・`ReleaseSteps`）。他の `probe_*` を import しない（輪を作らない）。
 - `generated.py` と `caps.py` の定数はゲートウェア側が正（`python -m fprobe_gw gen` で再生成。直接編集しない）。
 
 ## 2. 公開口
@@ -56,13 +56,21 @@
 | `__main__.py` | `fprobe` CLI。`Device`・`LogicAnalyzer` を直接使う経路と `run` / `merge` 等 |
 | `home.py` | 利用者ごとの保存先（`FPROBE_HOME`、既定 `~/.fprobe`） |
 
-## 3. Probe と mixin（`probe.py` と `probe_*.py`）
+## 3. Probe とサービス（`probe.py` と `probe_*.py`）
 
-`probe.py` の `Probe` は `class Probe(InspectTools, ObserveTools, … DeviceTools)` と mixin を継承し、`__init__` で状態を作って
-各 mixin の `_init_<名前>()` を呼ぶ。`Probe` 自身は機器の開閉（`session`・`target`・`dbg`・`close`・`_caps`）だけを持つ。
-mixin は単独では動かず、Probe に混ぜて使う（`self._lock` の中で機器に触る）。
+`probe.py` の `Probe` は核（機器の錠 `_lock`・機器の口 `session`・接続中のターゲット `target` / `_debug` / `dbg`・読み込んだ ELF
+`_symbols`・つないでいる先 `_link` 等と、機器の開閉 `close`・`_release_device`・`_caps`）を持ち、`__init__` で領域ごとのサービス
+（`probe_*.py` の `XxxService`）を作って `self._svc_<名前>` に置く。各サービスは次の 3 つの組を持つ
+（仕様 `docs/superpowers/specs/2026-11-03-probe-services-design.md`）:
 
-| 領域 | mixin を持つファイル（クラス名は多くが `XxxTools`） |
+- `API`: 公開の道具（API の impl 名）。`@expose` で Probe に委ねる（`getattr(probe, impl)` で呼べる）。
+- `SHARED`: ほかの領域・試験に出す名前（内部のメソッド・状態）。同じく Probe に委ねる（読み・書き・消し）。
+- `NEEDS`: ホスト（Probe の核と、ほかの領域が SHARED に出した名前）から使う名前。サービスは `self._host`（`HostView`）越しに
+  これだけを使える（並べていない名前は AttributeError。`tests/test_probe_services.py` が `self._host.<名前>` と NEEDS の一致を静的に確かめる）。
+
+機器を手放すときに閉じる段は `ReleaseSteps` に名前付きで登録する（登録の順に全部試し、失敗を集めて返す）。
+
+| 領域 | サービスを持つファイル（クラス名は `XxxService`） |
 |---|---|
 | プローブ本体・構成 | `probe_device`（probe_info・csr_read/write・target_voltage）、`probe_design`（Primer の構成の切替）、`probe_system`（system_status）、`probe_events`（DAP のイベント記録） |
 | ターゲット接続・低レベル | `probe_target`（target_*・registers・memory）、`probe_connect`（接続手順の上書き・ロック解除）、`probe_lowlevel`（診断・DP/AP・JTAG・ピン）、`probe_multicore`、`probe_monitor`（停止方式/モニタ方式） |
@@ -108,9 +116,9 @@ mixin は単独では動かず、Probe に混ぜて使う（`self._lock` の中�
 MCP の道具は、実装のメソッドを手で登録するのでなく、**API の仕様（`host/api/fprobe_api.json`）に並んだメソッドから実行時に作られる**
 （`mcp_client.build_client_server` が `spec.methods` を回し、`tool_function` が引数つきの関数にして `server.add_tool`）。
 
-1. **実装を Probe のメソッドとして書く**。領域に合う `probe_*.py` の mixin に追加する（合う領域が無ければ新しい `probe_<名前>.py` に
-   `XxxTools` クラスを作り、`probe.py` の import と `class Probe(...)` の継承に加え、状態が要るなら `_init_<名前>()` を `Probe.__init__` から呼ぶ）。
-   機器に触るときは `with self._lock:` の中で `self.session` / `self.target` を使う。共通の部品の型は `probe_host.ProbeHost` に並べる。
+1. **実装をサービスのメソッドとして書く**。領域に合う `probe_*.py` の `XxxService` に追加し、名前を `API` に足す（合う領域が無ければ
+   新しい `probe_<名前>.py` に `XxxService(host)` を作り、`probe.py` で `self._svc_<名前> = XxxService(self)` と `@expose("_svc_<名前>", XxxService)`）。
+   機器に触るときは `with self._host._lock:` の中で `self._host.session` / `self._host.target` を使い、使ったホストの名前を `NEEDS` に並べる。
 2. **仕様 `host/api/fprobe_api.json` にメソッドを足す**。名前（`target.connect` のようにドット区切り。MCP の道具名は `.` を `_` にしたもの）、
    `kind`（`read` か `control`）、`summary`、`impl`（Probe のメソッド名）、`params`（JSON Schema）、`result`。
    必要に応じて `record`・`observes`（状態を変えない読み）・`binary`（画面用。MCP には出ない）・`caller`・`offline`・`irreversible`

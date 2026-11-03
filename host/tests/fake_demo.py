@@ -19,6 +19,7 @@ from fake_demo_search import SearchDemo
 from fake_demo_target import TargetDemo
 from fake_demo_verify import VerifyDemo
 from fake_demo_xtrig import XtrigDemo
+from fake_probe_contract import unsupported_arg
 from fake_values import DemoMemory, DemoValues, GLOBALS
 from fprobe.dwarf.cexpr import UnknownNameError
 from fprobe.memview import format_hexdump, hexdump
@@ -44,7 +45,7 @@ MILESTONE = next(v.address for v in GLOBALS if v.name == "milestone")
 
 
 class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProbe):
-    """偽の機器のデモ。ビューごとのデモの値は fake_demo_*.py の mixin（ビューのまとまりごとに分けた）。"""
+    """偽の機器のデモ。ビューごとのデモの値は fake_demo_*.py のサービス（ビューのまとまりごとに分けた）。"""
 
     def __init__(self, fatal_after_s: float | None = None):
         """fatal_after_s: 致命的エラーのデモ（止めると壊れる手がかりのある ELF として、走り出して fatal_after_s 秒後に
@@ -55,6 +56,7 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         self._regs: dict[str, int] = {}                             # 書いた周辺レジスタ（無ければリセット値）
         self._reg_written: dict[str, int] = {}                      # 書いたコアレジスタ（pc 以外）
         super().__init__()
+        self._mem.peripherals = _PeripheralBus(self)
         self._values = DemoValues(self._mem, self._function_at, self._describe)
         self.function, self.line = "reset_handler", 28
         self.started = time.monotonic()
@@ -109,6 +111,15 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         return {"tick": ("reset_handler", 28), "reached_milestone": ("tick", 21)}.get(function, (function, flow[0]))
 
     def step_line(self, mode="over", location=None, timeout_s=5.0, mask_interrupts=True):
+        """本物と同じ形の Stop（steps = 1 命令ステップの数、runs = 踏み台まで走らせた回数。デモの数え方: 呼び出しを踏み越える・
+        関数から出る操作は 1 回走らせる）。"""
+        crossing = mode == "out" or (mode == "over" and (self.function, self.line) in {("reset_handler", 28), ("tick", 19)})
+        start = time.monotonic()
+        out = self._step_line(mode, location)
+        return {**out, "elapsed_s": round(time.monotonic() - start, 4), "time_source": "host", "steps": 1,
+                "runs": 1 if crossing else 0}
+
+    def _step_line(self, mode, location):
         self._need()
         f, n = self.function, self.line
         if mode == "until" and location:
@@ -129,15 +140,19 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
     def target_step(self, count=1):
         return self.step_line("into")
 
-    def target_halt(self):
+    def target_halt(self, core=None):
         self._need()
+        if core is not None:
+            raise unsupported_arg("target_halt", "core", core)
         self._fatal_pc = None
         self.counter += int((time.monotonic() - self.started) * 1000) & 0xFF
         self._go("tick", 18)
         return self.target_status()
 
-    def target_reset(self, halt=False):
+    def target_reset(self, halt=False, kind="default"):
         self._need()
+        if kind != "default":
+            raise unsupported_arg("target_reset", "kind", kind)
         self.counter = 0
         self._fatal_pc = None
         if halt:
@@ -146,11 +161,28 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
             self.state = "RUNNING"
 
     def target_connect(self, target="stm32f401xe", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None,
-                       script=None):
+                       script=None, core=None):
+        if core is not None:
+            raise unsupported_arg("target_connect", "core", core)
         self.connected = True
         self.link = {"target": target, "frequency_hz": frequency_hz, "wire": "jtag" if jtag_chain else "swd"}
         self._go(self.function, self.line)
         return {"target": target, "frequency_hz": frequency_hz}
+
+    def run_until_halt(self, timeout_s=5.0):
+        """再開し、止まる（ブレークポイント）か timeout_s まで待つ。時間切れなら止めて reason = timeout（本物と同じ形の Stop）。"""
+        start = time.monotonic()
+        self.target_resume()
+        while time.monotonic() - start < timeout_s:
+            if self.state == "HALTED":
+                return self._stop(start, "breakpoint")
+            time.sleep(0.01)
+        self.target_halt()
+        return self._stop(start, "timeout")
+
+    def _stop(self, start, reason):
+        return {"reason": reason, "pc": self.pc, **self._elf._place_of(self.pc), "elapsed_s": round(time.monotonic() - start, 3),
+                "time_source": "host"}
 
     def target_status(self):
         out = super().target_status()
@@ -191,15 +223,18 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         else:
             self._reg_written[name] = value & 0xFFFF_FFFF
 
-    def backtrace(self, variables=False, max_frames=64, max_elements=64):
+    def backtrace(self, variables=False, max_frames=64, max_elements=64, assume_leaf=False):
         self._need()
+        if assume_leaf:
+            raise unsupported_arg("backtrace", "assume_leaf", assume_leaf)
         # default_handler: 故障の模擬（fake_demo_target.py）。例外で中断された reached_milestone から先
         frames = {"reset_handler": [], "tick": ["reset_handler"], "reached_milestone": ["tick", "reset_handler"],
                   "default_handler": ["reached_milestone", "reset_handler"]}
         lines = {"reset_handler": 28, "tick": 19, "reached_milestone": 13}
         pcs = [self.pc] + [self._line_address(lines[f]) for f in frames[self.function]]
         return [{"index": i, "pc": pc, "note": "exception" if self.function == "default_handler" and i == 1 else "",
-                 "cfa": 0x20007FF0 - 0x20 * i, **self._elf._place_of(pc)} for i, pc in enumerate(pcs)][:max_frames]
+                 "cfa": 0x20007FF0 - 0x20 * i, "offset": self._elf._symbols.describe(pc).offset,
+                 **self._elf._place_of(pc)} for i, pc in enumerate(pcs)][:max_frames]
 
     def _frame_pc(self, frame: int) -> int:
         frames = self.backtrace()
@@ -234,23 +269,43 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         return check_expression(self._values.info, expression)          # デモの型（本物と同じ調べ方）
 
     def write_expression(self, expression, value, frame=0):
+        """本物と同じく道を状態で選ぶ: 止まっていればフレームで（via = halted）、走行中は watch_write の道（via = running）。"""
         self._need()
+        if self.state in ("RUNNING", "SLEEPING"):
+            if frame != 0:
+                raise ValueError(f"走行中は frame を選べない（frame={frame}。止めてから書く）")
+            written = self.watch_write(expression, value)
+            return {**written, "address": int(written["address"], 16), "via": "running"}
+        if self.state != "HALTED":
+            raise RuntimeError(f"ターゲットが {self.state}: 式に書けるのは止まっている・走っている間だけ")
         pc = self._frame_pc(frame)
         self._values.write(expression, value, pc)
-        return self._values.read(expression, pc)
+        return {**self._values.read(expression, pc), "via": "halted"}
+
+    def recording_condition_parse(self, condition):
+        return self._elf.recording_condition_parse(condition)           # 記録・機器に触らない（本物の Probe のまま）
 
     def type_info(self, name):
         return self._values.type_info(name)
 
-    def disasm_around(self, address=None, before=8, after=8, from_elf=False, branch_tables=None):
+    def disasm_around(self, address=None, before=8, after=8, from_elf=False, branch_tables=None, sync_limit=65536,
+                      data_ranges=None):
         return self._elf.disasm_around(self.pc if address is None else address, before, after, from_elf=True,
-                                       branch_tables=branch_tables)
+                                       branch_tables=branch_tables, sync_limit=sync_limit, data_ranges=data_ranges)
 
-    def disasm_range(self, address, length, from_elf=False, offset=0, limit=256, branch_tables=None):
-        return self._elf.disasm_range(address, length, True, offset, limit, branch_tables)
+    def disasm_range(self, address, length, from_elf=False, offset=0, limit=256, branch_tables=None, data_ranges=None):
+        return self._elf.disasm_range(address, length, True, offset, limit, branch_tables, data_ranges)
 
-    def disasm_function(self, location, from_elf=False, offset=0, limit=256, branch_tables=None):
-        return self._elf.disasm_function(location, True, offset, limit, branch_tables)
+    def disasm_function(self, location, from_elf=False, offset=0, limit=256, branch_tables=None, data_ranges=None):
+        return self._elf.disasm_function(location, True, offset, limit, branch_tables, data_ranges)
+
+    def disasm_text(self, location=None, address=None, length=None, before=8, after=8, source=True, from_elf=False,
+                    branch_tables=None, sync_limit=65536, data_ranges=None):
+        """本物の Probe の整形（ELF の命令を、機器に触れずに）。ターゲットの置き場所を指定しなければ今の PC の周り。"""
+        if location is None and address is None:
+            address = self.pc
+        return self._elf.disasm_text(location, address, length, before, after, source, True, branch_tables, sync_limit,
+                                     data_ranges)
 
     def memory_view(self, address, length, unit=8, width=16, compare=False, from_elf=False):
         self._need()
@@ -280,7 +335,9 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
             self._elf._svd = _with_gpio_enums(self._elf._svd)
         return self._elf._svd
 
-    def svd_load(self, device=None, path=None):
+    def svd_load(self, device=None, path=None, from_target=False):
+        if from_target:
+            raise unsupported_arg("svd_load", "from_target", from_target)
         out = self._elf.svd_load(device=device or "STM32F401", path=path)
         self._svd()
         return out
@@ -293,15 +350,18 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         self._svd()
         return self._elf.svd_registers(peripheral)
 
-    def peripheral_read(self, path, allow_side_effects=False):
+    def peripheral_read(self, path, allow_side_effects=False, skip=None):
         dev = self._svd()
         regs = [dev.register(path)] if "." in path else list(dev.peripheral(path).registers)
+        skipped = [r.path for r in regs if skip and (r.path in skip or r.name in skip)]
         out = []
         for r in regs:
+            if r.path in skipped:
+                continue
             value = self._regs.get(r.path, r.reset_value or 0)
             out.append({"path": r.path, "address": r.address, "size": r.size, "value": value,
                         "fields": [f.as_dict() for f in r.decode(value)]})
-        return {"registers": out, "skipped": []}
+        return {"registers": out, "skipped": [{"path": path_, "reason": "skip で指定された"} for path_ in skipped]}
 
     def peripheral_write(self, path, fields=None, value=None, allow_side_effects=False):
         """書いた値を覚える（読み・変更・書き込み。値の形は本物と同じ）。"""
@@ -334,8 +394,10 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
 
     # 端末の源（RTT・SWO・UART・セミホスティング）は fake_demo_io.py（IoDemo）
 
-    def target_resume(self):
+    def target_resume(self, core=None):
         self._need()
+        if core is not None:
+            raise unsupported_arg("target_resume", "core", core)
         if self._demo_resume():                 # ベクタキャッチ・故障・動作のあるブレークポイント（fake_demo_target.py）
             return
         self.state = "RUNNING"
@@ -352,6 +414,35 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
 # GPIO の MODER・OSPEEDR の各フィールドの値の名前（同梱の STM32F401 の SVD には列挙が無い。多くの SVD にはある。
 # 画面の周辺レジスタの選択肢を機器なしで見せる）
 _GPIO_ENUMS = {"MODER": ("Input", "Output", "Alternate", "Analog"), "OSPEEDR": ("Low", "Medium", "High", "VeryHigh")}
+
+
+class _PeripheralBus:
+    """周辺の番地のバイトの読み書き。値は周辺レジスタの値（DemoProbe._regs。無ければ SVD のリセット値）で、周辺レジスタの読み書き
+    （peripheral_read / peripheral_write）と同じもの: 同じ番地は同じ値。どのレジスタにも当たらない番地は 0（書きは捨てる）。"""
+
+    def __init__(self, probe):
+        self._probe = probe
+
+    def _value(self, register) -> int:
+        return self._probe._regs.get(register.path, register.reset_value or 0)
+
+    def read(self, address: int, length: int) -> bytes:
+        dev = self._probe._svd()
+        out = bytearray(length)
+        for i in range(length):
+            hit = dev.find(address + i)
+            if hit is not None:
+                out[i] = (self._value(hit.register) >> (8 * hit.offset)) & 0xFF
+        return bytes(out)
+
+    def write(self, address: int, data: bytes) -> None:
+        dev = self._probe._svd()
+        for i, byte in enumerate(data):
+            hit = dev.find(address + i)
+            if hit is not None:
+                r, shift = hit.register, 8 * hit.offset
+                value = (self._value(r) & ~(0xFF << shift)) | (byte << shift)
+                self._probe._regs[r.path] = value & ((1 << r.size) - 1)
 
 
 def _with_gpio_enums(device):

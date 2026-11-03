@@ -1,11 +1,11 @@
 <script lang="ts">
   // Log（段階 B §3 の 8）: 解読したログ（defmt / trice / 文字 / compact / memfault）を RTT・SWO・UART から受けて、記録の表で
   // 並べる（log.start / log.stop / log.read）。重要度・文字で絞る。値は API の記録のまま
-  import { errorText } from "../../lib/api";
+  import { errorText, readQuiet } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
-  import { LOG_KEEP, LogView, locationText, startParams, type LogRecord, type StartForm } from "../../lib/logview";
+  import { LOG_KEEP, LogView, locationText, logStatusItems, startParams, type LogRecord, type StartForm } from "../../lib/logview";
   import { load, save } from "../../lib/prefs";
 
   const POLL_MS = 500;
@@ -30,7 +30,15 @@
     return { format: "defmt", source: "rtt", channel: "", elf: "", til: "" };
   }
 
+  // 受け取りの様子（log.status: 行の数・重要度ごと・解読できなかった数・受けたバイト・警告・誤り）。読み足しと同じ時に読む
+  let status = $state<any>(null);
+  const statusRow = $derived(logStatusItems(status));
+  async function readStatus() {
+    status = (await readQuiet(conn, "log.status")).result;
+  }
+
   async function pull() {
+    void readStatus();
     try {
       await view.more({ level, contains });
       records = view.records;
@@ -100,6 +108,13 @@
     </select>
     <input bind:value={contains} placeholder={$i18n("log.contains")} aria-label={$i18n("log.contains")} />
   </form>
+  {#if statusRow}
+    <div class="status mono pad" title="log.status">
+      {#each statusRow as [k, v] (k)}<span class:bad={k === "errors" && v !== "0"}><span class="muted">{k}</span> {v}</span>{/each}
+    </div>
+    {#if status.error}<div class="bad pad">{status.error}</div>{/if}
+    {#each status.warnings ?? [] as w, i (i)}<div class="warn pad">{w}</div>{/each}
+  {/if}
   {#if error}<div class="bad pad">{error}</div>{/if}
   {#if dropped}<div class="muted pad">{$i18n("log.dropped", { n: dropped })}</div>{/if}
   {#if discarded}<div class="muted pad">{$i18n("common.discarded", { n: discarded, limit: LOG_KEEP })}</div>{/if}
@@ -127,4 +142,7 @@
   .warn .lvl { color: var(--warn); }
   .err .lvl, .bad { color: var(--bad); }
   .pad { padding: 4px 8px; }
+  .status { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+  .status .bad { color: var(--bad); }
+  .warn { color: var(--warn); }
 </style>

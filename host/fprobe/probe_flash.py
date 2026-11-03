@@ -2,7 +2,7 @@
 書き込みアルゴリズム（.FLM）、CMSIS-Pack の導入と選択。J-Link Commander の loadfile / erase / verifybin / savebin、
 OpenOCD の flash write_image / erase_sector / verify_image / read_bank、pyOCD の load / erase / pack の相当。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。部品は fprobe.flash（Flash の操作）と fprobe.packs（Pack）。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。部品は fprobe.flash（Flash の操作）と fprobe.packs（Pack）。
 
 - 進捗: 書き込み・消去・検証・読み出しの進み具合を通知 "flash.progress"（operation・phase・fraction・elapsed_s）で
   送る（デーモンが attach_publisher で送り先をつなぐ。MCP の道具には結果だけが返る）。
@@ -22,15 +22,26 @@ from pathlib import Path
 from .flash import (FlashMemory, Image, Progress, Rate, RegisterGuard, Segment, add_flm_region, crc32, remove_region,
                     save_image)
 from .packs import Packs
+from .probe_service import HostView
 
-__all__ = ["FlashTools"]
+__all__ = ["FlashService"]
 
 PROGRESS_TOPIC = "flash.progress"
 ERASE_MODES = ("range", "chip", "mass")
 
 
-class FlashTools:
-    def _init_flash(self) -> None:
+class FlashService:
+    API = ("attach_publisher", "flash", "flash_algo_add", "flash_algo_remove", "flash_algorithm_guard_get",
+           "flash_algorithm_guard_set", "flash_benchmark", "flash_erase", "flash_read", "flash_regions",
+           "flash_verify", "pack_find", "pack_install", "pack_list", "pack_load", "packs")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_flash_algos", "_flash_guards", "_flash_memory", "_flash_spans", "_packs", "_publish")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_debug", "_flash_bp", "_flash_bp_erased", "_flash_bp_program", "_image_written", "_lock", "_record_host",
+             "_require_halt_mode", "_watch_stops", "elf_load", "target", "target_status")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._publish = None                                   # 通知の送り先 publish(topic, data)（デーモン）
         self._flash_algos: dict[str, dict] = {}                # 名前 → add_flm_region の引数
         self._flash_guard: dict | None = None                  # 書き込みアルゴリズムの間の守り（使う側が渡す）
@@ -46,12 +57,23 @@ class FlashTools:
 
     def _flash_memory(self) -> FlashMemory:
         """いまのターゲットの Flash（覚えている .FLM の領域が無ければ足し直す）。_lock の中で。"""
-        target = self.target
+        target = self._host.target
         present = {r.name for r in target.memory_map.regions}
         for name, spec in self._flash_algos.items():
             if name not in present:
                 add_flm_region(target, name=name, **spec)
         return FlashMemory(target, guards=self._flash_guards())
+
+    def _flash_spans(self) -> list[tuple[int, int]] | None:
+        """Flash の領域の [始め, 終わり)（_lock の中で）。未接続・メモリの地図の無いターゲット（ARM-A・RISC-V）は None。"""
+        if self._host._debug is None:
+            return None
+        target = self._host.target
+        if target.memory_map is None:
+            return None
+        if self._flash_algos:
+            self._flash_memory()                                   # 覚えている .FLM の領域を足し直す
+        return [(r.start, r.start + r.length) for r in target.memory_map.iter_matching_regions(is_flash=True)]
 
     def _flash_guards(self) -> list[RegisterGuard]:
         return [RegisterGuard.from_dict(self._flash_guard)] if self._flash_guard is not None else []
@@ -62,9 +84,9 @@ class FlashTools:
         PLL のままアルゴリズムを動かさない）は本体に持たず、使う側が渡す（プラグイン fprobe.plugins.stm32_flash_clock）。"""
         if guard is not None:
             RegisterGuard.from_dict(guard)                     # 形を確かめる（誤りは ValueError）
-        with self._lock:
+        with self._host._lock:
             self._flash_guard = guard
-            fbp = self._flash_bp
+            fbp = self._host._flash_bp
             if fbp is not None:
                 fbp._memory.guards = self._flash_guards()
             return {"guard": guard}
@@ -74,7 +96,7 @@ class FlashTools:
         return {"guard": self._flash_guard}
 
     def _note_flash(self, kind: str, body: dict) -> None:
-        self._record_host("flash", kind, time.monotonic(), body=body)
+        self._host._record_host("flash", kind, time.monotonic(), body=body)
 
     # --- 書く・消す ------------------------------------------------------------------------
 
@@ -87,31 +109,31 @@ class FlashTools:
         既定はリセットしてから書く: 書き込みアルゴリズムはリセット直後のクロック・割り込み・DMA が止まった状態を前提に
         する。2026-10-18 に実機で、PLL・割り込みのあるファームのまま書くと失敗した）。"""
         image = Image.load(path, address)
-        with self._lock:
-            self._require_halt_mode("Flash の書き込み")
+        with self._host._lock:
+            self._host._require_halt_mode("Flash の書き込み")
             memory = self._flash_memory()
-            self._watch_stops(False)
+            self._host._watch_stops(False)
             if not preserve:
-                self.target.reset_and_halt()
+                self._host.target.reset_and_halt()
             progress = self._flash_progress("program")
             started = time.monotonic()
-            report = self._flash_bp_program(memory, image, erase=erase, smart=smart, progress=progress)
+            report = self._host._flash_bp_program(memory, image, erase=erase, smart=smart, progress=progress)
             comparison = memory.verify(image, progress) if verify else None
             if comparison is not None and not comparison.match:
                 first = comparison.differences[0]
                 raise RuntimeError(f"検証で違いがある: {comparison.differing} バイト（最初は 0x{first.address:08X}、"
                                    f"{len(comparison.differences)} 箇所）。target_flash_verify で詳細")
             if image.format == "elf":
-                self.elf_load(path)                       # 止まった場所を関数名と行で返せるように
-            self._image_written(elf=image.format == "elf")
+                self._host.elf_load(path)                       # 止まった場所を関数名と行で返せるように
+            self._host._image_written(elf=image.format == "elf")
             if reset:
-                self.target.reset()
-                self._watch_stops(True)
+                self._host.target.reset()
+                self._host._watch_stops(True)
             out = {"image": image.describe(), "program": report.as_dict(),
                    "verify": None if comparison is None else comparison.as_dict(),
                    "seconds": round(time.monotonic() - started, 3)}
             self._note_flash("program", {"source": image.source, "bytes": image.size, "seconds": out["seconds"]})
-            return {**out, **self.target_status()}
+            return {**out, **self._host.target_status()}
 
     def flash_erase(self, mode: str = "range", address: int | None = None, length: int | None = None,
                     preserve: bool = False) -> dict:
@@ -122,12 +144,12 @@ class FlashTools:
             raise ValueError(f"mode は {' / '.join(ERASE_MODES)}（{mode!r}）")
         if mode == "range" and (address is None or length is None):
             raise ValueError("mode range は address と length が要る")
-        with self._lock:
-            self._require_halt_mode("Flash の消去")
+        with self._host._lock:
+            self._host._require_halt_mode("Flash の消去")
             memory = self._flash_memory()
-            self._watch_stops(False)
+            self._host._watch_stops(False)
             if not preserve and mode != "mass":
-                self.target.reset_and_halt()
+                self._host.target.reset_and_halt()
             progress = self._flash_progress("erase")
             if mode == "range":
                 out = memory.erase(address, length, progress)
@@ -135,7 +157,7 @@ class FlashTools:
                 out = memory.erase_chip(progress)
             else:
                 out = memory.mass_erase()
-            self._flash_bp_erased(mode, address, length)       # 消したセクタの Flash の BKPT の記録を捨てる
+            self._host._flash_bp_erased(mode, address, length)       # 消したセクタの Flash の BKPT の記録を捨てる
             self._note_flash("erase", {"mode": mode, **out})
             return out
 
@@ -145,14 +167,14 @@ class FlashTools:
         """ファイル（ELF / HEX / BIN。BIN は address）とターゲットのメモリを比べる（書かない・止めない）。違う箇所を
         番地・期待値・実際の値で返す（多ければ先頭 32 箇所）。"""
         image = Image.load(path, address)
-        with self._lock:
+        with self._host._lock:
             comparison = self._flash_memory().verify(image, self._flash_progress("verify"))
             return {**comparison.as_dict(), "image": image.describe()}
 
     def flash_read(self, path: str, address: int | None = None, length: int | None = None) -> dict:
         """ターゲットのメモリを読んでファイルに保存する（.hex / .ihex は Intel HEX、ほかは BIN）。省略時は起動する Flash の
         全体（起動する領域から続く Flash の領域すべて）。止めない。CRC-32 と読み出しの速度を返す。"""
-        with self._lock:
+        with self._host._lock:
             memory = self._flash_memory()
             if address is None or length is None:
                 main = memory.main_flash()
@@ -171,7 +193,7 @@ class FlashTools:
     def flash_regions(self) -> dict:
         """Flash の領域（番地・大きさ・ページ・セクタの並び・消した値・アルゴリズムの出所 builtin / pack / flm:<path>）と、
         flash_algo_add で足したアルゴリズム。"""
-        with self._lock:
+        with self._host._lock:
             return {"regions": self._flash_memory().describe(),
                     "algorithms": [{"name": n, **{k: s.get(k) for k in ("flm", "address", "size", "ram_address",
                                                                           "ram_size")}}
@@ -186,22 +208,22 @@ class FlashTools:
         if name in self._flash_algos:
             raise ValueError(f"{name!r} はもう足してある（flash_algo_remove で外す）")
         spec = {"flm": str(flm), "address": address, "size": size, "ram_address": ram_address, "ram_size": ram_size}
-        with self._lock:
-            if self._debug is None:
+        with self._host._lock:
+            if self._host._debug is None:
                 self._flash_algos[name] = spec
                 return {"name": name, "pending": True}
-            region = add_flm_region(self.target, name=name, **spec)
+            region = add_flm_region(self._host.target, name=name, **spec)
             self._flash_algos[name] = spec
-            return next(r for r in FlashMemory(self.target).describe() if r["name"] == region.name)
+            return next(r for r in FlashMemory(self._host.target).describe() if r["name"] == region.name)
 
     def flash_algo_remove(self, name: str) -> dict:
         """flash_algo_add で足した領域を外す。"""
-        with self._lock:
+        with self._host._lock:
             if name not in self._flash_algos:
                 raise KeyError(f"足したアルゴリズム {name!r} は無い")
             del self._flash_algos[name]
-            if self._debug is not None and any(r.name == name for r in self.target.memory_map.regions):
-                remove_region(self.target, name)
+            if self._host._debug is not None and any(r.name == name for r in self._host.target.memory_map.regions):
+                remove_region(self._host.target, name)
             return {"removed": name}
 
     # --- 速度の計測 ------------------------------------------------------------------------
@@ -212,10 +234,10 @@ class FlashTools:
         read_length: 起動する Flash の先頭から読む（0 で省く）。program_address・program_length: そのセクタ（境界に
         合わせる）を消して書いて読み比べ、元の中身・RAM・レジスタ・走る状態に戻す（指定したときだけ。使っていないセクタを
         選ぶ）。SWD の周波数とともに、各段のバイト数・秒・bytes_per_s を返す。"""
-        with self._lock:
-            self._require_halt_mode("速度の計測")
+        with self._host._lock:
+            self._host._require_halt_mode("速度の計測")
             memory = self._flash_memory()
-            options = getattr(self._debug, "options", None) or {}
+            options = getattr(self._host._debug, "options", None) or {}
             out = {"frequency_hz": options.get("frequency"), "ram": None, "flash_read": None, "flash_program": None}
             if ram_length:
                 out["ram"] = self._bench_ram(memory, ram_length)
@@ -230,7 +252,7 @@ class FlashTools:
 
     def _bench_ram(self, memory: FlashMemory, length: int) -> dict:
         from pyocd.core.memory_map import MemoryType
-        target = self.target
+        target = self._host.target
         region = (memory.memory_map.get_default_region_of_type(MemoryType.RAM)
                   or next(iter(memory.memory_map.iter_matching_regions(type=MemoryType.RAM)), None))
         if region is None:
@@ -266,10 +288,10 @@ class FlashTools:
         pattern = Image([Segment(address, random.Random(address).randbytes(length))])
         with memory.preserving([address]):
             try:
-                report = self._flash_bp_program(memory, pattern, erase="sector", smart=False)
+                report = self._host._flash_bp_program(memory, pattern, erase="sector", smart=False)
                 verified = memory.verify(pattern).match
             finally:
-                self._flash_bp_program(memory, Image([Segment(address, original)]), erase="sector", smart=True)
+                self._host._flash_bp_program(memory, Image([Segment(address, original)]), erase="sector", smart=True)
             restored = memory.verify(Image([Segment(address, original)])).match
         return {"address": address, "length": length,
                 "erase": Rate(report.erased_bytes, report.erase_s).as_dict(),

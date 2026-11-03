@@ -5,15 +5,15 @@
   // FPGA の条件（例: restart changed and state=BUSY）の回数は、使う人が入れた範囲（最後の N 件）でデーモンが数えた
   // 事実（fpga_obs.count: 回数・数えた範囲）をそのまま描く。画面では数えない・毎秒を計算しない・推さない。
   import { tick, untrack } from "svelte";
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { i18n, type Key } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
   import { haltReasonKey } from "../../lib/target";
   import {
-    addressKey, exampleView, fieldsText, parseAddress, parseCondition, parseCount, parseRate,
-    readConditionCounts, fpgaOnly, isSymbolName, sanitizeConditions, symbolWatch, sanitizeWatches, SharedSystem,
-    correlateParams,
+    addressKey, conditionError, exampleView, fieldsText, parseAddress, parseCount, parseRate,
+    readConditionCounts, isSymbolName, sanitizeConditions, symbolWatch, sanitizeWatches, SharedSystem,
+    correlateParams, pinsStreamStart,
     memoryStopped as isMemoryStopped, samplingRows, writeWord,
     type Condition, type ConditionCount, type Watch,
   } from "../../lib/system";
@@ -21,15 +21,11 @@
   const POLL_MS = 1000;
   const { app, conn, dock, tl } = shared();
 
-  interface Latest { group: number; value: number; time_us: number | null; fields?: Record<string, number | string> }
-  interface Status {
-    time_us: number;
-    mcu: { connected: boolean; state?: string; target?: string; core?: number; error?: string; memory?: Record<string, number>;
-           connect?: Record<string, unknown> | null; halt_reason?: string; halt_bits?: string[] };
-    fpga: { available: boolean; mode?: string; running?: boolean; stuck?: boolean; driving?: boolean; overflow_seen?: boolean;
-            scans?: number; id?: number; latest?: Latest[]; gaps?: number; latest_error?: string;
-            config?: Record<string, unknown> | null; auto_reopen?: boolean; reopened?: number };
-  }
+  /** system.status の応答（仕様から生成した型） */
+  type Status = Result<"system.status">;
+  /** MCU: つないで読めた形（state を持つ）・つないでいない・読めなかった（error）の 3 つ（API の応答の形のまま） */
+  type McuRead = Extract<Status["mcu"], { state: unknown }>;
+  type FpgaOpen = Extract<Status["fpga"], { available: true }>;
 
   const linkOpen = $derived($app.link === "open");
   let watches = $state<Watch[]>(sanitizeWatches(JSON.parse(load("system.watches", "[]") || "[]")));
@@ -37,14 +33,22 @@
   let newAddress = $state("");
   let addError = $state<string | null>(null);
   let status = $state<Status | null>(null);
+  const mcu = $derived<McuRead | null>(status && "state" in status.mcu ? status.mcu : null);
+  const mcuError = $derived(status && "error" in status.mcu ? status.mcu.error : null);
+  const fpga = $derived<FpgaOpen | null>(status?.fpga.available ? status.fpga : null);
   let error = $state<string | null>(null);
-  let rec = $state<{ recording: boolean; name: string | null; events?: number; watch_running?: boolean; la_stream?: { running?: boolean; error?: string | null; overrun?: boolean };
-                     events_errors?: { count: number; last: string | null; lost: number } } | null>(null);
+  let rec = $state<Result<"recording.status"> | null>(null);
   let withPins = $state(load("system.withPins", "1") === "1");       // ピン（ロジアナ）も流し続けて記録へ
   $effect(() => save("system.withPins", withPins ? "1" : "0"));
   let pinsFormat = $state<"" | "rle" | "raw">((["rle", "raw"].includes(load("system.pinsFormat", "")) ? load("system.pinsFormat", "")
                                                                                                     : "") as "" | "rle" | "raw");
   $effect(() => save("system.pinsFormat", pinsFormat));
+  // RAW のとき: サンプルレート（MS/s）とチャンネル数も使う人が選ぶ（既定の速さで始めると、16 ch は 50 MB/s の壁を超えて溢れる）
+  let pinsRateText = $state(load("system.pinsRateMs", "") || "");
+  $effect(() => save("system.pinsRateMs", pinsRateText));
+  let pinsChannels = $state(load("system.pinsChannels", "") || "");
+  $effect(() => save("system.pinsChannels", pinsChannels));
+  const pinsStart = $derived(pinsStreamStart(pinsFormat, pinsRateText, pinsChannels));
   let withMemory = $state(load("system.withMemory", "1") === "1");   // MCU のメモリも DAP サンプラで記録へ（名前つき）
   $effect(() => save("system.withMemory", withMemory ? "1" : "0"));
   // 記録のメモリの読みの速さ（回/秒）: 使う人が入れる（時刻の分解能・リンクの帯域に効くので既定の値で決めない）
@@ -184,7 +188,7 @@
       if (rec?.recording || trigger) trigger = await conn.call("recording.trigger_status", {}, { quiet: true }).catch(() => null);
       if (trigger?.state === "off") trigger = null;
       error = null;
-      condCounts = s.fpga.driving ? (await readConditionCounts(conn, conditions.map((c) => c.expr), condLast)) ?? {} : {};
+      condCounts = s.fpga.available && s.fpga.driving ? (await readConditionCounts(conn, conditions.map((c) => c.expr), condLast)) ?? {} : {};
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -224,7 +228,7 @@
 
   // MCU の番地の語を書く（target.memory.write。止めずに書ける）: 値の欄をダブルクリック → Enter で書く・Esc でやめる。
   // AI の操作と同じ API。AI がつながっていて一時停止していなければ書く前に確かめる（writeWord の中の allowed）
-  const canWrite = $derived(linkOpen && Boolean(status?.mcu.connected) && !status?.mcu.error);
+  const canWrite = $derived(linkOpen && mcu !== null);
   let writing = $state<{ address: number; text: string } | null>(null);
   let writeError = $state<string | null>(null);
   function startWrite(address: number, v: number | undefined) {
@@ -261,9 +265,10 @@
     });
   };
 
-  function addCondition() {
-    if (!parseCondition(newCondExpr)) {
-      condError = $i18n("system.badCondition");
+  async function addCondition() {
+    const reason = await conditionError(conn, newCondExpr);          // 書き方はデーモンが確かめる
+    if (reason !== null) {
+      condError = `${$i18n("system.badCondition")} ${reason}`;
       return;
     }
     conditions = [...conditions.filter((c) => c.expr !== newCondExpr.trim()),
@@ -277,7 +282,7 @@
     if (await app.act("recording.start", { name: "system" }) === undefined) return;
     if (withMemory && watches.length) await watchMemory();
     // ピンの形式（RLE = 変化点だけ / RAW）は使う人が選んだもの（画面で決めない）
-    startedPins = withPins && pinsFormat !== "" && await app.act("recording.la_stream.start", { rle: pinsFormat === "rle" }) !== undefined;
+    startedPins = withPins && pinsStart !== null && await app.act("recording.la_stream.start", pinsStart) !== undefined;
     await poll();
   }
   // MCU のメモリを DAP サンプラで記録へ（時刻つきの値 = 時間軸の段。名前は表の名前）。サンプラは 1 つなので、ほかの
@@ -313,7 +318,7 @@
   }
   // 観測の回路が答えなくなった（対象の FPGA を書き直した・電源を入れ直した等）: 前と同じ設定で開き直す
   async function reopenFpga() {
-    if (status?.fpga.config) await app.act("fpga_obs.open", { ...status.fpga.config, auto_reopen: Boolean(status.fpga.auto_reopen) });
+    if (fpga?.config) await app.act("fpga_obs.open", { ...fpga.config, auto_reopen: fpga.auto_reopen });
     await poll();
   }
   async function showTimeline() {
@@ -330,7 +335,8 @@
   }
 
   // 結果の直前に多い出来事（recording.correlate）: 結果の条件の直前に、FPGA の条件の表と追加の候補のどれが来ているか
-  interface Cause { condition: string; count: number; judged?: number; preceded: number | null; coverage: number | null; followed: number | null;
+  interface Cause { condition: string; fpga_only: boolean;   // 項の変数がすべて FPGA の信号（デーモンが記録で解いた事実）
+                    count: number; judged?: number; preceded: number | null; coverage: number | null; followed: number | null;
                     delay_s: { median: number } | null; examples: { cause_t: number; effect_t: number }[];
                     same?: string[] }   // 同じ時刻に成立する候補（自動の候補の重複をまとめた）
   // causes_total・truncated・limit: 自動の候補を limit 個に切ったときの切る前の数と印（切ったことを黙らない）
@@ -430,8 +436,7 @@
     }
   }
 
-  // 結果の直前に多い出来事のうち FPGA の信号だけの条件は、FPGA の条件の表に足して毎秒の回数を見張れる
-  const fpgaNames = $derived([...new Set((status?.fpga.latest ?? []).flatMap((l) => Object.keys(l.fields ?? {})))]);
+  // 結果の直前に多い出来事のうち FPGA の信号だけの条件（デーモンの fpga_only）は、FPGA の条件の表に足して毎秒の回数を見張れる
   const addAsCondition = (expr: string) => {
     if (!conditions.some((c) => c.expr === expr)) conditions = [...conditions, { name: expr, expr }];
   };
@@ -443,13 +448,12 @@
 
   const removeCondition = (expr: string) => (conditions = conditions.filter((c) => c.expr !== expr));
   // 条件の回数: デーモンが数えた回数と、数えた範囲（値の数・最初と最後の値の間の秒）をそのまま
-  const countText = (c: ConditionCount | undefined) => !c ? "—" : c.error ? "!" : String(c.count ?? 0);
-  const countTip = (c: ConditionCount | undefined) => !c ? $i18n("system.condLastTip") : c.error ?? $i18n("system.condRange",
-    { values: c.values ?? 0, s: c.span_s === null || c.span_s === undefined ? "—" : c.span_s.toFixed(3),
-      gaps: c.gaps ?? 0, lost: c.lost ?? 0 });
+  const countText = (c: ConditionCount | undefined) => !c ? "—" : "error" in c ? "!" : String(c.count);
+  const countTip = (c: ConditionCount | undefined) => !c ? $i18n("system.condLastTip") : "error" in c ? c.error
+    : $i18n("system.condRange", { values: c.values, s: c.span_s === null ? "—" : c.span_s.toFixed(3), gaps: c.gaps, lost: c.lost });
 
-  const mcuOk = $derived(status?.mcu.connected && !status.mcu.error);
-  const fpgaOk = $derived(status?.fpga.available && status.fpga.running && !status.fpga.stuck);
+  const mcuOk = $derived(mcu !== null);
+  const fpgaOk = $derived(Boolean(fpga?.running && !fpga.stuck));
   const modeKey = (m?: string) => (m === "snapshot" ? "system.mode.snapshot" : "system.mode.stream");
 </script>
 
@@ -473,9 +477,17 @@
         <label class="small" title={$i18n("timeline.rleTip")}>{$i18n("timeline.rle")}<span class="req" aria-hidden="true">*</span>
           <select bind:value={pinsFormat} aria-required="true">
             <option value=""></option><option value="rle">RLE</option><option value="raw">RAW</option></select></label>
+        {#if pinsFormat === "raw"}
+          <label class="small" title={$i18n("system.pinsRateTip")}>{$i18n("system.pinsRate")}<span class="req" aria-hidden="true">*</span>
+            <input class="rate mono" inputmode="decimal" placeholder={$i18n("system.pinsRatePlaceholder")} aria-required="true"
+                   bind:value={pinsRateText} /></label>
+          <label class="small" title={$i18n("system.pinsChannelsTip")}>{$i18n("system.pinsChannels")}<span class="req" aria-hidden="true">*</span>
+            <select bind:value={pinsChannels} aria-required="true">
+              <option value=""></option><option value="16">16</option><option value="8">8</option><option value="4">4</option><option value="2">2</option></select></label>
+        {/if}
       {/if}
-      <button title={needsRate ? $i18n("system.memoryRateNeeded") : $i18n("system.startRecordingTip")}
-              disabled={!linkOpen || needsRate || (withPins && pinsFormat === "")}
+      <button title={needsRate ? $i18n("system.memoryRateNeeded") : withPins && pinsFormat === "raw" && pinsStart === null ? $i18n("system.pinsRawNeeded") : $i18n("system.startRecordingTip")}
+              disabled={!linkOpen || needsRate || (withPins && pinsStart === null)}
               onclick={startRecording}>{$i18n("system.startRecording")}</button>
     {/if}
     <button title={$i18n("system.timelineTip")} onclick={showTimeline}>{$i18n("system.timeline")}</button>
@@ -509,26 +521,26 @@
     <!-- MCU -->
     <section class="peer" aria-label="MCU">
       <header>
-        <span class="dot" class:ok={mcuOk} class:bad={status?.mcu.error}></span>
+        <span class="dot" class:ok={mcuOk} class:bad={mcuError !== null}></span>
         <strong>MCU</strong>
-        {#if status?.mcu.connected}
-          <span class="mono">{status.mcu.state ?? "?"}</span>
-          {#if haltReasonKey(status.mcu)}<span class="muted">{$i18n(haltReasonKey(status.mcu)!)}</span>{/if}
+        {#if mcu}
+          <span class="mono">{mcu.state}</span>
+          {#if haltReasonKey(mcu)}<span class="muted">{$i18n(haltReasonKey(mcu)!)}</span>{/if}
           <!-- DFSR の立っていたビット全部（halt_reason は 1 語。複数立っていた事実をそのまま） -->
-          {#if status.mcu.state === "HALTED" && status.mcu.halt_bits?.length}<span class="muted mono">DFSR {status.mcu.halt_bits.join(" ")}</span>{/if}
-          {#if status.mcu.state === "HALTED"}
+          {#if mcu.state === "HALTED" && mcu.halt_bits?.length}<span class="muted mono">DFSR {mcu.halt_bits.join(" ")}</span>{/if}
+          {#if mcu.state === "HALTED"}
             <!-- 止まった MCU の中（ELF が無くても使えるもの）: 呼び出し履歴・逆アセンブル・レジスタ -->
             <button title={$i18n("system.inspectTip")}
                     onclick={() => ["registers", "disassembly", "callStack"].forEach((id) => dock.show(id))}>{$i18n("system.inspect")}</button>
           {/if}
-          {#if status.mcu.target}<span class="muted">{status.mcu.target}{status.mcu.core !== undefined ? ` core ${status.mcu.core}` : ""}</span>{/if}
+          {#if mcu.target}<span class="muted">{mcu.target}{mcu.core !== undefined ? ` core ${mcu.core}` : ""}</span>{/if}
         {:else}
           <span class="muted">{$i18n("system.notConnected")}</span>
         {/if}
       </header>
-      {#if status?.mcu.error}
-        <div class="note bad">{status.mcu.error}
-          {#if status.mcu.connect}<button title={$i18n("system.reconnectTip")} onclick={reconnectMcu}>{$i18n("system.reconnect")}</button>{/if}
+      {#if mcuError !== null}
+        <div class="note bad">{mcuError}
+          {#if status?.mcu.connect}<button title={$i18n("system.reconnectTip")} onclick={reconnectMcu}>{$i18n("system.reconnect")}</button>{/if}
         </div>
       {/if}
       <div class="sub-title" title={$i18n("system.memoryTip")}>{$i18n("system.memory")}</div>
@@ -538,7 +550,7 @@
           <th></th></tr></thead>
         <tbody>
           {#each watches as w (w.address)}
-            {@const v = status?.mcu.memory?.[addressKey(w.address)]}
+            {@const v = mcu?.memory[addressKey(w.address)]}
             <tr>
               <td>{w.name}</td>
               <td class="mono muted">{addressKey(w.address)}</td>
@@ -563,7 +575,7 @@
           </tr>
         </tbody>
       </table>
-      {#if status?.mcu.memory && watches.length}
+      {#if status && mcu && watches.length}
         <div class="muted small">{$i18n("system.readAt", { t: (status.time_us / 1e6).toFixed(3) })}</div>
       {/if}
       {#if writeError}<div class="note bad">{writeError}</div>{/if}
@@ -573,13 +585,13 @@
     <!-- FPGA -->
     <section class="peer" aria-label="FPGA">
       <header>
-        <span class="dot" class:ok={fpgaOk} class:bad={status?.fpga.stuck} class:warn={status?.fpga.overflow_seen}></span>
+        <span class="dot" class:ok={fpgaOk} class:bad={fpga?.stuck} class:warn={fpga?.overflow_seen}></span>
         <strong>FPGA</strong>
-        {#if status?.fpga.available}
-          {#if status.fpga.driving}
-            <span>{$i18n(modeKey(status.fpga.mode))}</span>
-            <span class="mono muted" title={$i18n("system.scansTip")}>{$i18n("fpgaObs.scans")} {status.fpga.scans ?? "—"}</span>
-            {#if status.fpga.reopened}<span class="muted" title={$i18n("fpgaObs.autoReopenTip")}>{$i18n("fpgaObs.reopened", { n: status.fpga.reopened })}</span>{/if}
+        {#if fpga}
+          {#if fpga.driving}
+            <span>{$i18n(modeKey(fpga.mode))}</span>
+            <span class="mono muted" title={$i18n("system.scansTip")}>{$i18n("fpgaObs.scans")} {fpga.scans ?? "—"}</span>
+            {#if fpga.reopened}<span class="muted" title={$i18n("fpgaObs.autoReopenTip")}>{$i18n("fpgaObs.reopened", { n: fpga.reopened })}</span>{/if}
           {:else}
             <span class="muted">{$i18n("system.fpgaIdle")}</span>
             <button onclick={() => dock.show("fpgaObs")}>{$i18n("panel.fpgaObs")}</button>
@@ -588,27 +600,27 @@
           <span class="muted">{$i18n("system.noFpga")}</span>
         {/if}
       </header>
-      {#if status?.fpga.stuck}
+      {#if fpga?.stuck}
         <div class="note bad">{$i18n("fpgaObs.state.stuck")}
-          {#if status.fpga.config}<button title={$i18n("system.reopenTip")} onclick={reopenFpga}>{$i18n("system.reopen")}</button>{/if}
+          {#if fpga.config}<button title={$i18n("system.reopenTip")} onclick={reopenFpga}>{$i18n("system.reopen")}</button>{/if}
         </div>
       {/if}
-      <div class="sub-title">{status?.fpga.driving ? $i18n("system.latest") : $i18n("system.lastSeen")}</div>
-      {#if status?.fpga.latest?.length}
+      <div class="sub-title">{fpga?.driving ? $i18n("system.latest") : $i18n("system.lastSeen")}</div>
+      {#if fpga && fpga.latest?.length}
         <table class="grid">
           <thead><tr><th>{$i18n("fpgaObs.group")}</th><th>{$i18n("system.value")}</th><th></th></tr></thead>
           <tbody>
-            {#each status.fpga.latest as l (l.group)}
-              <tr class:stale={!status.fpga.driving}>
+            {#each fpga.latest as l (l.group)}
+              <tr class:stale={!fpga.driving}>
                 <td class="mono">{l.group}</td><td class="mono">{fieldsText(l.fields, l.value)}</td>
-                <td class="muted nowrap">{l.time_us !== null ? $i18n("system.ago", { s: Math.max(0, (status.time_us - l.time_us) / 1e6).toFixed(1) }) : ""}</td>
+                <td class="muted nowrap">{l.age_us !== null ? $i18n("system.ago", { s: (l.age_us / 1e6).toFixed(1) }) : ""}</td>
               </tr>
             {/each}
           </tbody>
         </table>
-        <div class="muted small">{$i18n("system.gaps")} {status.fpga.gaps ?? 0}</div>
-      {:else if status?.fpga.available}
-        <div class="muted small">{status.fpga.latest_error ? $i18n("system.noValues") : $i18n("system.noChange")}</div>
+        <div class="muted small">{$i18n("system.gaps")} {fpga.gaps ?? 0}</div>
+      {:else if fpga}
+        <div class="muted small">{fpga.latest_error ? $i18n("system.noValues") : $i18n("system.noChange")}</div>
       {/if}
       <div class="sub-title" title={$i18n("system.conditionsTip")}>{$i18n("system.conditions")}</div>
       {#if obsMatch && haltOn?.orphan}
@@ -705,7 +717,7 @@
               <span class="cause-name" title={[c.condition, ...(c.same ?? [])].join(" / ")}>{#if named}<strong>{named.name}</strong> <span class="mono muted">{c.condition}</span>{:else}<span class="mono">{c.condition}</span>{/if}
                 <span class="muted">({c.count})</span>
                 {#if c.same?.length}<span class="muted small">{$i18n("system.sameAs", { list: c.same.join(" / ") })}</span>{/if}</span>
-              {#if fpgaOnly(c.condition, fpgaNames) && !conditions.some((x) => x.expr === c.condition)}
+              {#if c.fpga_only && !conditions.some((x) => x.expr === c.condition)}
                 <button title={$i18n("system.addAsConditionTip")} onclick={() => addAsCondition(c.condition)}>{$i18n("system.addAsCondition")}</button>
               {/if}
               {#if c.examples.length}<button onclick={() => showExample(c.examples[0])}>{$i18n("system.showExample")}</button>{/if}

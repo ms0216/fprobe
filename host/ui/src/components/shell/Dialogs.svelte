@@ -8,7 +8,10 @@
   import { allowed } from "../../lib/guard";
   import { LANGS, getLang, setLang, i18n, type Lang } from "../../lib/i18n";
   import { load, save } from "../../lib/prefs";
-  import { diagnose, mhzListToHz, mhzToHz, pinsText, type DiagnoseReport, type Pins } from "../../lib/diagnose";
+  import {
+    chainFromText, chainText, diagnose, mhzListToHz, mhzToHz, pinsText, scanChain, type ChainScan, type DiagnoseReport, type Pins,
+  } from "../../lib/diagnose";
+  import { hex32 } from "../panels/format";
   import { svdLoadParams } from "../../lib/peripherals";
 
   const { app, conn, dbg, ui } = shared();
@@ -28,6 +31,10 @@
   let failed = $state(false);
   let badClock = $state(false);                      // 周波数の欄が正の数でない
   let diagnosis = $state<{ report: DiagnoseReport | null; pins: Pins | null; error: string | null } | null>(null);
+  // JTAG のチェーン（jtag.scan の結果と、接続に渡す jtag_chain の欄。空なら送らない）
+  let chain = $state(load("connect.jtagChain", ""));
+  let badChain = $state(false);
+  let chainScan = $state<{ scan: ChainScan | null; error: string | null } | null>(null);
 
   const kind = $derived($ui.dialog);
   const online = $derived($app.link === "open");
@@ -36,8 +43,10 @@
   $effect(() => {
     if (kind === "connect") untrack(() => {
       device = load("connect.target", device);
-      failed = false;                                  // 前に開いたときの失敗・診断は持ち越さない
+      failed = false;                                  // 前に開いたときの失敗・診断・走査は持ち越さない
       diagnosis = null;
+      chainScan = null;
+      badChain = false;
     });
   });
 
@@ -73,11 +82,15 @@
   async function connect() {
     const hz = mhzToHz(mhz);
     badClock = hz === null;
-    if (hz === null || !(await allowed(app))) return;
+    const jtagChain = chainFromText(chain);
+    badChain = jtagChain === null;
+    if (hz === null || jtagChain === null || !(await allowed(app))) return;
     save("connect.target", device);
     save("connect.mhz", mhz);
+    save("connect.jtagChain", chain);
     busy = true;
-    const done = await app.act("target.connect", { target: device, frequency_hz: hz });
+    const done = await app.act("target.connect", { target: device, frequency_hz: hz,
+                                                   ...(jtagChain ? { jtag_chain: jtagChain } : {}) });
     busy = false;
     failed = done === undefined;
     if (!failed) close();
@@ -93,6 +106,14 @@
     busy = false;
   }
 
+  /** JTAG のチェーンを走査する（未接続のときだけ。速さは接続の欄。空ならデーモンの既定） */
+  async function runScan() {
+    if (!(await allowed(app))) return;
+    busy = true;
+    chainScan = await scanChain(conn, mhz.trim() === "" ? null : mhzToHz(mhz));
+    busy = false;
+  }
+
   /** 診断が返した部品の候補と応答した速さを、接続の欄に入れる（接続は使う人が押す） */
   function useCandidate(name: string, hz: number | null) {
     device = name;
@@ -102,6 +123,7 @@
   function close() {
     failed = false;
     diagnosis = null;
+    chainScan = null;
     ui.close();
   }
 
@@ -146,11 +168,49 @@
       <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
       <label for="dclk">{$i18n("diagnose.speeds")}</label>
       <span><input id="dclk" class="mono" bind:value={diagMhz} placeholder={mhz} title={$i18n("diagnose.speedsTip")} /> MHz</span>
+      <label for="chain" title={$i18n("jtagScan.chainTip")}>jtag_chain</label>
+      <span><input id="chain" class="mono" bind:value={chain} placeholder="4, 5" title={$i18n("jtagScan.chainTip")}
+                   aria-invalid={badChain} /></span>
       <span></span><span class="row"><button class="primary" disabled={!online || !device.trim() || !mhz.trim() || busy}>{$i18n("cmd.connect")}</button>
         <button type="button" disabled={!online || busy} title={$i18n("diagnose.tip")} onclick={() => void runDiagnosis()}>
-          {$i18n("diagnose.run")}</button></span>
+          {$i18n("diagnose.run")}</button>
+        <button type="button" disabled={!online || busy} title={$i18n("jtagScan.tip")} onclick={() => void runScan()}>
+          {$i18n("jtagScan.run")}</button></span>
     </form>
     {#if badClock}<p class="bad small">{$i18n("dialog.badClock")}</p>{/if}
+    {#if badChain}<p class="bad small">{$i18n("jtagScan.badChain")}</p>{/if}
+    {#if chainScan}
+      <div class="diagnosis" aria-live="polite">
+        {#if chainScan.scan}
+          {@const s = chainScan.scan}
+          <p><strong>{$i18n("jtagScan.devices", { n: s.count })}</strong>
+            <span class="mono small"> tdo {s.tdo} · total_ir_length {s.total_ir_length ?? "—"}</span></p>
+          {#if s.devices.length}
+            <table class="steps mono">
+              <thead><tr><th>#</th><th>IDCODE</th><th>{$i18n("jtagScan.part")}</th><th>IR</th><th>ir_length_source</th></tr></thead>
+              <tbody>
+                {#each s.devices as d (d.index)}
+                  <tr><td>{d.index}</td>
+                    <td>{d.idcode === null ? "—" : hex32(d.idcode)}</td>
+                    <td>{[d.designer, d.name].filter(Boolean).join(" · ")}</td>
+                    <td>{d.ir_length ?? "—"}</td>
+                    <td>{d.ir_length_source}{d.ir_candidates ? ` ${JSON.stringify(d.ir_candidates)}` : ""}</td></tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+          {#each s.notes as n, i (i)}<p class="muted small">{n}</p>{/each}
+          {#if s.jtag_chain}
+            <div class="row"><span class="small mono">jtag_chain [{chainText(s.jtag_chain)}]</span>
+              <button type="button" disabled={busy} onclick={() => (chain = chainText(s.jtag_chain!))}>{$i18n("jtagScan.use")}</button></div>
+          {:else}
+            <p class="muted small">{$i18n("jtagScan.noChain")}</p>
+          {/if}
+        {:else if chainScan.error}
+          <p class="bad">{chainScan.error}</p>
+        {/if}
+      </div>
+    {/if}
     {#if failed && !diagnosis}<p class="muted small">{$i18n("diagnose.afterFail")}</p>{/if}
     {#if diagnosis}
       <div class="diagnosis" aria-live="polite">

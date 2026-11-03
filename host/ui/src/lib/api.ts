@@ -1,11 +1,15 @@
 // デーモンの API（JSON-RPC 2.0 over WebSocket）の利用者。Svelte に依らない。
 // 名乗る（session.hello）→ 購読（session.subscribe）→ open。切れたら間をあけてつなぎ直す。
 // 仕様で binary のメソッド（timeline.tiles）の応答はバイナリのフレームで届く: 結果の data に区画の型付きの配列。
-import { API_VERSION, type Methods } from "../../../api/generated/fprobe_api";
+import { API_VERSION, type Methods, type Params } from "../../../api/generated/fprobe_api";
 import { t } from "./i18n";
-import { decodeFrame } from "./timeline/frame";
+import { decodeFrame, type Section } from "./timeline/frame";
 
-export type { Methods };
+export type { Methods, Params };
+/** メソッド M の応答の型（仕様の result から生成）。binary のメソッドは区画を型付きの配列で data に足した形（decodeFrame） */
+export type Result<M extends keyof Methods> = Methods[M] extends { binary: true }
+  ? Methods[M]["result"] & { data: Record<string, Section> }
+  : Methods[M]["result"];
 export type LinkState = "connecting" | "open" | "closed";
 const E_VERSION = -32010;
 const E_INVALID_PARAMS = -32602;
@@ -31,6 +35,17 @@ export class RpcError extends Error {
 export function errorText(e: unknown): string {
   if (e instanceof RpcError && typeof e.data?.detail === "string") return e.data.detail;
   return e instanceof Error ? e.message : String(e);
+}
+
+/** 読む（quiet: 操作の記録に残さない）。結果か、誤りの文（errorText）。パネルの「読む」ボタン・通知での読み直し用 */
+export async function readQuiet<M extends keyof Methods>(conn: Pick<DaemonConnection, "call">, method: M,
+                                                         params: Params<M> = {} as Params<M>):
+  Promise<{ result: Result<M> | null; error: string | null }> {
+  try {
+    return { result: await conn.call(method, params, { quiet: true }), error: null };
+  } catch (e) {
+    return { result: null, error: errorText(e) };
+  }
 }
 
 /** まだ無い（E_NO_DATA）: 読めなかった誤りではない */
@@ -80,7 +95,7 @@ export class DaemonConnection {
   }
 
   /** quiet: 画面の自動の読み（状態を変えない読みだけ）を操作の記録に残さない。source: どこから（操作の記録に残す。lib/source.ts） */
-  call<M extends keyof Methods>(method: M, params?: Methods[M]["params"], opts?: CallOptions): Promise<any> {
+  call<M extends keyof Methods>(method: M, params?: Params<M>, opts?: CallOptions): Promise<Result<M>> {
     if (!this.ready) return Promise.reject(new Error(t("tip.offline")));
     return this.request(method, params ?? {}, { ...(opts?.quiet ? { quiet: true } : {}),
                                                  ...(opts?.source ? { source: opts.source } : {}) });

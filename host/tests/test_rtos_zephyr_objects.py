@@ -86,7 +86,8 @@ def test_timers_remaining_from_the_timeout_list(rtos):
     objects = by_name(rtos.objects())
     blink = objects["blink_timer"].fields
     assert blink == {"period_ticks": 100, "active": True, "remaining_ticks": 50, "expiry_count": 4,
-                     "callback": "blink_expired", "user_data": 0x1234}
+                     "callback": "blink_expired", "user_data": 0x1234,
+                     "remaining_excludes": ["elapsed_since_last_announce"]}     # 最後の告知からの経過は引いていない
     assert objects["watchdog_timer"].fields["remaining_ticks"] == 20
     stopped = objects["stopped_timer"].fields
     assert not stopped["active"] and "remaining_ticks" not in stopped

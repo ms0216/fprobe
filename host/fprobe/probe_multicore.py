@@ -1,7 +1,7 @@
 """Probe の道具: マルチコア（U31）。コアごとに DP を持つ複数ドロップの SWD の部品（RP2040）で、コアを選んで接続し、
 両方のコアの状態を出し、接続していないコアを止める・再開する。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・_debug・_link・session・target_connect と _place_of を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・_debug・_link・session・target_connect と _place_of を使う。
 
 - コアの選択: target_connect の core（pyOCD のターゲット名を fprobe.multidrop の表で選ぶ）。target_core_select は
   同じ速度で connect_mode="attach"（止めずに）別のコアにつなぎ直す。ブレークポイント・レジスタ等の道具はすべて
@@ -15,42 +15,53 @@ import time
 
 from . import generated as g
 from .multidrop import CoreProbe, MultidropPart, part_of
+from .probe_service import HostView
 
-__all__ = ["MulticoreTools"]
+__all__ = ["MulticoreService"]
 
 _SAMPLER_BUSY = ("DAP サンプラ（watch 等）が同じ線で動いている間は、もう一方のコアを覗かない（DP を選び直すと"
                  "サンプラの読みがそちらへ向かう）: サンプラを止めてから")
 
 
-class MulticoreTools:
-    """コアの選択と、接続していないコアの状態・停止・再開（Probe の mixin）。"""
+class MulticoreService:
+    """コアの選択と、接続していないコアの状態・停止・再開（Probe のサービス）。"""
+
+    API = ("target_core_select",)
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_multicore_status", "_other_core", "_rescue")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_clear_halt_reason", "_debug", "_flash_bp_detach", "_last_connect", "_link", "_lock", "_monitor_detach",
+             "_place_of", "dbg", "session", "target_connect", "target_disconnect")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
 
     def _multidrop(self) -> tuple[MultidropPart, int] | None:
         """接続中なら (部品, 接続中のコア)。コアごとに DP を持つ部品でなければ None。"""
-        link = self._link or {}
+        link = self._host._link or {}
         if link.get("core") is None:
             return None
         found = part_of(link.get("target"))
         return (found[0], link["core"]) if found else None
 
     def _sampler_running(self) -> bool:
-        device = self.session.device
-        return bool(getattr(device.capabilities(), "sampler", False) and device.read32(g.SAMPLER_CONTROL) & 1)
+        device = self._host.session.device
+        return bool(device.capabilities().sampler and device.read32(g.SAMPLER_CONTROL) & 1)
 
     def _core_probe(self) -> CoreProbe:
         part, home = self._multidrop()
         if self._sampler_running():
             raise RuntimeError(_SAMPLER_BUSY)
-        probe = self._debug.probe
+        probe = self._host._debug.probe
         probe.flush()                                         # pyOCD が溜めた転送を、DP を選び直す前に出す
         # pyOCD の CMSISDAPProbe は CMSIS-DAP の層（DAPAccessCMSISDAP）を _link に持つ。RawDap はその層の上で動く
-        return CoreProbe(probe._link, part, home, (self._link or {}).get("frequency_hz"))
+        return CoreProbe(probe._link, part, home, (self._host._link or {}).get("frequency_hz"))
 
     def _core_entry(self, index: int, values: dict, selected: bool) -> dict:
         entry = {"core": index, "selected": selected, "state": values["state"]}
         if "pc" in values:
             entry["pc"] = values["pc"]
-            entry.update(self._place_of(values["pc"]))
+            entry.update(self._host._place_of(values["pc"]))
         return entry
 
     def _multicore_status(self, status: dict) -> dict:
@@ -83,19 +94,19 @@ class MulticoreTools:
         found = self._multidrop()
         if found is None or found[0].rescue is None:
             raise ValueError("rescue のリセットは救済の DP を持つ部品（RP2040）に接続中だけ")
-        connect = dict(self._last_connect or {"target": self._link["target"]})
+        connect = dict(self._host._last_connect or {"target": self._host._link["target"]})
         probe = self._core_probe()
-        self._monitor_detach()                              # チップが生きている間に: Flash に書いた BKPT を戻す等
-        self._flash_bp_detach()
+        self._host._monitor_detach()                              # チップが生きている間に: Flash に書いた BKPT を戻す等
+        self._host._flash_bp_detach()
         probe.rescue()
         try:
-            self.target_disconnect()
+            self._host.target_disconnect()
         except Exception:                                   # noqa: BLE001  チップはリセット済み: 片付けに失敗しても捨てる
-            self._debug, self._link = None, None
+            self._host._debug, self._host._link = None, None
         time.sleep(0.05)                                    # リセットからブート ROM が止まるまで
-        self.target_connect(**{**connect, "connect_mode": "attach"})
-        self._clear_halt_reason()                           # 前の停止の理由（DFSR）を残さない
-        self.dbg.reset("system", False)
+        self._host.target_connect(**{**connect, "connect_mode": "attach"})
+        self._host._clear_halt_reason()                           # 前の停止の理由（DFSR）を残さない
+        self._host.dbg.reset("system", False)
 
     def _other_core(self, core: int, action: str) -> dict | None:
         """core が接続中のコアでなければ、そのコアを action（halt / resume）して状態を返す。接続中のコアなら None。"""
@@ -111,10 +122,10 @@ class MulticoreTools:
 
     def target_core_select(self, core: int, connect_mode: str = "attach") -> dict:
         """接続するコアを替える（同じ部品・同じ速度で、既定は止めずに attach でつなぎ直す）。以後の道具はそのコアに効く。"""
-        with self._lock:
+        with self._host._lock:
             found = self._multidrop()
             if found is None:
                 raise ValueError("コアを替えられるのはコアごとに DP を持つ複数ドロップの部品（RP2040 等）に接続中だけ")
             part, _ = found
-            frequency_hz = self._link["frequency_hz"]
-        return self.target_connect(part.name, frequency_hz=frequency_hz, connect_mode=connect_mode, core=core)
+            frequency_hz = self._host._link["frequency_hz"]
+        return self._host.target_connect(part.name, frequency_hz=frequency_hz, connect_mode=connect_mode, core=core)

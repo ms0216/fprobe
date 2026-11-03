@@ -34,7 +34,11 @@ def dap_link_wire(link) -> JtagWire:
     class _Wire:
         def sequence(self, cycles, tms, tdi, capture):
             data = link.jtag_sequence(cycles, tms, capture, tdi)
-            return int.from_bytes(bytes(data or b""), "little") & ((1 << cycles) - 1) if capture else None
+            if not capture:
+                return None
+            # pyOCD の版で戻り値が違う: 0.45 まではバイト列（LSB が先頭）、0.46 からは整数
+            value = data if isinstance(data, int) else int.from_bytes(bytes(data or b""), "little")
+            return value & ((1 << cycles) - 1)
     return _Wire()
 
 

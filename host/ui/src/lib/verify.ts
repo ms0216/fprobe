@@ -7,6 +7,7 @@
 //   名前と値の組のまま
 // - フック（hooks.add）: event・phase 等は API の仕様の欄、動作（actions）は行で組む
 // 画面では判定しない（pass / fail を計算しない）。Svelte に依らない。
+import type { Result } from "./api";
 import type { Key } from "./i18n";
 import { buildParams, type Field, type FieldError, type FieldValues } from "./apiform";
 import { methodFields } from "./crosstrigger";
@@ -432,11 +433,7 @@ export function actionText(a: Record<string, unknown>): string {
 }
 
 /** rules.last の片方（rules・inject）: その呼び出しの応答と、いつ・だれが（デーモンが残した事実） */
-export interface LastRun {
-  result: any;
-  at: number | null;                  // UNIX 秒
-  caller: { id: number; name: string; role: string } | null;
-}
+export type LastRun = NonNullable<Result<"rules.last">["rules" | "inject"]>;
 
 export async function readLastRun(call: (m: string, p: object, o: { quiet: boolean }) => Promise<any>,
                                   kind: "rules" | "inject"): Promise<LastRun | null> {
@@ -445,7 +442,8 @@ export async function readLastRun(call: (m: string, p: object, o: { quiet: boole
 }
 
 /** 最後の実行の行（時刻はこの PC の時刻の書き方。だれかは呼び出し元の名前と役割） */
-export function lastRunText(t: (k: Key, p?: Record<string, string | number>) => string, run: LastRun | null): string {
+export function lastRunText(t: (k: Key, p?: Record<string, string | number>) => string,
+                            run: Pick<LastRun, "at" | "caller"> | null): string {
   if (!run) return "";
   const when = run.at === null ? "—" : new Date(run.at * 1000).toLocaleString();
   return t("verify.lastRun", { when, who: run.caller ? `${run.caller.name} (${run.caller.role})` : "—" });

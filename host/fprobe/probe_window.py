@@ -1,6 +1,6 @@
 """Probe の道具の共通の部品: DAP サンプラの持ち主と、デバイスの時刻付きの出来事の「窓」。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・session・_recorder・_collector・_view を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・session・_recorder・_collector・_view を使う。
 
 - DAP サンプラ（F4）は機器に 1 つ。使う道具（watch・RTOS の時間軸の方法 A・プロファイルの pcsr）は
   `_claim_sampler` で持ち主になり、終えたら `_release_sampler` で返す。ほかの道具が使っている間は、設定を
@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 from .collector import unwrap48
 from .events import ACK_OK, EventLog, resolve
 from .profile.dwt import ITM_LAR
+from .probe_service import HostView
 
-__all__ = ["EventWindow", "WINDOW_EVENT_LIMIT", "WindowCursor", "WindowTools", "write_registers"]
+__all__ = ["EventWindow", "WINDOW_EVENT_LIMIT", "WindowCursor", "WindowService", "write_registers"]
 
 WINDOW_EVENT_LIMIT = 1 << 18           # 記録していないとき、窓に読むイベント記録の件数の上限（16 バイト × 26 万 = 4 MB）
 _RELEASE = {"watch": "watch.stop", "rtos": "rtos.timeline.stop", "profile": "profile.stop", "rtt": "rtt.stop"}
@@ -69,8 +70,16 @@ class EventWindow:
         return None if self.t1 is None else self.t1 - self.t0
 
 
-class WindowTools:
-    def _init_window(self) -> None:
+class WindowService:
+    API = ("sampler_status",)
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_claim_sampler", "_close_window", "_open_window", "_release_sampler", "_ring_events", "_sampler_user",
+              "_window_cursor", "_window_events", "_window_info", "_window_new")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_collector", "_lock", "_recorder", "_view", "session")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._sampler_user: str | None = None
         self._sampler_since: float | None = None
         self._sampler_client: dict | None = None
@@ -110,8 +119,8 @@ class WindowTools:
 
     def _open_window(self) -> EventWindow:
         """いまから後の出来事を読む窓を開く（_lock の中で）。記録していなければイベント記録を動かす。"""
-        device = self.session.device
-        if self._recorder is not None:
+        device = self._host.session.device
+        if self._host._recorder is not None:
             return EventWindow(device.time(), True)
         log = EventLog(device)                                    # イベント記録の無い構成なら RuntimeError
         log.ensure_started()
@@ -120,34 +129,36 @@ class WindowTools:
     def _close_window(self, window: EventWindow) -> None:
         """窓を閉じる（_lock の中で）。以後は閉じた時刻までを読む。"""
         if window.t1 is None:
-            window.t1 = self.session.device.time()
+            window.t1 = self._host.session.device.time()
 
     def _window_events(self, window: EventWindow, stream: str) -> list[tuple[int, int, int]]:
         """窓の中の出来事 (時刻, a, b): stream "sample" は (時刻, 番地, 値)、"swo" / "uart"（受けたバイト）は
-        (時刻, 0, バイト)。
+        (時刻, 0, バイト)。サンプラの語の時刻は、DAP の時刻が線上の点の回路（dap_line_time）では読みを頼んだ転送の点
+        （値を読んだ瞬間の窓の始め）、古い回路は値が返った周期（窓の notes に書く）。
         _lock の外で呼ぶ（記録から読むときは、集める側がロックを取るため）。"""
         if window.recorded:
             return self._recorded_events(window, stream)
-        with self._lock:
+        with self._host._lock:
             return self._ring_events(window, stream)
 
     def _recorded_events(self, window: EventWindow, stream: str) -> list[tuple[int, int, int]]:
-        collector = self._collector
+        collector = self._host._collector
         if collector is not None:
             collector.poll()                                      # 次の周期を待たずに、届いている分を記録へ
-        view = self._view
+        view = self._host._view
         if view is None:
             raise RuntimeError("窓を開いた記録が読めない")
         t1 = window.t1
         if t1 is None:
-            with self._lock:
-                t1 = self.session.device.time()
+            with self._host._lock:
+                t1 = self._host.session.device.time()
         kinds = [_RECORDED_KINDS[stream]]
+        # 読めなかった語は本体に ACK がある（線上の点の回路の読めた語は本体に {t_lo, t_hi, waits} があり、ACK は無い）
         return [(e.t, e.a, e.b) for e in view.events(window.t0, t1, streams=[stream], kinds=kinds)
-                if e.body is None]                                # body に ACK があるのは読めなかった語
+                if e.body is None or "ack" not in e.body]
 
     def _ring_events(self, window: EventWindow, stream: str) -> list[tuple[int, int, int]]:
-        device = self.session.device
+        device = self._host.session.device
         log = EventLog(device)
         written, _ = log.counts()
         if written < window.seen:                                 # 記録の開始等でリングが始め直された
@@ -163,8 +174,14 @@ class WindowTools:
         now = device.time()
         t1 = window.t1 if window.t1 is not None else now
         kind = _RING_KINDS[stream]
+        caps = device.capabilities()
+        line_time = bool(caps.dap_line_time)
+        note = ("サンプラの語の時刻は読みを頼んだ転送の線上の点（値を読んだ瞬間の窓の始め。値が確定したのはその後）"
+                if line_time else "サンプラの語の時刻は値が返った周期（値を読んだ瞬間はそれより前）")
+        if kind == "sample" and note not in window.notes:
+            window.notes.append(note)
         out = []
-        for a in resolve(events):
+        for a in resolve(events, line_time=line_time, output_ticks=caps.dap_output_ticks):
             if a.kind != kind or (kind == "sample" and a.ack != ACK_OK):      # 読めなかった語は使わない
                 continue
             t = unwrap48(a.time, now)
@@ -182,8 +199,8 @@ class WindowTools:
             part = EventWindow(cursor.last_t, True, t1=window.t1) if cursor.last_t is not None else window
             events = self._window_events(part, cursor.stream)
         else:
-            with self._lock:
-                written = EventLog(self.session.device).counts()[0]
+            with self._host._lock:
+                written = EventLog(self._host.session.device).counts()[0]
             part = EventWindow(window.t0, False, cursor.ring_seen, window.t1)
             events = self._window_events(part, cursor.stream)
             cursor.ring_seen = written

@@ -25,9 +25,23 @@ from dataclasses import dataclass, field
 from .pcprofile import Profile, Profiler
 from .samples import PcSamples
 
-__all__ = ["BY", "OTHER", "Grouping", "call_stats", "group_profile", "group_rows", "timeline", "window"]
+__all__ = ["BY", "OTHER", "ORDERS", "Grouping", "call_stats", "group_profile", "group_rows", "order_rows", "timeline",
+           "window"]
 
 BY = ("function", "file", "directory", "prefix", "groups")
+ORDERS = ("samples", "line")
+
+
+def order_rows(rows: list[dict], order: str, by: str) -> list[dict]:
+    """選んだ行（サンプル数の多い順）の並び。samples はそのまま、line は行番号の順（行番号の無い行は 0。同じ行番号は
+    サンプル数の順のまま）。line は行番号のある表（by = line / instruction）だけ。"""
+    if order not in ORDERS:
+        raise ValueError(f"order は {' / '.join(ORDERS)}")
+    if order == "samples":
+        return rows
+    if by not in ("line", "instruction"):
+        raise ValueError(f"order = line は by = line / instruction の表だけ（by = {by}）")
+    return sorted(rows, key=lambda r: r["line"] or 0)
 OTHER = "(other)"
 UNKNOWN_FILE = "(unknown)"
 

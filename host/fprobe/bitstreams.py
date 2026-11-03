@@ -106,7 +106,7 @@ def wanted_design(caps, protocol: str) -> str | None:
     if protocol == "swd" and caps.design in FEATURES.values():
         return None
     if caps.design not in SWITCHABLE:
-        if protocol == "jtag" and not getattr(caps, "jtag", True):
+        if protocol == "jtag" and not caps.jtag:
             raise DesignSwitchError(f"デザイン {caps.design!r} に JTAG が無く、書き替えの対象でもない")
         return None
     return design

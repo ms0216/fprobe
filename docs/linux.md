@@ -162,6 +162,7 @@ FPROBE_LINUX_HOST=192.168.77.2 FPROBE_LINUX_KEY=~/.ssh/fprobe_pynq pytest gatewa
 
 実機の事実（2026-10-23、PYNQ-Z2）: `gateware/tests/hil/test_linux_ring_pynq_hw.py`
 - xsdb の memap で、CPU を止めずに DDR を 470 kB/s で読めました（16384 語 139 ms）。
+- **起動の構成が reserved-memory 方式（`mem=479M` なし。`docs/boards/pynq-z2.md`）のときは、0x1DF00000 は Linux の通常のメモリ**で、リングを置くとカーネルを壊して固まる（2026-10-31 に実機で固まった）。予約領域は 0x1E000000〜0x1FFFFFFF なので、その最後の 1 MB（0x1FF00000）を使う（実機の試験は `FPROBE_RING_PHYS=0x1FF00000`）。止めずに読む口は xsdb（`linux.memap.connect`）か、fprobe の JTAG（`linux.memap.connect_jtag`。PJTAG、Primer の J12。LAN が落ちている間に 448 件、3000/3000 件を道 B で読み、止めた時間 0・lost/torn/corrupt 0。2026-10-31）。
 - リングは物理番地 0x1DF00000 の 1 MB（リング専用）。`host/pynq/uEnv.txt` の `mem=479M` で Linux から外しています
   （その上の 0x1E000000〜 の 32 MB は深いバッファ）。2026-10-23 の 479M での再試験: 3000/3000 件を道 B で読み、
   LAN が落ちている間に 418 件、lost・torn・corrupt・頭の誤りは 0 件、CPU を止めた時間は 0。

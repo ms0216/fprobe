@@ -1,29 +1,32 @@
 // Code Profile のビューの計算と、ソースの余白に出す当たりの割合・カバレッジ（Source のパネルが読む）。
 // Svelte・DOM に依らない（store の約束 subscribe だけを満たす）。
-import type { DaemonConnection } from "./api";
+import type { ProfileFunctionRow, ProfileLineRow, ProfileRow } from "../../../api/generated/fprobe_api";
+import type { DaemonConnection, Result } from "./api";
 import type { TimelineSnapshot } from "./timeline/state";
 
 type Conn = Pick<DaemonConnection, "call">;
 
-/** 関数（行）の割合の行（profile.result / profile.aggregate の rows） */
-export interface ProfileRow {
-  function: string;
-  address?: number;
-  file?: string | null;
-  line?: number | null;
-  samples: number;
-  fraction: number;
+// 割合の表の行（profile.result / profile.aggregate の rows。仕様から生成した型）: by = function の行・by = line の行
+export type { ProfileFunctionRow, ProfileLineRow };
+
+/** by = 関数・行・命令・例外の表（profile.aggregate の組の表でない形。行を頼んだ応答は必ずこちら） */
+export function rowTable(r: Result<"profile.result"> | Result<"profile.aggregate">) {
+  if (!("rows_total" in r)) throw new Error(`profile: by=${r.by} の組の表が返った（行の表を頼んだ）`);
+  return r;
+}
+
+/** by = function の表の行（頼んだ by の行だけが返る。型を絞るだけ） */
+export function functionRows(rows: ProfileRow[]): ProfileFunctionRow[] {
+  return rows.filter((r): r is ProfileFunctionRow => "size" in r);
+}
+
+/** by = line の表の行（命令の行は text を持つ） */
+export function lineRows(rows: ProfileRow[]): ProfileLineRow[] {
+  return rows.filter((r): r is ProfileLineRow => "line" in r && !("text" in r));
 }
 
 /** 関数のカバレッジ（profile.coverage の functions の要素） */
-export interface FunctionCoverage {
-  function: string;
-  lines: number;
-  lines_hit: number;
-  line_fraction: number;
-  hit_lines: [string, number][];
-  missed_lines: [string, number][];
-}
+export type FunctionCoverage = Result<"profile.coverage">["functions"][number];
 
 /** 区間で集計する範囲: 時間軸の基準と選択のカーソルの間（記録の時間軸）。方法 pcsr の時刻はタイムベースなので
  *  そのまま t0 / t1 に渡せる。itm はコアのクロック数で合わないので null（理由は reason） */
@@ -51,7 +54,7 @@ export interface HeatSnapshot {
 }
 
 /** 行の当たりとカバレッジ → ファイルごとの表 */
-export function heatOf(lines: ProfileRow[], coverage: FunctionCoverage[]): HeatSnapshot {
+export function heatOf(lines: ProfileLineRow[], coverage: FunctionCoverage[]): HeatSnapshot {
   const out: HeatSnapshot = { lines: new Map(), missed: new Map() };
   for (const r of lines) {
     if (!r.file || !r.line) continue;

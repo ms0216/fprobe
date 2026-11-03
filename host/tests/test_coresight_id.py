@@ -89,6 +89,49 @@ def test_the_walk_reports_where_it_stopped_at_its_limits():
     assert few.walk["truncated"] is True and few.walk["limit"] == 2
 
 
+def as_dicts(root):
+    return root.as_dict()
+
+
+@pytest.mark.parametrize("build", ["stm32", "nested", "limits"])
+def test_reading_many_words_at_once_gives_the_same_walk_with_fewer_reads(build):
+    """read_many（まとめた読み。1 回の往復）は往復の数が減るだけで、結果は 1 語ずつと同じ。まとめた読みの中に読めない語が
+    あれば、まとめた読み全体が失敗する（JTAG の誤りの印は読みの列ごと）: そのときは 1 語ずつに戻る。"""
+    words: dict[int, int] = {}
+    if build == "stm32":
+        words, base = stm32f401_words(), 0xE00FF003
+    elif build == "nested":
+        add_rom_table(words, 0x1000, [0x2000, 0x3000], cls=9)
+        add_rom_table(words, 0x2000, [0x4000])
+        add_component(words, 0x4000, 9, ARM, 0x906)
+        base = 0x1000
+    else:
+        add_rom_table(words, 0x1000, [0x2000, 0x3000])
+        add_component(words, 0x2000, 9, ARM, 0x906)
+        add_component(words, 0x3000, 1, ARM, 0x4C0)
+        base = 0x1000
+    faulting = {0x3000 + 0xFBC}                                   # class 1 の部品の DEVARCH は読めない（まとめた読みが失敗する）
+
+    def read(address):
+        if address in faulting:
+            raise RuntimeError("FAULT")
+        return words.get(address, 0)
+    calls = {"one": 0, "many": 0}
+
+    def read_one(address):
+        calls["one"] += 1
+        return read(address)
+
+    def read_many(addresses):
+        calls["many"] += 1
+        return [read(a) for a in addresses]
+    single = ci.walk_rom_table(read_one, base)
+    single_reads, calls["one"] = calls["one"], 0
+    batched = ci.walk_rom_table(read_one, base, read_many=read_many)
+    assert as_dicts(batched) == as_dicts(single)
+    assert calls["one"] + calls["many"] < single_reads / 3                                # 往復は 1 語ずつの 3 分の 1 未満
+
+
 def test_stm32_is_identified_from_dbgmcu():
     part = ci.identify_part(reader(stm32f401_words()), {ST})
     assert part.name == "STM32F401xD/E" and part.id == 0x433 and part.option_family == "f4"

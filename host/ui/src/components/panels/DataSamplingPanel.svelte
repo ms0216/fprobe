@@ -9,7 +9,7 @@
   // 観測の組は Dashboard・AI と分け合う（lib/watchshare.ts: 足すだけ・自分の式だけやめる・取り合いを出す）。
   // 式の一覧と周期はデーモンの画面の状態（ui.state の sampling）で別の窓・別の PC・AI と同じものを見る。周期の欄は
   // 取っている間は実際の周期（watch.status）。誤った式は watch.set が外し（rejected）、その行に印と理由を出す。
-  // 表の最新の値と配列の要素は、値のダブルクリックで書ける（走行中は watch.write、止まっていれば debug.write_expression。
+  // 表の最新の値と配列の要素は、値のダブルクリックで書ける（debug.write_expression。走行中は止めずに、止まっていればフレームで。道はデーモンが選ぶ。
   // lib/valuewrite の exprWriteCall）
   import { untrack } from "svelte";
   import Chart from "../charts/Chart.svelte";
@@ -155,7 +155,7 @@
         ...plotted.map((name) => call("watch.series", { name, last }, { quiet: true })),
       ]);
       series.forEach((s: any) => store.merge(s.name, s.samples ?? [], typeof s.from_us === "number" ? s.from_us : null));
-      for (const v of values?.values ?? []) if (names.includes(v.name) && v.time_us !== null) store.note(v.name, v);
+      for (const v of values?.values ?? []) if (names.includes(v.name) && v.time_us !== null) store.note(v.name, { ...v, time_us: v.time_us });
       const [x, y, dt] = untrack(() => [xName, yName, maxDtUs.trim()]);
       if (untrack(() => mode === "xy") && x && y && names.includes(x) && names.includes(y)) {
         xyResult = await call("watch.xy", { x, y, last, ...(dt !== "" && Number.isFinite(Number(dt)) ? { max_dt_us: Number(dt) } : {}) },
@@ -342,12 +342,12 @@
     }
   }
 
-  // 値を書く（式・配列の要素）。使う API はターゲットの状態で決める
+  // 値を書く（式・配列の要素）。debug.write_expression（道はデーモンが選ぶ）
   const via = $derived(exprWriteMethod(target?.state));
   async function writeExpr(expression: string, input: string): Promise<string | null> {
     const c = exprWriteCall(target?.state, expression, parseInput(input));
     if (!c || !(await allowed(app))) return null;
-    const done = await app.act(c.method as "watch.write", c.params as any);
+    const done = await app.act(c.method as "debug.write_expression", c.params as any);
     if (done !== undefined && mode === "array" && wave && halted) await readArray(new Event("submit"));
     return null;
   }

@@ -11,6 +11,11 @@
 -- バッファ）は flush の間に前の受信の残り（ホストが読まずに止めたバイト）を捨てる。窓の間に揃ったバイトを
 -- 捨てるのは、受信を窓の分だけ遅く始めたのと同じ（受信はもともと流れの途中から始まる）。
 --
+-- バイトの時刻（out_time。時刻の正しさの R3。docs/superpowers/specs/2026-11-01-time-accuracy-design.md）: UART 方式は、そのバイトの
+-- 開始ビットの辺を見つけた周期の time（uart_rx。端子の辺は out_time − UART_RX_START_DELAY 以上 + 1 刻み未満）。Manchester 方式は、
+-- そのバイトの最初のデータビットの中央の変化を見つけた周期の time（swo_manchester_rx。R4、段階 S3: 端子の変化は
+-- out_time − SWO_MANCHESTER_BIT_DELAY 以上 + 1 刻み未満。送り手の速さに依らない）。値は fprobe_gw.timing が正。
+--
 -- 最高速度（clk = 100 MHz、divisor の下限 4 = 25 Mbit/s。tests/tb/swo_receiver_modes_tb.py・swo_manchester_rx_tb.py）:
 --   UART: 開始ビットの検出の後は divisor ごとに数えるだけなので、送り手との速さのずれが 10 ビットで溜まる。
 --         受けられるずれは divisor = 4 で -1〜+5%、5 以上で -3〜+4〜5%（正 = 送り手が遅い）。TPIU の分周
@@ -33,9 +38,11 @@ entity swo_receiver is
     manchester : in  std_logic;                      -- '1' = Manchester 方式（HAS_MANCHESTER のときだけ効く）
     divisor    : in  unsigned(15 downto 0);
     swo        : in  std_logic;                      -- 非同期でよい
+    time       : in  unsigned(47 downto 0) := (others => '0');   -- タイムベース（バイトの時刻に使う）
     out_valid  : out std_logic;
     out_ready  : in  std_logic;
     out_data   : out std_logic_vector(7 downto 0);
+    out_time   : out unsigned(47 downto 0);          -- out_data のバイトの時刻（上の説明）
     flush      : out std_logic;                      -- 開始の窓: 下流は SWO の残りを捨てる
     error      : out std_logic;
     overrun    : out std_logic
@@ -45,8 +52,10 @@ end entity;
 architecture rtl of swo_receiver is
   signal uart_valid, uart_frame_error, uart_overrun : std_logic;
   signal uart_data  : std_logic_vector(7 downto 0);
+  signal uart_time  : unsigned(47 downto 0);
   signal man_valid, man_frame_error : std_logic;
   signal man_data   : std_logic_vector(7 downto 0);
+  signal man_time   : unsigned(47 downto 0);
   signal use_man    : std_logic;
   signal rx_valid, rx_frame_error, rx_overrun : std_logic;
   signal rx_data    : std_logic_vector(7 downto 0);
@@ -59,26 +68,29 @@ architecture rtl of swo_receiver is
 begin
   uart_i : entity work.uart_rx
     generic map (DIVISOR_BITS => 16)
-    port map (clk => clk, rst => rst, divisor => divisor, rx => swo, out_valid => uart_valid,
-              out_ready => '1', out_data => uart_data, frame_error => uart_frame_error, overrun => uart_overrun);
+    port map (clk => clk, rst => rst, divisor => divisor, rx => swo, time => time, out_valid => uart_valid,
+              out_ready => '1', out_data => uart_data, out_time => uart_time, frame_error => uart_frame_error,
+              overrun => uart_overrun);
 
   manchester_g : if HAS_MANCHESTER generate
     manchester_i : entity work.swo_manchester_rx
       generic map (DIVISOR_BITS => 16)
-      port map (clk => clk, rst => rst, divisor => divisor, rx => swo, out_valid => man_valid,
-                out_data => man_data, frame_error => man_frame_error);
+      port map (clk => clk, rst => rst, divisor => divisor, rx => swo, time => time, out_valid => man_valid,
+                out_data => man_data, out_time => man_time, frame_error => man_frame_error);
     use_man <= manchester;
   end generate;
 
   no_manchester_g : if not HAS_MANCHESTER generate
     man_valid       <= '0';
     man_data        <= (others => '0');
+    man_time        <= (others => '0');
     man_frame_error <= '0';
     use_man         <= '0';
   end generate;
 
   rx_valid       <= man_valid when use_man = '1' else uart_valid;
   rx_data        <= man_data when use_man = '1' else uart_data;
+  out_time       <= man_time when use_man = '1' else uart_time;
   rx_frame_error <= man_frame_error when use_man = '1' else uart_frame_error;
   rx_overrun     <= '0' when use_man = '1' else uart_overrun;
 

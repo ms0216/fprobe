@@ -56,6 +56,11 @@ def test_vhdl_package_matches_board_definition():
     m = PYNQ_Z2.sync_pll
     assert re.search(rf"MMCM_MULT\s*:\s*real\s*:=\s*{m.mult}\s*;", text)
     assert re.search(rf"MMCM_OUT_DIV\s*:\s*real\s*:=\s*{m.out_div}\s*;", text)
+    assert re.search(rf"MMCM_DIVCLK\s*:\s*positive\s*:=\s*{m.divclk}\s*;", text)
+    # VCO 1200 MHz（-1 の上限）。cap_clk の分周は構成の比で決まり、VHDL（pynq_z2_pkg.mmcm_cap_div = MMCM_OUT_DIV / 比）と同じ式
+    assert m.vco_mhz == 1200.0 and m.fout_hz == 100_000_000
+    assert re.search(r"return OUT_DIV / ratio;", text)
+    assert [m.cap_hz(r) for r in (2, 3, 4)] == [200_000_000, 300_000_000, 400_000_000]
     choices = re.search(r"XOUT_PIN_CHOICES\s*:.*:=\s*\(([\d, ]+)\)", text)[1]
     assert [int(x) for x in choices.split(",")] == [PYNQ_Z2.debug_connector[n] for n in PYNQ_Z2.output_pins]
 
@@ -72,7 +77,13 @@ def test_ps7_block_design_script_exists_and_names_gp0():
 def test_xilinx_mmcm_model_locks_and_runs(tmp_path):
     run_cocotb(toplevel="xilinx_mmcm", sources=[RTL_ROOT.parent / "tests" / "rtl" / "sim_xilinx_prims.vhd",
                                                 *rtl("boards/pynq_z2/xilinx_mmcm.vhd")],
-               test_module="tests.tb.xilinx_mmcm_tb", build_dir=tmp_path)
+               test_module="tests.tb.xilinx_mmcm_tb", generics={"CAP_DIV": 5}, build_dir=tmp_path)   # 100 MHz と 200 MHz（比 2）
+
+
+def test_xilinx_oddr_model_outputs_d1_then_d2(tmp_path):
+    run_cocotb(toplevel="xilinx_oddr", sources=[RTL_ROOT.parent / "tests" / "rtl" / "sim_xilinx_prims.vhd",
+                                                *rtl("boards/pynq_z2/xilinx_oddr.vhd")],
+               test_module="tests.tb.xilinx_oddr_tb", build_dir=tmp_path)
 
 
 def test_ps_pjtag_is_routed_to_the_raspberry_pi_header():

@@ -2,7 +2,7 @@
 試行して判定する。
 
 仕様: docs/superpowers/specs/2026-10-18-u25-u44-rules-hooks-design.md の 2 節。
-ここは台本の検証と試行の進め方だけ。機器の操作は InjectHost（Probe の RulesTools が実装。ロックは向こう）。
+ここは台本の検証と試行の進め方だけ。機器の操作は InjectHost（Probe の RulesService が実装。ロックは向こう）。
 """
 
 import hashlib

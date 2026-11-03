@@ -39,7 +39,7 @@ entity deep_axi_harness is
     ev_enable    : in  std_logic;
     ev_valid     : in  std_logic;
     ev_data      : in  std_logic_vector(127 downto 0);
-    ev_written   : out unsigned(31 downto 0);
+    ev_written   : out unsigned(63 downto 0);
     ev_lost      : out unsigned(31 downto 0);
     la_beats     : out unsigned(ADDR_BITS downto 0);
     ev_beats     : out unsigned(ADDR_BITS downto 0);

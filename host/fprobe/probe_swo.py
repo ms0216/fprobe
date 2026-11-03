@@ -1,9 +1,9 @@
 """Probe の道具: SWO の DWT・ITM の設定（U11）。ITM のポート・TPIU・例外トレース・イベントカウンタ・DWT の比較器による
 データトレース（変数へのアクセスを値・PC・時刻付きで、止めずに）・値一致のウォッチポイント。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・session・_symbols・_recorder・_swo_baud・
-swo_start・_profile_run と、WatchTools（式 → 番地と大きさと型: `_watch_target`）、InspectTools（SVD: `_device`）、
-WindowTools（出来事の窓・write_registers）を使う。機器に触るのは必ず _lock の中。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・session・_symbols・_recorder・_swo_baud・
+swo_start・_profile_run と、WatchService（式 → 番地と大きさと型: `_watch_target`）、InspectService（SVD: `_device`）、
+WindowService（出来事の窓・write_registers）を使う。機器に触るのは必ず _lock の中。
 
 - 書く順（2026-10-18 に実機で分かった注意）: パケットを出さない設定（DEMCR.TRCENA・ITM の鍵・TPIU・SWO のピン）
   → SWO の受信を始めて窓を開く → ITM → DWT_CTRL → 比較器（COMP・MASK の後に FUNCTION）。逆だと受信がパケットの
@@ -29,8 +29,9 @@ from .profile.exceptions import exception_name
 from .swo_trace import (CPUID, LNK1ENA, NOPRFCNT, NOTRCPKT, CoreInfo, CounterTotals, DataAccess, DataTrace,
                         DataTraceAssembler, DwtInfo, TimedItmStream, TracePlan, TraceRequest, ValueWatch, core_info,
                         dwt_function, dwt_mask, plan_trace)
+from .probe_service import HostView
 
-__all__ = ["ACCESS_LIMIT", "SwoTools"]
+__all__ = ["ACCESS_LIMIT", "SwoService"]
 
 ACCESS_LIMIT = 1 << 20                  # ためるアクセスの上限（超えた分は数えて捨てる）
 EXCEPTION_LIMIT = 1 << 16               # ためる例外トレースの上限
@@ -75,7 +76,7 @@ class _SwoRun:
     request: TraceRequest
     plan: TracePlan
     core: CoreInfo
-    targets: dict                                         # 名前 → WatchTools._Watched（型で値を解釈する）
+    targets: dict                                         # 名前 → WatchService._Watched（型で値を解釈する）
     restore: list[RegisterWrite]                          # 止めるときに書く（mask の部分だけ元の値に）
     reserved: list[int]
     baud: float | None
@@ -95,16 +96,26 @@ class _SwoRun:
     errors: int = 0
     last_t: int = -1                                      # 処理した最後のバイトの時刻
     recorded: int = 0                                     # 記録に書いたアクセスの数
-    recorded_overflows: dict[str, int] = field(default_factory=dict)
+    recorded_counter_events: int = 0                      # 記録に書いたカウンタの溢れの印の数（counters.events）
+    untimed: int = 0                                      # デバイスの時刻が分からなかったパケット（時刻 None）
     times: dict[int, int] = field(default_factory=dict)   # タイムスタンプ待ちのパケット（id）→ デバイスの時刻
     timebase_hz: float = 0.0
     running: bool = True
 
 
-class SwoTools:
-    """SWO の DWT・ITM の設定（Probe の mixin）。"""
+class SwoService:
+    """SWO の DWT・ITM の設定（Probe のサービス）。"""
 
-    def _init_swo(self) -> None:
+    API = ("swo_configure", "swo_trace", "swo_unconfigure")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_swo_counter_overflows", "_swo_run")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_close_window", "_debug", "_device", "_lock", "_open_window", "_place_of", "_profile_run", "_recorder",
+             "_swo_baud", "_symbols", "_watch_target", "_window_events", "_window_info", "session", "swo_start",
+             "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._swo_run: _SwoRun | None = None
 
     # --- 設定 ------------------------------------------------------------------------------------
@@ -129,12 +140,12 @@ class SwoTools:
         request = TraceRequest(tuple(ports or ()), timestamps, timestamp_prescale, exception_trace,
                                tuple(counters or ()), tuple(t for t, _ in traces), tuple(w for w, _ in watches))
         targets = {t.name: w for t, w in traces + watches if w is not None}
-        with self._lock:
-            if self._profile_run is not None:
+        with self._host._lock:
+            if self._host._profile_run is not None:
                 raise RuntimeError("プロファイルが DWT・ITM を使っている（profile_stop を先に）")
             if self._swo_run is not None and self._swo_run.running:
                 self._swo_finish()                                   # 前の設定を戻してから（戻した後なら何もしない）
-            target = self.target
+            target = self._host.target
             core = core_info(target.read_memory(CPUID))
             pyocd = _PyocdDwt(target)
             pyocd.prepare()
@@ -147,7 +158,7 @@ class SwoTools:
                 tpiu, baud = list(swo.writes), swo.baud
                 warnings += swo.warnings
             plan = plan_trace(request, info, core_clock_hz=core_clock_hz,
-                              swo_baud=baud if baud is not None else self._swo_baud)
+                              swo_baud=baud if baud is not None else self._host._swo_baud)
             plan.warnings[:0] = warnings
             pin_writes = self._trace_pin(trace_pin) if trace_pin is not None else []
             itm_was_on = bool(target.read_memory(ITM_TCR) & 1) if plan.uses_swo else False
@@ -155,10 +166,10 @@ class SwoTools:
             window = None
             if plan.uses_swo:
                 if swo_baud is not None:
-                    self.swo_start(round(baud))
-                elif self._swo_baud is None:
+                    self._host.swo_start(round(baud))
+                elif self._host._swo_baud is None:
                     raise RuntimeError("SWO の受信が始まっていない（swo_baud か swo_start）")
-                window = self._open_window()
+                window = self._host._open_window()
             before.update({a: v for a, v in write_registers(target, plan.enable).items() if a not in before})
             for u in plan.comparators:
                 pyocd.reserve(u.index)
@@ -168,7 +179,7 @@ class SwoTools:
             run = _SwoRun(request, plan, core, targets, restore, [u.index for u in plan.comparators],
                           baud if plan.uses_swo else None, window, not itm_was_on, trace_pin, TimedItmStream(not itm_was_on),
                           Timestamper() if timestamps else None, DataTraceAssembler(plan.comparators),
-                          timebase_hz=self.session.device.capabilities().timebase_hz)
+                          timebase_hz=self._host.session.device.capabilities().timebase_hz)
             self._swo_run = run
         return {"running": True, "core": {"name": core.name, "arch": core.arch, "cpuid": core.cpuid},
                 "plan": plan.as_dict(), "swo_baud": run.baud, "synced": run.synced, "trace_pin": trace_pin,
@@ -180,7 +191,7 @@ class SwoTools:
         unknown = set(d) - {"expression", "access", "pc", "value", "offset"}
         if unknown or "expression" not in d:
             raise ValueError(f"data_trace の項目は expression・access・pc・value・offset: {sorted(unknown) or d}")
-        w = self._watch_target(d["expression"])
+        w = self._host._watch_target(d["expression"])
         return DataTrace(d["expression"], w.address, w.size, d.get("access", "write"), d.get("pc", True),
                          d.get("value", True), d.get("offset", False)), w
 
@@ -189,7 +200,7 @@ class SwoTools:
         if unknown or "value" not in d:
             raise ValueError(f"value_watch の項目は expression・value・size・access・action・pc: {sorted(unknown) or d}")
         expression = d.get("expression")
-        w = self._watch_target(expression) if expression else None
+        w = self._host._watch_target(expression) if expression else None
         size = d.get("size") or (w.size if w is not None else None)
         if size is None:
             raise ValueError("value_watch に expression が無ければ size が要る（大きさを仮定しない）")
@@ -227,7 +238,7 @@ class SwoTools:
         if not isinstance(spec, dict) or set(spec) != {"register", "fields"} or not isinstance(spec["fields"], dict) \
                 or not spec["fields"]:
             raise ValueError(f"trace_pin は {{\"register\": \"周辺.レジスタ\", \"fields\": {{欄: 値}}}}（{spec!r}）")
-        reg = self._device().register(spec["register"])           # SVD が無い・レジスタが無ければ誤り
+        reg = self._host._device().register(spec["register"])           # SVD が無い・レジスタが無ければ誤り
         mask = value = 0
         for name, v in spec["fields"].items():
             field = reg.field(name)                                # 欄が無ければ KeyError
@@ -239,7 +250,7 @@ class SwoTools:
     def swo_unconfigure(self) -> dict:
         """swo_configure の設定を戻す（比較器を外し、DWT_CTRL・ITM の変えたビットを元に）。SWO の受信・TPIU は残す
         （ファームの printf 等も使うため）。届いている分まで組み立てた結果（swo_trace と同じ形）を返す。"""
-        with self._lock:
+        with self._host._lock:
             if self._swo_run is None or not self._swo_run.running:
                 raise NoData("swo_configure で設定していない")
             run = self._swo_finish()
@@ -251,22 +262,22 @@ class SwoTools:
         try:
             if run.window is not None:
                 self._swo_pull(run)
-            if self._debug is not None:
-                write_registers(self.target, run.restore)
+            if self._host._debug is not None:
+                write_registers(self._host.target, run.restore)
         finally:
-            pyocd = _PyocdDwt(self.target) if self._debug is not None else None
+            pyocd = _PyocdDwt(self._host.target) if self._host._debug is not None else None
             for index in run.reserved:
                 if pyocd is not None:
                     pyocd.release(index)
             if run.window is not None:
-                self._close_window(run.window)
+                self._host._close_window(run.window)
             run.running = False
             self._swo_finish_assembly(run)
         return run
 
     def _swo_finish_assembly(self, run: _SwoRun) -> None:
         tail = run.stamper.flush() if run.stamper is not None else []
-        self._swo_take(run, [(run.times.pop(id(p.packet), 0), p.local_time, p.packet) for p in tail])
+        self._swo_take(run, [(run.times.pop(id(p.packet), None), p.local_time, p.packet) for p in tail])
         self._swo_keep(run, run.assembler.flush())
         self._swo_record(run)
 
@@ -280,7 +291,7 @@ class SwoTools:
         if run is None:
             raise NoData("swo_configure で設定していない")
         if run.running:
-            with self._lock:
+            with self._host._lock:
                 if run.window is not None:
                     self._swo_pull(run)
                 self._swo_record(run)
@@ -288,7 +299,7 @@ class SwoTools:
 
     def _swo_pull(self, run: _SwoRun) -> None:
         """窓の新しいバイトを解読して組み立てる（_lock の中で呼んでよい: 窓の読みは RLock を取り直すだけ）。"""
-        new = [(t, b) for t, _, b in self._window_events(run.window, "swo") if t > run.last_t]
+        new = [(t, b) for t, _, b in self._host._window_events(run.window, "swo") if t > run.last_t]
         if not new:
             return
         run.last_t = new[-1][0]
@@ -298,7 +309,7 @@ class SwoTools:
         else:
             run.times.update((id(p), t) for t, p in packets)      # ローカルのタイムスタンプが来るまで待つパケット
             timed = run.stamper.feed([p for _, p in packets])
-            items = [(run.times.pop(id(tp.packet), 0), tp.local_time, tp.packet) for tp in timed]
+            items = [(run.times.pop(id(tp.packet), None), tp.local_time, tp.packet) for tp in timed]   # 無ければ分からない（0 にしない）
         self._swo_take(run, items)
 
     def _swo_take(self, run: _SwoRun, items: list) -> None:
@@ -313,7 +324,8 @@ class SwoTools:
                     run.exceptions_dropped += 1
             run.overflows += isinstance(p, Overflow)
             run.errors += isinstance(p, DecodeError)
-        run.counters.feed(p for _, _, p in items)
+            run.untimed += t is None
+        run.counters.feed_timed((t, p) for t, _, p in items)
         self._swo_keep(run, run.assembler.feed(items))
 
     @staticmethod
@@ -323,24 +335,26 @@ class SwoTools:
         run.dropped += max(len(accesses) - room, 0)
 
     def _swo_record(self, run: _SwoRun) -> None:
-        rec = self._recorder
+        rec = self._host._recorder
         if rec is None or (run.window is not None and not run.window.recorded):
             run.recorded = len(run.accesses)
             return
         rows = []
         for a in run.accesses[run.recorded:]:
+            if a.t is None:                                       # 時刻の分からないもの（untimed に数えた）は時間軸に置かない
+                continue
             body = {k: v for k, v in self._access_dict(run, a).items() if k not in ("t", "time_us")}
             rows.append(("swo", "data_access", a.t, a.address or 0, a.value or 0, body))
         run.recorded = len(run.accesses)
-        for counter, n in run.counters.overflows.items():
-            if n > run.recorded_overflows.get(counter, 0):
-                rows.append(("swo", "counter_overflow", run.last_t, 0, 256 * n, {"counter": counter, "total": 256 * n}))
-                run.recorded_overflows[counter] = n
+        # カウンタの溢れは印のパケットの時刻に（前は処理した最後のバイトの時刻に置いていた）
+        for t, counter, total in run.counters.events[run.recorded_counter_events:]:
+            rows.append(("swo", "counter_overflow", t, 0, total, {"counter": counter, "total": total}))
+        run.recorded_counter_events = len(run.counters.events)
         if rows:
             rec.add_many(rows)
 
     def _access_dict(self, run: _SwoRun, a: DataAccess) -> dict:
-        out = {"t": a.t, "time_us": (a.t - run.window.t0) * 1e6 / run.timebase_hz if run.window else None,
+        out = {"t": a.t, "time_us": (a.t - run.window.t0) * 1e6 / run.timebase_hz if run.window and a.t is not None else None,
                "name": a.name, "role": a.role, "comparator": a.comparator, "write": a.write,
                "address": a.address, "size": a.size, "raw": a.value,
                "value": None if a.value is None else {"kind": "int", "value": a.value}, "complete": a.complete}
@@ -355,8 +369,8 @@ class SwoTools:
                 pass
         if a.pc is not None:
             out["pc"] = a.pc
-            if self._symbols is not None:
-                out.update({k: v for k, v in self._place_of(a.pc).items()})
+            if self._host._symbols is not None:
+                out.update({k: v for k, v in self._host._place_of(a.pc).items()})
         return out
 
     def _trace_dict(self, run: _SwoRun, offset: int, limit: int, name: str | None) -> dict:
@@ -368,9 +382,10 @@ class SwoTools:
                               "events_dropped": run.exceptions_dropped, "events_limit": EXCEPTION_LIMIT},
                "lost": run.assembler.lost, "outside": run.assembler.outside, "unknown": run.assembler.unknown,
                "overflows": run.overflows, "decode_errors": run.errors, "dropped": run.dropped,
+               "untimed": run.untimed,                    # デバイスの時刻が分からなかったパケット（t = null。記録に置かない）
                "comparators": [c.as_dict() for c in run.plan.comparators], "warnings": list(run.plan.warnings)}
         if run.window is not None:
-            out["window"] = self._window_info(run.window, run.timebase_hz)
+            out["window"] = self._host._window_info(run.window, run.timebase_hz)
         return out
 
     def _swo_counter_overflows(self) -> dict[str, int] | None:

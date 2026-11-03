@@ -3,7 +3,7 @@
 実機の PYNQ-Z2 の fprobe（Ethernet）を無人で何時間も回し、不具合・劣化・取りこぼしを見つける道具。FPGA 解析（観測）を主に見る。
 
 ```
-python tools/soak/soak.py --host <PYNQ の IP> --until 06:30 --log soak.jsonl
+python tools/soak/soak.py --host 192.168.0.219 --until 06:30 --log soak.jsonl
 ```
 
 - `--until HH:MM`（次にその時刻になるとき）か `--hours N` で止まる。止めるファイル（既定 `soak.stop`）を作っても、Ctrl+C でも、実行中のシナリオが終わってから安全に止まり、最終の要約を出す。

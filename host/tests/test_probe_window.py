@@ -88,4 +88,17 @@ def test_a_window_opened_while_recording_reads_the_recording(probe):
     assert probe._window_events(window, "swo") == [(window.t0 + 30, 0, 0xAA)]
     wait = probe.recording_find({"stream": "sample", "b": 6})["events"]
     assert wait[0]["body"] == {"ack": 0b010}
+
+
+def test_a_recorded_window_keeps_line_time_words_that_carry_their_read_window(probe):
+    # DAP の時刻が線上の点の回路の語は本体に {t_lo, t_hi, waits}（ACK は無い）: 読めた語なので使う（本体の有無で捨てない）
+    probe.recording_start(name="window_line")
+    with probe._lock:
+        window = probe._open_window()
+    probe._recorder.add("sample", "word", window.t0 + 10, a=ADDRESS, b=5, body={"t_lo": window.t0 + 2,
+                                                                                "t_hi": window.t0 + 30, "waits": 0})
+    probe._recorder.add("sample", "word", window.t0 + 20, a=ADDRESS, b=6, body={"ack": 0b010})
+    probe._recorder.flush()
+    probe.session.device.ticks = window.t0 + 100                 # 窓の終わり（いま）を語の後に
+    assert probe._window_events(window, "sample") == [(window.t0 + 10, ADDRESS, 5)]
     assert probe._window_info(window, 1e8)["source"] == "recording"

@@ -1,0 +1,25 @@
+{
+  "timebase_hz": 1000000,
+  "format": 2,
+  "layout": "segmented",
+  "policy": {
+    "segment_s": 3600,
+    "segment_bytes": null,
+    "max_bytes": null,
+    "decimate_after_s": null,
+    "decimate_streams": [
+      "dap",
+      "sample",
+      "swo",
+      "clock",
+      "waveform"
+    ]
+  },
+  "summary": {
+    "w0": 1024,
+    "fan": 16,
+    "levels": 10,
+    "index_level": 3
+  },
+  "closed": true
+}

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from dwarf_stack import StackBuilder
 from pyocd.core import exceptions as pyocd_errors
+from pyocd.core.target import Target
 from value_kinds import venum, vint
 
 from fprobe.debug import Debugger, PyocdAccess
@@ -24,6 +25,10 @@ class FakeTarget:
 
     def __init__(self, image: ImageAccess):
         self.image = image
+        self.state = Target.State.HALTED                 # 止まった所の値を読む（Probe.write_expression が状態で道を選ぶ）
+
+    def get_state(self):
+        return self.state
 
     def read_memory_block8(self, address, length):
         try:

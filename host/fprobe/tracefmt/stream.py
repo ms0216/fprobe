@@ -46,11 +46,15 @@ class TraceStream:
 
     @classmethod
     def create(cls, format: str, description: str | None = None, metadata: str | None = None,
-               ctf_header: str | None = None, strings=None) -> "TraceStream":
+               ctf_header: str | None = None, strings=None, ts_hz: float | None = None) -> "TraceStream":
+        """ts_hz は CTF の時刻の速さ（TSDL に clock が無いとき。ほかの形式は形式が申告するので受けない）。"""
+        if ts_hz is not None and format != "ctf":
+            raise ValueError("ts_hz は ctf だけ（ほかの形式は記録が時刻の速さを申告する）")
         if format == "systemview":
             return cls(format, SystemViewDecoder(synced=False, description=description, strings=strings))
         if format == "ctf":
-            return cls(format, CtfDecoder(parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header))
+            return cls(format, CtfDecoder(parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header,
+                                          ts_hz=ts_hz))
         if format == "tracealyzer":
             return cls(format, TracealyzerDecoder(strings))
         raise ValueError(f"流れで受けられる形式は {' / '.join(STREAM_FORMATS)}")
@@ -70,16 +74,25 @@ def decode_trace(format: str, data: bytes, description: str | None = None, metad
     if format == "systemview":
         trace = decode_systemview(data, description, strings)
     elif format == "ctf":
-        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer)
+        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer,
+                           ts_hz=ts_hz if _ctf_timed(metadata, ctf_header) else None)
     elif format == "tracealyzer":
         trace = decode_tracealyzer(data, strings)
     elif format == "tracex":
         trace = decode_tracex(data, ts_hz)
     else:
         raise ValueError(f"ファイルから読める形式は systemview / ctf / tracealyzer / tracex（{format} は RAM から）")
-    if ts_hz and not trace.ts_hz:
+    if ts_hz and not trace.timed:
+        trace.notes.append("時刻の無い記録: ts_hz は使わない（ts は出来事の順の番号で、時刻ではない）")
+    elif ts_hz and not trace.ts_hz:
         trace.ts_hz = ts_hz
     return trace
+
+
+def _ctf_timed(metadata: str | None, ctf_header: str | None) -> bool:
+    if metadata:
+        return any(f.name == "timestamp" for f in parse_tsdl(metadata, ctf_header).header)
+    return ctf_header != "id16"
 
 
 def rtt_ring(memory, address: int, channel: str | int) -> bytes:
@@ -123,7 +136,10 @@ def snapshot(format: str, read: Read, symbol: Callable[[str], tuple[int, int] | 
         if not length:
             raise ValueError("ram_tracing の大きさが分からない（size を渡す）")
         data = read(start, min(length, max_bytes))
-        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer=True)
+        trace = decode_ctf(data, parse_tsdl(metadata, ctf_header) if metadata else None, ctf_header, ram_buffer=True,
+                           ts_hz=ts_hz if _ctf_timed(metadata, ctf_header) else None)
+        if ts_hz and not trace.timed:
+            trace.notes.append("時刻の無い記録: ts_hz は使わない（ts は出来事の順の番号で、時刻ではない）")
         return trace, {"bytes": len(data), "size": length, "max_bytes": max_bytes, "truncated": length > max_bytes,
                        "address": start, "source": ZEPHYR_RAM_BUFFER}
     if format == "tracex":

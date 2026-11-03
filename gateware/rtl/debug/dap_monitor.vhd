@@ -7,12 +7,16 @@
 -- 一致 = ((番地 xor match_addr) and addr_mask) = 0 かつ 向き（on_write / on_read）かつ
 --        書き込みなら ((値 xor match_data) and data_mask) = 0（読みは値を見ない。AP の読み値は 1 つ後で返るため）。
 -- 応答が OK の転送だけを数える。
+-- PHY は前の命令の応答の前に次の命令を受けることがある（受理と応答の対が 2 つまで重なる）ので、受理した命令を 2 段の待ち行列に
+-- 控え、応答は古い方と対にする。
 -- イベント: 応答のあった転送はすべて（WAIT・FAULT も）1 件として ev_* に出す（ev_valid 1 周期）。ev_addr は DRW なら
 -- TAR から求めたメモリの番地、それ以外はレジスタの番地 A[3:2] & "00"。ev_data は書き込み値か線上の読み値。
 -- DRW の番地は線上で測った値ではなく、ホストが書いた CSW・TAR を追って求めたもの。追えたときだけ求める（ev_addr_known）:
 -- CSW と TAR を同じ AP（SELECT の APSEL）に書いた後で、DRW もその AP、増加方式が「なし」か「単純増加」、自動増加が
 -- 1 KB の境界を越えていない（ADIv5 は境界の先の増加を実装に任せる）。追えない DRW は ev_addr = レジスタの番地で
 -- ev_addr_known = 0。番地一致（match）も追えた DRW だけで比べる。BD0〜3 は DRW として追わない（レジスタの番地のまま）。
+-- ev_time: その転送の線上の点の時刻（debug_port の rsp_time。SWD は ACK の後の立ち上がり、JTAG は Update-DR を出る立ち上がり。
+-- docs/superpowers/specs/2026-11-01-time-accuracy-design.md R5）。match と同じ周期に出る。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -31,6 +35,7 @@ entity dap_monitor is
     rsp_ack       : in  std_logic_vector(2 downto 0);
     rsp_data      : in  std_logic_vector(31 downto 0);
     rsp_parity    : in  std_logic;
+    rsp_time      : in  unsigned(63 downto 0);
     -- 設定
     match_addr    : in  std_logic_vector(31 downto 0);
     addr_mask     : in  std_logic_vector(31 downto 0);
@@ -54,7 +59,8 @@ entity dap_monitor is
     ev_parity     : out std_logic;
     ev_addr       : out std_logic_vector(31 downto 0);
     ev_addr_known : out std_logic;                       -- 0 = DRW だがメモリの番地を追えなかった（ev_addr はレジスタの番地）
-    ev_data       : out std_logic_vector(31 downto 0)
+    ev_data       : out std_logic_vector(31 downto 0);
+    ev_time       : out unsigned(63 downto 0)
   );
 end entity;
 
@@ -62,9 +68,14 @@ architecture rtl of dap_monitor is
   constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
   constant ACK_OK      : std_logic_vector(2 downto 0) := "001";
 
-  signal pending : boolean := false;
-  signal req     : std_logic_vector(3 downto 0) := (others => '0');
-  signal data    : std_logic_vector(31 downto 0) := (others => '0');
+  -- 受理して応答をまだ見ていない命令（0 が古い）
+  type q_req_t is array (0 to 1) of std_logic_vector(3 downto 0);
+  type q_data_t is array (0 to 1) of std_logic_vector(31 downto 0);
+  type q_bool_t is array (0 to 1) of boolean;
+  signal q_n     : natural range 0 to 2 := 0;
+  signal q_xfer  : q_bool_t := (others => false);
+  signal q_req   : q_req_t := (others => (others => '0'));
+  signal q_data  : q_data_t := (others => (others => '0'));
   signal sel     : std_logic_vector(31 downto 0) := (others => '0');
   signal tar     : unsigned(31 downto 0) := (others => '0');
   signal size    : std_logic_vector(2 downto 0) := "010";
@@ -80,6 +91,7 @@ architecture rtl of dap_monitor is
   signal ev_parity_r : std_logic := '0';
   signal ev_addr_r, ev_data_r : std_logic_vector(31 downto 0) := (others => '0');
   signal ev_known_r  : std_logic := '1';
+  signal ev_time_r   : unsigned(63 downto 0) := (others => '0');
 begin
   process (clk)
     variable ap, rnw   : boolean;
@@ -88,12 +100,16 @@ begin
     variable data_ok   : boolean;
     variable tracked   : boolean;                     -- この AP の DRW のメモリの番地を追えている
     variable next_tar  : unsigned(31 downto 0);
+    variable low11    : unsigned(10 downto 0);
+    variable req      : std_logic_vector(3 downto 0);
+    variable data     : std_logic_vector(31 downto 0);
+    variable n        : natural range 0 to 2;
   begin
     if rising_edge(clk) then
       match_r    <= '0';
       ev_valid_r <= '0';
       if rst = '1' then
-        pending <= false;
+        q_n     <= 0;
         sel     <= (others => '0');
         tar     <= (others => '0');
         size    <= "010";
@@ -106,15 +122,28 @@ begin
         en_prev <= '0';
       else
         en_prev <= enable;
-        if cmd_fire = '1' then
-          pending <= cmd_op = OP_TRANSFER;
-          req     <= cmd_req;
-          data    <= cmd_data;
-        elsif rsp_valid = '1' and pending then
-          pending      <= false;
+        n    := q_n;
+        req  := q_req(0);
+        data := q_data(0);
+        if rsp_valid = '1' and n /= 0 then
+          -- 古い方の応答: 待ち行列から外す
+          q_xfer(0) <= q_xfer(1);
+          q_req(0)  <= q_req(1);
+          q_data(0) <= q_data(1);
+          n := n - 1;
+        end if;
+        if cmd_fire = '1' and n < 2 then
+          q_xfer(n) <= cmd_op = OP_TRANSFER;
+          q_req(n)  <= cmd_req;
+          q_data(n) <= cmd_data;
+          n := n + 1;
+        end if;
+        q_n <= n;
+        if rsp_valid = '1' and q_n /= 0 and q_xfer(0) then
           ev_valid_r   <= '1';
           ev_request_r <= req;
           ev_ack_r     <= rsp_ack;
+          ev_time_r    <= rsp_time;
           ev_parity_r  <= rsp_parity and req(1);
           if req(1) = '1' then
             ev_data_r <= rsp_data;
@@ -159,7 +188,9 @@ begin
                 if inc = "01" then                                   -- 単純増加
                   next_tar := tar + shift_left(to_unsigned(1, 32), to_integer(unsigned(size(1 downto 0))));
                   tar <= next_tar;
-                  if next_tar(31 downto 10) /= tar(31 downto 10) then
+                  -- 1 KB の境界を越えるか = 下位 10 ビットの加算の桁あふれ（32 ビットの和の上位を比べると長い経路だった。2026-10-29）
+                  low11 := ('0' & tar(9 downto 0)) + shift_left(to_unsigned(1, 11), to_integer(unsigned(size(1 downto 0))));
+                  if low11(10) = '1' then
                     tar_known <= false;                              -- 1 KB の境界の先は実装次第: 追わない
                   end if;
                 end if;
@@ -190,5 +221,6 @@ begin
   ev_addr       <= ev_addr_r;
   ev_addr_known <= ev_known_r;
   ev_data       <= ev_data_r;
+  ev_time       <= ev_time_r;
   match         <= match_r;
 end architecture;

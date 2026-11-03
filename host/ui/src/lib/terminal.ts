@@ -4,6 +4,7 @@
 // 一緒に配られるので、古いデーモン向けの経路（誤りの文の語で rtt.* に落とす・チャンネル 0 だけ書けるとみなす）は持たない。
 // 行の時刻: terminal.read の times（受け取りごとの壁時計の秒と、記録中ならタイムベースの時刻 t）を画面の文字の位置の
 // 印（Stamp）にし、行の始まりの時刻を出す。t のある行は時間軸のその時刻へ飛べる。
+import type { LogAddress } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection } from "./api";
 
 type Call = DaemonConnection["call"];
@@ -44,6 +45,14 @@ export interface Chunk {
   times?: ChunkTime[];
   timebaseHz?: number | null;
   terminals?: TerminalSwitch[];   // RTT の源だけ（仮想端末の切り替えはデーモンが文字から除いて返す）
+}
+
+const KIND_LABEL = { rtt: "RTT", swo: "SWO", uart: "UART", semihosting: "Semihosting" } as const;
+
+/** 源のタブの名前: 種類を前に付ける（RTT のチャンネル名は「Terminal」「Log」のままでは RTT と分からない）。名前が種類で始まっていれば重ねない */
+export function sourceLabel(s: TerminalSource): string {
+  const kind = KIND_LABEL[s.kind];
+  return s.name.toLowerCase().startsWith(kind.toLowerCase()) ? s.name : `${kind} ${s.name}`;
 }
 
 export async function loadSources(call: Call): Promise<SourceList> {
@@ -308,4 +317,22 @@ export function clockTime(wall: number): string {
   const d = new Date(wall * 1000);
   const two = (n: number) => String(n).padStart(2, "0");
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+}
+
+// --- 番地を引く（log.annotate。docs/superpowers/specs/2026-11-02-ui-default-panels-design.md §4.3） ---
+
+/** log.annotate に渡す文字: 選んだ行があればその行、無ければ今の源の文字全部（画面に持っている分） */
+export function annotateText(screen: Screen, rows: Line[], picked: number | null): string {
+  if (picked !== null && rows[picked]) return rows[picked].spans.map((s) => s.text).join("");
+  return plain(screen);
+}
+
+/** log.annotate の addresses の 1 件（API のまま。番地として書かれた数かどうかは API も決めない） */
+export type AnnotatedAddress = LogAddress;
+
+/** 場所の表示: 関数+オフセットとファイル:行（API が返した欄だけ。無ければ API の where） */
+export function placeText(a: AnnotatedAddress): string {
+  const fn = a.function ? (a.offset ? `${a.function}+0x${a.offset.toString(16)}` : a.function) : "";
+  const src = a.file ? (a.line !== undefined ? `${a.file}:${a.line}` : a.file) : "";
+  return [fn, src].filter(Boolean).join("  ") || a.where;
 }

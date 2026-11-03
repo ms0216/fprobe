@@ -14,7 +14,8 @@
   import { Poller } from "../../lib/poll";
   import { load, save } from "../../lib/prefs";
   import {
-    SymbolAddresses, heatOf, selectedRange, sourceHeat, type FunctionCoverage, type ProfileRow,
+    SymbolAddresses, functionRows, heatOf, lineRows, rowTable, selectedRange, sourceHeat, type FunctionCoverage, type ProfileFunctionRow,
+    type ProfileLineRow,
   } from "../../lib/profile";
   import { percent } from "../../lib/rtos";
   import { coreClock } from "../../lib/target";
@@ -43,7 +44,7 @@
   let summary = $state<any>(null);           // profile.result（全体。方法・取っているか・分類）
   let coverage = $state<Map<string, FunctionCoverage>>(new Map());
   let open = $state<string | null>(null);
-  let lines = $state<ProfileRow[]>([]);
+  let lines = $state<ProfileLineRow[]>([]);
   let linesCut = $state<ReturnType<typeof topCut>>(null);
   let heatCut = $state<ReturnType<typeof topCut>>(null);
   let stopping = $state(false);
@@ -113,9 +114,9 @@
     coverage = new Map((cov.functions as FunctionCoverage[]).map((f) => [f.function, f]));
     if (open) await loadLines(open);
     if (heat) {
-      const all = w ? await conn.call("profile.aggregate", { by: "line", t0: w.t0, t1: w.t1, top: HEAT_TOP }, quiet)
-                    : await conn.call("profile.result", { by: "line", top: HEAT_TOP }, quiet);
-      sourceHeat.set(heatOf(all.rows, [...coverage.values()]));
+      const all = rowTable(w ? await conn.call("profile.aggregate", { by: "line", t0: w.t0, t1: w.t1, top: HEAT_TOP }, quiet)
+                             : await conn.call("profile.result", { by: "line", top: HEAT_TOP }, quiet));
+      sourceHeat.set(heatOf(lineRows(all.rows), [...coverage.values()]));
       heatCut = topCut(all.rows.length, all.rows_total, HEAT_TOP);
     } else {
       sourceHeat.clear();
@@ -125,10 +126,10 @@
 
   async function loadLines(fn: string) {
     const w = span;
-    const r = w ? await conn.call("profile.aggregate", { by: "line", function: fn, t0: w.t0, t1: w.t1, top: LINES_TOP }, quiet)
-                : await conn.call("profile.result", { by: "line", function: fn, top: LINES_TOP }, quiet);
+    const r = rowTable(w ? await conn.call("profile.aggregate", { by: "line", function: fn, t0: w.t0, t1: w.t1, top: LINES_TOP, order: "line" }, quiet)
+                         : await conn.call("profile.result", { by: "line", function: fn, top: LINES_TOP, order: "line" }, quiet));
     if (open !== fn) return;
-    lines = [...r.rows].sort((a: ProfileRow, b: ProfileRow) => (a.line ?? 0) - (b.line ?? 0));
+    lines = lineRows(r.rows);                                   // 並びは API（order: line）
     linesCut = topCut(r.rows.length, r.rows_total, LINES_TOP);
   }
 
@@ -139,7 +140,7 @@
     if (open) await loadLines(open).catch(() => {});
   }
 
-  async function showLine(r: ProfileRow) {
+  async function showLine(r: ProfileLineRow) {
     const address = await symbols.of(`${r.file}:${r.line}`);
     if (address !== null) showAddress(address);
   }
@@ -164,7 +165,7 @@
     }
   }
 
-  const rows = $derived<ProfileRow[]>(result?.rows ?? []);
+  const rows = $derived<ProfileFunctionRow[]>(functionRows(result?.rows ?? []));
   const rowsCut = $derived(topCut(rows.length, result?.rows_total, TOP));
   const maxFraction = $derived(Math.max(1e-9, ...rows.map((r) => r.fraction)));
   const cat = (k: string) => percent(summary?.categories?.[k]?.fraction);

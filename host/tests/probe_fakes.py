@@ -4,17 +4,16 @@
 （fprobe.probe_window・fprobe.collector 等）に monkeypatch で差し込む（`use_fake_ring`）。
 """
 
-from types import SimpleNamespace
-
 from pyocd.core.target import Target
 
 from fprobe import generated as g
 from fprobe.events import ACK_OK, KIND_SAMPLE, KIND_SWO, DapEvent
+from caps_fakes import FakeDeviceBase, caps_for
 
 HZ = 100_000_000                                  # タイムベース・sys のクロック
 
 
-class FakeDevice:
+class FakeDevice(FakeDeviceBase):
     """CSR（番地 → 値）と、進めて使うタイムベース、イベント記録のリング（ring）。"""
 
     def __init__(self, ring_capacity: int = 1 << 16):
@@ -24,24 +23,37 @@ class FakeDevice:
         self.ring_written = 0
         self.ring_capacity = ring_capacity
         self.ring_running = False
+        self.jtag_bit_extra_cycles = 0            # 今の jtag_phy（1 ビット = 2 × 半周期）。古い回路を模すなら 1
+        self.min_half_period = 1                  # 今の回路（SWCLK / TCK の最大 = sys / 2）。2026-11-03 より前の回路を模すなら 2
 
     # CSR
     def write32(self, address, value):
         self.csr[address] = value
 
-    def write(self, address, values):
-        for i, v in enumerate(values):
+    def write(self, address, words):
+        for i, v in enumerate(words):
             self.write32(address + 4 * i, v)
 
     def read32(self, address):
         return self.csr.get(address, 0)
 
-    def read(self, address, count=1):
+    def read(self, address, count=1, *, timeout_retries=0):
         return [self.csr.get(address + 4 * i, 0) for i in range(count)]
 
+    def exchange(self, address, words):
+        """同じ番地に順に書き、書くごとに読む（Device.exchange。CONTROL の EXCHANGE）。"""
+        out = []
+        for v in words:
+            self.write32(address, v)
+            out.append(self.read32(address))
+        return out
+
     def capabilities(self):
-        return SimpleNamespace(sampler=True, sys_clock_hz=HZ, timebase_hz=HZ, board="fake", design="fprobe",
-                               jtag=True, inject=True, xtrig=True)
+        """属性 caps を置いた試験はそれ（with_caps(dev.capabilities(), …) で欄を替える）、無ければ標準の構成。"""
+        if self.caps is not None:
+            return self.caps
+        return caps_for(sampler=True, jtag=True, inject=True, xtrig=True, jtag_bit_extra_cycles=self.jtag_bit_extra_cycles,
+                        min_half_period=self.min_half_period)
 
     def time(self):
         return self.ticks
@@ -75,6 +87,7 @@ class FakeRing:
         self.dev = dev
         self.capacity = dev.ring_capacity
         self.overwritten = 0                                       # 本物の EventLog と同じ（この偽物は読む間に追い越されない）
+        self.records = 0
 
     def start(self):
         self.dev.ring, self.dev.ring_written, self.dev.ring_running = [], 0, True
@@ -95,7 +108,9 @@ class FakeRing:
     def read(self, last=None, end=None):
         base = self.dev.ring_written - len(self.dev.ring)            # リングに残っている最も古いものの番号
         events = self.dev.ring[:max(0, (self.dev.ring_written if end is None else end) - base)]
-        return list(events if last is None else events[len(events) - last:] if last else [])
+        out = list(events if last is None else events[len(events) - last:] if last else [])
+        self.records = len(out)                                     # この偽物は 1 記録 1 イベント
+        return out
 
 
 def use_fake_ring(monkeypatch, *modules) -> None:

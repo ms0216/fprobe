@@ -9,7 +9,7 @@ import { FakeConn } from "./fake-conn";
 import { ints, varray, venum, vint, vna, vptr, vstruct } from "./value-kinds";
 
 const entry = (seq: number, extra: Partial<LogEntry> = {}): LogEntry => ({
-  seq, host_s: 1, address: 0x20000044, where: "reached_milestone+4 (sram_demo.c:13)", hit: seq, message: "milestone {value}",
+  seq, host_s: 1, time_source: "host_received", address: 0x20000044, where: "reached_milestone+4 (sram_demo.c:13)", hit: seq, message: "milestone {value}",
   values: { value: vint(256 * seq) }, ...extra,
 });
 

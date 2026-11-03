@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 // fprobe のモニタ方式のターゲット側（DebugMon_Handler と箱）。説明は fprobe_monitor.h、仕様は
 // docs/superpowers/specs/2026-10-18-u37-monitor-mode-design.md。
 //

@@ -32,7 +32,7 @@ def test_numbers_of_values():
     assert number_of(vbool(True)) == 1 and number_of(vfloat(2.5)) == 2.5 and number_of(venum("RUN", 1)) == 1
     assert number_of(vint(-3)) == -3 and number_of(vfloat("nan")) is None
     assert number_of(vstruct(enum=venum("A", 1), value=vint(1))) is None
-    assert number_of(varray(ints(1))) is None and number_of(vna("optimized out")) is None
+    assert number_of(varray(ints(1), element_type="int")) is None and number_of(vna("optimized out")) is None
 
 
 def test_start_on_a_value_with_pretrigger_and_stop_on_another():

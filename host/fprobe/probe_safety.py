@@ -1,6 +1,6 @@
 """Probe の道具: 止める前の手がかりと、走らせたままの見張り（止まらずに回り続けている状態）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。Probe の _lock・target・_symbols・_monitor を使う。
+Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_service。ホストから使う名前は NEEDS）。Probe の _lock・target・_symbols・_monitor を使う。
 
 - halt_risk: ELF だけで、使う側が halt_risk_set で明示した名前・正規表現に合うシンボルがあるか（fprobe.halt_risk）と、
   ELF に止めずにデバッグするモニタ（target.debug_mode の monitor）があるか。機器には触らない。既定の名前の表は
@@ -17,16 +17,24 @@ import time
 from .halt_risk import compile_patterns, scan
 from .liveness import Liveness
 from .profile.dwt import DEMCR, DEMCR_TRCENA, DWT_PCSR
+from .probe_service import HostView
 
-__all__ = ["DHCSR", "SafetyTools"]
+__all__ = ["DHCSR", "SafetyService"]
 
 DHCSR = 0xE000EDF0
 S_LOCKUP = 1 << 19
 NOT_CORTEX_M = ("riscv", "armv7-a", "armv6")   # pyOCD を使わない接続の debug_architecture（DHCSR・DWT が無い）
 
 
-class SafetyTools:
-    def _init_safety(self) -> None:
+class SafetyService:
+    API = ("halt_risk", "halt_risk_get", "halt_risk_set", "liveness_get", "liveness_set")
+    # ほかの領域（Probe の委譲）・試験に出す名前
+    SHARED = ("_fatal_state", "_function_name", "_halt_names", "_halt_patterns")
+    # ホスト（Probe の核と、ほかの領域）から使う名前
+    NEEDS = ("_lock", "_monitor", "_symbols", "target")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._halt_names: list[str] = []                                  # halt_risk_set で渡された条件
         self._halt_patterns: list[str] = []
         self._liveness_settings = {"functions": [], "patterns": [], "pc_samples": None,   # 条件が無ければ PC を読まない
@@ -51,11 +59,15 @@ class SafetyTools:
         """止める前の手がかり（ELF だけ。機器には触らない。判定はしない）: names・patterns（halt_risk_set で渡された
         条件）、matched（どれかに合った）、matches（合った条件ごと: query、by = name / pattern、count、symbols =
         [{name, kind, address}] を全部）、monitor_in_elf（止めずにデバッグするモニタがあるか。あれば
-        target_debug_mode_set の mode="monitor" へ）。"""
-        symbols = self._symbols
+        target_debug_mode_set の mode="monitor" へ）、debug_mode（いまの方式 halt / monitor）、confirm_before_halt
+        （matched かつ debug_mode が halt = 止める操作がコアを止める。人の画面はこれで止める前に確かめる）。"""
+        symbols = self._host._symbols
         if symbols is None:
             raise RuntimeError("ELF が読み込まれていない（debug_elf_load を先に）")
-        return {"elf": str(symbols.path), **scan(symbols.names(), self._halt_names, self._halt_patterns)}
+        found = scan(symbols.names(), self._halt_names, self._halt_patterns)
+        mode = "halt" if self._host._monitor is None else "monitor"
+        return {"elf": str(symbols.path), **found, "debug_mode": mode,
+                "confirm_before_halt": found["matched"] and mode == "halt"}
 
     # --- 走らせたままの見張りの条件 ------------------------------------------------------------------
 
@@ -71,10 +83,10 @@ class SafetyTools:
                 raise ValueError(f"pc_samples（1 以上の整数。見張りの 1 回に読む PC の見本の数）が要る（{pc_samples!r}）")
         else:
             pc_samples = None
-        if tick_variable is not None and self._symbols is not None:
-            self._symbols.variable(tick_variable)                               # ELF に無ければ KeyError
+        if tick_variable is not None and self._host._symbols is not None:
+            self._host._symbols.variable(tick_variable)                               # ELF に無ければ KeyError
         live = Liveness(self._function_name, functions, patterns)               # 正規表現が読めなければ ValueError
-        with self._lock:
+        with self._host._lock:
             self._liveness = live
             self._liveness_settings = {"functions": functions, "patterns": patterns, "pc_samples": pc_samples,
                                        "tick_variable": tick_variable}
@@ -89,13 +101,13 @@ class SafetyTools:
     # --- 致命的エラーの見張り -----------------------------------------------------------------------
 
     def _function_name(self, pc: int) -> str | None:
-        f = self._symbols.function_at(pc) if self._symbols is not None else None
+        f = self._host._symbols.function_at(pc) if self._host._symbols is not None else None
         return f.name if f is not None else None
 
     def _tick_address(self) -> int | None:
         """使う側が liveness_set の tick_variable で渡したティックの変数の番地（渡されていない・ELF に無ければ None。
         ELF と名前ごとに 1 回引く）。"""
-        symbols, name = self._symbols, self._liveness_settings["tick_variable"]
+        symbols, name = self._host._symbols, self._liveness_settings["tick_variable"]
         if symbols is None or name is None:
             return None
         if self._tick_symbols is None or self._tick_symbols[0] is not symbols or self._tick_symbols[1] != name:
@@ -109,12 +121,12 @@ class SafetyTools:
     def _fatal_state(self, state: str) -> dict | None:
         """走っているコアが致命的エラーで回り続けていれば、その様子（_lock の中で。target_status から）。読めなければ
         None（見張りは状態の読みを妨げない）。"""
-        if state not in ("RUNNING", "LOCKUP") or self._monitor is not None \
-                or getattr(self.target, "debug_architecture", None) in NOT_CORTEX_M:     # DHCSR・DWT は Cortex-M だけ
+        if state not in ("RUNNING", "LOCKUP") or self._host._monitor is not None \
+                or getattr(self._host.target, "debug_architecture", None) in NOT_CORTEX_M:     # DHCSR・DWT は Cortex-M だけ
             self._liveness.reset()
             return None
         try:
-            target = self.target
+            target = self._host.target
             lockup = state == "LOCKUP" or bool(target.read_memory(DHCSR) & S_LOCKUP)
             pcs: list[int | None] = []
             if not lockup and self._liveness_settings["pc_samples"]:

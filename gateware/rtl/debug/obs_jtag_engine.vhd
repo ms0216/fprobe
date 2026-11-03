@@ -14,7 +14,9 @@
 -- イベント（1 周期の脈。fprobe_core が種類 8・9 にする）:
 --   記録: data = 記録の語、address = スキャンの番号（scans）、時刻 = 受けた時。
 --   印: data = 番号、address = 0、時刻 = 印を載せたスキャンの Update-DR を出る TCK の立ち上がり（obs_core はその瞬間に
---   印の記録を書く。対象側の遅れは観測の回路が SYNC_DELAY で申告する）。PC は番号で印の記録と組にする。
+--   印の記録を書く。対象側の遅れは観測の回路が SYNC_DELAY_LO・SYNC_DELAY_HI で範囲を申告する）。PC は番号で印の記録と組にする。
+--   時刻は端子の TCK（jtag_phy の FF の出力）が上がった辺の time_count そのもの（その辺を次の辺で見るが、写すのはその周期の
+--   time_count = 上がった辺の値。差 0。obs_e2e の test_event_times_are_the_tck_edges_on_the_pin で確かめた）。
 -- 応答の記録（読みの結果）は read_value にも写す（番号 | 番地 | 値）。
 -- 標本型（obs_snap_core。見出しの印 0xA7）: ID の照合をせず、スキャンごとに語 0（印 | 変化の回数 | 値）を記録の
 -- イベントにする（値が前と同じで変化の回数も 0 の標本は出さない）。時刻 = Capture-DR を出る TCK の立ち上がり（値を取り込む瞬間）。
@@ -101,6 +103,10 @@ architecture rtl of obs_jtag_engine is
   signal pending  : boolean;                          -- 命令を出した（応答を待つ）
   signal seg      : seg_t;
   signal part     : unsigned(8 downto 0);             -- 本体の区間の番号（DR は対象の語の番号）
+  -- part は engine の判定と obs_record_rx の判定の多くに配られる（2026-10-29、PYNQ を高い周波数の目標で配線して、最も遅い経路の
+  -- 始点）。Vivado に複製させる（Gowin は無視する）
+  attribute max_fanout : integer;
+  attribute max_fanout of part : signal is 12;
   signal split    : std_logic;                        -- 最後の区間の最後の 1 ビット（TMS 1）を送る
   signal partial  : std_logic_vector(30 downto 0);   -- 最後の語の先の 31 ビット
 
@@ -120,6 +126,11 @@ architecture rtl of obs_jtag_engine is
 
   -- スキャン
   signal m_words     : unsigned(8 downto 0);          -- このスキャンの記録の語数（始めに cfg_words から決める）
+  -- 判定に使う値をレジスタに置く（2026-10-29、sys を上げるため。最後の区間かの判定が、語数の足し算・設定の比較を毎回
+  -- 組み合わせ回路で行い、最も遅い経路だった）: last_body = DR の最後の本体の区間の番号（m_words + HEADER_WORDS − 1。
+  -- m_words と同じ所で決める）、*_after0 = 後ろの区間が無い（設定。スキャンの間は変えない）
+  signal last_body   : unsigned(8 downto 0) := (others => '0');
+  signal dr_after0, ir_after0 : boolean := true;
   signal scan_cmd    : std_logic_vector(15 downto 0);
   signal scan_count  : unsigned(31 downto 0);
   signal sync_count  : unsigned(15 downto 0);
@@ -200,18 +211,33 @@ architecture rtl of obs_jtag_engine is
   begin
     case s is
       when SEG_BEFORE => return false;
-      when SEG_BODY   => return b = bodies(ir_scan) - 1 and length_of(SEG_AFTER, ir_scan) = 0;
+      when SEG_BODY   =>
+        if ir_scan then
+          return b = 0 and ir_after0;
+        elsif snap_scan = '1' then
+          return b = 0 and dr_after0;                   -- 標本型は語 0 だけ
+        end if;
+        return b = last_body and dr_after0;
       when SEG_AFTER  => return true;
     end case;
   end function;
 begin
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      dr_after0 <= cfg_dr_after = 0;
+      ir_after0 <= cfg_ir_after = 0;
+    end if;
+  end process;
+
   phy_i : entity work.jtag_phy
     port map (clk => clk, rst => rst, enable => phy_enable, half_period => cfg_half_period, idle_cycles => 0,
               dr_before => 0, dr_after => 0, ir_before => 0, ir_after => 0, ir_len => 1, sample_delay => sample_delay,
+              now => (others => '0'), rsp_time => open,          -- 観測の口はスキャンの点を自分で取る（cap_time・upd_time）
               cmd_valid => phy_cmd_valid, cmd_ready => phy_cmd_ready, cmd_op => phy_cmd_op,
               cmd_count => phy_cmd_count, cmd_request => "000" & phy_cmd_tms, cmd_data => phy_cmd_data,
               rsp_valid => phy_rsp_valid, rsp_ack => open, rsp_data => phy_rsp_data,
-              tck => phy_tck, tms => tms, tdi => tdi, tdo => tdo);
+              tck => phy_tck, tms => tms, tms_lead => open, tdi => tdi, tdo => tdo);
 
   queue_i : entity work.obs_cmd_queue
     generic map (DEPTH => CMD_DEPTH, WIDTH => 16)
@@ -463,11 +489,14 @@ begin
                 sync_count <= sync_count + 1;
               end if;
               if cfg_words = 0 then
-                m_words <= to_unsigned(1, 9);
+                m_words   <= to_unsigned(1, 9);
+                last_body <= to_unsigned(1 + HEADER_WORDS - 1, 9);
               elsif cfg_words > 256 then
-                m_words <= to_unsigned(256, 9);
+                m_words   <= to_unsigned(256, 9);
+                last_body <= to_unsigned(256 + HEADER_WORDS - 1, 9);
               else
-                m_words <= cfg_words;
+                m_words   <= cfg_words;
+                last_body <= cfg_words + HEADER_WORDS - 1;
               end if;
               running_r <= id_ok_r;
               issue(OP_SEQ_OUT, 3, '1', x"00000000_00000001");   -- 1,0,0 → Shift-DR
@@ -483,7 +512,7 @@ begin
               data := cfg_user_ir;
             else
               fill := '0';
-              if seg = SEG_BODY and part = m_words + HEADER_WORDS - 1 then
+              if seg = SEG_BODY and part = last_body then
                 data := scan_cmd & x"0000";                        -- 最後の 16 ビット
               else
                 data := (others => '0');

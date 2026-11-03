@@ -1,7 +1,7 @@
 # /etc/systemd/system/fprobe-ip.service
-# eth0 を固定のアドレス 192.168.0.2/24 にする（host/pynq/fprobe-ip）。DHCP の IP が起動のたびに変わるため。
+# eth0 を固定のアドレス <家の LAN のアドレス>/24 にする（host/pynq/fprobe-ip）。DHCP の IP が起動のたびに変わるため。
 [Unit]
-Description=fprobe: fixed address 192.168.0.2 on eth0
+Description=fprobe: fixed address <家の LAN のアドレス> on eth0
 After=network-online.target ifup@eth0.service
 Wants=network-online.target
 

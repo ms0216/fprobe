@@ -209,3 +209,23 @@ def test_line_stepper_uses_the_call_frame_information_for_step_out():
     cpu.write32(cpu.regs["sp"], 0x10D)
     halt = stepper.step("out")
     assert halt.reason == "arrived" and halt.regs.pc == 0x10C and cpu.steps == 0
+
+
+def test_a_step_reports_what_the_host_executed_even_when_the_line_does_not_change():
+    # 3 行ステップが同じ行に戻ってくる呼び出しでも「進んだ」と分かるよう、止まった様子に、ホストが発行した 1 命令ステップの数（steps）と、
+    # 踏み台まで走らせた回数（runs）を測った事実として付ける（使いやすさの評価 2026-11-03: 画面の担当は位置が変わらないので進んだと分からなかった）
+    cpu, dbg = machine(pc=0x104)                          # 行 11（呼び出しは無い）
+    plain = dbg.step_line("over")
+    assert plain.steps is not None and plain.steps >= 1 and plain.runs == 0
+    cpu, dbg = machine(pc=0x108)                          # 行 12: square を呼ぶ（踏み越えるので踏み台まで走らせる）
+    over_call = dbg.step_line("over")
+    assert over_call.steps >= 1 and over_call.runs >= 1
+    assert over_call.where.line != 12 or over_call.pc != 0x108
+
+
+def test_the_step_counts_reach_the_api_result():
+    from fprobe.probe_debug import DebugService
+    cpu, dbg = machine(pc=0x108)
+    stop = dbg.step_line("over")
+    out = DebugService._stop_dict(stop)
+    assert out["steps"] == stop.steps and out["runs"] == stop.runs

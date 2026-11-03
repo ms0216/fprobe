@@ -12,10 +12,10 @@ SYMBOL = 28
 
 
 class Psf:
-    def __init__(self, freq: int = 48_000_000, platform: int = 0x1AA1):
+    def __init__(self, freq: int = 48_000_000, platform: int = 0x1AA1, timer_type: int = 1):
         self.out = bytearray(struct.pack("<IHHIII", 0x50534600, 0x000E, platform, 0, 1, 0) +
                              struct.pack("<HBB", 0, 0, 0) + b"FreeRTOS")
-        self.out += struct.pack("<IIIIIII", 1, 0, freq, 0, 1000, 0, 0)
+        self.out += struct.pack("<IIIIIII", timer_type, 0, freq, 0, 1000, 0, 0)
         self.count = 0
 
     def table(self, entries: list[tuple[int, str, int]]) -> "Psf":
@@ -70,6 +70,25 @@ def test_missing_events_are_counted_from_the_event_counter():
     p = Psf().table([]).event(0x01, 1, IDLE).event(0x30, 2, T1, skip=3)
     trace = decode_tracealyzer(p.bytes())
     assert trace.lost == 3 and any(e.kind == "overflow" for e in trace.events)
+
+
+def test_the_missing_events_mark_carries_the_interval_they_were_lost_in():
+    # 欠けた出来事は前の出来事と次の出来事の間のどこか: 印に両端を残す（前の時刻が 0 でも 0 を使う）
+    p = Psf().table([]).event(0x01, 0, IDLE).event(0x30, 500, T1, skip=2)
+    trace = decode_tracealyzer(p.bytes())
+    [mark] = [e for e in trace.events if e.kind == "overflow"]
+    assert mark.ts == 0 and mark.args == {"missing": 2, "after_ts": 0, "before_ts": 500}
+
+
+@pytest.mark.parametrize("timer_type", [2, 3, 4, 6])
+def test_timers_that_are_not_free_running_up_counters_are_not_unwrapped(timer_type):
+    # 減るタイマ・OS のタイマ（type 2・3・4・6）の値は 32 ビットの増える時刻として続けられない: 時刻にしない（順の番号）。
+    # 生の値は args の raw_ts に残す
+    p = Psf(timer_type=timer_type).table([]).event(0x01, 900, IDLE).event(0x30, 800, T1).event(0x30, 700, T1)
+    trace = decode_tracealyzer(p.bytes())
+    assert not trace.timed and trace.ts_hz is None and trace.ts_wraps == 0
+    assert [e.args.get("raw_ts") for e in trace.events if e.kind == "task_ready"] == [800, 700]
+    assert [e.ts for e in trace.events] == sorted(e.ts for e in trace.events)
 
 
 def test_compact_prints_use_elf_strings():

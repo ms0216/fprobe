@@ -5,21 +5,32 @@
 出力は端子のロジアナのチャンネル（channel）で指す。どの端子が使えるか（候補）と、同時に動かせる数（動作の数）は
 ケイパビリティ outputs・output_actions が申告する。端子に動作を割り当てるのはこの層（使う側は動作の番号を知らない）。
 
-Probe（fprobe.probe。共通の部品の型は fprobe.probe_host.ProbeHost）に混ぜて使う mixin。機器に触るのは必ず _lock の中。
+核（Probe の _lock・session）だけに頼るサービス。機器に触るのは必ず _lock の中。
 仕様: docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md
 """
 
+from .probe_service import HostView
 from .xtrig import OutputConfig, OutputMode, PinOutputs, Source, pulse_range_s, pulse_ticks
 
-__all__ = ["MODES", "XtrigOutputTools"]
+__all__ = ["MODES", "XtrigOutputService"]
 
 MODES = {"pulse": OutputMode.PULSE, "hold": OutputMode.HOLD, "while": OutputMode.WHILE}
 LEVELS = {"high": True, "low": False}
 PATTERN_KEYS = {"mask", "value", "any"}
 
 
-class XtrigOutputTools:
-    def _init_xtrig_out(self) -> None:
+class XtrigOutputService:
+    """クロストリガの出力の端子。"""
+
+    API = ("xtrig_output_set", "xtrig_output_enable", "xtrig_output_disable", "xtrig_output_release",
+           "xtrig_output_status")
+
+    # ほかの領域（Probe の委譲）に出す名前（構成の書き替え・つなぎ直しの後に端子を取り戻す）
+    SHARED = ("_restore_outputs",)
+    NEEDS = ("_lock", "session")
+
+    def __init__(self, host):
+        self._host = HostView(host, self.NEEDS, type(self).__name__)
         # 出力に使っている端子の設定（channel → xtrig_output_set の引数）。FPGA が立ち上がり直すと機器の設定は消え、
         # 端子が普段の機能に戻ってターゲットの線を駆動しうる（UART TX は High）ので、開き直したらすぐ取り戻す（B29）
         self._claimed_outputs: dict[int, dict] = {}
@@ -36,7 +47,7 @@ class XtrigOutputTools:
         return {"restored": restored, "failed": failed}
 
     def _pin_outputs(self) -> PinOutputs:
-        outputs = PinOutputs(self.session.device)
+        outputs = PinOutputs(self._host.session.device)
         if not outputs.actions:
             raise RuntimeError("この構成にクロストリガの出力の端子が無い（ケイパビリティ outputs が 0 本）")
         return outputs
@@ -80,10 +91,10 @@ class XtrigOutputTools:
         mask = int(pattern.get("mask", 0))
         if not mask and not flags:
             raise ValueError("条件が無い: pattern の mask か sources を指定する")
-        with self._lock:
+        with self._host._lock:
             outputs = self._pin_outputs()
             pin = self._pin_index(outputs, channel)
-            clock_hz = self.session.device.capabilities().timebase_hz
+            clock_hz = self._host.session.device.capabilities().timebase_hz
             length, unit = 1, 0
             if MODES[mode] is OutputMode.PULSE:
                 if pulse_us is None or pulse_us <= 0:
@@ -113,21 +124,21 @@ class XtrigOutputTools:
 
     def xtrig_output_enable(self, channel: int) -> dict:
         """出力の動作を有効にする（脈・保持は次の条件の立ち上がりから、条件の間はすぐ）。"""
-        with self._lock:
+        with self._host._lock:
             outputs = self._pin_outputs()
             outputs.enable(self._action_of(outputs, channel))
         return {"channel": channel, "enabled": True}
 
     def xtrig_output_disable(self, channel: int) -> dict:
         """出力の動作を無効にする（保持も戻る）。端子は出力に使ったまま駆動しない（高インピーダンス）。"""
-        with self._lock:
+        with self._host._lock:
             outputs = self._pin_outputs()
             outputs.disable(self._action_of(outputs, channel))
         return {"channel": channel, "enabled": False}
 
     def xtrig_output_release(self, channel: int) -> dict:
         """出力の動作を無効にし、設定を消して、端子を普段の機能（UART・SWO）に戻す（動作が空く）。"""
-        with self._lock:
+        with self._host._lock:
             outputs = self._pin_outputs()
             action = outputs.action_for(self._pin_index(outputs, channel), allocate=False)
             if action is not None:
@@ -138,10 +149,10 @@ class XtrigOutputTools:
     def xtrig_output_status(self) -> dict:
         """出力の端子の候補ごとの状態: channel・プルアップ・設定済みか・有効・動いているか（駆動中）・claim・形・条件。
         actions = 同時に動かせる数、free = いま空いている数。"""
-        with self._lock:
-            outputs = PinOutputs(self.session.device)
+        with self._host._lock:
+            outputs = PinOutputs(self._host.session.device)
             states = outputs.status()
-            clock_hz = self.session.device.capabilities().timebase_hz
+            clock_hz = self._host.session.device.capabilities().timebase_hz
         mode_names = {v: k for k, v in MODES.items()}
         by_pin = {st.pin: st for st in states if st.in_use}
         result = []

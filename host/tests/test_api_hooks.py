@@ -7,16 +7,18 @@ import pytest
 
 from fprobe.api.arbiter import Client
 from fprobe.api.client import ApiError, DaemonClient
-from fprobe.probe_hooks import HookTools
+from fprobe.probe_hooks import HookService
+from fprobe.probe_service import expose
 from test_api_daemon import FakeBackend, _serve
 
 
-class HookBackend(HookTools, FakeBackend):
-    """偽の機器 + 本物のフックの登録簿（Probe の HookTools）。"""
+@expose("_svc_hooks", HookService)
+class HookBackend(FakeBackend):
+    """偽の機器 + 本物のフックの登録簿（Probe と同じ HookService）。"""
 
     def __init__(self):
         FakeBackend.__init__(self)
-        self._init_hooks()
+        self._svc_hooks = HookService(self)
         self.resets = 0
         self.noted = []
         self.evaluate_error = None
@@ -29,12 +31,12 @@ class HookBackend(HookTools, FakeBackend):
     def target_status(self):
         return {"state": self.state, "pc": self.pc}
 
-    def evaluate(self, expression, frame=0, max_elements=64):
+    def evaluate(self, expression, frame=0, max_elements=64, live=False):
         if self.evaluate_error:
             raise RuntimeError(self.evaluate_error)
         return {"expression": expression, "value": 42}
 
-    def record_host_event(self, stream, kind, body):
+    def record_host_event(self, stream, kind, body, time_source="host", started_host_s=None):
         self.noted.append((stream, kind, body))
 
 

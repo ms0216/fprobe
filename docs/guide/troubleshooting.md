@@ -40,10 +40,10 @@
 
 ## 既知の制限
 
-- **イベントの書き込み数 `EVENTS_WRITTEN`（イベントリングの `written`）は 32 ビットで回り込みます。** ホストは `written` が前回見た値より
-  小さいことを「記録の始め直し」と見る（`EventCursor`、`probe_window` など）ため、回り込みと区別できません。回り込むまでの時間は
-  2^32 ÷（イベントの毎秒の件数）です。これは計算式による見積りで、実測ではありません。毎秒 100 万件なら約 71 分、毎秒 7 千件の FPGA 観測なら約 7 日。
-  対処は未実装です（世代カウンタを回路かプロトコルに足す設計判断が要る）。重い記録を長時間行うときは、1 回の記録を回り込みの前に区切ってください。
+- **イベントの書き込み数 `EVENTS_WRITTEN`（イベントリングの `written`）は 64 ビット（`written_hi`:`written`）です。** 以前の版は 32 ビットで、
+  回路では 2^32 件で止まり（飽和）、ホストは回り込みを「記録の始め直し」と見分けられませんでした。`written_hi` は `written` を読んだ時点の上位を
+  保持するので、`written` に続けて同じ連続読み出しの中で読みます（`EventLog.counts()` がそうする）。この変更を含まない回路のビットストリームは、
+  ホストと対で出し直す必要があります（古い回路では `written_hi` の読み出しがバスエラーになる）。
 - FPGA の観測（`fpga_obs`）は PYNQ-Z2 の `fprobe_pynq`・`fprobe_pynq_deep` だけ（[../architecture/feature-matrix.md](../architecture/feature-matrix.md)）。
 - 1 クロック版の観測 IP は TCK ≤ 対象の clk / 8。
 - 起動の途中（PL が未構成の間）の PYNQ-Z2 の端子の状態は未確認（[../boards/pynq-z2.md](../boards/pynq-z2.md)）。

@@ -8,10 +8,11 @@
 
   let { cs }: { cs: CommandState } = $props();
   const ctx = shared();
-  const { app } = ctx;
+  const { app, dbg } = ctx;
 
   const GROUPS = [["openElf", "loadDemo"], ["download", "reset"], ["continue", "halt"],
                   ["stepOver", "stepInto", "stepOut", "stepInstruction", "runToCursor"], ["toggleBreakpoint"], ["connect", "disconnect"]];
+  const STEP_LABEL = { over: "cmd.stepOver", into: "cmd.stepInto", out: "cmd.stepOut" } as const;
   const connected = $derived(cs.target !== undefined && cs.target !== "DISCONNECTED");
 
   function run(id: string) {
@@ -37,6 +38,18 @@
     </div>
   {/each}
   <span class="spacer"></span>
+  {#if $dbg.lastStep}
+    {@const step = $dbg.lastStep}
+    {@const mode = $i18n(STEP_LABEL[step.mode])}
+    {@const s = step.elapsedS.toString()}
+    <span class="last mono" title={$i18n("toolbar.lastStepTip")}>
+      {step.steps === null || step.runs === null ? $i18n("toolbar.lastStepTimeOnly", { mode, s })
+        : $i18n("toolbar.lastStep", { mode, steps: step.steps, runs: step.runs, s })}</span>
+  {/if}
+  {#if $app.target?.linux}
+    {@const lx = $app.target.linux}
+    <span class="where mono" title={lx.elf}>{lx.comm} pid {lx.pid}{lx.tid !== null ? ` · tid ${lx.tid}` : ""}{lx.thread_comm && lx.thread_comm !== lx.comm ? ` (${lx.thread_comm})` : ""}</span>
+  {/if}
   {#if $app.target?.state === "HALTED" && $app.target?.where}
     <span class="where mono" title={$app.target.where}>{$app.target.where}</span>
   {/if}
@@ -57,5 +70,6 @@
   .toggleBreakpoint { color: var(--bad); }
   .label { font-size: 12.5px; }
   .spacer { flex: 1; }
+  .last { font-size: 12px; color: var(--accent); margin-right: 8px; white-space: nowrap; }
   .where { font-size: 12px; color: var(--muted); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

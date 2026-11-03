@@ -6,9 +6,10 @@ import random
 import pytest
 
 from fprobe import generated as g
-from fprobe.caps import Capabilities
+from caps_fakes import FakeDeviceBase, caps_for
 from fprobe.events import KIND_OBS_RECORD, KIND_OBS_SYNC, DapEvent, resolve
-from fprobe.fpga_obs import FpgaObs, ObsDecoder, ObsSample, fit_sync, samples
+from fprobe.clockmap import pair
+from fprobe.fpga_obs import FpgaObs, ObsDecoder, ObsSample, SyncSegment, samples
 
 T_VALUE, T_MARK, T_OVERFLOW, T_CONTROL = 0, 1, 2, 3
 
@@ -64,7 +65,7 @@ def test_values_take_their_time_from_the_mark_backwards_and_forwards():
 
 def test_values_wait_for_the_first_mark():
     # 印が来るまでは時刻が分からない: 取り込みは値を持っておき、印が来たら後ろ向きに決めて出す
-    d = ObsDecoder(nominal_ratio=2.0)
+    d = ObsDecoder(nominal_ratio=2.0, max_pending=None)
     assert d.feed([group_record(0), value(0, 0x11), value(10, 0x22)]) == []
     out = no_groups(d.feed([mark(5, 7), sync(7, 1000)]))
     assert [(s.value, s.time_fprobe) for s in out] == [(0x11, pytest.approx(970)), (0x22, pytest.approx(990))]
@@ -109,6 +110,41 @@ def test_overflow_is_a_gap_and_starts_a_new_chain():
     assert [s.time_fprobe for s in out[3:]] == pytest.approx([4990, 4990, 4993])     # 新しい鎖は印 2 から
 
 
+def test_overflow_records_in_a_row_add_their_lost_counts():
+    # 観測の回路は、溢れの記録を書いた次の周期に値が変わると溢れの記録をもう 1 つ書く（obs_core の S_VALUE）。
+    # 間に失った数は続けて来た溢れの和
+    events = [group_record(0), value(0, 1), mark(5, 1), sync(1, 1000),
+              group_record(0), overflow(12), overflow(1), value(0, 9), mark(3, 2), sync(2, 5000)]
+    out = samples(events, nominal_ratio=1.0)
+    assert [(s.kind, s.value, s.lost) for s in out] == [
+        ("group", None, 0), ("value", 1, 0), ("gap", None, 13), ("value", 9, 0)]
+
+
+def test_copies_are_marked_and_changes_are_not():
+    # 写し（その時刻にその値だった。変わった時刻とは限らない）: 鎖の始め・溢れの後・組の切り替えの後の最初の値、
+    # 標本型の標本。鎖の中の値の記録は変化（copy = False）
+    events = [group_record(0), value(0, 1), value(5, 2), mark(5, 1), sync(1, 1000),
+              group_record(1), value(2, 0x33), value(4, 0x34),
+              overflow(3), group_record(1), value(0, 0x40), value(2, 0x41)]
+    vals = [s for s in samples(events, nominal_ratio=1.0) if s.kind == "value"]
+    assert [(s.value, s.copy) for s in vals] == [(1, True), (2, False), (0x33, True), (0x34, False), (0x40, True),
+                                                 (0x41, False)]
+    assert all(not s.copy for s in samples(events, nominal_ratio=1.0) if s.kind != "value")
+
+
+def test_after_lost_events_the_first_value_is_a_copy():
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
+    d.events_lost()
+    out = d.feed([mark(5, 1), sync(1, 1000), group_record(0), value(2, 0x33), value(3, 0x34)])
+    assert [(s.value, s.copy) for s in out if s.kind == "value"] == [(0x33, True), (0x34, False)]
+
+
+def test_snapshot_values_are_copies():
+    snap = [record(0, 0xA7 << 24 | n << 16 | v, time=t) for t, n, v in ((100, 0, 5), (200, 1, 6), (300, 3, 7))]
+    vals = [s for s in samples(snap) if s.kind == "value"]
+    assert [(s.value, s.copy) for s in vals] == [(5, True), (6, True), (7, True)]
+
+
 def test_the_group_comes_from_the_control_record():
     events = [group_record(0), value(0, 0x11), mark(5, 1), sync(1, 1000), group_record(1), value(4, 0x33)]
     out = samples(events, nominal_ratio=1.0)
@@ -122,7 +158,7 @@ def test_feeding_in_pieces_gives_the_same_samples():
               value(3, 0x33), overflow(2), group_record(1), value(0, 0x44), mark(4, 2), sync(2, 9000)]
     whole = samples(events, nominal_ratio=1.0)
     for cut in range(1, len(events)):
-        d = ObsDecoder(nominal_ratio=1.0)
+        d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
         assert d.feed(events[:cut]) + d.feed(events[cut:]) + d.flush() == whole, cut
 
 
@@ -133,7 +169,7 @@ def test_without_any_mark_the_fprobe_time_is_unknown():
 
 def test_after_lost_events_values_wait_for_the_next_mark():
     # イベントが欠けたら（記録のリングの追い越し等）delta の足し合わせが切れる。次の印から数え直す
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     d.feed([group_record(0), value(0, 1), mark(5, 1), sync(1, 1000)])
     d.events_lost()
     assert d.feed([value(4, 2)]) == []
@@ -143,7 +179,7 @@ def test_after_lost_events_values_wait_for_the_next_mark():
 
 def test_values_before_the_group_is_known_are_not_reported():
     # 途中から読み始めた: 組の記録を見るまで値を出さない（組 0 と取り違えない）
-    d = ObsDecoder(nominal_ratio=1.0)
+    d = ObsDecoder(nominal_ratio=1.0, max_pending=None)
     d.events_lost()
     assert d.feed([mark(5, 1), sync(1, 1000), value(4, 0x11)]) == []
     out = d.feed([group_record(3), value(2, 0x33)])
@@ -163,18 +199,21 @@ def test_responses_are_not_values():
     assert [s.value for s in no_groups(samples(events, nominal_ratio=1.0))] == [1]
 
 
-def test_sync_fit_maps_target_time_to_fprobe_time():
-    # 対象の水晶が 50 ppm 速い。組の揺れは ±1 周期（同期の遅れ）。直線に合わせて誤差 1 周期未満
+def test_sync_windows_map_target_time_to_a_fprobe_range():
+    # 対象の水晶が 50 ppm 速い。印の瞬間は窓（± 1 周期の揺れを窓に入れる）。値の時刻は隣り合う印の窓を通る直線の範囲で、
+    # 本当の時刻を必ず含む（段階 S3: 最小二乗 fit_sync をやめた）
     rng = random.Random(1)
     pairs = []
     for k in range(200):
         target = 1_000_000 + k * 50_000
-        fprobe = 7_000 + (target - 1_000_000) * 2 * (1 - 50e-6) + rng.uniform(-1, 1)
-        pairs.append((target, round(fprobe)))
-    [seg] = fit_sync(pairs)
-    for target in (1_000_000, 3_000_000, 10_950_000):
+        fprobe = 7_000 + (target - 1_000_000) * 2 * (1 - 50e-6)
+        off = rng.uniform(-1, 1)                                    # 印の瞬間の揺れ（対象の周期）
+        pairs.append(pair((target + off - 1, target + off + 1), fprobe))
+    seg = SyncSegment(pairs)
+    for target in (1_000_000, 3_010_000, 10_925_000):
         truth = 7_000 + (target - 1_000_000) * 2 * (1 - 50e-6)
-        assert abs(seg.to_fprobe(target) - truth) < 1.0
+        lo, hi = seg.window(target, target)
+        assert lo <= truth <= hi and hi - lo < 10
 
 
 def test_obs_events_are_not_dap_failures():
@@ -182,25 +221,23 @@ def test_obs_events_are_not_dap_failures():
     assert [(a.kind, a.address, a.value) for a in acc] == [("obs_record", 9, 3 << 16 | 0x44), ("obs_sync", 0, 2)]
 
 
-class FakeDevice:
+class FakeDevice(FakeDeviceBase):
     """CSR の読み書きを覚え、観測の回路の役もする: enable で ID が読めた状態に、読みの命令で応答を read_value に。"""
 
     def __init__(self, fpga_obs=True, regs=None):
-        self.caps = Capabilities(fpga_obs=fpga_obs)
+        self.caps = caps_for(fpga_obs=fpga_obs)
         self.regs = {g.OBS_STATUS: 0, g.OBS_SCANS: 0, g.OBS_ID: 0, g.OBS_READ_VALUE: 0}
-        self.core = {0: 0x4253, 1: 0x464F, 2: 2, 3: 1, 4: 16, 5: 0xF080, 6: 0x02FA, 7: 13, 8: 1, 9: 8, **(regs or {})}
+        self.core = {0: 0x4253, 1: 0x464F, 2: 2, 3: 1, 4: 16, 5: 0xF080, 6: 0x02FA, 7: 13, 8: 1, 9: 8, 10: 12, 11: 14,
+                     **(regs or {})}
         self.writes = []
 
-    def capabilities(self):
-        return self.caps
-
-    def write32(self, address, v):
-        self.writes.append((address, v))
-        self.regs[address] = v
-        if address == g.OBS_CONTROL and v & 1:
+    def write32(self, address, value):
+        self.writes.append((address, value))
+        self.regs[address] = value
+        if address == g.OBS_CONTROL and value & 1:
             self.regs[g.OBS_STATUS] = 1 << g.OBS_STATUS_ID_OK[0] | 1 << g.OBS_STATUS_RUNNING[0]
             self.regs[g.OBS_ID] = 0x464F4253
-        if address == g.OBS_CMD_PUSH and v & 1:
+        if address == g.OBS_CMD_PUSH and value & 1:
             cmd = self.regs[g.OBS_CMD]
             if cmd & 0xF == 2:
                 seq = (self.regs[g.OBS_READ_VALUE] >> 24) + 1 & 0xFF
@@ -236,8 +273,41 @@ def test_open_reads_the_declaration():
     obs = FpgaObs(FakeDevice())
     info = obs.open(chain={}, user_ir=2, half_period=5)
     assert info == {"id": 0x464F4253, "mode": "stream", "version": 2, "width": 16, "groups": 1, "fifo_depth": 16,
-                    "clock_hz": 50_000_000, "sync_delay": 6.5, "sample_delay": 1.0, "lost_bits": 8}
+                    "clock_hz": 50_000_000, "sync_delay": 6.5, "sample_delay": 1.0, "lost_bits": 8,
+                    "sync_delay_lo": 6.0, "sync_delay_hi": 7.0, "sample_delay_lo": 1.0, "sample_delay_hi": 1.0}
     assert (obs.sync_delay, obs.sample_delay) == (6.5, 1.0)
+    assert (obs.sync_delay_lo, obs.sync_delay_hi, obs.sample_delay_lo, obs.sample_delay_hi) == (6.0, 7.0, 1.0, 1.0)
+
+
+def test_an_old_circuit_without_the_range_registers_gives_its_documented_range():
+    # レジスタ 10・11 の無い回路は 0 を返す: その回路の申告（SYNC_DELAY は平均、±0.5 周期）から範囲にする
+    obs = FpgaObs(FakeDevice(regs={7: 7, 10: 0, 11: 0}))
+    info = obs.open(chain={}, user_ir=2, half_period=5)
+    assert (info["sync_delay"], info["sync_delay_lo"], info["sync_delay_hi"]) == (3.5, 3.0, 4.0)
+
+
+def test_a_snapshot_circuit_declares_no_delay_range():
+    # 標本型にはレジスタが無く、値を取り込む瞬間の遅れの申告も無い: 範囲は分からない（None）
+    dev = FakeDevice()
+    obs = FpgaObs(dev)
+    write32 = dev.write32
+
+    def snap_write(address, v):
+        write32(address, v)
+        if address == g.OBS_CONTROL and v & 1:
+            dev.regs[g.OBS_ID] = 0x534E4150
+    dev.write32 = snap_write
+    info = obs.open(chain={}, user_ir=2, half_period=5)
+    assert info["mode"] == "snapshot"
+    assert [info[k] for k in ("sync_delay_lo", "sync_delay_hi", "sample_delay_lo", "sample_delay_hi")] == [None] * 4
+
+
+def test_the_decoder_keeps_the_declared_ranges():
+    d = ObsDecoder(sync_delay=3.5, sync_delay_lo=3.0, sync_delay_hi=4.0, sample_delay_lo=1.0, sample_delay_hi=1.0, max_pending=None)
+    assert (d.sync_delay_lo, d.sync_delay_hi, d.sample_delay_lo, d.sample_delay_hi) == (3.0, 4.0, 1.0, 1.0)
+    d.reset_clock(None, 6.5, 1.0, sync_delay_lo=6.0, sync_delay_hi=7.0)
+    assert (d.sync_delay_lo, d.sync_delay_hi, d.sample_delay_lo, d.sample_delay_hi) == (6.0, 7.0, None, None)
+    assert ObsDecoder(max_pending=None).sync_delay_lo is None
 
 
 def test_register_read_waits_for_its_own_response():
@@ -356,7 +426,7 @@ def test_a_mark_whose_late_is_saturated_is_not_used_for_timing():
 
 
 def test_after_lost_events_a_snapshot_is_not_compared_with_the_old_value():
-    d = ObsDecoder()
+    d = ObsDecoder(max_pending=None)
     d.feed([snapshot(0, 0x42, 1000)])
     d.events_lost()
     out = d.feed([snapshot(0, 0x42, 2000)])

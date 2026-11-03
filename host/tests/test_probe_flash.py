@@ -203,3 +203,13 @@ def test_packs_are_found_installed_and_listed(probe, tmp_path):
     assert out["packs"] == [{"pack": "Keil.STM32F4xx_DFP", "version": "3.0.0"}]
     assert out["targets"] == ["stm32f401retx"]                                  # target_connect に渡す名前
     assert [p["pack"] for p in probe.pack_list()["packs"]] == ["Keil.STM32F4xx_DFP"]
+
+
+def test_a_local_pack_file_is_loaded_as_targets(probe, tmp_path, monkeypatch):
+    import fprobe.packs as m
+    monkeypatch.setattr(m, "_pack_devices", lambda path: [SimpleNamespace(part_number="ABC123")])
+    monkeypatch.setattr(m, "_register_pack", lambda path: None)
+    pack = tmp_path / "Vendor.ABC_DFP.1.0.0.pack"
+    pack.write_bytes(b"PK")
+    probe._packs = Packs(cache_factory=lambda: None)
+    assert probe.pack_load(str(pack)) == {"path": str(pack), "targets": ["abc123"]}

@@ -2,11 +2,17 @@
 [Unit]
 Description=fprobe relay (UDP 63920 <-> PL zynq_frame_link)
 After=network.target
+# 中継は /dev/fprobe_ring（fprobe_ringmap）を起動のときだけ探すので、起動時の読み込み（/etc/modules-load.d。fprobe_gw pynq ringmap）
+# の後に起動する。systemd-modules-load は sysinit.target が引き込むので Wants= は置かない（読み込みが無い・失敗しても中継は複写の道で動く）
+After=systemd-modules-load.service
 
 [Service]
 ExecStart=/usr/local/bin/fprobe-relay
 Restart=on-failure
 RestartSec=2
+# 起動の約 3 分間は PYNQ の jupyter などの Python が CPU を使い切り、中継の 2 スレッド（読み取りと送信）と取り合ってストリームが溢れる。
+# 上げると、jupyter・clear_pl_statefile の再起動と 2 コアを使い切る Python 2 本の中でも 25 MS/s（50 MB/s）が 40 秒・2 GB 欠けなし（-20: 3/3。-10: 2/2 が溢れた。上げない場合は jupyter の再起動だけで約 5.7 秒で overrun。2026-10-31 実測）
+Nice=-20
 # 印が無い（終了コード 2）・回路が違う（3）は起動し直さない
 RestartPreventExitStatus=2 3
 

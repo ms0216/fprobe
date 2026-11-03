@@ -42,6 +42,7 @@ entity dap_processor is
     swd_idle_cycles : out natural range 0 to 255;
     swd_cmd_valid   : out std_logic;
     swd_cmd_ready   : in  std_logic;
+    swd_cmd_cond    : out std_logic;                 -- 前の転送が OK のときだけ受ける（dap_link の先出し）
     swd_cmd_op      : out std_logic_vector(1 downto 0);
     swd_cmd_count   : out natural range 1 to 64;
     swd_cmd_request : out std_logic_vector(3 downto 0);
@@ -97,7 +98,7 @@ architecture rtl of dap_processor is
   signal u_get_n, u_put_n : units_n_t;
   signal u_put_val  : units_word_t;
   -- dap_link ⇄ ユニット（シーケンス・転送）
-  signal link_req, link_ack : std_logic;
+  signal link_req, link_ack, link_take, xfer_take : std_logic;
   signal link_op    : std_logic_vector(1 downto 0);
   signal link_count : natural range 1 to 64;
   signal link_request : std_logic_vector(3 downto 0);
@@ -233,7 +234,7 @@ begin
               put_req => u_put_req(U_TRANSFER), put_n => u_put_n(U_TRANSFER), put_val => u_put_val(U_TRANSFER),
               put_ack => put_ack,
               link_req => xfer_link_req, link_request => xfer_request, link_data => xfer_data,
-              link_ack => link_ack, link_resp => link_resp, link_ok => link_ok, link_rdata => link_rdata,
+              link_ack => link_ack, link_take => xfer_take, link_resp => link_resp, link_ok => link_ok, link_rdata => link_rdata,
               match_retry => match_retry, jtag => jtag_r, jtag_count => jtag_count, jtag_index => jtag_index);
 
   -- PHY を使うのはシーケンスと転送のユニットだけ（同時には動かない）
@@ -242,12 +243,13 @@ begin
   link_count   <= 1 when unit = U_TRANSFER else seq_count;
   link_request <= xfer_request when unit = U_TRANSFER else seq_request;
   link_data    <= xfer_data when unit = U_TRANSFER else seq_data;
+  link_take    <= xfer_take when unit = U_TRANSFER else '1';     -- シーケンスは応答を待つ状態でしか命令を出さない
 
   link_i : entity work.dap_link
     port map (clk => clk, rst => rst, enable => enable, wait_retry => wait_retry,
               req => link_req, op => link_op, count => link_count, request => link_request, data => link_data,
-              ack => link_ack, resp => link_resp, ok => link_ok, rdata => link_rdata, val => link_val,
-              phy_valid => swd_cmd_valid, phy_ready => swd_cmd_ready, phy_op => swd_cmd_op,
+              ack => link_ack, ack_take => link_take, resp => link_resp, ok => link_ok, rdata => link_rdata, val => link_val,
+              phy_valid => swd_cmd_valid, phy_ready => swd_cmd_ready, phy_cond => swd_cmd_cond, phy_op => swd_cmd_op,
               phy_count => swd_cmd_count, phy_request => swd_cmd_request, phy_data => swd_cmd_data,
               phy_rsp_valid => swd_rsp_valid, phy_rsp_ack => swd_rsp_ack, phy_rsp_data => swd_rsp_data,
               phy_rsp_parity => swd_rsp_parity);

@@ -7,21 +7,19 @@ import pytest
 from fprobe import generated as g
 from fprobe.session import swo_start
 from fprobe.uart_flow import UartFlow
+from caps_fakes import FakeDeviceBase, caps_for
 
 
-class FakeDevice:
+class FakeDevice(FakeDeviceBase):
     def __init__(self, uart_flow=(4, 1)):
         self.regs = {g.UART_FLOW: 0, g.UART_LINES: 0}
-        self._caps = SimpleNamespace(uart_flow=uart_flow)
+        self.caps = caps_for(uart_flow=tuple(uart_flow))
 
-    def capabilities(self):
-        return self._caps
+    def read32(self, address):
+        return self.regs[address]
 
-    def read32(self, addr):
-        return self.regs[addr]
-
-    def write32(self, addr, value):
-        self.regs[addr] = value
+    def write32(self, address, value):
+        self.regs[address] = value
 
 
 def test_configure_maps_channels_to_candidate_indexes():

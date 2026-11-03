@@ -101,7 +101,7 @@ def test_p2_live_watch_by_name_without_halting(session):
     p = Probe(eth=HOST)
     try:
         p.target_connect("nrf52840", frequency_hz=4_000_000, connect_mode="attach")
-        p.elf_load(os.environ.get("FPROBE_XIAO_ELF", "C:/Users/M/zmk/ws/build/right-mon/zephyr/zmk.elf"))
+        p.elf_load(os.environ.get("FPROBE_XIAO_ELF", "<home>/zmk/ws/build/right-mon/zephyr/zmk.elf"))
         p.watch_set(["is_connected", "position_state"], rate_hz=1000)
         time.sleep(0.3)
         values = {v["name"]: v["value"] for v in p.watch_values()["values"]}

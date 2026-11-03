@@ -173,7 +173,8 @@ def test_systemview_over_rtt_becomes_a_recorded_timeline(probe):
     target_writes(cpu, 1, sysview_stream())
     wait_for(lambda: probe.trace_status()["events"] >= 10)
     stopped = probe.trace_stop()
-    assert stopped["ts_hz"] == 64e6 and stopped["recorded_events"] == stopped["events"]
+    assert stopped["ts_hz"] == 64e6 and stopped["recorded_events"] + stopped["unplaced_events"] == stopped["events"]
+    assert stopped["unplaced_events"] == 1 and stopped["breaks"][0]["reason"] == "init"   # TRACE_START の時刻は分からない
     tl = stopped["timeline"]
     assert tl["made"] and tl["recorded"] and tl["isr"] == 1 and tl["stats"]["tasks"]["sensor"]["runs"] == 1
     got = probe.rtos_timeline_get()
@@ -196,10 +197,21 @@ def test_ctf_snapshot_from_ram(probe):
     connect(probe, cpu)
     data = ctf_scenario()
     cpu.ram[0x4000:0x4000 + len(data)] = data
-    out = probe.trace_snapshot("ctf", address=SRAM + 0x4000, size=1024, ctf_header="ts32_id8")
+    out = probe.trace_snapshot("ctf", address=SRAM + 0x4000, size=1024, ctf_header="ts32_id8", ts_hz=1e9)
     assert out["events"] == 12 and out["read"]["source"] == "ram_tracing" and out["timeline"]["made"]
-    assert out["clock"]["anchor_t"] > 0 and probe.trace_events(kinds=["marker"])["events"][0]["text"] == "frame"
-    assert out["clock"]["basis"] == "one_anchor_declared_rate" and any("速さの誤差" in n for n in out["notes"])   # ?40
+    assert out["clock"]["anchors"][0]["anchor_t"] > 0
+    assert probe.trace_events(kinds=["marker"])["events"][0]["text"] == "frame"
+    assert out["clock"]["basis"] == "anchor_per_segment_declared_rate" and any("速さの誤差" in n for n in out["notes"])
+
+
+def test_ctf_without_a_clock_rate_is_not_placed_on_the_timebase(probe):
+    # CTF の時刻の速さは TSDL の clock か使う側の ts_hz（組み込みの表で 1e9 を決め打ちしない）
+    cpu = FakeCpu(image=RTT_DEMO)
+    connect(probe, cpu)
+    data = ctf_scenario()
+    cpu.ram[0x4000:0x4000 + len(data)] = data
+    out = probe.trace_snapshot("ctf", address=SRAM + 0x4000, size=1024, ctf_header="ts32_id8")
+    assert "ts_hz" not in out and "clock" not in out and not out["timeline"]["made"]
 
 
 def test_event_recorder_is_read_while_running_and_formatted_with_scvd(probe):
@@ -227,6 +239,35 @@ def test_event_recorder_is_read_while_running_and_formatted_with_scvd(probe):
     stopped = probe.trace_stop()
     names = [e["name"] for e in probe.trace_events()["events"]]
     assert names == ["ThreadCreated", "ThreadSwitched", "ThreadSwitched"] and stopped["timeline"]["made"]
+    assert stopped["segments"] == 1 and stopped["breaks"] == []
+
+
+def test_event_recorder_reinitialized_while_running_begins_a_new_segment(probe):
+    # 対象が Event Recorder を初期化し直す（init_count が変わる）と時刻は 0 から: 前の読みと同じ区切りに混ぜない
+    cpu = FakeCpu(image=RTT_DEMO)
+    connect(probe, cpu)
+    r = Recorder(count=16)
+    info_at, status_at, buf_at = SRAM + 0x5000, SRAM + 0x40, SRAM + 0x100
+
+    def publish():
+        info = bytearray(r.info())
+        struct.pack_into("<II", info, 8, buf_at, 0)
+        struct.pack_into("<I", info, 16, status_at)
+        cpu.ram[info_at - SRAM:info_at - SRAM + 24] = info
+        cpu.ram[status_at - SRAM:status_at - SRAM + 36] = r.status()
+        cpu.ram[buf_at - SRAM:buf_at - SRAM + len(r.buf)] = r.buf
+    r.record2(0x0101, 5_000, 0, 0)
+    publish()
+    probe.trace_start("eventrecorder", source="memory", address=info_at, period_s=0.01)
+    r.init_count += 1
+    r.ts_last = 0
+    r.record2(0x0101, 10, 1, 0)
+    publish()
+    wait_for(lambda: probe.trace_status()["events"] == 2)
+    stopped = probe.trace_stop(timeline=False)
+    assert [b["reason"] for b in stopped["breaks"]] == ["recorder_reinit"] and stopped["segments"] == 2
+    segments = [e.get("segment", 0) for e in probe.trace_events()["events"]]
+    assert segments == [0, 1]
 
 
 def test_component_viewer_reads_target_memory(probe, tmp_path):
@@ -254,7 +295,7 @@ def test_component_viewer_reads_target_memory(probe, tmp_path):
 def test_trace_import_from_a_file_feeds_the_timeline_analysis(probe, tmp_path):
     path = tmp_path / "trace.ctf"
     path.write_bytes(ctf_scenario())
-    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8")
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8", ts_hz=1e9)
     assert out["events"] == 12 and out["timeline"]["made"] and not out["timeline"]["recorded"]
     assert probe.rtos_timeline_get()["runs"]
     with pytest.raises(ValueError):
@@ -274,7 +315,7 @@ def test_priority_order_is_not_guessed_from_the_os_name(probe, tmp_path):
     # 形式そのものが 1 つの RTOS のもの（Zephyr の CTF・ThreadX の TraceX）なら、その RTOS のソースで決まる向き
     path = tmp_path / "trace.ctf"
     path.write_bytes(ctf_scenario())
-    assert probe.trace_import("ctf", str(path), ctf_header="ts32_id8")["timeline"]["priority_order"] == "lower_is_more_urgent"
+    assert probe.trace_import("ctf", str(path), ctf_header="ts32_id8", ts_hz=1e9)["timeline"]["priority_order"] == "lower_is_more_urgent"
 
 
 def test_idle_tasks_are_named_by_the_caller(probe, tmp_path):
@@ -282,10 +323,10 @@ def test_idle_tasks_are_named_by_the_caller(probe, tmp_path):
     # 名前を結果に返す
     path = tmp_path / "trace.ctf"
     path.write_bytes(ctf_scenario())
-    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8")
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8", ts_hz=1e9)
     assert out["timeline"]["idle_tasks"] is None
     assert any("アイドルのタスクが分からない" in n for n in probe.rtos_timeline_load(window_us=10)["notes"])
-    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8", idle_tasks=["idle", "IDLE"])
+    out = probe.trace_import("ctf", str(path), ctf_header="ts32_id8", ts_hz=1e9, idle_tasks=["idle", "IDLE"])
     given = out["timeline"]["idle_tasks"]
     assert given["matched"] == {"idle": [IDLE]} and given["unmatched"] == ["IDLE"]
     assert not any("アイドルのタスクが分からない" in n for n in probe.rtos_timeline_load(window_us=10)["notes"])

@@ -51,11 +51,17 @@ def test_invalid_names_and_unknown_names(home):
 def test_probe_info_reports_the_device_name_and_version(home, monkeypatch):
     from types import SimpleNamespace
 
+    from caps_fakes import FakeDeviceBase, caps_for
     from fprobe import mcp_server
-    from fprobe.caps import Build, Capabilities
+    from fprobe.caps import Build
     build = Build(id="0123456789abcdef", time=1_790_000_000, git="89abcdef", dirty=False)
-    caps = Capabilities(design="fprobe", board="Tang Primer 20K Dock", sampler=False, build=build)
-    device = SimpleNamespace(capabilities=lambda: caps, time=lambda: 5)
+
+    class Device(FakeDeviceBase):
+        caps = caps_for(board="Tang Primer 20K Dock", sampler=False, build=build)
+
+        def time(self):
+            return 5
+    device = Device()
     session = SimpleNamespace(device=device, address=USB, close=lambda: None, link=None)
     monkeypatch.setattr(mcp_server.Session, "open", classmethod(lambda cls, serial=None: session))
     p = mcp_server.Probe()

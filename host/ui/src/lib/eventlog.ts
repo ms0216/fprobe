@@ -1,6 +1,7 @@
 // Event Log（Tracealyzer / SystemView の Events・TRACE32 のトレースリスト）の計算: 構造化された検索の条件 →
 // recording.find の query、結果の要約・CSV・時間軸の印、区間の統計（timing.measure）の分布図・長い順の上位、調査の印とメモ。
 // Svelte・DOM に依らない。仕様: docs/reports/2026-10-18-gap-analysis.md G07
+import type { IntervalReport, Json, RecordingEvent } from "../../../api/generated/fprobe_api";
 import type { Bar } from "./chart";
 import { parseCount } from "./system";
 import { formatDuration } from "./time";
@@ -8,16 +9,7 @@ import type { Mark } from "./timeline/state";
 import { display } from "./vartree";
 
 /** 記録の出来事（recording.find / recording.events の 1 件。fprobe.recording.Event） */
-export interface RecEvent {
-  t: number;
-  stream: string;
-  kind: string;
-  a: number;
-  b: number;
-  body: any;
-  t_end: number | null;
-  uncertainty: number | null;
-}
+export type RecEvent = RecordingEvent;
 
 export const STREAMS = ["rtos", "uart", "swo", "rtt", "dap", "sample", "aux", "user", "host", "target", "annotation",
                         "testpoint", "rule", "clock"] as const;
@@ -174,7 +166,7 @@ export function searchMarks(events: RecEvent[]): Mark[] {
 
 export interface Histogram { lo: number; hi: number; count: number }
 /** 長い順の上位（timing.measure の longest。bin = 入る棒の番号） */
-export interface Longest { t: number; t_end: number; duration: number; bin: number }
+export type Longest = NonNullable<IntervalReport["longest"]>[number];
 
 /** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒（デーモンが示した bin）を目立たせる） */
 export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null, longest: Longest[]): Bar[] {
@@ -203,14 +195,21 @@ export interface Note {
   role: string | null;                // ai / human / script / hook
 }
 
+/** 出来事の本文（形を決めない値 Json）の欄の表。表でなければ空（欄が無いのと同じに読む） */
+export function fieldsOf(v: Json | undefined): { [key: string]: Json } {
+  return v !== null && v !== undefined && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
 /** 印（annotation.mark）に置いた者を添える: 印の本文の事実だけ（フックの印は body.hook、recording.mark の印は
  *  デーモンが残した body.client）。無ければ null（fprobe が置いた印・古い記録。操作の記録から推さない） */
 export function notesOf(marks: RecEvent[]): Note[] {
   return marks.map((m) => {
-    const text = String(m.body?.text ?? "");
-    if (m.body?.hook !== undefined) return { t: m.t, text, by: `hook ${m.body.hook}`, role: "hook" };
-    const client = m.body?.client;
-    return { t: m.t, text, by: client?.name ?? null, role: client?.role ?? null };
+    const body = fieldsOf(m.body);
+    const text = String(body.text ?? "");
+    if (body.hook !== undefined) return { t: m.t, text, by: `hook ${body.hook}`, role: "hook" };
+    const client = fieldsOf(body.client);
+    return { t: m.t, text, by: typeof client.name === "string" ? client.name : null,
+             role: typeof client.role === "string" ? client.role : null };
   });
 }
 

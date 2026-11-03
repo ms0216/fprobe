@@ -7,9 +7,9 @@ use work.csr_bus_pkg.all;
 use work.build_info_pkg.all;
 
 package design_caps_pkg is
-  constant CAPS_ROM : csr_word_array_t(0 to 48) := (
+  constant CAPS_ROM : csr_word_array_t(0 to 90) := (
     x"50414346",
-    x"000000C4",
+    x"0000016C",
     x"00040001",
     x"00000002",
     x"00140002",
@@ -44,12 +44,54 @@ package design_caps_pkg is
     x"0004000B",
     x"08000000",
     x"0004000D",
-    x"0000003F",
+    x"0001803F",
     x"0004000E",
-    x"00000007",
+    x"0000001F",
     x"00060014",
     x"00070006",
     x"00000001",
+    x"00300015",
+    x"00010000",
+    x"00000100",
+    x"01000001",
+    x"00010000",
+    x"00000100",
+    x"01000001",
+    x"00000000",
+    x"80800000",
+    x"FF8080FF",
+    x"80FF8080",
+    x"8080FF80",
+    x"FF8080FF",
+    x"00700019",
+    x"01000102",
+    x"00010007",
+    x"01000103",
+    x"00010007",
+    x"0100010F",
+    x"00010007",
+    x"0000050D",
+    x"00000001",
+    x"01000113",
+    x"00010007",
+    x"00000614",
+    x"00000007",
+    x"00000516",
+    x"00000002",
+    x"01000205",
+    x"00010002",
+    x"02000206",
+    x"00000000",
+    x"05000207",
+    x"00010002",
+    x"05000908",
+    x"00010002",
+    x"05000219",
+    x"00010002",
+    x"02000717",
+    x"00000000",
+    x"02000818",
+    x"00000000",
     x"00140010",
     BUILD_INFO(0),
     BUILD_INFO(1),
@@ -69,6 +111,7 @@ package design_caps_pkg is
   constant LA_FILTER : boolean := true;
   constant LA_PULSE : boolean := true;
   constant LA_STREAM_EVENTS : boolean := false;
+  constant LA_STREAM_GAPS : boolean := false;
   constant OBS_PORT : boolean := false;
   constant SYNC : boolean := false;
   constant XOUT_COUNT : natural := 0;
@@ -77,4 +120,12 @@ package design_caps_pkg is
   constant UART_FLOW : boolean := false;
   constant MEM_ADDR_BITS : natural := 23;
   constant EVENT_RING_BITS : natural := 0;
+  constant CAP_RATIO : natural := 1;
+  constant LA_LANES : positive := 1;
+  constant LA_LANE_ADDR_BITS : positive := 1;
+  constant LA_FINE_PINS : boolean := false;
+  constant LA_LANE_IN_AGE : natural := 0;
+  constant LA_TESTGEN : boolean := false;
+  constant EVENT_BYTE_PACK : boolean := false;
+  constant SAMPLER_CHECK_MAX : positive := 1;
 end package;

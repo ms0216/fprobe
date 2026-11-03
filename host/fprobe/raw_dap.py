@@ -100,6 +100,8 @@ class RawDap:
         self._select: int | None = None                 # 最後に書いた SELECT（不明なら None）
         self._csw_set: set[int] = set()                 # CSW を 32 ビット・自動増加なしにした AP
         self.frequency_hz: int | None = None
+        # DAP の転送の往復（積んだ転送を送る flush）の数。計測用（振る舞いは変えない）: 操作ごとの往復を数えて性能の約束を試験する
+        self.round_trips = 0
 
     @classmethod
     def attached(cls, link, protocol: str, frequency_hz: int | None = None) -> "RawDap":
@@ -110,15 +112,29 @@ class RawDap:
 
     # --- 線 --------------------------------------------------------------------------------------
 
-    def start(self, protocol: str, frequency_hz: int, jtag_chain: list[int] | None = None, dap_index: int = 0) -> None:
-        """CMSIS-DAP の DAP_Connect（swd / jtag）と速度。jtag なら IR 長の列（TDO 側から）と DP の位置 dap_index。"""
+    def start(self, protocol: str, frequency_hz: int, jtag_chain: list[int] | None = None, dap_index: int = 0,
+              jtag_idle_cycles: int | None = None) -> None:
+        """CMSIS-DAP の DAP_Connect（swd / jtag）と速度。jtag なら IR 長の列（TDO 側から）と DP の位置 dap_index。
+        jtag_idle_cycles: 各スキャンの後に入れる Run-Test/Idle のクロック数（DAP_TransferConfigure）。与えなければ触らない
+        （pyOCD の接続時の値のまま）。JTAG のみ。ターゲットの DAP が転送を終えるのに要る（Raspberry Pi 2B は 4 以上）。"""
+        if jtag_idle_cycles is not None and protocol != "jtag":
+            raise ValueError("jtag_idle_cycles は JTAG だけの設定（protocol=%r）" % protocol)
         if self.protocol is not None:
             self.link.disconnect()
         port = {"swd": DAPAccessIntf.PORT.SWD, "jtag": DAPAccessIntf.PORT.JTAG}[protocol]
         self.link.connect(port)
+        # 転送を溜めて flush で 1 回の往復にまとめる（pyOCD の初期値は無効で、転送ごとに往復する。2026-10-29 に実機で
+        # 4 語の書き込みが 11 パケット・約 2 ms だった）。誤りは flush で出る: このクラスの転送は必ず _xfer の flush を通る
+        self.link.set_deferred_transfer(True)
         self.link.set_clock(frequency_hz)
         if protocol == "jtag":
             self.link.configure_jtag(list(jtag_chain or [4]))
+            if jtag_idle_cycles is not None:
+                self.link._protocol.transfer_configure(idle_cycles=jtag_idle_cycles)   # pyOCD に公開の口が無い
+            # DAP_Connect で線を解放して取り直すと、TMS のプルアップ等で TAP の状態が変わりうる。最初の転送は Run-Test/Idle から始まると
+            # 仮定するので、TMS = 1 を 6 回（Test-Logic-Reset）→ TMS = 0（Run-Test/Idle）で、状態を決めておく
+            self.link.jtag_sequence(6, 1, False, 0)
+            self.link.jtag_sequence(1, 0, False, 0)
         self.protocol, self.frequency_hz, self.dap_index = protocol, frequency_hz, dap_index
         self._forget()
 
@@ -148,10 +164,12 @@ class RawDap:
         self.link.swj_sequence(8, 0)
 
     def switch_to_jtag(self) -> None:
-        """SWD→JTAG（0xE73C）と TAP のリセット（TMS = 1 を 8 回）。"""
+        """SWD→JTAG（0xE73C）と TAP のリセット（TMS = 1 を 8 回）、TMS = 0 で Run-Test/Idle へ（DAP_Transfer と fprobe の jtag_phy は
+        TAP が Run-Test/Idle にいる前提。Test-Logic-Reset のままだと最初の転送が崩れる）。"""
         self.line_reset()
         self.link.swj_sequence(16, 0xE73C)
         self.link.swj_sequence(8, 0xFF)
+        self.link.swj_sequence(1, 0)
 
     def targetsel(self, value: int) -> None:
         """複数ドロップの SWD（DPv2）で DP を選ぶ: 線のリセットの後の TARGETSEL の書き込み（応答は無い）。"""
@@ -170,6 +188,7 @@ class RawDap:
     # --- DP ---------------------------------------------------------------------------------------
 
     def _xfer(self, what: str, fn):
+        self.round_trips += 1
         try:
             value = fn()
             self.link.flush()
@@ -289,16 +308,19 @@ class RawDap:
         """MEM-AP のレジスタ番地（ADIv5 の番地を ADIv6 の並びに直す）。"""
         return register + 0xD00 if self.adi_v6 else register
 
-    def _prepare(self, ap: int, address: int) -> None:
+    def _ensure_csw(self, ap: int) -> None:
         if ap not in self._csw_set:                              # 32 ビット・番地の自動増加なし（Prot 等は保つ）
             csw = self.read_ap(ap, self.mem_register(AP_CSW))
             self.write_ap(ap, self.mem_register(AP_CSW), (csw & _CSW_KEEP) | CSW_SIZE32)
             self._csw_set.add(ap)
+
+    def _prepare(self, ap: int, address: int) -> None:
+        self._ensure_csw(ap)
         self.write_ap(ap, self.mem_register(AP_TAR), address)
 
     def mem_read32(self, ap: int, address: int) -> int:
-        self._prepare(ap, address)
-        return self.read_ap(ap, self.mem_register(AP_DRW))
+        """1 語を読む。TAR の書き込み・DRW の読み・（JTAG では）CTRL/STAT の誤りの確かめを、1 回の往復にまとめる。"""
+        return self.mem_read32_many(ap, [address])[0]
 
     def mem_read32_repeat(self, ap: int, address: int, count: int) -> list[int]:
         """同じ番地の語を count 回読む（番地は増やさない。CMSIS-DAP の DAP_TransferBlock で、往復をまとめる）。"""
@@ -312,9 +334,78 @@ class RawDap:
                 count, _AP_REG[reg], dap_index=self.dap_index, now=False)))
         return list(self._xfer(what, lambda: self.link.reg_read_repeat(count, _AP_REG[reg], dap_index=self.dap_index)))
 
+    def mem_write32_then_read_repeat(self, ap: int, writes: list[tuple[int, int]], address: int, count: int) -> list[int]:
+        """writes（番地と値の組）を順に書いてから、address の語を count 回読む（番地は増やさない）。JTAG では書きと読みと
+        CTRL/STAT の誤りの確かめを 1 回の往復で（コアの DCC の速いモードの開始と読み出し）。SWD は書きと読みの 2 回。"""
+        if count <= 0:
+            self.mem_write32_many(ap, writes)
+            return []
+        if self.protocol != "jtag":
+            self.mem_write32_many(ap, writes)
+            return self.mem_read32_repeat(ap, address, count)
+        self._ensure_csw(ap)
+        tar = _AP_REG[self._select_ap(ap, self.mem_register(AP_TAR))]
+        drw = _AP_REG[self._select_ap(ap, self.mem_register(AP_DRW))]
+
+        def queue():
+            for a, v in writes:
+                self.link.write_reg(tar, a, dap_index=self.dap_index)
+                self.link.write_reg(drw, v & 0xFFFFFFFF, dap_index=self.dap_index)
+            self.link.write_reg(tar, address, dap_index=self.dap_index)
+            return self.link.reg_read_repeat(count, drw, dap_index=self.dap_index, now=False)
+        return list(self._jtag_checked(f"AP 0x{ap:X} の {len(writes)} 語の書きと DRW の {count} 回の読み出し", queue))
+
     def mem_write32(self, ap: int, address: int, value: int) -> None:
-        self._prepare(ap, address)
-        self.write_ap(ap, self.mem_register(AP_DRW), value)
+        """1 語を書く。TAR と DRW の書き込み（と JTAG の誤りの確かめ）を 1 回の往復にまとめる。"""
+        self.mem_write32_many(ap, [(address, value)])
+
+    def _many(self, ap: int, what: str, queue_each, items: list):
+        """items の各々を TAR + DRW で並べ、1 回の往復（flush）で送る。JTAG は同じ往復で CTRL/STAT の誤りの印も見る。"""
+        self._ensure_csw(ap)
+        tar = self._select_ap(ap, self.mem_register(AP_TAR))
+        drw = self._select_ap(ap, self.mem_register(AP_DRW))      # TAR と DRW は同じバンク（SELECT は 1 回）
+
+        def queue():
+            results = [queue_each(_AP_REG[tar], _AP_REG[drw], item) for item in items]
+            return lambda: [r() for r in results if r is not None]
+        if self.protocol == "jtag":
+            return self._jtag_checked(what, queue)
+        return self._xfer(what, lambda: queue()())
+
+    def mem_write32_many(self, ap: int, writes: list[tuple[int, int]]) -> None:
+        """番地と値の組を順に書き、1 回の往復で送る（複数のコアへの停止要求を、往復を挟まずに出すため）。"""
+        if not writes:
+            return None
+
+        def each(tar, drw, w):
+            self.link.write_reg(tar, w[0], dap_index=self.dap_index)
+            self.link.write_reg(drw, w[1] & 0xFFFFFFFF, dap_index=self.dap_index)
+        self._many(ap, f"AP 0x{ap:X} の {len(writes)} 語の書き込み", each, writes)
+        return None
+
+    def mem_batch(self, ap: int, ops: list[tuple]) -> list[int]:
+        """書き（("w", 番地, 値)）と読み（("r", 番地)）を順に並べ、1 回の往復で送る。読んだ値を順に返す（コアのデバッグで、命令の書き込みと
+        完了の確かめを同じ往復にするため）。"""
+        if not ops:
+            return []
+
+        def each(tar, drw, op):
+            self.link.write_reg(tar, op[1], dap_index=self.dap_index)
+            if op[0] == "w":
+                self.link.write_reg(drw, op[2] & 0xFFFFFFFF, dap_index=self.dap_index)
+                return None
+            return self.link.read_reg(drw, dap_index=self.dap_index, now=False)
+        return self._many(ap, f"AP 0x{ap:X} の {len(ops)} 個の読み書き", each, ops)
+
+    def mem_read32_many(self, ap: int, addresses: list[int]) -> list[int]:
+        """番地を順に読み、1 回の往復で送る（全コアの DSCR を同じ往復で読むため）。"""
+        if not addresses:
+            return []
+
+        def each(tar, drw, address):
+            self.link.write_reg(tar, address, dap_index=self.dap_index)
+            return self.link.read_reg(drw, dap_index=self.dap_index, now=False)
+        return self._many(ap, f"AP 0x{ap:X} の {len(addresses)} 語の読み出し", each, addresses)
 
 
 class DpPort:

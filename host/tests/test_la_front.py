@@ -1,17 +1,17 @@
 """fprobe.la の前段の追加の条件（U21）: グリッチフィルタとパルス幅のトリガのレジスタ。機器は使わない。"""
 
-from types import SimpleNamespace
-
 import pytest
 
 from fprobe import generated as g
 from fprobe.la import Front, Pulse
+from caps_fakes import FakeDeviceBase, caps_for
 
 CLOCK = 100_000_000
 
 
 def caps(**features):
-    return SimpleNamespace(sys_clock_hz=CLOCK, la_channels=16, **{"la_filter": True, "la_pulse": True, **features})
+    return caps_for(**{"sys_clock_hz": CLOCK, "la_sample_hz": CLOCK, "la_channels": 16, "la_filter": True, "la_pulse": True,
+                       **features})
 
 
 def fields(words):
@@ -33,7 +33,7 @@ def test_filter_in_nanoseconds_and_its_delay():
     front = Front.of(caps(), filter_channels=0b101, filter_ns=50)
     f = fields(front.words)
     assert (f["channels"], f["cycles"]) == (0b101, 5)
-    assert front.info["filter"] == {"channels": [0, 2], "min_width_ns": 50.0, "delay_ns": 40.0}
+    assert front.info["filter"] == {"channels": [0, 2], "min_width_ns": 50.0, "delay_ns": 40.0, "delay_cycles": 4}
     assert fields(Front.of(caps(), filter_channels=1, filter_ns=1).words)["cycles"] == 2   # 最短でも 2 周期
     with pytest.raises(ValueError, match="ns まで"):
         Front.of(caps(), filter_channels=1, filter_ns=3000)
@@ -60,7 +60,7 @@ def test_pulse_width_range_longer_shorter_and_timeout():
 
 
 def test_missing_features():
-    old = SimpleNamespace(sys_clock_hz=CLOCK, la_channels=16)          # U21 の前の構成: レジスタが無いので書かない
+    old = caps_for(sys_clock_hz=CLOCK, la_channels=16)                 # U21 の前の構成: レジスタが無いので書かない
     assert Front.of(old) is None
     with pytest.raises(RuntimeError, match="la_filter"):
         Front.of(old, filter_channels=1, filter_ns=50)
@@ -71,13 +71,10 @@ def test_missing_features():
 def test_analyzer_writes_the_front_after_the_trigger_and_before_starting():
     from fprobe.la import LogicAnalyzer
 
-    class Dev:
+    class Dev(FakeDeviceBase):
         def __init__(self):
             self.writes = []
-
-        def capabilities(self):
-            return SimpleNamespace(la_channels=16, la_depth=64, la_sample_hz=CLOCK, mem_bytes=0, sys_clock_hz=CLOCK,
-                                   la_filter=True, la_pulse=True)
+            self.caps = caps(la_depth=64)
 
         def write32(self, address, value):
             self.writes.append((address, [value]))
@@ -99,13 +96,10 @@ def test_external_only_waits_for_the_cross_trigger_alone():
     # して、パターンが空のとき「真」= すぐ捕捉、にならないようにする。パターンと一緒には指定できない
     from fprobe.la import LogicAnalyzer
 
-    class Dev:
+    class Dev(FakeDeviceBase):
         def __init__(self):
             self.writes = []
-
-        def capabilities(self):
-            return SimpleNamespace(la_channels=16, la_depth=64, la_sample_hz=CLOCK, mem_bytes=0, sys_clock_hz=CLOCK,
-                                   la_filter=False, la_pulse=False)
+            self.caps = caps(la_depth=64, la_filter=False, la_pulse=False)
 
         def write32(self, address, value):
             self.writes.append((address, [value]))
@@ -152,7 +146,9 @@ def test_triggers_on_channels_the_device_does_not_have_are_rejected():
     check_trigger_channels(without, mask=0x3FF, rise=1 << 9)
     with pytest.raises(ValueError, match=r"rise の ch \[10, 12\].*fprobe_la"):
         check_trigger_channels(without, rise=1 << 10 | 1 << 12)
-    check_trigger_channels(caps(), mask=1 << 15)                       # 申告を持たない偽物は調べない
+    with pytest.raises(ValueError, match=r"mask の ch \[15\]"):          # LA_LAYOUT の無い古いデバイスは古い並びで調べる（ch 10〜15 は無い）
+        check_trigger_channels(caps(), mask=1 << 15)
+    check_trigger_channels(caps(la_channels=0), mask=1 << 15)          # ロジアナの無い構成は調べない（ロジアナの道具が先に断る）
 
 
 def test_channel_names_follow_the_declared_layout():

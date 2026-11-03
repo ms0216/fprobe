@@ -35,17 +35,20 @@ CALLS_LIMIT = 1 << 16                   # 持っておく最近の呼び出し�
 @dataclass(frozen=True)
 class TimeMap:
     """源の時刻（整数、1 秒 = hz）→ タイムベース: ticks = offset + round(t × timebase_hz / hz)。
-    uncertainty はタイムベースの単位（0 = 確か）。"""
+    uncertainty はタイムベースの単位（0 = 確か、None = 分からない）。bound = "upper" なら写した時刻は出来事の時刻の
+    上限（受けた・読んだ時刻に合わせた: 出来事はそれより前で、どれだけ前かは uncertainty に入っていない）。"""
     hz: float
     timebase_hz: float
     offset: int = 0
-    uncertainty: float = 0.0
+    uncertainty: float | None = 0.0
+    bound: str | None = None
 
     def ticks(self, t: int) -> int:
         return self.offset + round(t * self.timebase_hz / self.hz)
 
     def to_dict(self) -> dict:
-        return {"timebase_hz": self.timebase_hz, "offset": self.offset, "uncertainty_ticks": self.uncertainty}
+        return {"timebase_hz": self.timebase_hz, "offset": self.offset, "uncertainty_ticks": self.uncertainty,
+                "bound": self.bound}
 
 
 class TimedSwo:

@@ -67,7 +67,8 @@ describe("実行すると API を呼ぶ", () => {
                                 "debug.breakpoint.list": { breakpoints: [], watchpoints: [] }, "debug.elf.load_demo":
                                   { path: "/demo.elf", files: [] }, "debug.source.list": { files: [] },
                                 "debug.halt_risk": { elf: "/x/app.elf", names: ["RADIO_IRQHandler"], patterns: [],
-                                                     matched: true, monitor_in_elf: false,
+                                                     matched: true, monitor_in_elf: false, debug_mode: "halt",
+                                                     confirm_before_halt: true,
                                                      matches: [{ query: "RADIO_IRQHandler", by: "name", count: 1,
                                                                  symbols: [{ name: "RADIO_IRQHandler", kind: "function",
                                                                              address: 0x100 }] }] } });

@@ -20,6 +20,7 @@ import InterruptsPanel from "./InterruptsPanel.svelte";
 import LocalsPanel from "./LocalsPanel.svelte";
 import LogPanel from "./LogPanel.svelte";
 import LinuxPanel from "./LinuxPanel.svelte";
+import LinuxHaltPanel from "./LinuxHaltPanel.svelte";
 import LogicAnalyzerPanel from "./LogicAnalyzerPanel.svelte";
 import LowLevelPanel from "./LowLevelPanel.svelte";
 import MemoryPanel from "./MemoryPanel.svelte";
@@ -29,6 +30,8 @@ import ProfilePanel from "./ProfilePanel.svelte";
 import RecordingsPanel from "./RecordingsPanel.svelte";
 import RegistersPanel from "./RegistersPanel.svelte";
 import RtosObjectsPanel from "./RtosObjectsPanel.svelte";
+import RtosTimingPanel from "./RtosTimingPanel.svelte";
+import TestpointsPanel from "./TestpointsPanel.svelte";
 import SourcePanel from "./SourcePanel.svelte";
 import SystemPanel from "./SystemPanel.svelte";
 import SwoTracePanel from "./SwoTracePanel.svelte";
@@ -54,12 +57,13 @@ export const PANELS: PanelDef[] = [
   { id: "fault", title: "panel.fault", component: FaultPanel, group: "debug" },
   // 時間軸・端末・記録
   { id: "timeline", title: "panel.timeline", component: TimelinePanel, group: "trace" },
-  { id: "terminal", title: "panel.terminal", component: TerminalPanel, group: "trace" },
-  { id: "log", title: "panel.log", component: LogPanel, group: "trace" },
+  { id: "terminal", title: "panel.terminal", about: "panel.terminal.about", component: TerminalPanel, group: "trace" },
+  { id: "log", title: "panel.log", about: "panel.log.about", component: LogPanel, group: "trace" },
   { id: "linux", title: "panel.linux", component: LinuxPanel, group: "trace" },
-  { id: "activity", title: "panel.activity", component: ActivityPanel, group: "trace" },
+  { id: "linuxHalt", title: "panel.linuxHalt", component: LinuxHaltPanel, group: "trace" },
+  { id: "activity", title: "panel.activity", about: "panel.activity.about", component: ActivityPanel, group: "trace" },
   { id: "swoTrace", title: "panel.swoTrace", component: SwoTracePanel, group: "trace" },
-  { id: "eventLog", title: "panel.eventLog", component: EventLogPanel, group: "trace" },
+  { id: "eventLog", title: "panel.eventLog", about: "panel.eventLog.about", component: EventLogPanel, group: "trace" },
   { id: "recordings", title: "panel.recordings", component: RecordingsPanel, group: "trace" },
   // 解析のビュー（システム解析 = MCU と FPGA を対等に並べる）
   { id: "system", title: "panel.system", component: SystemPanel, group: "analysis" },
@@ -67,6 +71,10 @@ export const PANELS: PanelDef[] = [
   { id: "power", title: "panel.power", component: PowerPanel, group: "analysis" },
   { id: "cpuLoad", title: "panel.cpuLoad", component: CpuLoadPanel, group: "analysis" },
   { id: "rtosObjects", title: "panel.rtosObjects", component: RtosObjectsPanel, group: "analysis" },
+  // RTOS の時間（ジョブの応答時間・キュー・スタックの最大。CPU Load と同じタスクの時間軸から）
+  { id: "rtosTiming", title: "panel.rtosTiming", component: RtosTimingPanel, group: "analysis" },
+  // 時間を測る（テストポイントの関数の時間・異常・呼び出し・カバレッジ。docs/superpowers/specs/2026-11-02-ui-default-panels-design.md）
+  { id: "testpoints", title: "panel.testpoints", component: TestpointsPanel, group: "analysis" },
   { id: "heap", title: "panel.heap", component: HeapPanel, group: "analysis" },
   { id: "profile", title: "panel.profile", component: ProfilePanel, group: "analysis" },
   { id: "interrupts", title: "panel.interrupts", component: InterruptsPanel, group: "analysis" },

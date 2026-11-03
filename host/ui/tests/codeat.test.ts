@@ -28,7 +28,7 @@ describe("応答 → 描く値", () => {
   });
 
   it("同じ行の直前と直後は両方の印。t で止まっていれば止まった場所の印も（走っていれば付けない）", () => {
-    const halted = { t: 1200, dt_s: -3e-6, uncertainty_s: 1e-6, state: "HALTED", file: "main.c", line: 17, pc: 0x20000054 };
+    const halted = { t: 1200, dt_s: -3e-6, uncertainty_s: 1e-6, state: "HALTED" as const, file: "main.c", line: 17, pc: 0x20000054 };
     const r = response({ pc_after: sample(2000, "main.c", 17), state: halted, halt_before: halted });
     expect(lineMarks(r, "main.c").get(17)).toEqual(["before", "after", "halt"]);
     expect(haltedAt(r)).toBe(halted);

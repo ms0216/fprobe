@@ -28,7 +28,7 @@ def test_plan_slots_rejects_addresses_outside_32_bits():
 
 def test_swd_hz_for_rate_rejects_a_non_positive_rate():
     with pytest.raises(ValueError):
-        swd_hz_for_rate([(0x2000_0000, 1)], 0, 100_000_000)
+        swd_hz_for_rate([(0x2000_0000, 1)], 0, 100_000_000, 1)
 
 
 def test_sampler_ap_is_range_checked():

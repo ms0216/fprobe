@@ -1,10 +1,13 @@
 """fprobe.api.spec / gen: API の仕様（host/api/fprobe_api.json）の読み込み・検証・生成物の一致。"""
 
+import dataclasses
+
 import pytest
 
 from fprobe.api import API_VERSION
 from fprobe.api.gen import render_markdown, render_typescript, write_all
-from fprobe.api.spec import InvalidParams, load_spec
+from fprobe.api.spec import InvalidParams, InvalidResult, load_spec, result_schema_problems
+from fprobe.caps import Capabilities
 from fprobe.mcp_server import Probe
 
 
@@ -82,7 +85,7 @@ def test_irreversible_methods_are_declared_in_the_spec(spec):
 
 
 CALLER = {"ui.state.set", "watch.set", "rtos.timeline.start", "profile.start", "rtt.start", "cycles.clock",
-          "recording.mark", "rules.check", "inject.run"}
+          "recording.mark", "rules.check", "inject.run", "linux.halt.open"}
 
 
 def test_who_started_or_placed_something_is_the_callers_fact(spec):
@@ -100,3 +103,42 @@ def test_the_count_window_of_fpga_conditions_is_given_by_the_caller(spec):
     m = spec.methods["fpga_obs.count"]
     assert set(m.params["required"]) == {"conditions", "last"}
     assert "default" not in m.params["properties"]["last"]
+
+
+def test_every_result_is_a_written_shape(spec):
+    # 応答の形はすべて書いてある: 型の無い節・中身を書かない object・items の無い配列・使われない定義が無い
+    # （result_schema_problems の約束。何でもよい値は $defs の Json を明示して引く）
+    assert result_schema_problems(spec) == []
+
+
+def test_dataclass_shapes_are_generated_from_the_implementation(spec):
+    # 実装の dataclass をそのまま返す形（x-from）は、仕様に手で書かず dataclass から作る（gen が作り直し、
+    # test_generated_files_match_the_spec が古さを見る）。ケイパビリティは caps.Capabilities の全部の欄
+    caps = spec.defs["Capabilities"]
+    assert caps["x-from"] == "fprobe.caps:Capabilities"
+    assert list(caps["properties"]) == [f.name for f in dataclasses.fields(Capabilities)]
+    assert caps["properties"]["inject"] == {"type": "boolean"}           # 作った後は必ず bool（metadata の api_type）
+    assert spec.methods["probe.info"].result["properties"]["capabilities"] == {"$ref": "#/$defs/Capabilities"}
+
+
+def test_results_are_validated_against_the_spec(spec):
+    with pytest.raises(InvalidResult, match=r"probe\.info: \['capabilities'\]"):
+        spec.validate_result("probe.info", {"capabilities": {}, "link_open": None, "time": 0, "target_connected": False,
+                                            "device": None, "name": None, "version": None})
+    with pytest.raises(InvalidResult, match="probe.info"):
+        spec.validate_result("probe.info", {"surprise": 1})
+
+
+def test_type_schema_follows_the_jsonable_shape():
+    from typing import Literal
+    from fprobe.api.typeschema import type_schema
+    defs: dict = {}
+    assert type_schema(int | None, defs) == {"type": ["integer", "null"]}
+    assert type_schema(tuple[int, ...], defs) == {"type": "array", "items": {"type": "integer"}}
+    assert type_schema(tuple[int, str], defs) == {"type": "array", "prefixItems": [{"type": "integer"}, {"type": "string"}],
+                                                  "items": False}
+    assert type_schema(dict[int, bytes], defs) == {"type": "object", "additionalProperties": {"type": "string"}}
+    assert type_schema(Literal["a", "b"], defs) == {"enum": ["a", "b"]}
+    assert type_schema(Capabilities, defs) == {"$ref": "#/$defs/Capabilities"} and "LaChannel" in defs
+    with pytest.raises(TypeError):
+        type_schema(object, defs)

@@ -59,7 +59,7 @@ def connected(bus, target="rp2040_core0", core=0, pc=0x10000200, state=Target.St
     probe = SimpleNamespace(_link=bus, flush=lambda: flushed.append(True))
     p._debug = SimpleNamespace(target=pyocd_core, probe=probe, close=lambda: None)
     p._session = SimpleNamespace(device=FakeDevice())
-    p._link = {"target": target, "frequency_hz": 4_000_000, "wire": "swd", "core": core}
+    p._link = {"target": target, "frequency_hz": 4_000_000, "wire": "swd", **({"core": core} if core is not None else {})}   # 本物と同じく core は複数ドロップの部品だけ
     return p, flushed
 
 

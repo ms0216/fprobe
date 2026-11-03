@@ -4,20 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fprobe"
+license = { text = "AGPL-3.0-only（host/firmware と fprobe/testpoint/fprobe_tp.h は Apache-2.0。LICENSING.md）" }
 version = "0.1.0"
 description = "fprobe（FPGA マルチファンクション・デバッグプローブ）のホストライブラリ"
 requires-python = ">=3.12"
-license = { text = "AGPL-3.0-only（host/firmware と fprobe/testpoint/fprobe_tp.h は Apache-2.0。LICENSING.md）" }
 dependencies = ["pyusb>=1.2", "libusb-package>=1.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# 入口（使い方）ごとの extras。素のライブラリ（USB・Ethernet の Device）は依存の本体だけで動く。
+#   ライブラリ+デバッガ: fprobe[debug]    デーモン+画面: fprobe[daemon]    AI（MCP）: fprobe[mcp]    試験: fprobe[dev]
 # 入っていれば大きな記録のロジアナの波形（数千万の変化点）を一括の計算で開く（無くても同じ結果で遅いだけ）
 fast = ["numpy>=1.24"]
 debug = ["pyocd>=0.45", "capstone>=5"]     # fprobe.session（pyOCD と同時利用）、fprobe.disasm
 serial = ["pyserial>=3.5"]                   # SerialLink（UART のホストリンク）
-mcp = ["fprobe[debug,fast]", "mcp>=2.3", "pyserial>=3.5", "pyyaml>=6"]   # fprobe-mcp（pyyaml: 規則・台本の YAML）
+client = ["websockets>=15"]                  # デーモンの API のクライアント（fprobe.api.client。MCP が使う）
+# fprobe-daemon（API・画面・GDB サーバ）。デバッガ・SerialLink・規則の YAML も使う
+daemon = ["fprobe[debug,fast,serial,client]", "uvicorn>=0.30", "starlette>=0.40", "pyyaml>=6", "jsonschema>=4"]
+mcp = ["fprobe[daemon]", "mcp>=2.3"]        # fprobe-mcp。必要ならデーモン（fprobe-daemon）を子プロセスで起こすので daemon を含む
 aux = ["mpremote>=1.25", "pyserial>=3.5"]    # 補助マイコン（Pico）へのプログラムの書き込み（fprobe.aux_flash）
+# 試験（pytest host）。デーモン・MCP の結合の試験も含むので、その extras をすべて含む
+dev = ["pytest>=8", "fprobe[mcp,aux]", "httpx>=0.27"]
 
 [project.scripts]
 fprobe = "fprobe.__main__:main"
@@ -33,3 +39,8 @@ fprobe = ["data/svd/*", "data/connect_scripts/*.py", "testpoint/*.h", "linux/age
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error::DeprecationWarning"]
+# 速さの約束の試験（perf_budget.within を使うもの）は既定の実行から外し、別の実行で続けて走らせる（docs/testing-speed.md）:
+#   pytest                 # 機能の試験（perf を除く）
+#   pytest -m perf         # 速さの約束だけ（ほかの試験の後始末・負荷と混ざらない別のプロセス）
+addopts = "-m 'not perf'"
+markers = ["perf: 速さの約束の試験（perf_budget.within）。既定の実行から外れる。pytest -m perf で走らせる"]

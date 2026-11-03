@@ -6,8 +6,7 @@ import usb.util
 from libusb_package import get_libusb1_backend
 
 from . import generated as g
-from .frame_link import CH_CONTROL, CH_STREAM, MAX_PAYLOAD, FrameLink
-from .serial_link import DEFAULT_BAUD, SerialLink
+from .frame_link import CH_CONTROL, CH_STREAM, MAX_PAYLOAD, FrameLink, StreamBuffer
 
 __all__ = ["DeviceNotFound", "LinkTransport", "UsbTransport", "find_device"]
 
@@ -94,6 +93,19 @@ class UsbTransport:
             except usb.core.USBTimeoutError:
                 return
 
+    # 拡張ストリームの道（Device がこの口で問う）。USB の道は Bulk の EP の 1 つだけで、PC 側に溜めず（読みが EP の読みそのもの）、
+    # 中継も無い
+    stream_tcp_open = False
+
+    def select_stream_path(self, ps_read: bool) -> None:
+        """道は 1 つなので何もしない。"""
+
+    def stream_buffer(self, reset_peak: bool = False) -> None:
+        return None
+
+    def relay_status(self) -> None:
+        return None
+
     def close(self) -> None:
         usb.util.release_interface(self._device, self._interface)
         if self._owns_device:
@@ -109,17 +121,6 @@ class LinkTransport:
     def __init__(self, link: FrameLink, *, owns_link: bool = False):
         self.link = link
         self._owns_link = owns_link
-
-    @classmethod
-    def open(cls, port: str, baud: int = DEFAULT_BAUD) -> "LinkTransport":
-        """SerialLink の COM ポートで開く。"""
-        return cls(SerialLink.open(port, baud), owns_link=True)
-
-    @classmethod
-    def open_eth(cls, host: str, port: int | None = None) -> "LinkTransport":
-        """EthLink（UDP）で開く。"""
-        from .eth_link import DEFAULT_PORT, EthLink
-        return cls(EthLink.open(host, port or DEFAULT_PORT), owns_link=True)
 
     def send(self, message: bytes) -> None:
         self.link.send(CH_CONTROL, message)
@@ -143,6 +144,26 @@ class LinkTransport:
         if not data:
             raise TimeoutError("ストリームが届かない")
         return data
+
+    @property
+    def stream_tcp_open(self) -> bool:
+        """拡張ストリーム（ch 4）を TCP でも受けている（EthLink.open_stream_tcp 済み）。"""
+        return self.link.stream_tcp_open
+
+    def select_stream_path(self, ps_read: bool) -> None:
+        """拡張ストリームを受け付ける道を選ぶ: ps_read = True は PS 直読み（TCP）、False はこのリンクのフレーム。TCP を
+        開いていなければ道は 1 つなので何もしない（frame_link.FrameLink.select_source）。TCP が切れた後も道は選ぶ（切れた後に
+        窓経由を選べるように。PS 直読みは TCP の道のまま読みが「止まった」で失敗する）。"""
+        if self.link.stream_tcp_opened:
+            self.link.select_source(CH_STREAM, "stream" if ps_read else "frames")
+
+    def stream_buffer(self, reset_peak: bool = False) -> StreamBuffer:
+        """拡張ストリーム（ch 4）の PC の受け取り済みで未読の量と欠け（frame_link.StreamBuffer）。"""
+        return self.link.stream_buffer(reset_peak=reset_peak)
+
+    def relay_status(self) -> dict | None:
+        """中継の状態（eth_link.EthLink.relay_status）。中継の無いリンク・返事の無い中継では None。"""
+        return self.link.relay_status()
 
     def flush(self) -> None:
         """遅れて届く応答も含めて、50 ms 何も来なくなるまで CONTROL を読み捨てる。"""

@@ -22,6 +22,7 @@ class Pin:
     drive: int | None = None         # 出力電流（mA）
     bank_vccio: str | None = None    # バンクの I/O 電圧（"1.5" 等。SSTL など 3.3V 以外の規格で指定する）
     hysteresis: str | None = None    # 入力のヒステリシス（"NONE" / "L2H" / "H2L" / "HIGH"）
+    slew: str | None = None          # 出力の立ち上がり・立ち下がりの速さ（"FAST" / "SLOW"。100 MHz 以上で toggle する出力は FAST）
 
 
 @dataclass(frozen=True)

@@ -36,6 +36,10 @@
       {#if isFatal($app.target.fatal)}<span class="fatal">· {$i18n("status.target.fatal")}</span>
       {:else}<span class="tick">· {$i18n("status.target.tickStopped")}</span>{/if}
     {/if}</span>
+  {#if $app.target?.linux}
+    {@const lx = $app.target.linux}
+    <span class="item mono" title={lx.elf}>Linux {lx.comm} pid {lx.pid}{lx.tid !== null ? ` tid ${lx.tid}` : ""}</span>
+  {/if}
   {#if link?.speed}<span class="item">{link.wire} {frequency(link.speed)}</span>{/if}
   {#if link?.cpu}<span class="item">{link.cpu}</span>{/if}
   <span class="spacer"></span>

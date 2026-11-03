@@ -4,7 +4,7 @@ DemoProbe（fake_demo.py）に混ぜる mixin。本物のコードをそのま�
 - 規則（rules.check・rules.states・rules.report）: 本物の Probe（self._elf）にデモの記録を開いた状態で渡す。
 - 故障注入（inject.run）: 台本の検査と試行の進め方は本物（fprobe.inject.run_script）。機器の操作（InjectHost）だけ偽物
   （_DemoInjectHost）: 割り込み書き込みはデモの RAM に書き、注入の時刻はデモの記録の範囲の中の時刻にする。
-- フック（hooks.*）: 本物の登録簿（fprobe.probe_hooks.HookTools）。デーモンが backend.hook_table を見て実行する。
+- フック（hooks.*）: 本物の登録簿（fprobe.probe_hooks.HookService）。デーモンが backend.hook_table を見て実行する。
 
 偽の機器の成立の仕方（デモの約束。本物の機器の振る舞いではない）:
 - host: 発火（fire）で成立。pattern・sequence: 仕掛けて 20 ms 後に成立（端子が動いたとみなす）。
@@ -16,7 +16,8 @@ DemoProbe（fake_demo.py）に混ぜる mixin。本物のコードをそのま�
 import time
 
 from fprobe.inject import InjectScript, run_script
-from fprobe.probe_hooks import HookTools
+from fprobe.probe_hooks import HookService
+from fprobe.probe_service import expose
 from fprobe.xtrig import InjectStatus
 
 __all__ = ["VerifyDemo"]
@@ -131,10 +132,11 @@ class _DemoInjectHost:
         return time.monotonic()
 
 
-class VerifyDemo(HookTools):
+@expose("_svc_hooks", HookService)
+class VerifyDemo:
     def _init_verify(self) -> None:
         """DemoProbe.__init__ から。"""
-        self._init_hooks()
+        self._svc_hooks = HookService(self)
         self._inject_status = InjectStatus(False, "ok", 0, 0, 0)
         self._inject_n = 0
 

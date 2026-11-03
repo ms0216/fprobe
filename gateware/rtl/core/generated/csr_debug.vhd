@@ -18,7 +18,7 @@ entity csr_debug is
     bus_ack   : out std_logic;
     bus_err   : out std_logic;
     bus_rdata : out csr_word_t;
-    sample_delay_swd : out std_logic_vector(1 downto 0);   -- sample_delay.swd（RW）
+    sample_delay_swd : out std_logic_vector(2 downto 0);   -- sample_delay.swd（RW）
     sample_delay_jtag : out std_logic_vector(2 downto 0)   -- sample_delay.jtag（RW）
   );
 end entity;
@@ -29,7 +29,7 @@ architecture rtl of csr_debug is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal sample_delay_swd_r : std_logic_vector(1 downto 0) := "01";
+  signal sample_delay_swd_r : std_logic_vector(2 downto 0) := "001";
   signal sample_delay_jtag_r : std_logic_vector(2 downto 0) := "000";
 begin
   start <= bus_req = '1' and ack = '0';
@@ -42,16 +42,16 @@ begin
       err   <= '0';
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
-        sample_delay_swd_r <= "01";
+        sample_delay_swd_r <= "001";
         sample_delay_jtag_r <= "000";
       elsif start then
         ack   <= '1';
         case index is
           when 0 =>   -- sample_delay
-            rdata(1 downto 0) <= sample_delay_swd_r;
+            rdata(2 downto 0) <= sample_delay_swd_r;
             rdata(10 downto 8) <= sample_delay_jtag_r;
             if bus_we = '1' then
-              sample_delay_swd_r <= bus_wdata(1 downto 0);
+              sample_delay_swd_r <= bus_wdata(2 downto 0);
               sample_delay_jtag_r <= bus_wdata(10 downto 8);
             end if;
           when others =>

@@ -36,15 +36,15 @@ function setup(responders: Record<string, any> = {}, hash = "") {
 }
 
 describe("URL のハッシュ", () => {
-  it("視点・カーソル・段・出来事・フレームを載せ、ほかの項目（token）は保つ", () => {
+  it("視点・カーソル・段・出来事・フレームを載せ、ほかの項目（layout）は保つ", () => {
     const d = { ...emptyScreen(), view: { source: "recording" as const, t0: 100, t1: 900 },
                 cursors: { selection: 150, mouse: 7, reference: 120 }, rows: ["wave:0", "uart"],
                 event: { stream: "uart", t: 160 }, frame: 2 };
-    const hash = toHash("#token=abc", d);
-    expect(hash).toBe("#token=abc&v=recording:100-900&sel=150&ref=120&rows=wave:0,uart&ev=uart@160&f=2");
+    const hash = toHash("#layout=system", d);
+    expect(hash).toBe("#layout=system&v=recording:100-900&sel=150&ref=120&rows=wave:0,uart&ev=uart@160&f=2");
     expect(fromHash(hash)).toEqual({ view: d.view, cursors: { selection: 150, mouse: null, reference: 120 },
                                      rows: ["wave:0", "uart"], event: { stream: "uart", t: 160 }, frame: 2 });
-    expect(toHash("#token=abc", emptyScreen())).toBe("#token=abc");
+    expect(toHash("#layout=system", emptyScreen())).toBe("#layout=system");
     expect(fromHash("#v=capture:9-3&f=-1")).toEqual({});                      // 壊れた値は使わない
   });
 });
@@ -113,7 +113,7 @@ describe("画面の状態の同期", () => {
   });
 
   it("URL に状態があれば、開いたときにそれを当ててデーモンへ送る。URL も手元に合わせて書き換える", async () => {
-    const { conn, tl, sync, url } = setup({}, "#token=t&sel=77&f=0");
+    const { conn, tl, sync, url } = setup({}, "#layout=debug&sel=77&f=0");
     conn.link!("open", {});
     await settle();
     expect(tl.snapshot.selection).toBe(77);
@@ -121,7 +121,7 @@ describe("画面の状態の同期", () => {
       .toEqual({ cursors: { selection: 77, mouse: null, reference: null }, frame: 0, origin: sync.origin });
     tl.setReference(5);
     await settle(400);
-    expect(url()).toBe("#token=t&sel=77&ref=5");
+    expect(url()).toBe("#layout=debug&sel=77&ref=5");
   });
 
   it("ほかの窓・AI のマウスのカーソルを時間軸へ（自分のものは除く。カーソルだけの変化では視点を当て直さない）", async () => {

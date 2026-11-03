@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from fprobe.probe_formats import FormatTools
+from fprobe.probe_formats import FormatService
 
 UP = [SimpleNamespace(index=0, name="Terminal"), SimpleNamespace(index=1, name="SysView")]
 
 
 def pick(up, channel, format):
-    return FormatTools._rtt_channel_index(up, channel, format)
+    return FormatService._rtt_channel_index(up, channel, format)
 
 
 def test_the_name_the_format_defines_is_found():

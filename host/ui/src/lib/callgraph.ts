@@ -1,20 +1,10 @@
+import type { Result } from "./api";
 // Call Graph のビューの計算（IAR・Keil の Call Graph / Stack Usage の型）。Svelte・DOM に依らない。
 // 材料は debug.stack.static（ELF だけ。機器に触らない）の関数ごとの枠・呼び先を含む最大・最深の経路・直接の呼び先と、
 // 根（リセット・例外・呼ばれない関数・関数ポインタの呼び先の候補）。プロファイルがあれば関数の割合も並べる。
 
 /** debug.stack.static の functions の要素 */
-export interface StackFunction {
-  function: string;
-  address?: number;
-  frame: number;
-  frame_source: string;
-  max: number;
-  bounded: boolean;
-  reasons: string[];
-  unknown_from: string[];
-  path: string[];
-  calls?: string[];
-}
+export type StackFunction = Result<"debug.stack.static">["functions"][number];
 
 export interface StackRoot {
   root: string;

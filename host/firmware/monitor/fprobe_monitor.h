@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 // fprobe のモニタ方式（止めずにデバッグする。J-Link の Monitor Mode Debugging の相当）のターゲット側。
 // 仕様: docs/superpowers/specs/2026-10-18-u37-monitor-mode-design.md
 //

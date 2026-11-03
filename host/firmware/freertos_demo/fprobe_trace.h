@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
 /* 方法 B（組み込みあり）: FreeRTOS のトレースフックで、タスクとカーネルの出来事を ITM のスティミュラス・ポートに書く。
  * 仕様: docs/superpowers/specs/2026-10-18-u10-u16-trace-hooks-user-events-design.md の 1 節（ポート 31 は F6 の 5.2 節）。
  *

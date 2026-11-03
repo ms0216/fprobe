@@ -18,7 +18,7 @@ import pytest
 
 from fprobe import generated as g
 from fprobe import la_wave
-from fprobe.caps import Capabilities
+from caps_fakes import FakeDeviceBase, caps_for
 from fprobe.la import (Capture, DeepAnalyzer, LaStream, LogicAnalyzer, SegmentSplitter, StreamChunk, Transitions,
                        VcdWriter, Waveform, decode_beats, decode_transitions, trigger_sample, write_vcd)
 
@@ -214,7 +214,7 @@ def test_stream_chunks_join_to_whole(seed, rle, tmp_path, numpy_mode):
     else:
         expected = random_samples(rng, 8 * rng.randint(1, 60), 16)
         data = array("H", expected).tobytes()
-    stream = LaStream(None, rle, 1e-8, 16)
+    stream = LaStream(FakeDeviceBase(), rle, 1e-8, 16)
     cuts = sorted(rng.sample(range(1, len(data)), min(len(data) - 1, rng.randint(0, 8)))) if len(data) > 1 else []
     pieces = [data[a:b] for a, b in zip([0, *cuts], [*cuts, len(data)])]
     chunks = [c for c in (stream._take(p) for p in pieces) if c is not None]
@@ -256,7 +256,7 @@ def test_stream_with_headers_splits_at_any_byte(seed):
         wire += head.to_bytes(16, "little") + body
         rle_beats.append(body)
         seq += n
-    stream = LaStream(None, False, 1e-8, 16, events=(0, 100))
+    stream = LaStream(FakeDeviceBase(), False, 1e-8, 16, events=(0, 100))
     cuts = sorted(rng.sample(range(1, len(wire)), min(len(wire) - 1, 7)))
     got = b"".join(c.data for c in (stream._take(wire[a:b]) for a, b in zip([0, *cuts], [*cuts, len(wire)])) if c)
     assert got == b"".join(rle_beats)
@@ -264,43 +264,39 @@ def test_stream_with_headers_splits_at_any_byte(seed):
 
 # --- 深いバッファ（リング）の読み出しの別実装 ------------------------------------------------------------
 
-class RingDevice:
+class RingDevice(FakeDeviceBase):
     """深いバッファの機器の模型: 拍 k をリングの k % R に置き、トリガの拍 tb・スロット slot、トリガ後 post 拍を埋めて止まった状態。"""
 
     def __init__(self, samples, ring, tb, slot, post, rle_data=None, time=1_000_000, **caps):
-        self.caps = Capabilities(la_channels=16, la_sample_hz=100_000_000, sys_clock_hz=100_000_000, mem_bytes=1 << 20,
-                                 **caps)
+        self.caps = caps_for(la_channels=16, la_sample_hz=100_000_000, mem_bytes=1 << 20, **caps)
         self.ring, self.tb, self.slot, self.post, self.time = ring, tb, slot, post, time
         self.data = rle_data if rle_data is not None else array("H", samples).tobytes()
         self.regs = {g.LA_DEEP_RING_BEATS: ring, g.MEM_STATUS: 1 << g.MEM_STATUS_READY[0],
                      g.LA_DEEP_STATUS: slot << g.LA_DEEP_STATUS_TRIGGER_SLOT[0] | 1 << g.LA_DEEP_STATUS_DONE[0]}
         self.pending = b""
 
-    def capabilities(self):
-        return self.caps
-
-    def read32(self, a):
-        if a == g.LA_DEEP_POST_BEATS and a not in self.regs:
+    def read32(self, address):
+        if address == g.LA_DEEP_POST_BEATS and address not in self.regs:
             return self.post
-        return self.regs.get(a, 0)
+        return self.regs.get(address, 0)
 
-    def read(self, a, count=1):
-        if a == g.LA_DEEP_TRIGGER_BEAT:
+    def read(self, address, count=1, *, timeout_retries=0):
+        if address == g.LA_DEEP_TRIGGER_BEAT:
             return [self.tb % self.ring, min(self.tb + 1 + self.post, self.ring), self.time & 0xFFFFFFFF, self.time >> 32]
         return [0] * count
 
-    def write32(self, a, v):
-        self.regs[a] = v
+    def write32(self, address, value):
+        self.regs[address] = value
 
-    def write(self, a, words):
+    def write(self, address, words):
         for i, w in enumerate(words):
-            self.regs[a + 4 * i] = w
-        if a == g.LA_DEEP_READ_FIRST:
+            self.regs[address + 4 * i] = w
+        if address == g.LA_DEEP_READ_FIRST:
             self.first, self.count = words
 
-    def read_stream(self, n, timeout_ms=0):
+    def read_stream(self, size, timeout_ms=0):
         beats = [(self.first + j) % self.ring for j in range(self.count)]
-        return b"".join(self.data[b * 16:(b + 1) * 16] for b in beats)[:n]
+        return b"".join(self.data[b * 16:(b + 1) * 16] for b in beats)[:size]
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -432,18 +428,11 @@ class _Collector:
 
 
 def _tools(dev, collector):
-    from fprobe.probe_la import LogicAnalyzerTools
-
-    class T(LogicAnalyzerTools):
-        pass
-    t = T()
-    t._init_la()
-    t._lock = threading.RLock()
-    t.session = SimpleNamespace(device=dev)
-    t._collector = collector
-    t._la = None
-    t._la_idle = lambda: None
-    return t
+    """ロジアナのサービスを、偽のホスト（核と、ほかの領域の口）で作る（機器・Probe は使わない）。"""
+    from fprobe.probe_la import LogicAnalyzerService
+    host = SimpleNamespace(_lock=threading.RLock(), session=SimpleNamespace(device=dev), _collector=collector,
+                           _recorder=None, _la_idle=lambda: None)
+    return LogicAnalyzerService(host)
 
 
 def test_failed_deep_arm_does_not_leave_event_recording_paused():

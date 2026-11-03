@@ -6,6 +6,7 @@
 // - 設定の読み戻し（xtrig.status の match・inject、la.trigger_status）を欄へ入れる
 // - 条件の欄: API の仕様（fprobe_api.json）の引数そのまま（人の操作と AI の操作は一対一）
 // Svelte に依らない。
+import type { Result } from "./api";
 import { buildParams, fieldsOf, type Field, type FieldError, type FieldValues } from "./apiform";
 import { METHODS } from "./apispec";
 import { SOURCES, type SequenceStatus, type TriggerSource } from "./logic";
@@ -115,19 +116,8 @@ export function cellBlock(s: TriggerSource, column: RouteColumn, sources: Record
 // --- 出力の端子（xtrig.output_status ↔ xtrig.output_set） ---------------------------------------------
 
 /** xtrig.output_status の outputs の 1 つ（そのまま） */
-export interface OutputPin {
-  channel: number;
-  pull_up: boolean;
-  configured: boolean;
-  enabled?: boolean;
-  active?: boolean;
-  claim?: boolean;
-  mode?: string;
-  level?: string;
-  pattern?: { mask: number; value: number; any: boolean };
-  sources?: string[];
-  pulse_us?: { min: number; max: number };
-}
+/** xtrig.output_status の端子 1 本（API の応答の型） */
+export type OutputPin = Result<"xtrig.output_status">["outputs"][number];
 
 export interface OutputColumn { channel: number; sources: TriggerSource[]; editable: boolean; reason?: "pulse" }
 
@@ -157,30 +147,13 @@ export function outputSourcesCall(pin: OutputPin, sources: TriggerSource[]):
 
 // --- 回数・時刻（API の事実） --------------------------------------------------------------------
 
-export interface XtrigStatus {
-  /** 割り込み書き込みの状態と、中身のレジスタの読み戻し（ap・address・value） */
-  inject?: { busy: boolean; result: string; ack: number; count: number; time: number; ap: number; address: number;
-             value: number };
-  /** 番地一致の回数・時刻と、条件のレジスタの読み戻し（xtrig.set_match の引数と同じ名前） */
-  match?: { count: number; time: number; address: number; address_mask: number; data: number; data_mask: number;
-            on_write: boolean; on_read: boolean };
-  route?: { to_la?: string[]; to_inject?: string[] };
-}
-export interface ObsTriggerStatus { condition: string | null; halt?: boolean; la?: boolean; count?: number; orphan?: boolean;
-                                    restored?: boolean; mask?: number; value?: number; change?: number }
-export interface SamplerTriggerStatus { enabled: boolean; address: number; mask: number; value: number; halt: boolean; la: boolean;
-                                        matched: boolean; seen_any: boolean; seen: number; count: number; time: number;
-                                        prev_time: number }
+export type XtrigStatus = Result<"xtrig.status">;
+export type ObsTriggerStatus = Result<"fpga_obs.trigger_status">;
+export type SamplerTriggerStatus = Result<"sampler.trigger_status">;
 /** 捕捉の状態（la.trigger_status の internal・deep） */
 export interface CaptureState { capturing: boolean; triggered: boolean; done: boolean; trigger_time: number | null }
 /** la.trigger_status: ロジアナのトリガの条件と状態のレジスタの読み戻し */
-export interface LaTriggerStatus {
-  mask: number; value: number; rise: number; fall: number; external_only: boolean; rate_hz: number; pretrigger: number;
-  filter?: { channels: number; cycles: number; min_width_ns: number | null };
-  pulse?: { mode: "none" } | { mode: "width" | "timeout"; level: number; channel: number; min_ns: number; max_ns: number | null };
-  internal?: CaptureState;
-  deep?: CaptureState;
-}
+export type LaTriggerStatus = Result<"la.trigger_status">;
 export interface Statuses {
   xtrig?: XtrigStatus | null;
   la?: LaTriggerStatus | null;
@@ -220,7 +193,7 @@ export function sourceFacts(s: TriggerSource, st: Statuses): Facts {
     case "sequence":            // 単発: 発火したか・その時刻だけ（回数のレジスタは無い）
       return { count: UNREADABLE, time: st.sequence?.fired ? st.sequence.time : null };
     case "obs_match":           // 成り立った時刻のレジスタは無い
-      return { count: st.obs?.condition !== null || st.obs?.orphan ? st.obs?.count ?? null : null, time: UNREADABLE };
+      return { count: st.obs && "count" in st.obs ? st.obs.count : null, time: UNREADABLE };   // 仕掛けていなければ回数は無い
     case "sampler_match":
       return counted(st.sampler?.count, st.sampler?.time);
   }

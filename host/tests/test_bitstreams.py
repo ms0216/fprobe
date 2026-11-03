@@ -12,14 +12,31 @@ from fprobe import bitstreams as bs
 from fprobe import generated as g
 from fprobe import mcp_server
 from fprobe.mcp_server import Probe
+from fprobe.probe_design import DesignService
+from caps_fakes import FakeDeviceBase, caps_for
 
 
 def caps(design, *, jtag=None, sampler=None, inject=None, build=None):
     standard = design == g.DESIGN_FOR_SWD
-    return SimpleNamespace(design=design, board="Tang Primer 20K Dock", jtag=not standard if jtag is None else jtag,
-                           sampler=standard if sampler is None else sampler,
-                           inject=standard if inject is None else inject, xtrig=True,
-                           sys_clock_hz=100_000_000, timebase_hz=100_000_000, build=build)
+    return caps_for(design, board="Tang Primer 20K Dock", jtag=not standard if jtag is None else jtag,
+                    sampler=standard if sampler is None else sampler,
+                    inject=standard if inject is None else inject, xtrig=True, build=build)
+
+
+class BoardDevice(FakeDeviceBase):
+    """偽の Primer の開いた口: 抜かれた後に読むと USB の切断（本物の Device と同じく読んだものを last_capabilities に残す）。"""
+
+    def __init__(self, read_caps):
+        self._read_caps = read_caps
+
+    def capabilities(self):
+        return self._read_caps()
+
+    def time(self):
+        return 0
+
+    def write32(self, address, value):
+        pass
 
 
 def test_the_designs_come_from_the_gateware():
@@ -123,9 +140,8 @@ class Board:
         def capabilities():
             if board.plugged != plugged:
                 raise usb.core.USBError("Input/Output Error", errno=5)
-            device.last_capabilities = caps(design, **features)
-            return device.last_capabilities
-        device = SimpleNamespace(capabilities=capabilities, time=lambda: 0, write32=lambda a, v: None)
+            return caps(design, **features)
+        device = BoardDevice(capabilities)
         return SimpleNamespace(device=device, debug=debug, close=lambda: None, link=None)
 
 
@@ -142,7 +158,7 @@ def board(tmp_path, monkeypatch):
 
 def make_probe(board, tmp_path):
     p = Probe("0001", bitstreams=str(tmp_path))
-    p._init_design(str(tmp_path), program=board.program, sleep=lambda s: None)
+    p._svc_design = DesignService(p, str(tmp_path), program=board.program, sleep=lambda s: None)
     return p
 
 
@@ -345,3 +361,50 @@ def test_reopening_the_device_keeps_watching_the_elf(board, tmp_path):
     finally:
         p.close()
     assert p._elf_closing.is_set()                       # 本当に閉じるときは止める
+
+
+class _FakeRecorder:
+    def __init__(self, last_ticks):
+        self._last_ticks, self.ended = last_ticks, None
+
+    def end(self, reason, **facts):
+        self.ended = {"reason": reason, **facts}
+
+
+def _recording(p, monkeypatch, last_ticks=1_000):
+    rec = _FakeRecorder(last_ticks)
+    p._recorder = rec
+
+    def stop():
+        p._recorder = None
+        return {"recording": "rec1", "events": None}
+    monkeypatch.setattr(p, "recording_stop", stop)
+    return rec
+
+
+def test_switching_the_design_ends_the_recording_first(board, tmp_path, monkeypatch):
+    # ビットストリームを書くとタイムベースが 0 に戻る（time-accuracy §14.1）: 記録は前の時代で終える
+    p = make_probe(board, tmp_path)
+    try:
+        p.probe_info()
+        rec = _recording(p, monkeypatch)
+        out = p.probe_design_switch(design="fprobe_jtag")
+        assert out["recording_stopped"] == "rec1" and rec.ended["reason"] == "design_switch"
+        assert p._recorder is None
+    finally:
+        p.close()
+
+
+def test_a_lost_link_ends_the_recording_and_tells_whether_the_timebase_restarted(board, tmp_path, monkeypatch):
+    p = make_probe(board, tmp_path)
+    try:
+        p.target_connect("stm32f401xe")
+        rec = _recording(p, monkeypatch, last_ticks=1_000)
+        board.unplug()
+        out = p.recover_link(lost(p))                                   # 開き直した機器のタイムベースは 0
+        assert out["recording_stopped"] == {"name": "rec1", "timebase_restarted": True}
+        assert rec.ended == {"reason": "link_lost", "last_ticks": 1_000} and "rec1" in out["message"]
+        board.unplug()
+        assert p.recover_link(lost(p))["recording_stopped"] is None      # 記録していなければ何もしない
+    finally:
+        p.close()

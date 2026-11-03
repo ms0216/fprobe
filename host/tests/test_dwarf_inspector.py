@@ -47,7 +47,7 @@ def test_backtrace_names_lines_and_arguments_of_every_frame(o0):
     assert trace[1]["line"] == line_of("probe_point(total + corner.x);")
     assert trace[1]["offset"] == trace[1]["pc"] - insp.symbols.symbol("leaf_sum").address
     assert values(trace[0]["arguments"]) == {"marker": vint(1234)}
-    assert values(trace[1]["arguments"]) == {"s": vptr(sensors + 80, "const Sensor", symbol="sensors+80"),
+    assert values(trace[1]["arguments"]) == {"s": vptr(sensors + 80, "const Sensor", deref=True, symbol="sensors+80"),
                                              "depth": vint(0)}
     assert [values(f["arguments"])["depth"] for f in trace[2:6]] == ints(0, 1, 2, 3)
     assert values(trace[5]["arguments"])["s"]["symbol"] == "sensors"
@@ -74,14 +74,14 @@ def test_locals_can_be_written_and_read_in_a_caller_frame(o0):
 
 @pytest.mark.parametrize("expression, expected", [
     ("head->samples[1][2]", vint(-6)),
-    ("sensors[1].name", varray(ints(98, 101, 116, 97, 0, 0, 0, 0), string="beta")),
+    ("sensors[1].name", varray(ints(98, 101, 116, 97, 0, 0, 0, 0), element_type="char", string="beta")),
     ("head->next->pos.y", vint(2)),
     ("sensors[0].flags.level", vint(-3)),
     ("sensors[0].flags.wide", vint(0x123)),
     ("(unsigned char)sensors[0].pos.y", vint(236)),
     ("*(struct Point *)&sensors[1].pos", vstruct(x=vint(-1), y=vint(2))),
     ("matrix[2][3]", vint(23)),
-    ("matrix[1]", varray(ints(10, 11, 12, 13))),
+    ("matrix[1]", varray(ints(10, 11, 12, 13), element_type="uint16_t")),
     ("greeting[4]", vint(ord("o"))),
     ("*message", vint(ord("h"))),
     ("message[7]", vint(ord("f"))),
@@ -112,12 +112,12 @@ def test_expression_types_addresses_and_pointers(o0):
     pointer = insp.read("&sensors[1]")
     assert pointer["type"] == "Sensor *" and pointer["value"]["address"] == sensors + 80
     assert "address" not in pointer
-    assert insp.read("head + 1")["value"] == vptr(sensors + 80, "Sensor", symbol="sensors+80")
+    assert insp.read("head + 1")["value"] == vptr(sensors + 80, "Sensor", deref=True, symbol="sensors+80")
     assert insp.read("callback")["value"]["symbol"] == "square"
     assert insp.read("message")["value"]["string"] == "hello, fprobe"
     assert insp.read("walk::visits")["type"] == "int"
     assert insp.read("sensors[0].samples")["type"] == "int32_t[2][3]"
-    assert insp.read("ramp", max_elements=3)["value"] == varray(ints(1, 2, 0), length=100)
+    assert insp.read("ramp", max_elements=3)["value"] == varray(ints(1, 2, 0), length=100, element_type="uint8_t")
 
 
 @pytest.mark.parametrize("expression", [
@@ -140,7 +140,7 @@ def test_writes_to_globals_including_enums_and_bitfields(o0):
     assert insp.read("sensors[0].mode")["value"] == venum("MODE_FAULT", -2)
     assert insp.read("sensors[0].flags")["value"] == vstruct(ready=vint(1), mode=vint(5), level=vint(-8),
                                                              wide=vint(0x123), raw=vint(0xAB))
-    assert insp.read("sensors[0].samples[0]")["value"] == varray(ints(1, 42, 3))
+    assert insp.read("sensors[0].samples[0]")["value"] == varray(ints(1, 42, 3), element_type="int32_t")
     with pytest.raises(ValueError):
         insp.write("sensors[0].flags.level", 8)                     # 4 ビットの符号付きは -8〜7
     with pytest.raises(ValueError):

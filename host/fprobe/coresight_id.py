@@ -16,6 +16,8 @@ __all__ = ["CORE_NAMES", "Component", "Part", "STM32_PARTS", "StmPart", "candida
            "read_component", "walk_rom_table"]
 
 Read = Callable[[int], int]
+ReadMany = Callable[[list[int]], list[int]]       # 番地の列を順に読む（1 回の往復にまとめる道。失敗は例外）
+_ENTRIES_PER_READ = 32                            # read_many で ROM テーブルの入口をまとめて読む数（往復の数だけに効く）
 
 # JEP106 の (継続コードの数, ID)。確かなものだけ
 _DESIGNERS = {(4, 0x3B): "Arm", (0, 0x20): "STMicroelectronics", (2, 0x44): "Nordic Semiconductor",
@@ -154,11 +156,22 @@ class Component:
         return [self] + [d for c in self.children for d in c.flatten()]
 
 
-def read_component(read: Read, base: int) -> Component:
-    """部品の 4 KB の窓の末尾（CIDR・PIDR・DEVARCH）を読む。"""
+def read_component(read: Read, base: int, read_many: ReadMany | None = None) -> Component:
+    """部品の 4 KB の窓の末尾（CIDR・PIDR・DEVARCH）を読む。read_many があれば CIDR・PIDR と DEVARCH の 10 語を 1 回で
+    （DEVARCH を使うのは CoreSight の class 9 だけ。まとめた読みが失敗したら、CIDR・PIDR の 9 語の後に DEVARCH を別に読む
+    今までの手順に戻る: 往復の数が変わるだけで結果は同じ）。"""
+    addresses = [base + 0xFF0 + 4 * i for i in range(4)] + [base + 0xFE0 + 4 * i for i in range(4)] + [base + 0xFD0]
+    speculative = None
     try:
-        cidr = [read(base + 0xFF0 + 4 * i) & 0xFF for i in range(4)]
-        pidr = [read(base + 0xFE0 + 4 * i) & 0xFF for i in range(4)] + [read(base + 0xFD0) & 0xFF]
+        if read_many is not None:
+            try:
+                *words, speculative = read_many(addresses + [base + _DEVARCH])
+            except Exception:
+                words = read_many(addresses)
+        else:
+            words = [read(a) for a in addresses]
+        cidr = [w & 0xFF for w in words[:4]]
+        pidr = [w & 0xFF for w in words[4:]]
     except Exception as e:
         return Component(base, 0, (0, 0), 0, 0, error=str(e) or type(e).__name__)
     preamble = cidr[0] | (cidr[1] & 0x0F) << 8 | cidr[2] << 16 | cidr[3] << 24
@@ -170,32 +183,50 @@ def read_component(read: Read, base: int) -> Component:
     devarch = None
     if cls == CLASS_CORESIGHT:
         try:
-            devarch = read(base + _DEVARCH)
+            devarch = speculative if speculative is not None else read(base + _DEVARCH)
         except Exception:
             devarch = None
     return Component(base, cls, designer, part, pidr[2] >> 4, devarch)
 
 
-def walk_rom_table(read: Read, base: int, depth: int = 4, limit: int = 128) -> Component:
+def walk_rom_table(read: Read, base: int, depth: int = 4, limit: int = 128, read_many: ReadMany | None = None) -> Component:
     """base の部品を読み、ROM テーブルなら入口をたどる（深さ depth、全体で limit 個まで）。上限で入口を最後まで
     たどらなかった ROM テーブルには truncated（"depth" / "limit"）を付け、根の walk に使った上限・読んだ部品の数・
-    どこかで打ち切ったかを返す（打ち切った下の部品を「無い」と区別できるように）。"""
+    どこかで打ち切ったかを返す（打ち切った下の部品を「無い」と区別できるように）。
+    read_many があれば、部品の識別子と ROM テーブルの入口をまとめて読む（往復の数が減るだけで、結果は同じ。入口は表の範囲の中で
+    先の分まで読む: 表の範囲の語は読める決まり。まとめた読みが失敗したら、その入口からは 1 語ずつ読んで、どの入口かを言う）。"""
     seen: set[int] = set()
     cut = False
+
+    def entry_reader(address: int, entries: int):
+        cache: dict[int, int] = {}
+
+        def entry(i: int) -> int:
+            if read_many is None:
+                return read(address + 4 * i)
+            if i not in cache:
+                n = min(_ENTRIES_PER_READ, entries - i)
+                try:
+                    cache.update(zip(range(i, i + n), read_many([address + 4 * k for k in range(i, i + n)])))
+                except Exception:
+                    return read(address + 4 * i)
+            return cache[i]
+        return entry
 
     def visit(address: int, level: int) -> Component:
         nonlocal cut
         seen.add(address)
-        comp = read_component(read, address)
+        comp = read_component(read, address, read_many)
         if comp.error or not comp.is_rom_table:
             return comp
         if level >= depth:
             comp.truncated, cut = "depth", True
             return comp
         entries = 960 if comp.cls == CLASS_ROM else 512
+        entry_at = entry_reader(address, entries)
         for i in range(entries):
             try:
-                entry = read(address + 4 * i)
+                entry = entry_at(i)
             except Exception as e:
                 comp.error = f"入口 {i} を読めない: {e}"
                 break

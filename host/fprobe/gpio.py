@@ -58,10 +58,7 @@ class Gpio:
 
     def supports_sequence(self) -> bool:
         if self._exchange_ok is None:
-            version = getattr(self.dev, "protocol_version", None)          # Device は開いたときに読んでいる
-            if version is None:
-                version = getattr(self.dev.capabilities(), "protocol_version", None)
-            self._exchange_ok = (version or 0) >= EXCHANGE_PROTOCOL
+            self._exchange_ok = self.dev.protocol_version >= EXCHANGE_PROTOCOL     # Device は開いたときに読んでいる
         return self._exchange_ok
 
     def sequence(self, states: Sequence[int]) -> list[int]:

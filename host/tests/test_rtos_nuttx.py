@@ -101,6 +101,24 @@ def test_waits(image):
     assert t["main"].wait is None and t["logger"].wait is None and t["Idle_Task"].wait is None
 
 
+def test_remaining_ticks_wrap_with_the_tick_width_and_overdue_is_not_zero(image):
+    # 期限（waitdog.expired）とティックの差はティックの幅で回る。期限を過ぎた量を 0 にしない（overdue_ticks）
+    rtos, access = nx(image)
+    ticks = address(image, "g_system_ticks")
+    mask = rtos.tick_mask()
+    size = (mask.bit_length() + 7) // 8
+    old = access.read_memory(ticks, size)
+    try:
+        access.write_memory(ticks, (1020).to_bytes(size, "little"))
+        w = by_name(rtos.tasks())["sensor"].wait                     # 期限 1010
+        assert (w.remaining_ticks, w.overdue_ticks, w.wake_tick) == (None, 10, 1010)
+        access.write_memory(ticks, (mask - 15).to_bytes(size, "little"))      # 期限 1010 は 1 周した先
+        w = by_name(rtos.tasks())["sensor"].wait
+        assert (w.remaining_ticks, w.overdue_ticks) == (1010 + 16, None)
+    finally:
+        access.write_memory(ticks, old)
+
+
 def test_stacks(image):
     rtos, _ = nx(image)
     tasks = by_name(rtos.tasks())

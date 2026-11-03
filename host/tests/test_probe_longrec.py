@@ -10,31 +10,11 @@ import pytest
 from fprobe.la import Transitions
 from fprobe.mcp_server import Probe
 from test_la_stream import raw_source
+from test_probe_recording import FakeDevice
 from test_recording_stream import TimedStreamDevice
-
-HZ = 100_000_000
-
-
-class FakeDevice:
-    def __init__(self):
-        self.ticks = 1_000_000
-
-    def time(self):
-        self.ticks += 1000
-        return self.ticks
-
-    def read32(self, address):
-        return 0                                     # イベント記録の容量 0 = 無い構成
-
-    def capabilities(self):
-        return SimpleNamespace(timebase_hz=HZ, board="fake", design="fprobe")
 
 
 class StreamDevice(TimedStreamDevice):
-    def capabilities(self):
-        return SimpleNamespace(mem_bytes=128 << 20, la_channels=16, la_sample_hz=HZ, timebase_hz=HZ, board="fake",
-                               design="fprobe")
-
     def read32(self, address):
         from fprobe import generated as g
         if address in (g.LA_DEEP_RING_BEATS, g.LA_DEEP_STATUS, g.LA_DEEP_STREAM_BEATS, g.MEM_STATUS):

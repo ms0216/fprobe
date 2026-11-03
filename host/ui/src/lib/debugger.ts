@@ -2,7 +2,7 @@
 // Svelte に依らない（store の約束 subscribe だけを満たす）。ターゲットの状態は AppState（target.state の通知）から受ける。
 // ウォッチは止まったら読み直し、走っている間はウォッチのパネルが開いていれば周期的に走らせたまま読み（ライブ ウォッチ。
 // debug.evaluate の live = 大域・静的とメモリ）、つないでいなければ ELF だけで式と型を調べる（debug.expression.check）。
-import { errorText, type DaemonConnection } from "./api";
+import { errorText, type DaemonConnection, type Params } from "./api";
 import type { BreakpointAction } from "./breakpoints";
 import { isRunning } from "./commands";
 import { execution, stepParams } from "./execution";
@@ -16,6 +16,9 @@ export interface SourceFile {
   name: string;
   path: string;
   exists: boolean;
+  // Linux のプロセス: この PC に無く、attach のときに対象から取り寄せた写し（debug.source.read が読む）
+  fetched?: { target: string; path: string; local_path: string; bytes: number; sha256: string };
+  fetch_error?: { target: string; path: string; error: string };
 }
 
 export interface Source {
@@ -41,6 +44,7 @@ export interface Breakpoint extends Place {
   action?: BreakpointAction;           // 条件・ヒット カウント・ログ（lib/breakpoints.ts）
   tool?: string;                       // 道具（heap.trace 等）が置いたもの
   enabled?: boolean;                   // false = 無効にしたもの（debug.breakpoint.enable。機器には置いていない）
+  at?: { file: string; path: string; line: number };   // "ファイル:行" で置いた場所（デーモンが解いた事実）
 }
 
 export interface Watchpoint {
@@ -83,10 +87,10 @@ export interface Frame {
   line?: number | null;
 }
 
-/** デーモンの欄 file・line → ソースの場所（ファイルは名前だけ）。欄が無ければ null（where の文字は解釈しない） */
+/** デーモンの欄 file・line → ソースの場所（file は行表のファイルの名前のまま）。欄が無ければ null（where の文字は解釈しない） */
 export function placeOf(p: { file?: string | null; line?: number | null } | null | undefined)
   : { file: string; line: number } | null {
-  return p?.file && typeof p.line === "number" ? { file: p.file.split(/[\\/]/).pop()!, line: p.line } : null;
+  return p?.file && typeof p.line === "number" ? { file: p.file, line: p.line } : null;
 }
 
 /** フレームのソースの場所（デーモンが返す file・line） */
@@ -112,6 +116,7 @@ export interface Instruction {
   line?: number | null;
   new_line?: boolean;
   bytes?: string;
+  in_flash?: boolean | null;     // その番地が Flash の領域か（デーモンの事実。null = 分からない。書く道は lib/valuewrite）
 }
 
 export interface DebugSnapshot {
@@ -133,11 +138,25 @@ export interface DebugSnapshot {
   focus: number | null;      // showAddress で見せた番地（Disassembly が強調する。止まり直すと null）
   gen: number;               // 変数を読み直した回数（木の展開したポインタの先を読み直す合図）
   stops: number;             // 止まって読み直した回数（変わった値の印は、前に止まったときの値と比べる）
+  lastStep: StepInfo | null; // 最後のステップ操作の結果（デーモンが返した値。走り出したら null）
+}
+
+/** ステップ操作の結果（debug.step の応答のまま）。steps・runs はデーモンが測った数（古いデーモンは無い = null）。
+ *  踏み越えた呼び出しから同じ行に戻っても、これで進んだと分かる */
+export interface StepInfo {
+  mode: "over" | "into" | "out";
+  steps: number | null;      // ホストが発行した 1 命令ステップの数
+  runs: number | null;       // 踏み台・ブレークポイントまで走らせた回数
+  elapsedS: number;
+  where: string;
 }
 
 // ELF・ブレークポイントを変える操作。誰か（AI も）が行ったら読み直す
+// Linux のプロセスの全コア停止デバッグ（linux.halt.debug.*）: attach している間はそのプロセスの ELF・ブレークポイントを
+// 同じ API が返す（AI が MCP で attach・close しても人の画面が読み直す）
+const LINUX_ATTACH = ["linux.halt.debug.attach", "linux.halt.debug.close", "linux.halt.close"];
 const ELF_METHODS = new Set(["debug.elf.load", "debug.elf.load_demo", "debug.elf.upload", "target.program_ram",
-                             "target.flash"]);
+                             "target.flash", ...LINUX_ATTACH]);
 // 止まっている間に値を変え得る操作。誰か（AI も）が行ったら変数を読み直す
 const WRITE_METHODS = new Set(["debug.write_expression", "debug.variable.write", "target.memory.write",
                                "target.registers.write", "target.peripheral.write", "debug.call"]);
@@ -145,18 +164,25 @@ const WRITE_METHODS = new Set(["debug.write_expression", "debug.variable.write",
 const BREAK_METHODS = new Set(["debug.breakpoint.set", "debug.breakpoint.clear", "debug.breakpoint.enable",
                                "debug.watchpoint.set",
                                "debug.watchpoint.clear", "target.connect", "target.disconnect", "target.program_ram",
-                               "target.flash"]);
+                               "target.flash", ...LINUX_ATTACH, "linux.halt.debug.break.insert",
+                               "linux.halt.debug.break.remove"]);
 
-/** 開いているファイルの、ブレークポイントの印を付ける行。置いたときの「ファイル:行」を優先する（同じ番地に複数の行が
- *  あると、番地から引き直した行は押した行とずれる） */
+/** 開いているファイルの、ブレークポイントの印を付ける行。置いた「ファイル:行」（デーモンが解いた at）を優先する（同じ番地に
+ *  複数の行があると、番地から引き直した行は押した行とずれる）。場所の文字は画面で解釈しない */
 export function markedLines(d: DebugSnapshot, only?: (b: Breakpoint) => boolean): Set<number> {
   const out = new Set<number>();
   for (const b of only ? d.breakpoints.filter(only) : d.breakpoints) {
-    const [file, line] = b.location.split(":");
-    if (d.open && file === d.open && /^\d+$/.test(line ?? "")) out.add(Number(line));
-    else if (b.file === d.open && b.line !== undefined) out.add(b.line);
+    if (b.at) {
+      if (b.at.file === d.open) out.add(b.at.line);
+    } else if (b.file === d.open && b.line !== undefined) out.add(b.line);
   }
   return out;
+}
+
+/** 行に置いたブレークポイント（置いた場所の at が先、無ければ番地から引いた行） */
+function breakpointOnLine(bps: Breakpoint[], file: string, line: number): Breakpoint | undefined {
+  return bps.find((b) => b.at?.file === file && b.at.line === line)
+    ?? bps.find((b) => !b.at && b.file === file && b.line === line);
 }
 
 /** ブレークポイントのある命令の番地（逆アセンブルの印） */
@@ -170,7 +196,7 @@ export class Debugger {
   private snap: DebugSnapshot = {
     elf: null, files: [], open: null, source: null, stop: null, stale: false, breakpoints: [], watchpoints: [],
     registers: null, backtrace: [], watches: savedWatches(), watchMode: "elf", locals: null, disasm: [], gen: 0, stops: 0,
-    frame: 0, focus: null,
+    frame: 0, focus: null, lastStep: null,
   };
   private liveUsers = 0;                     // ウォッチを走らせたまま読む利用者（開いているパネル）の数
   private liveTimer: ReturnType<typeof setInterval> | null = null;
@@ -193,6 +219,8 @@ export class Debugger {
       if (WRITE_METHODS.has(e.method) && this.snap.stop) void this.refreshVariables();
       if (e.method === "target.registers.write" && this.snap.stop) void this.reloadRegisters();
     });
+    // ELF の更新の見張りが読み込み直した（だれの操作でもない変化。点検 A3）: ソースの一覧と本文を読み直す
+    conn.on("elf.changed", () => void this.reloadFiles());
     app.subscribe((s: Snapshot) => this.onTarget(s.target));
   }
 
@@ -268,7 +296,8 @@ export class Debugger {
 
   /** 行単位のステップ（over / into / out。実行の設定の割り込みの扱いで）。止まった場所は target.state の通知で届く */
   async step(mode: "over" | "into" | "out"): Promise<void> {
-    await this.app.act("debug.step", stepParams(mode, execution.get()));
+    const r = await this.app.act("debug.step", stepParams(mode, execution.get()));
+    if (r) this.set({ lastStep: { mode, steps: r.steps ?? null, runs: r.runs ?? null, elapsedS: r.elapsed_s, where: r.where } });
   }
 
   /** 1 命令のステップ（逆アセンブルの命令ステップ） */
@@ -292,7 +321,7 @@ export class Debugger {
   /** ファイルの行のブレークポイントを切り替える（開いていないファイルでも、置いた場所の「ファイル:行」で） */
   async toggleAt(file: string, line: number): Promise<void> {
     if (this.snap.source?.name === file) return this.toggleBreakpoint(line);
-    const existing = this.snap.breakpoints.find((b) => b.location === `${file}:${line}`);
+    const existing = breakpointOnLine(this.snap.breakpoints, file, line);
     if (existing) await this.app.act("debug.breakpoint.clear", { location: existing.location });
     else await this.app.act("debug.breakpoint.set", { location: `${file}:${line}` });
     await this.reloadBreakpoints();
@@ -315,7 +344,7 @@ export class Debugger {
   async openFile(name: string): Promise<void> {
     const seq = ++this.openSeq;
     const file = this.snap.files.find((f) => f.name === name);
-    if (!file?.exists) {
+    if (!file?.exists && !file?.fetched) {                  // fetched: attach のときに取り寄せた写しがある
       this.set({ open: name, source: null });
       return;
     }
@@ -331,8 +360,7 @@ export class Debugger {
   async toggleBreakpoint(line: number): Promise<void> {
     const source = this.snap.source;
     if (!source || !source.lines.includes(line)) return;
-    const existing = this.snap.breakpoints.find((b) => b.location === `${source.name}:${line}`)
-      ?? this.snap.breakpoints.find((b) => b.file === source.name && b.line === line);
+    const existing = breakpointOnLine(this.snap.breakpoints, source.name, line);
     if (existing) await this.app.act("debug.breakpoint.clear", { location: existing.location });
     else await this.app.act("debug.breakpoint.set", { location: `${source.name}:${line}` });
     await this.reloadBreakpoints();
@@ -342,8 +370,7 @@ export class Debugger {
   breakpointAt(line: number): Breakpoint | undefined {
     const source = this.snap.source;
     if (!source) return undefined;
-    return this.snap.breakpoints.find((b) => b.location === `${source.name}:${line}`)
-      ?? this.snap.breakpoints.find((b) => b.file === source.name && b.line === line);
+    return breakpointOnLine(this.snap.breakpoints, source.name, line);
   }
 
   async enableBreakpoint(location: string, enabled: boolean): Promise<void> {
@@ -399,13 +426,13 @@ export class Debugger {
     return found;
   }
 
-  /** 式の指す値に書き（Watch・Locals の値の編集）、変数を読み直す。書けたら true。使う API はターゲットの状態で決める
-   *  （lib/valuewrite の exprWriteCall: 止まっていれば選んだフレームで debug.write_expression、走っていれば watch.write）。
-   *  AI の作業中は確かめる（lib/guard の allowed） */
+  /** 式の指す値に書き（Watch・Locals の値の編集）、変数を読み直す。書けたら true。API はいつも debug.write_expression
+   *  （止まっていれば選んだフレームで、走行中なら止めずに。道はデーモンがターゲットの状態で選ぶ: lib/valuewrite の
+   *  exprWriteCall）。AI の作業中は確かめる（lib/guard の allowed） */
   async writeExpression(expression: string, value: number | string): Promise<boolean> {
     const call = exprWriteCall(this.target?.state, expression, value, this.snap.stop ? this.snap.frame : undefined);
     if (!call || !(await allowed(this.app))) return false;
-    const done = await this.app.act(call.method as "watch.write", call.params as any);
+    const done = await this.app.act("debug.write_expression", call.params as Params<"debug.write_expression">);
     if (done === undefined) return false;
     if (this.snap.stop) await this.refreshVariables();
     else await this.refreshWatches();
@@ -470,9 +497,17 @@ export class Debugger {
         this.lastStop = key;
         void this.refreshStopped(place);
       }
+    } else if (target?.state === "DISCONNECTED") {
+      // ターゲットが無くなった（切断・Linux のプロセスの close）: もう無い状態の値を今の値のように残さない。式は残す
+      this.lastStop = undefined;
+      ++this.stopSeq;                                       // 遅れて返った止まったときの読みも捨てる
+      this.set({ stop: null, stale: false, registers: null, backtrace: [], locals: null, disasm: [], focus: null,
+                 frame: 0, lastStep: null, watches: this.snap.watches.map((w) => ({ name: w.name })),
+                 watchMode: "elf" });
     } else if (target) {
       this.lastStop = undefined;
       if (this.snap.stop !== null || !this.snap.stale) this.set({ stop: null, stale: this.snap.registers !== null });
+      if (this.snap.lastStep !== null) this.set({ lastStep: null });
     }
     if (target?.state !== was) this.syncLive();            // 走り出した・止まった・切れた: ウォッチの読み方を変える
   }

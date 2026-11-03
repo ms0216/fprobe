@@ -67,3 +67,10 @@ def test_long_quiet_period(tmp_path, monkeypatch, one_clock, half, sync):
 
 def test_changes_during_a_target_reset_are_reported_as_lost(tmp_path, monkeypatch):
     run(tmp_path, monkeypatch, "changes_made_during_a_target_reset", half=3, words=8, sync=2, seed=61)
+
+
+@pytest.mark.parametrize("one_clock,snap,half", [(False, False, 3), (True, False, 10), (True, True, 10)])
+def test_event_times_are_the_tck_edges_on_the_pin(tmp_path, monkeypatch, one_clock, snap, half):
+    """表 17 の「+1」: 印・標本のイベントの時刻と、端子の TCK の立ち上がりの差（0 のはず）。"""
+    run(tmp_path, monkeypatch, "the_event_times_are_the_tck_edges", one_clock=one_clock, snap=snap, half=half, sync=1,
+        words=2, seed=71)

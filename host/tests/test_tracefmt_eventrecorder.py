@@ -22,8 +22,16 @@ class Recorder:
         self.index = 0
         self.ctx = 0
         self.dumped = 0
+        self.ts_overflow, self.ts_last, self.init_count = 0, 0, 1
+
+    def tick(self, ts: int) -> None:
+        """EventRecorder.c の時刻の読み: 前に読んだ値より小さければ ts_overflow を 1 つ進める。"""
+        if ts < self.ts_last:
+            self.ts_overflow += 1
+        self.ts_last = ts
 
     def item(self, info: int, ts: int, v1: int, v2: int) -> None:
+        self.tick(ts)
         i = self.index
         self.index += 1
         slot = i & (self.count - 1)
@@ -65,8 +73,8 @@ class Recorder:
         return struct.pack("<BBHIIIIB3x", 1, 0, 0x0101, self.count, 0x2000_0100, 0x2000_0200, 0x2000_0040, 0)
 
     def status(self) -> bytes:
-        return struct.pack("<BBH8I", 1, self.ctx & 7, 0, self.index, self.index, self.dumped, 0, self.freq, 0, 1,
-                           0xE1A5276B)
+        return struct.pack("<BBH8I", 1, self.ctx & 7, 0, self.index, self.index, self.dumped, self.ts_overflow,
+                           self.freq, self.ts_last, self.init_count, 0xE1A5276B)
 
     def decode(self, scvd=None, ctx=None, since=None):
         return decode_event_recorder(parse_info(self.info()), parse_status(self.status()), bytes(self.buf), scvd,
@@ -164,6 +172,40 @@ def test_timestamps_wrap_32_bits():
     r.record2(0x0101, 0x0000_0100, 0, 0)
     trace, _ = r.decode()
     assert [e.ts for e in trace.events] == [0xFFFF_FF00, 0x1_0000_0100] and trace.ts_wraps == 1
+
+
+def test_times_count_the_targets_ts_overflow():
+    # 対象が数えた桁あふれ（ts_overflow）で 64 ビットにする: 読む前に 2 周していれば、最初の記録の時刻も 2 周分の後
+    r = Recorder()
+    r.tick(0xFFFF_FFF0)
+    r.tick(0x10)
+    r.tick(0xFFFF_FFF0)
+    r.tick(0x10)                                                         # ここまでで ts_overflow = 2
+    r.record2(0x0101, 0x100, 0, 0)
+    r.record2(0x0101, 0x200, 0, 0)
+    trace, _ = r.decode()
+    assert [e.ts for e in trace.events] == [2 << 32 | 0x100, 2 << 32 | 0x200] and trace.ts_wraps == 0
+
+
+def test_a_since_read_over_overwritten_records_keeps_the_wraps_the_target_counted():
+    # 読みの間に上書きされた記録の中で 2 周しても、続きの時刻は ts_overflow から（前の読みからの 1 周未満を仮定しない）
+    r = Recorder(count=4)
+    r.record2(0x0101, 0xF000_0000, 0, 0)
+    first, nxt = r.decode()
+    for ts in (0x1000, 0xF000_0000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000):    # 2 周（上書きで前半は読めない）
+        r.record2(0x0101, ts, 0, 0)
+    more, _ = r.decode(since=nxt)
+    assert first.events[0].ts == 0xF000_0000
+    assert [e.ts for e in more.events] == [2 << 32 | t for t in (0x3000, 0x4000, 0x5000, 0x6000)]
+
+
+def test_a_wrap_after_the_last_record_is_not_counted_into_it():
+    # 最後の記録の後に時刻を読んで 1 周していれば（ts_last < 最後の記録の値）、最後の記録は 1 周前
+    r = Recorder()
+    r.record2(0x0101, 0xFFFF_0000, 0, 0)
+    r.tick(0x10)
+    trace, _ = r.decode()
+    assert [e.ts for e in trace.events] == [0xFFFF_0000]
 
 
 def test_bad_control_blocks():

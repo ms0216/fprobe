@@ -91,6 +91,36 @@ def test_names_shared_by_two_kinds_need_a_prefix(tmp_path):
         correlate(rec, "nothing changed", ["mark rose"], window_s=0.01)
 
 
+def test_each_cause_gives_its_terms_and_whether_it_is_fpga_only(tmp_path):
+    """候補ごとに項（変数・種類・演算・値）と、FPGA の信号だけの条件か（fpga_only）を返す。画面は条件の文字を
+    構文解析しない（E5）。"""
+    rec = make(tmp_path)
+    out = correlate(rec, "errors changed", ['restart changed and state="BUSY"', "mark rose and restart=1"],
+                    window_s=0.005)
+    by = {c["condition"]: c for c in out["causes"]}
+    fpga = by['restart changed and state="BUSY"']
+    assert fpga["terms"] == [{"variable": "restart", "kind": "fpga", "op": "changed"},
+                             {"variable": "state", "kind": "fpga", "op": "=", "value": "BUSY"}]
+    assert fpga["fpga_only"] is True
+    mixed = by["mark rose and restart=1"]
+    assert [t["kind"] for t in mixed["terms"]] == ["pin", "fpga"] and mixed["fpga_only"] is False
+    auto = correlate(rec, "errors changed", None, window_s=0.005)
+    assert all("terms" in c and isinstance(c["fpga_only"], bool) for c in auto["causes"])
+
+
+def test_a_condition_is_parsed_by_the_host(tmp_path, monkeypatch):
+    """条件の文字の検査（recording.condition.parse）: 記録・機器に触らない。読めなければ理由つきの誤り（E5）。"""
+    from fprobe.mcp_server import Probe
+    p = Probe("unused")
+    assert p.recording_condition_parse('"Error count" changed and fpga.state=BUSY') == {
+        "condition": '"Error count" changed and fpga.state=BUSY',
+        "terms": [{"variable": "Error count", "op": "changed"}, {"variable": "fpga.state", "op": "=", "value": "BUSY"}]}
+    with pytest.raises(ConditionError, match="瞬間"):
+        p.recording_condition_parse("state=BUSY")
+    with pytest.raises(ConditionError):
+        p.recording_condition_parse("state >= 2")
+
+
 def test_addresses_and_channel_numbers_work_without_names(tmp_path):
     rec = make(tmp_path)
     out = correlate(rec, "0x20040808 changed", ["ch2 rose"], window_s=0.005)
@@ -388,6 +418,31 @@ def test_the_read_interval_is_reported_as_a_fact_without_a_rule_of_thumb(tmp_pat
     assert out["sampling"]["errors"] == pytest.approx(0.001) and out["warnings"] == []
     reads = out["reads"]["errors"]
     assert reads["count"] == 100 and reads["interval_s"]["max"] == pytest.approx(0.001)
+    # 古い回路の語（範囲の無い本体）: 時刻の意味は値が返った周期、変化の範囲は分からない
+    assert reads["time_point"] == "value_returned" and reads["change_window_s"] is None
+    assert reads["change_window_unknown"] == 5
+
+
+def test_line_time_words_give_the_window_each_change_happened_in(tmp_path):
+    # 線上の点の回路（time-accuracy S2）の語の本体 {t_lo, t_hi}: 変化は前の読みの t_lo より後〜変わった値の語の t_hi。
+    # 時刻（読みを頼んだ点）を変化の時刻として使ったことを time_point で返し、範囲の幅を事実で返す
+    rec = Recorder(tmp_path / "r", timebase_hz=1e6, meta={"sample.names": {f"0x{ERRORS:08X}": "errors"},
+                                                          "fpga.signals": SIGNALS})
+    rows = [("fpga", "value", 0, 0, 0), ("fpga", "value", 1500, 0, 1 << 3)]
+    for k, value in enumerate([0, 0, 1, 1, 2]):
+        t = k * 1000
+        rows.append(("sample", "word", t, ERRORS, value, {"t_lo": t - 5, "t_hi": t + 900 if k < 4 else None, "waits": 0}))
+    rec.add_many(rows)
+    rec.close()
+    r = Recording.open(tmp_path / "r")
+    try:
+        out = correlate(r, "errors changed", ["restart changed"], window_s=0.002)
+    finally:
+        r.close()
+    reads = out["reads"]["errors"]
+    assert reads["time_point"] == "read_request"
+    # 変化 1 回目: 前の読み（t 1000）の t_lo 995 〜 t 2000 の語の t_hi 2900、2 回目: 2995 〜 分からない（最後の語）
+    assert reads["change_window_s"]["max"] == pytest.approx((2900 - 995) / 1e6) and reads["change_window_unknown"] == 1
 
 
 def test_holes_in_the_data_are_reported(tmp_path):

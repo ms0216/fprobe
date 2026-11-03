@@ -78,6 +78,9 @@
     `pair_valid : out std_logic`; `pair_local : out unsigned(63 downto 0)`（子: パルスの立ち上がりを見た刻み）;
     `pair_parent : out unsigned(63 downto 0)`; `crc_errors : out unsigned(15 downto 0)`
   - 定数 `RX_LATENCY_TICKS : natural := 3`（`sync_bit` の 2 段 + 立ち上がりの検出 1 段。パッケージ `sync_link_pkg` に置き、ホストへ caps で申告）
+    - 注（2026-11-02）: 実装は **2**（`gateware/rtl/core/sync_link.vhd:18`「同期化 2。検出は 2 段目と同じ周期」、申告は `fprobe_gw/timing.py:44`
+      の `SYNC_RX_LATENCY_TICKS = 2`、試験 `sync_link_tb.py:14`）。置き場所もパッケージではなく entity の中の定数と `timing.py`。この計画の 3 は実装と違う。
+      あわせて、下の CRC-8 の初期値も実装は 0 ではなく `x"FF"`（`sync_link.vhd:17`）。
 - 線の形（親）: アイドルは 0。`period` 刻みごとに、立ち上がりの刻みの `time_count` を T として保持し、線を 1 にして `BIT_TICKS` 保つ（パルス = スタートの印）→ T の 64 ビットを下位から各 `BIT_TICKS` → CRC-8（多項式 0x07、初期値 0、T の 8 バイトを下位から）8 ビット → 0。`master = '0'` なら `sync_out` は常に 0。
 - 子: 同期化した入力の立ち上がりで、その刻みの `time_count` を保持し、各ビットの中央（立ち上がりから `BIT_TICKS * (k + 1) + BIT_TICKS / 2` 刻み）で 72 ビットを読む。CRC が合えば `pair_valid` を 1 刻み、`pair_local` = 保持した刻み、`pair_parent` = T。合わなければ `crc_errors` を 1 増やし、出さない。`enable = '0'` なら何もしない。
 

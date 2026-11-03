@@ -87,13 +87,15 @@ def _is_file(qualifier: str) -> bool:
 class FrameView:
     """変数の場所を評価するための、1 つのフレームの様子。
 
-    pc: 変数・スコープを引く番地（呼び出し元のフレームでは戻り先 − 1 = 呼び出し命令の中）。
+    pc: 変数・スコープを引く番地（**リンク時の番地**。呼び出し元のフレームでは戻り先 − 1 = 呼び出し命令の中）。
     read_register: DWARF のレジスタ番号 → 値（復元できなければ AccessError / NotAvailable）。
+    load_bias: 実行時の番地 − リンク時の番地（PIE・共有ライブラリ）。大域・静的変数の番地（DW_OP_addr・addrx）に足す。
     """
     pc: int | None
     read_memory: Callable[[int, int], bytes]
     read_register: Callable[[int], int]
     cfa: int | None = None
+    load_bias: int = 0
 
 
 def _no_register(number: int) -> int:
@@ -496,7 +498,8 @@ class DebugInfo:
                     raise NotAvailable("フレームの基底が分からない")
                 return evaluate_value(ops, self.eval_context(function, frame))
         return EvalContext(frame.read_memory, frame.read_register, frame_base, frame.cfa,
-                           lambda index: self.dwarf.get_addr(cu, index), lambda offset: self._base_type(cu, offset))
+                           lambda index: self.dwarf.get_addr(cu, index), lambda offset: self._base_type(cu, offset),
+                           load_bias=frame.load_bias)
 
     def _base_type(self, cu, offset: int) -> tuple[int, bool]:
         die = self.dwarf.get_DIE_from_refaddr(cu.cu_offset + offset, cu)
