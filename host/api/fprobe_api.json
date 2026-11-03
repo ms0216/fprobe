@@ -5633,6 +5633,82 @@
               "type": "null"
             }
           ]
+        },
+        "options": {
+          "description": "linux.halt.debug.attach に渡した設定（今の attach で使っている値。画面は欄にこの値を映し、AI が attach したときも人の画面に同じ値が見える）",
+          "type": "object",
+          "properties": {
+            "pid": {
+              "type": "integer"
+            },
+            "elf": {
+              "type": "string"
+            },
+            "skew_limit_ns": {
+              "type": "integer"
+            },
+            "thread_id": {
+              "type": "string"
+            },
+            "kernel_isa": {
+              "type": "string"
+            },
+            "max_step_retries": {
+              "type": "integer"
+            },
+            "bp_unmapped": {
+              "type": "string"
+            },
+            "max_halt_s": {
+              "type": "number"
+            },
+            "fetch_from_target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "breakpoint_kind": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "sw",
+                    "hw"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "step_max_instructions": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "step_timeout_s": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pid",
+            "elf",
+            "skew_limit_ns",
+            "thread_id",
+            "kernel_isa",
+            "max_step_retries",
+            "bp_unmapped",
+            "max_halt_s",
+            "fetch_from_target",
+            "breakpoint_kind",
+            "step_max_instructions",
+            "step_timeout_s"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -5652,7 +5728,8 @@
         "stats",
         "close",
         "last_run",
-        "last_threads"
+        "last_threads",
+        "options"
       ],
       "additionalProperties": false
     },
@@ -9562,6 +9639,10 @@
             }
           ],
           "description": "tid の決まり方: selected = linux.halt.debug.select で選んだ（次の止まりまで）/ last_stop = 最後の停止のスレッド / rule = 対象のスレッドを走らせている最小番号のコア、無ければリーダー"
+        },
+        "breakpoint_edit_requires_halt": {
+          "type": "boolean",
+          "description": "ブレークポイントの置き外し（debug.breakpoint.set / clear・linux.halt.debug.break.insert / remove）は、全コアが止まっている間だけできる（走行中は断る）。画面はこれを見て、走行中は置き外しの操作を無効にして理由を出す"
         }
       },
       "required": [
@@ -9575,7 +9656,8 @@
         "pc_error",
         "elf",
         "load_bias",
-        "tid_from"
+        "tid_from",
+        "breakpoint_edit_requires_halt"
       ],
       "additionalProperties": false
     },
@@ -23072,12 +23154,18 @@
                 "type": "null"
               }
             ],
-            "default": null
+            "default": null,
+            "examples": [
+              1000000
+            ]
           },
           "pretrigger": {
             "type": "integer",
             "default": 1024,
-            "minimum": 0
+            "minimum": 0,
+            "examples": [
+              1024
+            ]
           },
           "mask": {
             "type": "integer",
@@ -55523,11 +55611,21 @@
                   "refused_while_open": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "enum": [
+                        "target.connect",
+                        "lowlevel",
+                        "linux.memap.connect_jtag",
+                        "probe.design.switch"
+                      ]
+                    },
+                    "description": "開いている間、断る操作（識別子）: target.connect / lowlevel = 線を直接動かす操作（jtag.scan・dp/ap・pins 等）/ linux.memap.connect_jtag / probe.design.switch = 構成の書き替え（自動の書き替えも）"
                   },
                   "device_lock": {
-                    "type": "string"
+                    "enum": [
+                      "per_call",
+                      "openocd_path"
+                    ],
+                    "description": "機器の錠の使い方: per_call = コアの操作は 1 回ずつ機器の錠を取る（gdb のスレッドと他の操作が交互に使う）/ openocd_path = OpenOCD の経路（プローブの DAP は使わない）"
                   }
                 },
                 "required": [
@@ -55703,11 +55801,21 @@
                   "refused_while_open": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "enum": [
+                        "target.connect",
+                        "lowlevel",
+                        "linux.memap.connect_jtag",
+                        "probe.design.switch"
+                      ]
+                    },
+                    "description": "開いている間、断る操作（識別子）: target.connect / lowlevel = 線を直接動かす操作（jtag.scan・dp/ap・pins 等）/ linux.memap.connect_jtag / probe.design.switch = 構成の書き替え（自動の書き替えも）"
                   },
                   "device_lock": {
-                    "type": "string"
+                    "enum": [
+                      "per_call",
+                      "openocd_path"
+                    ],
+                    "description": "機器の錠の使い方: per_call = コアの操作は 1 回ずつ機器の錠を取る（gdb のスレッドと他の操作が交互に使う）/ openocd_path = OpenOCD の経路（プローブの DAP は使わない）"
                   }
                 },
                 "required": [
@@ -55782,13 +55890,19 @@
               "fprobe",
               "openocd"
             ],
-            "description": "fprobe = このデーモンの fprobe の JTAG（プローブの DAP を占有する）/ openocd = OpenOCD の Tcl ポート（CLI の --backend）"
+            "description": "fprobe = このデーモンの fprobe の JTAG（プローブの DAP を占有する）/ openocd = OpenOCD の Tcl ポート（CLI の --backend）",
+            "examples": [
+              "fprobe"
+            ]
           },
           "jtag_khz": {
             "type": "integer",
             "minimum": 1,
             "maximum": 100000,
-            "description": "JTAG クロック（kHz。配線の性質。CLI の --jtag-khz）"
+            "description": "JTAG クロック（kHz。配線の性質。CLI の --jtag-khz）",
+            "examples": [
+              25000
+            ]
           },
           "offsets": {
             "type": "string",
@@ -55799,29 +55913,44 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "カーネルの線形マップの仮想アドレスの始まり（--page-offset）"
+            "description": "カーネルの線形マップの仮想アドレスの始まり（--page-offset）",
+            "examples": [
+              2147483648
+            ]
           },
           "phys_offset": {
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "線形マップが対応する物理アドレスの始まり（--phys-offset）"
+            "description": "線形マップが対応する物理アドレスの始まり（--phys-offset）",
+            "examples": [
+              0
+            ]
           },
           "linear_map_end": {
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "線形マップの上端の仮想アドレス（high_memory。--linear-map-end）"
+            "description": "線形マップの上端の仮想アドレス（high_memory。--linear-map-end）",
+            "examples": [
+              3141533696
+            ]
           },
           "max_tasks": {
             "type": "integer",
             "minimum": 1,
-            "description": "タスク一覧が何個まで続いてよいか（超えたら破損とみなす。--max-tasks）"
+            "description": "タスク一覧が何個まで続いてよいか（超えたら破損とみなす。--max-tasks）",
+            "examples": [
+              100000
+            ]
           },
           "max_threads": {
             "type": "integer",
             "minimum": 1,
-            "description": "1 プロセスのスレッド一覧が何個まで続いてよいか（--max-threads）"
+            "description": "1 プロセスのスレッド一覧が何個まで続いてよいか（--max-threads）",
+            "examples": [
+              4096
+            ]
           },
           "mmu_format": {
             "type": "string",
@@ -55829,7 +55958,10 @@
               "short",
               "lpae"
             ],
-            "description": "ページテーブルの形式（--mmu-format）"
+            "description": "ページテーブルの形式（--mmu-format）",
+            "examples": [
+              "short"
+            ]
           },
           "journal": {
             "type": "string",
@@ -55838,12 +55970,18 @@
           },
           "fpga_request_times": {
             "type": "boolean",
-            "description": "fprobe のバックエンドだけ: 停止の要求を FPGA のイベントの記録で時刻づけし、停止の報告の上限と根拠の文をそれで書く（記録の無い構成では PC の時計の上限になり、根拠の文がそう言う）。CTI とは使わない"
+            "description": "fprobe のバックエンドだけ: 停止の要求を FPGA のイベントの記録で時刻づけし、停止の報告の上限と根拠の文をそれで書く（記録の無い構成では PC の時計の上限になり、根拠の文がそう言う）。CTI とは使わない",
+            "examples": [
+              true
+            ]
           },
           "part": {
             "type": "string",
             "minLength": 1,
-            "description": "[fprobe] 部品の名前（arm_a_part。例 zynq7000・bcm2836。--part）"
+            "description": "[fprobe] 部品の名前（arm_a_part。例 zynq7000・bcm2836。--part）",
+            "examples": [
+              "bcm2836"
+            ]
           },
           "fpga_halt_watch_bound_ns": {
             "anyOf": [
@@ -56133,11 +56271,21 @@
                   "refused_while_open": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "enum": [
+                        "target.connect",
+                        "lowlevel",
+                        "linux.memap.connect_jtag",
+                        "probe.design.switch"
+                      ]
+                    },
+                    "description": "開いている間、断る操作（識別子）: target.connect / lowlevel = 線を直接動かす操作（jtag.scan・dp/ap・pins 等）/ linux.memap.connect_jtag / probe.design.switch = 構成の書き替え（自動の書き替えも）"
                   },
                   "device_lock": {
-                    "type": "string"
+                    "enum": [
+                      "per_call",
+                      "openocd_path"
+                    ],
+                    "description": "機器の錠の使い方: per_call = コアの操作は 1 回ずつ機器の錠を取る（gdb のスレッドと他の操作が交互に使う）/ openocd_path = OpenOCD の経路（プローブの DAP は使わない）"
                   }
                 },
                 "required": [
@@ -56409,11 +56557,21 @@
                   "refused_while_open": {
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
+                      "enum": [
+                        "target.connect",
+                        "lowlevel",
+                        "linux.memap.connect_jtag",
+                        "probe.design.switch"
+                      ]
+                    },
+                    "description": "開いている間、断る操作（識別子）: target.connect / lowlevel = 線を直接動かす操作（jtag.scan・dp/ap・pins 等）/ linux.memap.connect_jtag / probe.design.switch = 構成の書き替え（自動の書き替えも）"
                   },
                   "device_lock": {
-                    "type": "string"
+                    "enum": [
+                      "per_call",
+                      "openocd_path"
+                    ],
+                    "description": "機器の錠の使い方: per_call = コアの操作は 1 回ずつ機器の錠を取る（gdb のスレッドと他の操作が交互に使う）/ openocd_path = OpenOCD の経路（プローブの DAP は使わない）"
                   }
                 },
                 "required": [
@@ -57285,38 +57443,56 @@
           "skew_limit_ns": {
             "type": "integer",
             "minimum": 0,
-            "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）"
+            "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）",
+            "examples": [
+              50000000
+            ]
           },
           "thread_id": {
             "enum": [
               "stack",
               "contextidr"
             ],
-            "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）"
+            "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）",
+            "examples": [
+              "stack"
+            ]
           },
           "kernel_isa": {
             "enum": [
               "arm",
               "thumb"
             ],
-            "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）"
+            "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）",
+            "examples": [
+              "arm"
+            ]
           },
           "max_step_retries": {
             "type": "integer",
             "minimum": 1,
-            "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか"
+            "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか",
+            "examples": [
+              8
+            ]
           },
           "bp_unmapped": {
             "enum": [
               "error",
               "hw"
             ],
-            "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）"
+            "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）",
+            "examples": [
+              "error"
+            ]
           },
           "max_halt_s": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す"
+            "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す。注意: 全コアを止めている間、対象のカーネルは動けないので、対象のハードウェアのウォッチドッグ（例: Raspberry Pi の BCM2835 は上限が約 15 秒）に餌をやれず、対象がハードウェアリセットされる（2026-11-04 実機: 6 回中 6 回、止めて約 15〜25 秒後）。max_halt_s がその上限より長いなら、先に対象のウォッチドッグを止める（systemd なら RuntimeWatchdogSec=0）",
+            "examples": [
+              120
+            ]
           },
           "fetch_from_target": {
             "anyOf": [
@@ -57344,7 +57520,10 @@
               }
             ],
             "default": null,
-            "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）"
+            "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）",
+            "examples": [
+              "sw"
+            ]
           },
           "step_max_instructions": {
             "anyOf": [
@@ -57357,7 +57536,10 @@
               }
             ],
             "default": null,
-            "description": "画面の道のステップ（debug.step・target.step・Run to Cursor。上限の引数を持たない置き方）で使う 1 行の命令の数の上限。渡さなければその道は断る（既定の上限を持たない）"
+            "description": "画面の道のステップ（debug.step・target.step・Run to Cursor。上限の引数を持たない置き方）で使う 1 行の命令の数の上限。渡さなければその道は断る（既定の上限を持たない）",
+            "examples": [
+              200000
+            ]
           },
           "step_timeout_s": {
             "anyOf": [
@@ -57370,7 +57552,10 @@
               }
             ],
             "default": null,
-            "description": "画面の道のステップ（debug.step・target.step・Run to Cursor）で使う時間の上限（秒）。debug.step の timeout_s（マイコンの既定 5.0 を持つ）は Linux の道では使わない。渡さなければその道は断る"
+            "description": "画面の道のステップ（debug.step・target.step・Run to Cursor）で使う時間の上限（秒）。debug.step の timeout_s（マイコンの既定 5.0 を持つ）は Linux の道では使わない。渡さなければその道は断る",
+            "examples": [
+              5
+            ]
           }
         },
         "required": [

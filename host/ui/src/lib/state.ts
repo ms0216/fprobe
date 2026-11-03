@@ -73,6 +73,11 @@ export class AppState {
 
   /** AI の利用者がつながっていて、一時停止していない（2 つの事実の組。AI が作業中かは判定しない: つながっているだけで
    *  何もしていないこともある） */
+  /** つながっている AI の利用者の名前（session.status の clients の事実。確認の文に載せる） */
+  get aiClientNames(): string[] {
+    return this.snap.clients.filter((c) => c.role === "ai").map((c) => c.name);
+  }
+
   get aiConnectedUnpaused(): boolean {
     return !this.snap.control.paused && this.snap.clients.some((c) => c.role === "ai");
   }

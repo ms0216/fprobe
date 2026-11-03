@@ -7,6 +7,7 @@
   import { sourcedApp, sourcedConn } from "./lib/source";
   import { CodeAtLink } from "./lib/codeat";
   import { commandForKey, type CommandState } from "./lib/commands";
+  import { watchFieldNames } from "./lib/fieldnames";
   import { SHARED, type Shared } from "./lib/context";
   import { Debugger, focusFrame } from "./lib/debugger";
   import type { Dock } from "./lib/dock";
@@ -89,7 +90,8 @@
   });
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
-                                         selection: $ui.selection, rescueDp: $app.target?.rescue_dp });
+                                         selection: $ui.selection, rescueDp: $app.target?.rescue_dp,
+                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt });
 
   function onKey(e: KeyboardEvent) {
     if ($ui.dialog) return;
@@ -107,6 +109,7 @@
   const stopFaults = watchFaults((m, p, o) => conn.call(m, p, o), app, () => dock.show("fault"));
   // AI（や別の窓）がパネルを開く・前に出すと頼んだ（ui.state.set の panel）: View メニューと同じに開く
   const stopPanels = followPanelRequests(conn, (id) => dock.show(id));
+  const stopFieldNames = watchFieldNames(document.body);                    // 名前だけが placeholder の欄にも名前のツールチップ
   const stopOpen = onTimeline({ open: (d) => (d.kind === "memory" ? showMemory(d.address) : void showAddress(d.address)) });
 
   // 合言葉が無い・違う（cookie が無い・作り直された）: 合言葉を入れる画面へ
@@ -117,6 +120,7 @@
   onDestroy(() => {
     stopOpen();
     stopPanels();
+    stopFieldNames();
     stopFaults();
     conn.stop();
     screen.dispose();

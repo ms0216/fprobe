@@ -528,3 +528,44 @@ def test_state_reads_do_not_wait_for_a_long_attach_and_say_it_is_attaching(race,
     assert sysst["mcu"]["connected"] is False and sysst["mcu"]["linux_attaching"]["pid"] == PID
     worker.join(10)
     wait_for(lambda: (s := seen.last()) and s.get("linux"))
+
+
+def test_the_status_tells_the_screen_that_breakpoint_edits_need_a_halt(race):  # noqa: F811
+    """画面が「走行中は置き外しを無効にして理由を出す」ための事実: target.status の linux に
+    breakpoint_edit_requires_halt（エンジンは走行中の置き外しを断る）。画面は対象の種類を決めず、この値を見る。"""
+    world, _, ai, gui = race
+    ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
+    st = gui.call("target.status")
+    assert st["linux"]["breakpoint_edit_requires_halt"] is True
+    with pytest.raises(ApiError, match="cores are running"):
+        ai.call("linux.halt.debug.run", wait_s=0.01)
+        gui.call("debug.breakpoint.clear")
+
+def test_a_step_on_a_dead_process_says_the_exit_status_and_the_killing_signal():
+    """クラッシュで死んだプロセスへのステップの誤り: カーネルの終了コード（(状態 << 8) | シグナル）の読み方を事実として添える
+    （「exit, code 11」だけでは、終了状態 11 なのかシグナル 11 なのか分からなかった）。"""
+    from fprobe.linux_halt.view import LinuxDebugView
+    with pytest.raises(RuntimeError, match=r"code 11 = exit status 0, killed by signal 11"):
+        LinuxDebugView._step_reply({"address": None, "kind": "exit", "code": 11}, 0.0)
+    with pytest.raises(RuntimeError, match=r"code 256 = exit status 1）"):
+        LinuxDebugView._step_reply({"address": None, "kind": "exit", "code": 256}, 0.0)
+
+def test_the_debug_status_returns_the_settings_the_attach_used_so_the_human_screen_shows_what_the_ai_ran(race):  # noqa: F811
+    """AI が attach したとき、人の画面の欄に同じ設定値を映すための事実: linux.halt.debug.status の options は、attach に
+    渡した設定そのまま（渡さなかった任意の設定は null）。"""
+    world, _, ai, gui = race
+    ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
+    opts = gui.call("linux.halt.debug.status")["options"]
+    assert opts == {**ATTACH, **SCREEN, "fetch_from_target": None}
+    ai.call("linux.halt.debug.close")
+    ai.call("linux.halt.debug.attach", **ATTACH)
+    assert gui.call("linux.halt.debug.status")["options"]["breakpoint_kind"] is None
+
+
+def test_the_open_status_names_what_is_refused_and_how_the_lock_is_used_by_identifiers_not_prose(race):  # noqa: F811
+    """画面の言葉（英語・日本語）は画面の i18n が付ける。API は識別子を返す（日本語の文を英語の画面に出さない）。"""
+    world, _, ai, gui = race
+    occ = gui.call("linux.halt.status")["occupies"]
+    assert occ["probe_dap"] is True
+    assert occ["refused_while_open"] == ["target.connect", "lowlevel", "linux.memap.connect_jtag", "probe.design.switch"]
+    assert occ["device_lock"] == "per_call"

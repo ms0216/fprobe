@@ -1,8 +1,10 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Source: 行の左の余白にブレークポイント、いまの行（▶）の強調、選んだ行（Run to Cursor・F9 の対象）、
   // 逆アセンブルの混在表示（Mixed）。何も開いていなければ Open ELF / Load Demo / 最近使った項目。
   import { tick } from "svelte";
   import { command, type CommandState } from "../../lib/commands";
+  import { highlightLines } from "../../lib/highlight";
   import { shared } from "../../lib/context";
   import { lineMenu, openMenu } from "../../lib/contextmenu";
   import { frameLine, markedLines, type Instruction } from "../../lib/debugger";
@@ -61,6 +63,7 @@
 
   const online = $derived($app.link === "open");
   const lines = $derived($dbg.source ? $dbg.source.text.replace(/\n$/, "").split("\n") : []);
+  const tokens = $derived(highlightLines(lines));                      // 構文の色（見せ方だけ）
   const breakable = $derived(new Set($dbg.source?.lines ?? []));
   const marked = $derived(markedLines($dbg));
   const disabledMarks = $derived(markedLines($dbg, (b) => b.enabled === false));
@@ -254,7 +257,7 @@
                   title={heat?.has(n) ? $i18n("profile.heatLine", { p: `${(heat.get(n)!.fraction * 100).toFixed(1)}%`, n: heat.get(n)!.samples })
                          : missed?.has(n) ? $i18n("profile.missedLine") : null}>{n}</span>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <span class="text" onclick={() => ui.select($dbg.open!, n)}>{text || " "}</span>
+            <span class="text" onclick={() => ui.select($dbg.open!, n)}>{#each tokens[i] ?? [] as tk, k (k)}<span class={tk.t}>{tk.s}</span>{/each}{text ? "" : " "}</span>
           </div>
           {#each byLine.get(n) ?? [] as ins (ins.address)}
             <div class="asm" class:pc={ins.address === $dbg.stop?.pc} class:frame={ins.address === framePc}>
@@ -273,7 +276,7 @@
   {:else}
     <div class="empty start">
       <strong class="title">{$i18n("source.noProgram")}</strong>
-      <span>{$i18n("source.noProgramHint")}</span>
+      <Hint text={$i18n("source.noProgramHint")} />
       <div class="actions">
         <button class="primary" disabled={!online} onclick={() => run("openElf")}>{$i18n("cmd.openElf")}</button>
         <button disabled={!online} title={$i18n("tip.loadDemo")} onclick={() => run("loadDemo")}>{$i18n("cmd.loadDemo")}</button>
@@ -300,6 +303,13 @@
   .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; font-size: 12px; }
   .lines { flex: 1; overflow: auto; padding: 4px 0; }
   .line, .asm { display: grid; grid-template-columns: 18px 14px 44px 1fr; align-items: center; min-height: 19px; }
+  /* 構文の色（lib/highlight.ts）。明暗は色の変数に従う */
+  .text :global(.kw) { color: var(--accent); }
+  .text :global(.type) { color: color-mix(in srgb, var(--accent) 55%, var(--ok)); }
+  .text :global(.str) { color: var(--ok); }
+  .text :global(.num) { color: var(--warn); }
+  .text :global(.cm) { color: var(--muted); font-style: italic; }
+  .text :global(.pp) { color: color-mix(in srgb, var(--bad) 55%, var(--accent)); }
   .line.selected { background: var(--select); }
   .line.stop { background: color-mix(in srgb, var(--warn) 22%, transparent); }
   .line.frame { background: color-mix(in srgb, var(--ok) 18%, transparent); }

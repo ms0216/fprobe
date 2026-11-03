@@ -4,7 +4,7 @@
   // 呼んだ操作は利用者 human として Activity と記録に残る。read は確かめない、control は確かめ、元に戻せない操作は赤
   import { callApi } from "../../lib/apicall";
   import { METHODS } from "../../lib/apispec";
-  import { buildParams, fieldsOf, valuesOf, type ApiMethod,
+  import { buildParams, exampleValues, fieldsOf, valuesOf, type ApiMethod,
            type FieldError, type FieldValues } from "../../lib/apiform";
   import { shared } from "../../lib/context";
   import { favorites } from "../../lib/favorites";
@@ -48,7 +48,7 @@
 
   function pick(m: ApiMethod, initial: FieldValues = {}) {
     chosen = m;
-    values = initial;
+    values = { ...exampleValues(fieldsOf(m.params)), ...initial };     // 最初の値は仕様の examples。呼んだ記録・お気に入りの値が先
     errors = {};
     unrestored = [];
     result = null;

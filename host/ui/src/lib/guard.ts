@@ -5,6 +5,11 @@ import { confirmer, type Confirmer } from "./confirm";
 import { t } from "./i18n";
 import type { AppState } from "./state";
 
-export async function allowed(app: Pick<AppState, "aiConnectedUnpaused">, ask: Confirmer = confirmer): Promise<boolean> {
-  return !app.aiConnectedUnpaused || ask.ask(t("confirm.aiConnected"), { ok: t("confirm.continue") });
+/** what = 今押した操作の名前（確認の文に載せる）。AI の名前は API の clients（事実）。どちらも無ければ従来の文 */
+export async function allowed(app: Pick<AppState, "aiConnectedUnpaused"> & Partial<Pick<AppState, "aiClientNames">>,
+                              ask: Confirmer = confirmer, what?: string): Promise<boolean> {
+  if (!app.aiConnectedUnpaused) return true;
+  const who = (app.aiClientNames ?? []).join(", ");
+  const message = who || what ? t("confirm.aiConnectedWho", { who: who || "-", what: what ?? "-" }) : t("confirm.aiConnected");
+  return ask.ask(message, { ok: t("confirm.continue") });
 }

@@ -12,6 +12,7 @@
   import { topCut } from "../../lib/cut";
   import { i18n } from "../../lib/i18n";
   import { Poller } from "../../lib/poll";
+  import { suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import {
     SymbolAddresses, functionRows, heatOf, lineRows, rowTable, selectedRange, sourceHeat, type FunctionCoverage, type ProfileFunctionRow,
@@ -32,7 +33,9 @@
   let method = $state(load("profile.method", "itm"));
   // 周期は使う人が選ぶ（画面の既定を持たない。選ぶまで始められない）
   const savedRate = Number(load("profile.rate", ""));
-  let rate = $state<number | null>(savedRate > 0 ? savedRate : null);
+  const RATES = [1000, 2000, 5000, 10000, 20000, 50000];
+  const suggestedRate = Number(suggestedOf("profile.start", "rate_hz"));          // 仕様の既定（欄に見えて書き換えられる）
+  let rate = $state<number | null>(savedRate > 0 ? savedRate : RATES.includes(suggestedRate) ? suggestedRate : null);
   let scope = $state<"whole" | "selected">(load("profile.scope", "whole") === "selected" ? "selected" : "whole");
   let heat = $state(load("profile.heat", "1") === "1");
   $effect(() => save("profile.method", method));
@@ -189,7 +192,7 @@
       <label>{$i18n("profile.rate")}<span class="req" aria-hidden="true">*</span>
         <select bind:value={rate} aria-required="true">
           {#if rate === null}<option value={null} disabled></option>{/if}
-          {#each [1000, 2000, 5000, 10000, 20000, 50000] as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
+          {#each RATES as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
         </select></label>
       {#if method === "itm"}
         <label title={clockAuto === "SystemCoreClock" ? $i18n("profile.clockFromElf") : ""}>

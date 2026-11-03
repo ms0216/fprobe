@@ -7,24 +7,31 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
-  import { EMPTY_ATTACH_FORM, EMPTY_GDB_FORM, EMPTY_HALT_FORM, haltDebugAttachParams, haltGdbServeParams, haltOpenParams,
+  import { EMPTY_GDB_FORM, attachFormOf, shouldRefreshOn, exampleAttachForm, exampleHaltForm, haltDebugAttachParams, haltFormOf, haltGdbServeParams, haltOpenParams,
     haltThreadsParams, type DebugAttachForm, type GdbServeForm, type HaltForm } from "../../lib/linuxhalt";
   import { load, save } from "../../lib/prefs";
 
   const POLL_MS = 500;                                   // gdb のサーバが動いている間、その事実を読み直す間隔（描き直し）
   const { app, conn } = shared();
 
-  // 欄は空から（前に書いた値だけを戻す）
-  let form = $state<HaltForm>(restore("linuxHalt.open", EMPTY_HALT_FORM));
+  // 欄の最初の値は、前に書いた値、無ければ API の仕様の「例・推奨の値」（examples。見えて・書き換えられ・送るときは欄の値を明示して送る）
+  let form = $state<HaltForm>(restore("linuxHalt.open", exampleHaltForm()));
   let gdbForm = $state<GdbServeForm>(restore("linuxHalt.gdb", EMPTY_GDB_FORM));
   // 全コア停止で止めて調べる（linux.halt.debug.attach。止めた後は今あるデバッガの画面がそのプロセスを描く）
-  let attachForm = $state<DebugAttachForm>(restore("linuxHalt.attach", EMPTY_ATTACH_FORM));
+  let attachForm = $state<DebugAttachForm>(restore("linuxHalt.attach", exampleAttachForm()));
   let attached = $state<Result<"linux.halt.debug.attach"> | null>(null);
   let detached = $state<Result<"linux.halt.debug.close"> | null>(null);
   let threadsPid = $state(load("linuxHalt.threadsPid", ""));
   type Status = Result<"linux.halt.status">;
   type OpenStatus = Extract<Status, { open: true }>;
   let status = $state<Status | null>(null);
+  // 最後に書いた値を残す（次に開いたとき・別の窓でも同じ欄の値から始まる）
+  $effect(() => { save("linuxHalt.open", JSON.stringify(form)); });
+  $effect(() => { save("linuxHalt.attach", JSON.stringify(attachForm)); });
+  let attachOptions = $state<Result<"linux.halt.debug.status">["options"] | null>(null);   // 今の attach で使っている設定（API の事実）
+  // 開いている間・attach している間は、欄に「使っている値」を映す（AI が open / attach したときも人の画面に同じ値が見える）。欄は変えられない
+  const openLocked = $derived(!!status?.open);
+  const attachLocked = $derived(!!attachOptions);
   let opened = $state<Result<"linux.halt.open"> | null>(null);
   let stop = $state<HaltStopReport | null>(null);            // 最後に操作が返した停止の報告（API の stop）
   let stopFrom = $state("");                                  // その操作の名前
@@ -44,7 +51,7 @@
   }
 
   async function call<M extends keyof Methods>(method: M, params?: Params<M>): Promise<Result<M> | undefined> {
-    if (!(await allowed(app))) return undefined;
+    if (!(await allowed(app, undefined, String(method)))) return undefined;
     error = null;
     try {
       return await app.act(method, params);
@@ -57,7 +64,16 @@
   async function refresh() {
     try {
       status = await conn.call("linux.halt.status", {}, { quiet: true });
+      error = null;                                   // 読めたら、前の読めなかった文は消す（つながっているのに「Not connected」が残っていた）
       gdb = status.open ? status.gdb : null;
+      if (status.open) form = haltFormOf(form, status.options as Record<string, unknown>);
+      if (status.open && status.debug && !status.debug.closed) {
+        const d = await conn.call("linux.halt.debug.status", {}, { quiet: true });
+        attachOptions = d.options;
+        if (d.options) attachForm = attachFormOf(attachForm, d.options as Record<string, unknown>);
+      } else {
+        attachOptions = null;
+      }
     } catch (e) {
       error = errorText(e);
     }
@@ -110,10 +126,13 @@
     threads = (await withStop("linux.halt.threads", built.params)) ?? null;
   }
 
-  $effect(() => { void refresh(); });
+  // つながってから読む（つながる前の読みの失敗の文が、つながった後も残っていた）。つながったとき・つなぎ直したときに読み直す
+  $effect(() => { if ($app.link === "open") void refresh(); });
   // だれが（AI も）操作しても読み直す
+  // 読み直す自分の読み（status・debug.status）の記録では読み直さない: debug.status は操作の種別で、静かな読みでも記録され、通知
+  // activity → 読み直し → 記録 → 通知… の循環になる（2026-11-04 実機: attach 中に毎秒 500 回の問い合わせ）。状態を変える操作だけ。
   $effect(() => conn.on("activity", (e: { method: string }) => {
-    if (e.method.startsWith("linux.halt.")) void refresh();
+    if (shouldRefreshOn(e.method)) void refresh();
   }));
   // gdb のサーバが動いている間は、その事実（接続・終わり方）を読み直す（gdb の操作は API の記録に出ないため）
   $effect(() => {
@@ -152,27 +171,33 @@
 {/snippet}
 
 <div class="pane linuxhalt">
-  <form class="pane-bar wrapbar" onsubmit={(e) => { e.preventDefault(); void open(); }}>
-    <select bind:value={form.backend} aria-label="backend" aria-required="true">
-      <option value="" disabled>backend</option><option value="fprobe">fprobe</option><option value="openocd">openocd</option>
-    </select><span class="req" aria-hidden="true">*</span>
-    <input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={$i18n("linuxHalt.offsetsHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <select bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true">
-      <option value="" disabled>mmu_format</option><option value="short">short</option><option value="lpae">lpae</option>
-    </select><span class="req" aria-hidden="true">*</span>
-    <input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={$i18n("linuxHalt.journalHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <select bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true">
-      <option value="" disabled>fpga_request_times</option><option value="true">true</option><option value="false">false</option>
-    </select><span class="req" aria-hidden="true">*</span>
-    <button class="primary small">{$i18n("linuxHalt.open")}</button>
+  <div class="head pad">
+    <span class="chip" class:on={status?.open}>● {status?.open ? `${status.backend}${"part" in status ? " · " + status.part : ""} · ${$i18n("linuxHalt.nCores", { n: status.n_cores })}` : $i18n("linuxHalt.none")}</span>
+    <button class="primary small" form="halt-open" disabled={openLocked} title={$i18n("linuxHalt.openHint")}>{$i18n("linuxHalt.open")}</button>
     {#if status?.open}<button type="button" class="small" onclick={async () => { const r = await call("linux.halt.close"); if (r !== undefined) { result = r; opened = null; } await refresh(); }}>{$i18n("linuxHalt.close")}</button>{/if}
+  </div>
+  <details class="pad" open={!status?.open}>
+    <summary>{$i18n("linuxHalt.settings")}</summary>
+  <form id="halt-open" class="pane-bar wrapbar" onsubmit={(e) => { e.preventDefault(); void open(); }}>
+    <label class="fld"><span class="nm" title="backend">{$i18n("linuxHalt.f.backend")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.backend} aria-label="backend" aria-required="true">
+      <option value="" disabled>backend</option><option value="fprobe">fprobe</option><option value="openocd">openocd</option>
+    </select></label>
+    <label class="fld"><span class="nm" title="jtag_khz">{$i18n("linuxHalt.f.jtag_khz")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="offsets">{$i18n("linuxHalt.f.offsets")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={$i18n("linuxHalt.offsetsHint")} aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="page_offset">{$i18n("linuxHalt.f.page_offset")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="phys_offset">{$i18n("linuxHalt.f.phys_offset")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="linear_map_end">{$i18n("linuxHalt.f.linear_map_end")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_tasks">{$i18n("linuxHalt.f.max_tasks")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_threads">{$i18n("linuxHalt.f.max_threads")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="mmu_format">{$i18n("linuxHalt.f.mmu_format")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true">
+      <option value="" disabled>mmu_format</option><option value="short">short</option><option value="lpae">lpae</option>
+    </select></label>
+    <label class="fld"><span class="nm" title="journal">{$i18n("linuxHalt.f.journal")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={$i18n("linuxHalt.journalHint")} aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="fpga_request_times">{$i18n("linuxHalt.f.fpga_request_times")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true">
+      <option value="" disabled>fpga_request_times</option><option value="true">true</option><option value="false">false</option>
+    </select></label>
   </form>
+  </details>
   <details class="pad">
     <summary>{$i18n("linuxHalt.backendFields")}</summary>
     <div class="bar">
@@ -205,37 +230,41 @@
         <button class="small" onclick={() => void refresh()}>{$i18n("linuxHalt.status")}</button>
         <button class="small" onclick={() => void withStop("linux.halt.halt_all")}>{$i18n("linuxHalt.haltAll")}</button>
         <button class="small" onclick={() => void withStop("linux.halt.resume_all")}>{$i18n("linuxHalt.resumeAll")}</button>
+      </div>
+      <details class="more">
+        <summary>{$i18n("linuxHalt.more")}</summary>
+        <div class="bar">
         <button class="small" onclick={async () => { processes = (await withStop("linux.halt.processes")) ?? null; }}>{$i18n("linuxHalt.processes")}</button>
         <input class="mono num" bind:value={threadsPid} placeholder="pid" aria-label="pid" />
         <button class="small" onclick={() => void threadsOf()}>{$i18n("linuxHalt.threads")}</button>
         <button class="small" title={$i18n("linuxHalt.recoverHint")} onclick={async () => { result = (await withStop("linux.halt.recover")) ?? null; }}>{$i18n("linuxHalt.recover")}</button>
         <button class="small" title={$i18n("linuxHalt.rescueHint")} onclick={async () => { result = (await call("linux.halt.rescue")) ?? null; await refresh(); }}>{$i18n("linuxHalt.rescue")}</button>
-      </div>
-      <details open>
+        </div>
+      </details>
+      <details>
         <summary>{$i18n("linuxHalt.facts")}</summary>
         <table class="mono small"><tbody>
           {#each FACTS.filter((k) => k in status!) as k (k)}<tr><td>{k}</td><td>{fmt(fact(status, k))}</td></tr>{/each}
-          <tr><td>options</td><td class="wrap">{fmt(status.options)}</td></tr>
         </tbody></table>
         {#if status.occupies}
-          <div class="mono small">probe_dap={fmt(status.occupies.probe_dap)} {status.occupies.device_lock}</div>
-          {#each status.occupies.refused_while_open as what (what)}<div class="mono small muted">✕ {what}</div>{/each}
+          <div class="mono small">probe_dap={fmt(status.occupies.probe_dap)} {$i18n(`linuxHalt.lock.${status.occupies.device_lock}`)}</div>
+          {#each status.occupies.refused_while_open as what (what)}<div class="mono small muted" title={what}>✕ {$i18n(`linuxHalt.refused.${what}`)}</div>{/each}
         {/if}
       </details>
-      <section>
+      <section class="cores">
         <strong>{$i18n("linuxHalt.cores")}</strong>
         {#if status.cores}
-          <table class="mono small">
-            <thead><tr><th>core</th><th>running</th><th>breakpoints</th><th>watchpoints</th></tr></thead>
-            <tbody>{#each status.cores as c (c.core)}<tr><td>{c.core}</td><td>{fmt(c.running)}</td><td>{fmt(c.breakpoints)}</td><td>{fmt(c.watchpoints)}</td></tr>{/each}</tbody>
-          </table>
-        {:else}<div class="muted small">{status.cores_unread}</div>{/if}
+          {#each status.cores as c (c.core)}
+            <span class="chip mono small" class:on={!c.running} title={`running=${fmt(c.running)} breakpoints=${fmt(c.breakpoints)} watchpoints=${fmt(c.watchpoints)}`}>{c.core}: {c.running ? $i18n("linuxHalt.running") : $i18n("linuxHalt.halted")} · bp {c.breakpoints.length} · wp {c.watchpoints.length}</span>
+          {/each}
+        {:else}<span class="muted small">{status.cores_unread}</span>{/if}
       </section>
-      <section>
+      <details>
+        <summary>journal</summary>
         <strong>journal</strong> <span class="mono small">{status.journal.path} exists={fmt(status.journal.exists)}</span>
         {#if status.journal.error}<div class="bad small">{status.journal.error}</div>{/if}
         {#each status.journal.entries ?? [] as e, i (i)}<div class="mono small">pa={hex(e.pa)} width={e.width} owners={fmt(e.owners)}</div>{/each}
-      </section>
+      </details>
       {#if stop}
         <section><strong>stop</strong> <span class="muted small">{stopFrom}</span>{@render report(stop)}</section>
       {/if}
@@ -261,27 +290,30 @@
       <details open>
         <summary>{$i18n("linuxHalt.debug")}</summary>
         <form class="bar" onsubmit={(e) => { e.preventDefault(); void attach(); }}>
-          <input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={$i18n("linuxHalt.elfHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <select bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true">
+          <label class="fld"><span class="nm" title="pid">{$i18n("linuxHalt.f.pid")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="elf">{$i18n("linuxHalt.f.elf")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={$i18n("linuxHalt.elfHint")} aria-required="true" disabled={attachLocked} /></label>
+          <details class="adv">
+            <summary>{$i18n("linuxHalt.advanced")} <span class="mono muted small">{attachForm.skewLimitNs} ns · {attachForm.maxHaltS} s · {attachForm.breakpointKind || "-"} bp · {attachForm.stepMaxInstructions} / {attachForm.stepTimeoutS} s</span></summary>
+          <label class="fld"><span class="nm" title="skew_limit_ns">{$i18n("linuxHalt.f.skew_limit_ns")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="thread_id">{$i18n("linuxHalt.f.thread_id")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true">
             <option value="" disabled>thread_id</option><option value="stack">stack</option><option value="contextidr">contextidr</option>
-          </select><span class="req" aria-hidden="true">*</span>
-          <select bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
+          </select></label>
+          <label class="fld"><span class="nm" title="kernel_isa">{$i18n("linuxHalt.f.kernel_isa")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
             <option value="" disabled>kernel_isa</option><option value="arm">arm</option><option value="thumb">thumb</option>
-          </select><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <select bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
+          </select></label>
+          <label class="fld"><span class="nm" title="max_step_retries">{$i18n("linuxHalt.f.max_step_retries")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="bp_unmapped">{$i18n("linuxHalt.f.bp_unmapped")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
             <option value="" disabled>bp_unmapped</option><option value="error">error</option><option value="hw">hw</option>
-          </select><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <input class="mono" bind:value={attachForm.fetchFromTarget} placeholder="fetch_from_target" aria-label="fetch_from_target" title={$i18n("linuxHalt.fetchHint")} />
-          <select bind:value={attachForm.breakpointKind} aria-label="breakpoint_kind" title={$i18n("linuxHalt.bpKindHint")}>
+          </select></label>
+          <label class="fld"><span class="nm" title="max_halt_s">{$i18n("linuxHalt.f.max_halt_s")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="fetch_from_target">{$i18n("linuxHalt.f.fetch_from_target")}</span><input class="mono" bind:value={attachForm.fetchFromTarget} placeholder="fetch_from_target" aria-label="fetch_from_target" title={$i18n("linuxHalt.fetchHint")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="breakpoint_kind">{$i18n("linuxHalt.f.breakpoint_kind")}</span><select disabled={attachLocked} bind:value={attachForm.breakpointKind} aria-label="breakpoint_kind" title={$i18n("linuxHalt.bpKindHint")}>
             <option value="">breakpoint_kind</option><option value="sw">sw</option><option value="hw">hw</option>
-          </select>
-          <input class="mono num" bind:value={attachForm.stepMaxInstructions} placeholder="step_max_instructions" aria-label="step_max_instructions" title={$i18n("linuxHalt.stepLimitHint")} />
-          <input class="mono num" bind:value={attachForm.stepTimeoutS} placeholder="step_timeout_s" aria-label="step_timeout_s" title={$i18n("linuxHalt.stepLimitHint")} />
-          <button class="primary small">{$i18n("linuxHalt.attach")}</button>
+          </select></label>
+          <label class="fld"><span class="nm" title="step_max_instructions">{$i18n("linuxHalt.f.step_max_instructions")}</span><input class="mono num" bind:value={attachForm.stepMaxInstructions} placeholder="step_max_instructions" aria-label="step_max_instructions" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="step_timeout_s">{$i18n("linuxHalt.f.step_timeout_s")}</span><input class="mono num" bind:value={attachForm.stepTimeoutS} placeholder="step_timeout_s" aria-label="step_timeout_s" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
+          </details>
+          <button class="primary small" disabled={attachLocked}>{$i18n("linuxHalt.attach")}</button>
           <button type="button" class="small" onclick={async () => { const r = await call("linux.halt.debug.close"); if (r !== undefined) { detached = r; attached = null; } await refresh(); }}>{$i18n("linuxHalt.detach")}</button>
         </form>
         {#if attached}
@@ -294,7 +326,7 @@
         {/if}
         {#if detached}<pre class="mono small">{JSON.stringify(detached, null, 1)}</pre>{/if}
       </details>
-      <details open>
+      <details>
         <summary>gdb</summary>
         <form class="bar" onsubmit={(e) => { e.preventDefault(); void serve(); }}>
           <input class="mono num" bind:value={gdbForm.pid} placeholder="pid" aria-label="pid" aria-required="true" /><span class="req" aria-hidden="true">*</span>
@@ -335,8 +367,18 @@
   .linuxhalt { display: flex; flex-direction: column; }
   .body { flex: 1; overflow: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 6px; }
   .bar, .wrapbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .short { width: 7em; }
-  .num { width: 6em; }
+  .head { display: flex; gap: 6px; align-items: center; }
+  .chip { font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--select); }
+  .chip.on { background: color-mix(in srgb, var(--warn) 25%, transparent); }
+  .cores { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .more > summary, .adv > summary { cursor: pointer; font-size: 12px; opacity: 0.85; }
+  .adv { margin-top: 4px; }
+  /* 欄の名前を常に見せる（値が入ると placeholder は消える。何の値かが分からなくなる） */
+  .fld { display: inline-flex; flex-direction: column; gap: 1px; }
+  .fld .nm { font-size: 10px; opacity: 0.7; }
+  /* 欄の名前（placeholder）が切れて読めなかった: 中身（空なら名前）の幅に合わせる */
+  .short { width: auto; field-sizing: content; min-width: 7em; }
+  .num { width: auto; field-sizing: content; min-width: 6em; }
   .small { font-size: 12px; }
   table td, table th { padding: 0 8px 0 0; vertical-align: top; text-align: left; }
   .wrap { white-space: pre-wrap; word-break: break-word; }

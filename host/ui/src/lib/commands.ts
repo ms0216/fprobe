@@ -29,6 +29,7 @@ export interface CommandState {
   elf: string | null;
   selection: { file: string; line: number } | null;
   rescueDp?: number;                         // ホストが申告した救済の DP（target.status の rescue_dp。無ければ無い）
+  editNeedsHalt?: boolean;                   // ブレークポイントの置き外しは止まっている間だけ（target.status の linux.breakpoint_edit_requires_halt。API の事実）
 }
 
 export interface Command {
@@ -49,6 +50,9 @@ const halted = (s: CommandState): Key | null => connected(s) ?? (s.target === "H
 /** 走っているか（眠って割り込みを待っている SLEEPING も走っている: 止める・観測の対象） */
 export const isRunning = (state: string | undefined): boolean => state === "RUNNING" || state === "SLEEPING";
 const running = (s: CommandState): Key | null => connected(s) ?? (isRunning(s.target) ? null : "tip.notRunning");
+/** ブレークポイントを置く・外せるか: 対象が「止まっている間だけ」と API が申告していれば、止まるまで使えない（理由を出す） */
+export const breakpointEditable = (s: CommandState): Key | null =>
+  connected(s) ?? (s.editNeedsHalt && s.target !== "HALTED" ? "tip.haltToEditBreakpoints" : null);
 const withElf = (s: CommandState): Key | null => online(s) ?? (s.elf ? null : "tip.noElf");
 const withLine = (base: (s: CommandState) => Key | null) => (s: CommandState): Key | null =>
   base(s) ?? (s.selection ? null : "tip.noLine");
@@ -92,10 +96,11 @@ export const COMMANDS: Command[] = [
   { id: "runToCursor", label: "cmd.runToCursor", tip: "tip.runToCursor", shortcut: "Ctrl+F10", icon: "runToCursor",
     blocked: withLine(halted), run: halting("step", ({ dbg }, s) => dbg.runTo(s.selection!.file, s.selection!.line)) },
   { id: "toggleBreakpoint", label: "cmd.toggleBreakpoint", tip: "tip.toggleBreakpoint", shortcut: "F9",
-    icon: "breakpoint", blocked: withLine(connected),
+    icon: "breakpoint", blocked: withLine(breakpointEditable),
     run: halting("breakpoint", ({ dbg }, s) => dbg.toggleAt(s.selection!.file, s.selection!.line)) },
   { id: "removeAllBreakpoints", label: "cmd.removeAllBreakpoints", tip: "tip.removeAllBreakpoints",
-    shortcut: "Ctrl+Shift+F9", blocked: connected, run: guarded(({ dbg }) => dbg.removeAllBreakpoints()) },
+    shortcut: "Ctrl+Shift+F9", blocked: breakpointEditable,
+    run: async ({ app, dbg }) => ((await allowed(app, undefined, t("cmd.removeAllBreakpoints"))) ? dbg.removeAllBreakpoints() : undefined) },
   { id: "connect", label: "cmd.connect", tip: "tip.connect", icon: "connect", blocked: online,
     run: ({ ui }) => ui.open("connect") },
   { id: "disconnect", label: "cmd.disconnect", tip: "tip.disconnect", shortcut: "Shift+F5", icon: "disconnect",

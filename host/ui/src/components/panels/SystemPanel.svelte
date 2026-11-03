@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // システム解析: MCU と FPGA を対等に並べる（どちらかが主でどちらかが従ではない）。MCU = コアの状態と止めずに読む
   // 番地（ファームウェアのメールボックス・カウンタ等。読んだ値と読んだ時刻）、FPGA = 観測の型・状態と各組の最新の値
   // （信号の名前で）。どちらも system.status 1 回で読む。細かい前後関係は時間軸（同じ時刻の上に両方が並ぶ）で見る。
@@ -8,6 +9,7 @@
   import { errorText, type Result } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { i18n, type Key } from "../../lib/i18n";
+  import { suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import { haltReasonKey } from "../../lib/target";
   import {
@@ -40,8 +42,10 @@
   let rec = $state<Result<"recording.status"> | null>(null);
   let withPins = $state(load("system.withPins", "1") === "1");       // ピン（ロジアナ）も流し続けて記録へ
   $effect(() => save("system.withPins", withPins ? "1" : "0"));
+  // 形式の最初の値は、前に選んだもの、無ければ仕様の既定（recording.la_stream.start の rle）。欄に見えて書き換えられる
+  const suggestedFormat = suggestedOf("recording.la_stream.start", "rle") === true ? "rle" : suggestedOf("recording.la_stream.start", "rle") === false ? "raw" : "";
   let pinsFormat = $state<"" | "rle" | "raw">((["rle", "raw"].includes(load("system.pinsFormat", "")) ? load("system.pinsFormat", "")
-                                                                                                    : "") as "" | "rle" | "raw");
+                                                                                                    : suggestedFormat) as "" | "rle" | "raw");
   $effect(() => save("system.pinsFormat", pinsFormat));
   // RAW のとき: サンプルレート（MS/s）とチャンネル数も使う人が選ぶ（既定の速さで始めると、16 ch は 50 MB/s の壁を超えて溢れる）
   let pinsRateText = $state(load("system.pinsRateMs", "") || "");
@@ -52,7 +56,7 @@
   let withMemory = $state(load("system.withMemory", "1") === "1");   // MCU のメモリも DAP サンプラで記録へ（名前つき）
   $effect(() => save("system.withMemory", withMemory ? "1" : "0"));
   // 記録のメモリの読みの速さ（回/秒）: 使う人が入れる（時刻の分解能・リンクの帯域に効くので既定の値で決めない）
-  let memoryRateText = $state(load("system.memoryRateHz", "") || "");
+  let memoryRateText = $state(load("system.memoryRateHz", "") || String(suggestedOf("watch.set", "rate_hz") ?? ""));   // 最初の値は仕様の既定（見えて書き換えられる）
   $effect(() => save("system.memoryRateHz", memoryRateText));
   const memoryRate = $derived(parseRate(memoryRateText));
   const needsRate = $derived(withMemory && watches.length > 0 && memoryRate === null);
@@ -357,7 +361,7 @@
   $effect(() => save("system.extraCauses", extraCauses));
   $effect(() => save("system.windowMs", windowOk ? String(windowMs) : ""));
   // 自動の候補で返す数（上位の数）は使う人が入れる（API の既定を暗黙に使わない）
-  let autoLimit = $state(load("system.autoLimit", ""));
+  let autoLimit = $state(load("system.autoLimit", "") || String(suggestedOf("recording.correlate", "limit") ?? ""));   // 最初の値は仕様の既定
   $effect(() => save("system.autoLimit", autoLimit));
   const autoLimitN = $derived(parseCount(autoLimit));
   let correlation = $state<Correlation | null>(null);
@@ -460,7 +464,7 @@
 <div class="pane system">
   <div class="pane-bar">
     <strong>{$i18n("panel.system")}</strong>
-    <span class="muted">{$i18n("system.tip")}</span>
+    <Hint text={$i18n("system.tip")} />
     <span class="spacer"></span>
     {#if rec?.recording}
       <span class="badge ok">● {$i18n("system.recording", { n: (rec.events ?? 0).toLocaleString() })}</span>
@@ -544,7 +548,7 @@
         </div>
       {/if}
       <div class="sub-title" title={$i18n("system.memoryTip")}>{$i18n("system.memory")}</div>
-      {#if !watches.length}<div class="muted small">{$i18n("system.memoryHint")}</div>{/if}
+      {#if !watches.length}<Hint text={$i18n("system.memoryHint")} />{/if}
       <table class="grid">
         <thead><tr><th>{$i18n("system.name")}</th><th>{$i18n("system.address")}</th><th>{$i18n("system.value")}</th>
           <th></th></tr></thead>
@@ -627,7 +631,7 @@
         <div class="note">{$i18n(haltOn.halt ? "system.haltOrphan" : "system.laOrphan", { n: haltOn.count ?? 0 })}
           <button class="armed" onclick={clearHalt}>{$i18n("system.haltDisarm")}</button></div>
       {/if}
-      {#if !conditions.length}<div class="muted small">{$i18n("system.conditionsHint")}</div>{/if}
+      {#if !conditions.length}<Hint text={$i18n("system.conditionsHint")} />{/if}
       {#if conditions.length}
         <label class="small" title={$i18n("system.condLastTip")}>{$i18n("system.condLast")}
           <input class="rate mono" inputmode="numeric" placeholder={$i18n("system.condLastPlaceholder")} bind:value={condLastText} />
@@ -670,7 +674,7 @@
   <!-- 結果の直前に多い出来事: 記録の中で、結果（MCU のメモリの変化等）の直前にどの条件が来ているか -->
   <section class="causes" aria-label={$i18n("system.causes")}>
     <div class="sub-title" title={$i18n("system.causesTip")}>{$i18n("system.causes")}</div>
-    {#if !rec?.name}<div class="muted small">{$i18n("system.causesHint")}</div>{/if}
+    {#if !rec?.name}<Hint text={$i18n("system.causesHint")} />{/if}
     <div class="cause-form">
       <label>{$i18n("system.effect")}
         <input class="mono" placeholder="errors changed" bind:value={effectExpr} /></label>

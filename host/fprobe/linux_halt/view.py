@@ -93,7 +93,8 @@ class LinuxDebugView:
                         "thread_comm": next((t["comm"] for t in f["threads"] if t["tid"] == f["tid"]), None),
                         "threads": f["threads"], "stop_kind": None if f["running"] else stop_kind,
                         "registers_from": f["registers_from"], "pc_error": f["pc_error"], "elf": f["elf"],
-                        "load_bias": f["load_bias"]}
+                        "load_bias": f["load_bias"],
+                        "breakpoint_edit_requires_halt": True}   # 置き外しは全コアが止まっている間だけ（走行中は断る。エンジンの事実）
         return out
 
     def read_words(self, addresses: list[int]) -> dict[str, int]:
@@ -173,8 +174,11 @@ class LinuxDebugView:
         上限）/ breakpoint・watchpoint
         （途中の当たり）/ そのほかの種類の名前。終了したプロセスには pc が無いので、その事実を誤りにする。"""
         if r.get("address") is None:
-            raise RuntimeError("プロセスが止まった場所が無い（%s%s）" % (r.get("kind"), "" if r.get("code") is None
-                                                                       else f", code {r['code']}"))
+            code = r.get("code")
+            # カーネルの終了コードは (終了状態 << 8) | 終了させたシグナル（0 ならシグナルなし）。読み方を事実として添える
+            how = "" if code is None else (f", code {code} = exit status {code >> 8}" +
+                                           (f", killed by signal {code & 0x7F}" if code & 0x7F else ""))
+            raise RuntimeError("プロセスが止まった場所が無い（%s%s）" % (r.get("kind"), how))
         if r.get("timed_out"):
             reason = "timeout"
         elif r["kind"] == "step":                               # 着かずに命令の数の上限を使い切った: max_instructions

@@ -9,6 +9,7 @@
   import SamplerNotice from "./SamplerNotice.svelte";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
+  import { suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import { onCalls, onRecording } from "../../lib/notify";
   import { Poller } from "../../lib/poll";
@@ -29,9 +30,9 @@
   let method = $state(load("cpuLoad.method", "sampled"));
   // 周期・窓の幅は使う人が選ぶ（画面の既定を持たない。周期を選ぶまで始められず、窓を選ぶまで推移を読まない）
   const positive = (v: number) => (v > 0 ? v : null);
-  let rate = $state<number | null>(positive(Number(load("cpuLoad.rate", ""))));
+  let rate = $state<number | null>(positive(Number(load("cpuLoad.rate", ""))) ?? positive(Number(suggestedOf("rtos.timeline.start", "rate_hz"))));   // 最初の値は仕様の既定
   let exceptions = $state(load("cpuLoad.exceptions", "1") === "1");
-  let windowUs = $state<number | null>(positive(Number(load("cpuLoad.window", ""))));
+  let windowUs = $state<number | null>(positive(Number(load("cpuLoad.window", ""))) ?? positive(Number(suggestedOf("rtos.timeline.load", "window_us"))));   // 最初の値は仕様の既定
   let byTask = $state(load("cpuLoad.byTask", "1") === "1");
   let table = $state<TaskTable | null>(null);
   let series = $state<LoadSeries | null>(null);

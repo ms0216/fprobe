@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   import type { LaChannel } from "../../lib/waveform";
   // Timeline: 共通タイムライン（ロジアナの波形・記録の段。WebGL2 の部品 Timeline.svelte）と捕捉の設定、縮図、
   // 段の名前の列（折りたたみ・並べ替え・隠す）、段の一覧のメニュー、カーソル（選択・基準・差）の表示、時刻へ移動
@@ -6,6 +7,7 @@
   import { allowed } from "../../lib/guard";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
+  import { exampleOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import { formatDuration, formatSeconds, parseSeconds } from "../../lib/time";
   import { captureRequest, channelChoices, channelName, rateChoices, readCaptureSettings } from "../../lib/waveform";
@@ -18,10 +20,12 @@
 
   const { app, tl, screen } = shared();
 
-  // 捕捉の設定は使う人が入れる（空から。既定の速さ・プリトリガ・拍を画面に持たない）。ここで覚えた値をメニュー・
-  // Logic Analyzer・System の捕捉も使う（lib/waveform.ts captureRequest）
-  let rate = $state(load("la.rate", ""));
-  let pretrigger = $state(load("la.pretrigger", ""));
+  // 捕捉の設定の最初の値は、前に入れた値、無ければ API の仕様の「例・推奨の値」（examples。見えて・書き換えられ・送るときは
+  // 欄の値を明示して送る。画面のコードに値を書かない）。ここで覚えた値をメニュー・Logic Analyzer・System の捕捉も使う
+  // （lib/waveform.ts captureRequest）
+  const example = (param: string): string => { const v = exampleOf("la.capture", param); return v === undefined ? "" : String(v); };
+  let rate = $state(load("la.rate", "") || example("rate_hz"));
+  let pretrigger = $state(load("la.pretrigger", "") || example("pretrigger"));
   let trigCh = $state(load("la.trigCh", "none"));
   let edge = $state(load("la.edge", "fall"));
   let deep = $state(false);
@@ -197,7 +201,7 @@
   {#if !t.extent}
     <div class="empty">
       <strong>{t.source === "capture" ? $i18n("timeline.noCapture") : $i18n("timeline.noRecording")}</strong>
-      <span>{t.source === "capture" ? $i18n("timeline.noCaptureHint") : $i18n("timeline.noRecordingHint")}</span>
+      <Hint text={t.source === "capture" ? $i18n("timeline.noCaptureHint") : $i18n("timeline.noRecordingHint")} />
     </div>
   {/if}
   {#if t.extent}<TimelineMinimap {tl} {t} />{/if}

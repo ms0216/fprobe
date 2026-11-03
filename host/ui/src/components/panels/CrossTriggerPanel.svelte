@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // クロストリガー: fprobe のクロストリガの全体（何が起きたら = 源、何をする = 行き先、どの源をどの行き先へ = 経路）を
   // 1 か所で見て設定する（docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.3 の作る順の 2 番目、
   // docs/reports/2026-10-24-fprobe-value-analysis.md §5.7-2）。
@@ -227,7 +228,7 @@
 
 <div class="pane xt">
   <div class="pane-bar">
-    <span class="muted">{$i18n("xt.summary")}</span>
+    <Hint text={$i18n("xt.summary")} />
     <span class="spacer"></span>
     <button class="small" onclick={() => void read()}>{$i18n("common.refresh")}</button>
   </div>
@@ -239,7 +240,7 @@
 
     <!-- 経路の表 -->
     <section>
-      <h3>{$i18n("xt.route")} <span class="muted small">{$i18n("xt.routeTip")}</span></h3>
+      <h3>{$i18n("xt.route")} <Hint text={$i18n("xt.routeTip")} /></h3>
       <div class="scroll">
         <table class="grid route">
           <thead>
@@ -263,9 +264,9 @@
               {@const ok = srcOk[s]}
               {@const f = sourceFacts(s, statuses)}
               <tr class:gone={!ok.ok}>
-                <td class="left" title="{s} ({SOURCE_API[s]})">
+                <td class="left" title={ok.ok ? `${s} (${SOURCE_API[s]})` : `${s} (${SOURCE_API[s]}) — ${absent(ok)}`}>
                   {$i18n(SOURCE_LABEL[s])}
-                  {#if !ok.ok}<div class="small reason">{absent(ok)}</div>{/if}
+                  {#if !ok.ok}<span class="small reason" aria-hidden="true"> ⓘ</span>{/if}
                 </td>
                 {#each RouteColumns as c (c)}
                   {@const b = cellBlock(s, c, srcOk, actOk)}

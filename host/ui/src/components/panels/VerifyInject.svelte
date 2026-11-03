@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // 試す › 故障注入（inject.run）: 台本を欄で組む・JSON の文・デーモンの PC のファイル（JSON / YAML）で渡して走らせ、
   // 試行ごとの判定（API の verdict・checks のまま）・注入の時刻（時間軸へ飛ぶ）を表に描く。timeout_s・observe_s は必須で
   // 既定を画面に持たない。送る引数は「引数」で見える（AI が送るものと同じ）
@@ -7,6 +8,7 @@
   import { onCalls } from "../../lib/notify";
   import { lastRunText, readLastRun, type LastRun } from "../../lib/verify";
   import { allowed } from "../../lib/guard";
+  import { readable } from "../../lib/fieldnames";
   import { i18n, type Key } from "../../lib/i18n";
   import {
     COMPARE, EXPECT_KINDS, WHEN_KINDS, checkText, emptyExpect, emptyScript, emptyTrial, injectCall, injectRows, wordText,
@@ -80,7 +82,7 @@
   {#if err(p)}<span class="err" role="alert">{$i18n(`verify.err.${err(p)}` as Key)}</span>{/if}
 {/snippet}
 
-{#snippet req(label: string)}<span class="mono">{label}<span class="ast" aria-hidden="true">*</span></span>{/snippet}
+{#snippet req(label: string)}<span class="mono" title={label}>{readable(label)}<span class="ast" aria-hidden="true">*</span></span>{/snippet}
 
 <section class="vsec">
   <div class="bar">
@@ -97,7 +99,7 @@
     <button class="primary" disabled={running} onclick={() => void run()} title="inject.run">
       {running ? $i18n("verify.running") : $i18n("verify.run")}</button>
   </div>
-  <div class="muted small">{$i18n("verify.injectSummary")}</div>
+  <Hint text={$i18n("verify.injectSummary")} />
 
   {#if source === "json"}
     <textarea class="mono" rows="10" bind:value={text} placeholder={'{"name": "...", "trials": [...]}'}

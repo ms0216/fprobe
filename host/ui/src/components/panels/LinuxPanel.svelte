@@ -3,6 +3,7 @@
   // 道 B（物理メモリのリングを JTAG で読む）・止めずに読む口（memap）・gdb・ftrace・journal。
   // 設定はすべて欄に出し、値は API の事実のまま並べる（隠さない。仕様 §2）
   import { errorText } from "../../lib/api";
+  import { suggestedOf } from "../../lib/apispec";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
@@ -18,7 +19,7 @@
   const { app, conn } = shared();
 
   // 接続・プローブの欄も空から（名前・ポート・方式・レジスタを画面で決めない。前に書いた値だけを戻す）
-  let form = $state<ConnectForm>(restore("linux.connect", { target: "", host: "", user: "", port: "", key: "", sudo: false, sudoPasswordEnv: "" }));
+  let form = $state<ConnectForm>(restore("linux.connect", { target: "", host: "", user: "", port: String(suggestedOf("linux.connect", "port") ?? ""), key: "", sudo: false, sudoPasswordEnv: "" }));
   let probe = $state<ProbeForm>(restore("linux.probe", { name: "", binary: "", method: "", symbol: "", address: "", isa: "",
     fetchargs: "", regs: "", ret: false, pid: "" }));
   // 道 B などの欄は空で始める（既定の値を置かない。前に書いた値だけを戻す）
@@ -139,7 +140,7 @@
   });
   // だれが（AI も）操作しても読み直す
   $effect(() => conn.on("activity", (e: { method: string }) => {
-    if (e.method.startsWith("linux.")) void refresh();
+    if (e.method.startsWith("linux.") && !e.method.startsWith("linux.halt.")) void refresh();     // linux.halt.* は SSH の状態ではない（停止デバッグの読みの記録で SSH の読み直しを呼ばない）
   }));
 
   const fmt = (v: unknown) => (v === null || v === undefined ? $i18n("linux.unknown") : typeof v === "object" ? JSON.stringify(v) : String(v));
@@ -147,18 +148,18 @@
 
 <div class="pane linux">
   <form class="pane-bar" onsubmit={(e) => { e.preventDefault(); void connect(); }}>
-    <input class="mono short" bind:value={form.target} placeholder={$i18n("linux.target")} aria-label={$i18n("linux.target")}
-           aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono" bind:value={form.host} placeholder={$i18n("linux.host")} aria-label={$i18n("linux.host")}
-           aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono short" bind:value={form.user} placeholder={$i18n("linux.user")} aria-label={$i18n("linux.user")}
-           aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono num" bind:value={form.port} placeholder={$i18n("linux.port")} aria-label={$i18n("linux.port")}
-           aria-required="true" /><span class="req" aria-hidden="true">*</span>
-    <input class="mono" bind:value={form.key} placeholder={$i18n("linux.key")} aria-label={$i18n("linux.key")} />
+    <label class="fld"><span class="nm">{$i18n("linux.target")}</span><input class="mono short" bind:value={form.target} placeholder={$i18n("linux.target")} aria-label={$i18n("linux.target")}
+           aria-required="true" /></label><span class="req" aria-hidden="true">*</span>
+    <label class="fld"><span class="nm">{$i18n("linux.host")}</span><input class="mono" bind:value={form.host} placeholder={$i18n("linux.host")} aria-label={$i18n("linux.host")}
+           aria-required="true" /></label><span class="req" aria-hidden="true">*</span>
+    <label class="fld"><span class="nm">{$i18n("linux.user")}</span><input class="mono short" bind:value={form.user} placeholder={$i18n("linux.user")} aria-label={$i18n("linux.user")}
+           aria-required="true" /></label><span class="req" aria-hidden="true">*</span>
+    <label class="fld"><span class="nm">{$i18n("linux.port")}</span><input class="mono num" bind:value={form.port} placeholder={$i18n("linux.port")} aria-label={$i18n("linux.port")}
+           aria-required="true" /></label><span class="req" aria-hidden="true">*</span>
+    <label class="fld"><span class="nm">{$i18n("linux.key")}</span><input class="mono" bind:value={form.key} placeholder={$i18n("linux.key")} aria-label={$i18n("linux.key")} /></label>
     <label><input type="checkbox" bind:checked={form.sudo} /> sudo</label>
-    <input class="mono short" bind:value={form.sudoPasswordEnv} placeholder={$i18n("linux.sudoEnv")} aria-label={$i18n("linux.sudoEnv")}
-      title={$i18n("linux.sudoEnvHint")} />
+    <label class="fld"><span class="nm">{$i18n("linux.sudoEnv")}</span><input class="mono short" bind:value={form.sudoPasswordEnv} placeholder={$i18n("linux.sudoEnv")} aria-label={$i18n("linux.sudoEnv")}
+      title={$i18n("linux.sudoEnvHint")} /></label>
     <button class="primary small">{$i18n("linux.connect")}</button>
     {#if target}<button type="button" class="small" onclick={async () => { if ((await call("linux.disconnect", { target })) !== undefined) { target = null; caps = null; clearResults(); } }}>
       {$i18n("linux.disconnect")}</button>{/if}
@@ -383,8 +384,12 @@
   .linux { display: flex; flex-direction: column; }
   .body { flex: 1; overflow: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 6px; }
   .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .short { width: 7em; }
-  .num { width: 4em; }
+  /* 欄の名前を常に見せる（値が入ると placeholder は消える） */
+  .fld { display: inline-flex; flex-direction: column; gap: 1px; }
+  .fld .nm { font-size: 10px; opacity: 0.7; }
+  /* 欄の名前（placeholder）が切れて読めなかった（「Target nam」「sudo passw」）: 中身（空なら名前）の幅に合わせる */
+  .short { width: auto; field-sizing: content; min-width: 7em; }
+  .num { width: auto; field-sizing: content; min-width: 4em; }
   .small { font-size: 12px; }
   table td { padding: 0 8px 0 0; vertical-align: top; }
   pre { margin: 2px 0; white-space: pre-wrap; }

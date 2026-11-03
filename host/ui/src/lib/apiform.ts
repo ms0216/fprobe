@@ -40,6 +40,7 @@ export interface Field {
   exclusiveMin?: number;
   description?: string;
   default?: unknown;
+  example?: unknown;                         // 仕様の examples の先頭（入力欄の最初の値。見えて・書き換えられ・送るときは欄の値を明示して送る）
 }
 
 /** 欄の誤り（画面が i18n の文言にする） */
@@ -51,6 +52,21 @@ export interface FieldError {
 
 /** 欄の値: 文字列（空 = 送らない）、null = null を送ると明示（null を許す欄だけ） */
 export type FieldValues = Record<string, string | null | undefined>;
+
+/** 仕様の「例・推奨の値」（examples）がある欄の、最初の値（欄の文字）。無い欄は入れない（空のまま） */
+export function exampleValues(fields: Field[]): FieldValues {
+  const out: FieldValues = {};
+  for (const f of fields) {
+    if (f.example === undefined) continue;
+    out[f.name] = f.kind === "json" ? JSON.stringify(f.example) : isAddressLike(f.name, f.example) ? hexText(f.example as number) : String(f.example);
+  }
+  return out;
+}
+
+/** 番地・オフセット・マスクのように 16 進で見る方が自然な整数の欄か（名前だけで決める見せ方。値は変えない: 0x の欄も 10 進も読める） */
+const ADDRESS_NAME = new RegExp("(^|_)(address|addr|offset|mask|base)(_|$)|_end$");
+export const isAddressLike = (name: string, v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 0 && ADDRESS_NAME.test(name);
+export const hexText = (v: number): string => "0x" + v.toString(16).toUpperCase();
 
 export function apiMethods(spec: ApiSpec): ApiMethod[] {
   return Object.entries(spec.methods)
@@ -102,6 +118,7 @@ export function fieldsOf(params: Schema): Field[] {
     const description = raw.description ?? p.description;
     if (description) field.description = description;
     if ("default" in raw) field.default = raw.default;
+    if (Array.isArray(raw.examples) && raw.examples.length) field.example = raw.examples[0];
     return field;
   });
 }

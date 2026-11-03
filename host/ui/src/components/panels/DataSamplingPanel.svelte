@@ -22,6 +22,7 @@
   import EditValue from "./EditValue.svelte";
   import { errorText } from "../../lib/api";
   import { i18n } from "../../lib/i18n";
+  import { suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import {
     addExpr, arrayWave, captureSeries, chartSeries, displayValue, health, OPS, parseExprList,
@@ -49,7 +50,7 @@
   let input = $state("");
   // 周期は使う人が選ぶ（画面の既定を持たない。選ぶまで Start できない）
   const positive = (v: number) => (Number.isFinite(v) && v > 0 ? v : null);
-  let rate = $state<number | null>(positive(Number(load("dataSampling.rate", ""))));
+  let rate = $state<number | null>(positive(Number(load("dataSampling.rate", ""))) ?? positive(Number(suggestedOf("watch.set", "rate_hz"))));   // 最初の値は仕様の既定
   let windowS = $state(Number(load("dataSampling.window", "10")));
   let mode = $state<Mode>((load("dataSampling.mode", "time") as Mode));
   let paused = $state(false);

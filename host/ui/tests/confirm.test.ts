@@ -52,6 +52,23 @@ describe("allowed（AI がつながっていて一時停止していないとき
   });
 });
 
+describe("allowed（確認の文に、AI の名前と押した操作の名前を載せる。どちらも API・画面の事実）", () => {
+  it("AI の名前と操作の名前が文に入る。どちらも無ければ従来の文", async () => {
+    const c = new Confirmer();
+    let shown: ConfirmRequest | null = null;
+    c.subscribe((r) => (shown = r));
+    const asked = allowed({ aiConnectedUnpaused: true, aiClientNames: ["claude-1"] } as any, c, "Remove All Breakpoints");
+    expect(shown!.message).toContain("claude-1");
+    expect(shown!.message).toContain("Remove All Breakpoints");
+    c.answer(true);
+    await asked;
+    const plain = allowed({ aiConnectedUnpaused: true } as any, c);
+    expect(shown!.message).toContain("An AI client is connected");
+    c.answer(false);
+    expect(await plain).toBe(false);
+  });
+});
+
 describe("画面の部品の確認の使い方", () => {
   const SRC = resolve(import.meta.dirname, "../src");
   const files = (dir: string): string[] => readdirSync(dir).flatMap((name) => {

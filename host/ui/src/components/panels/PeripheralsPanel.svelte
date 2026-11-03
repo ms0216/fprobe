@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Peripherals: SVD の周辺の木。周辺を開くとレジスタを読み、フィールドに解読する（読むと状態が変わるものは読まない）。
   // フィールドは SVD の定義に合わせて書ける（1 ビット = チェックボックス、値の名前 = 選択、ほか = 数。Enter で書く）。
   // レジスタの値はダブルクリックで全体を書く（16 進）。読むと状態が変わるレジスタは ⚠ と確認
@@ -224,7 +225,7 @@
   {:else}
     <div class="empty">
       <strong>{$i18n("peripherals.noSvd")}</strong>
-      <span>{$i18n("peripherals.noSvdHint")}</span>
+      <Hint text={$i18n("peripherals.noSvdHint")} />
       <div class="actions">
         <button disabled={!online} title={$i18n("tip.loadSvd")} onclick={async () => (await allowed(app)) && ui.open("loadSvd")}>
           {$i18n("cmd.loadSvd")}</button>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Power（J-Link の Power・Ozone の Power Graph に当たる）: いまのターゲットの電圧（probe.voltage を周期的に読み、
   // デーモンが残した読みの窓 probe.voltage_history の推移と最小・最大・平均を描く。止める・消す・CSV）、記録の電圧
   // （stream aux・kind mv）のグラフと、recording.voltage の指定した電圧以下の区間の一覧（ダブルクリック・最低の点で
@@ -171,8 +172,8 @@
              label={$i18n("power.voltage")} />
     </div>
   {/if}
-  <div class="note muted" title={$i18n("power.currentWhy")}>
-    <strong>{$i18n("power.current")}</strong> — {$i18n("power.currentWhy")}
+  <div class="note muted">
+        <strong>{$i18n("power.current")}</strong> <Hint text={$i18n("power.currentWhy")} />
   </div>
 
   <div class="pane-bar sub">
@@ -195,7 +196,7 @@
     <button onclick={() => void readRecording()}>{$i18n("common.refresh")}</button>
   </div>
   {#if !rec}
-    <p class="empty">{$i18n("power.noRecordingHint")}</p>
+    <p class="empty"><Hint text={$i18n("power.noRecordingHint")} /></p>
   {:else if !recVolts?.x.length}
     <p class="empty">{$i18n("power.noRecordingVolts")}</p>
   {:else}

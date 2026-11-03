@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { EMPTY_ATTACH_FORM, EMPTY_GDB_FORM, EMPTY_HALT_FORM, haltDebugAttachParams, haltGdbServeParams, haltOpenParams, haltThreadsParams, memapJtagParams,
+import { EMPTY_ATTACH_FORM, EMPTY_GDB_FORM, EMPTY_HALT_FORM, attachFormOf, exampleAttachForm, exampleHaltForm, haltFormOf, shouldRefreshOn, haltDebugAttachParams, haltGdbServeParams, haltOpenParams, haltThreadsParams, memapJtagParams,
   type GdbServeForm, type HaltForm } from "../src/lib/linuxhalt";
 
 const zynq: HaltForm = { ...EMPTY_HALT_FORM, backend: "fprobe", jtagKhz: "2000", offsets: "C:/x/offsets.json",
@@ -72,9 +72,10 @@ describe("画面は考えない層（API の応答を描くだけ）", () => {
     expect(src).not.toMatch(/\.sort\(/);
     expect(src).toMatch(/skew_verdict/);
   });
-  it("欄は空から（ボードの値・番地・速さを入れておかない）", () => {
-    expect(src).toMatch(/EMPTY_HALT_FORM/);
-    expect(src).not.toMatch(/0x4BA00477|zynq7000"\s*}|2000000/);
+  it("欄の最初の値は仕様の「例・推奨の値」から（画面のコードにボードの値・番地・速さを直接書かない）", () => {
+    // CLAUDE.md（2026-11-03）: 値の出どころは API の仕様。画面のコードに直接書くと、人に見えて AI（MCP）に見えない
+    expect(src).toMatch(/exampleHaltForm/);
+    expect(src).not.toMatch(/0x4BA00477|zynq7000"\s*}|2000000|0xBB400000|0x80000000/);
   });
   it("Linux のパネルに止めずに読む口の JTAG がある", () => {
     const linux = readFileSync(resolve(import.meta.dirname, "../src/components/panels/LinuxPanel.svelte"), "utf8");
@@ -98,5 +99,62 @@ describe("linux.halt.debug.attach の欄（人も画面から attach する）",
     expect("params" in all && all.params).toMatchObject({ fetch_from_target: "pi", breakpoint_kind: "sw",
       step_max_instructions: 4096, step_timeout_s: 2 });
     expect(haltDebugAttachParams({ ...filled, stepTimeoutS: "x" })).toEqual({ error: "step_timeout_s" });
+  });
+});
+
+describe("欄の最初の値は API の仕様の「例・推奨の値」（見えて・書き換えられ・送るときは欄の値を明示して送る）", () => {
+  it("open の欄: 仕様の examples が欄に入り、パス（offsets・journal）は空のまま。書き足せば、欄の値がそのまま引数になる", () => {
+    const f = exampleHaltForm();
+    expect([f.backend, f.jtagKhz, f.pageOffset, f.maxThreads, f.mmuFormat, f.fpgaRequestTimes, f.part])
+      .toEqual(["fprobe", "25000", "0x80000000", "4096", "short", "true", "bcm2836"]);
+    expect([f.offsets, f.journal]).toEqual(["", ""]);                         // 使う人のパスは例に入れない
+    const built = haltOpenParams({ ...f, offsets: "C:/x/o.json", journal: "C:/x/j.json" });
+    expect("params" in built && built.params).toMatchObject({ backend: "fprobe", jtag_khz: 25000, page_offset: 2147483648,
+      linear_map_end: 3141533696, max_tasks: 100000, max_threads: 4096, mmu_format: "short", fpga_request_times: true, part: "bcm2836" });
+  });
+
+  it("欄を書き換えれば、書き換えた値が送られる（画面が既定を黙って補わない）", () => {
+    const built = haltOpenParams({ ...exampleHaltForm(), offsets: "o", journal: "j", jtagKhz: "1000" });
+    expect("params" in built && (built.params as { jtag_khz: number }).jtag_khz).toBe(1000);
+  });
+
+  it("attach の欄: 仕様の examples が入り、pid・elf は空のまま", () => {
+    const f = exampleAttachForm();
+    expect([f.skewLimitNs, f.threadId, f.kernelIsa, f.maxStepRetries, f.bpUnmapped, f.maxHaltS, f.breakpointKind])
+      .toEqual(["50000000", "stack", "arm", "8", "error", "120", "sw"]);
+    expect([f.pid, f.elf]).toEqual(["", ""]);
+  });
+});
+
+describe("使っている設定を欄に映す（AI が open / attach したときも、人の画面の欄に同じ値が見える）", () => {
+  it("open の設定（API の options）が欄の値になる。無い・null の設定は今の欄のまま", () => {
+    const f = haltFormOf(EMPTY_HALT_FORM, { backend: "fprobe", jtag_khz: 25000, offsets: "C:/o.json", page_offset: 2147483648,
+      phys_offset: 0, linear_map_end: 3141533696, max_tasks: 100000, max_threads: 4096, mmu_format: "short",
+      journal: "C:/j.json", fpga_request_times: true, part: "bcm2836" });
+    expect([f.backend, f.jtagKhz, f.offsets, f.pageOffset, f.physOffset, f.maxThreads, f.mmuFormat, f.journal, f.fpgaRequestTimes, f.part])
+      .toEqual(["fprobe", "25000", "C:/o.json", "0x80000000", "0x0", "4096", "short", "C:/j.json", "true", "bcm2836"]);
+    expect(haltFormOf({ ...EMPTY_HALT_FORM, part: "mine" }, { part: null }).part).toBe("mine");
+  });
+
+  it("attach の設定が欄の値になる。渡さなかった任意の設定（null）は欄を空のまま", () => {
+    const f = attachFormOf(EMPTY_ATTACH_FORM, { pid: 1234, elf: "C:/x/race2", skew_limit_ns: 50000000, thread_id: "stack",
+      kernel_isa: "arm", max_step_retries: 8, bp_unmapped: "error", max_halt_s: 120, fetch_from_target: null,
+      breakpoint_kind: "sw", step_max_instructions: 200000, step_timeout_s: 5 });
+    expect([f.pid, f.elf, f.skewLimitNs, f.threadId, f.kernelIsa, f.maxStepRetries, f.bpUnmapped, f.maxHaltS, f.fetchFromTarget,
+      f.breakpointKind, f.stepMaxInstructions, f.stepTimeoutS])
+      .toEqual(["1234", "C:/x/race2", "50000000", "stack", "arm", "8", "error", "120", "", "sw", "200000", "5"]);
+  });
+});
+
+describe("状態の読み直しの循環を作らない（2026-11-04 実機: attach 中に毎秒 500 回の問い合わせになった）", () => {
+  it("状態を変える操作では読み直し、パネル自身の読み（status・debug.status 等）の記録では読み直さない", () => {
+    for (const m of ["linux.halt.open", "linux.halt.close", "linux.halt.debug.attach", "linux.halt.debug.close", "linux.halt.halt_all",
+                     "linux.halt.resume_all", "linux.halt.debug.run", "linux.halt.debug.halt", "linux.halt.debug.break.insert"]) {
+      expect(shouldRefreshOn(m), m).toBe(true);
+    }
+    for (const m of ["linux.halt.status", "linux.halt.debug.status", "linux.halt.debug.threads", "linux.halt.processes",
+                     "linux.halt.gdb.status", "debug.backtrace", "target.status"]) {
+      expect(shouldRefreshOn(m), m).toBe(false);
+    }
   });
 });

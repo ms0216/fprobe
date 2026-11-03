@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Interrupts（SystemView の Context / Runtime・IAR の Interrupt Log Summary・MCUXpresso の SWO Interrupt Trace の型）:
   // 割り込みごとの回数・合計・排他（自分）・最小・最大・平均・負荷と最大の回の時刻。源は記録の割り込みの区間（時刻が
   // タイムベース = 時間軸へ飛べる）か、Code Profile の SWO 例外トレース（profile.exceptions）。選んだ割り込みの時間の
@@ -180,7 +181,7 @@
       </div>
     {/if}
   {:else}
-    <div class="empty"><strong>{$i18n("interrupts.none")}</strong><span>{$i18n("interrupts.noneHint")}</span></div>
+    <div class="empty"><strong>{$i18n("interrupts.none")}</strong><Hint text={$i18n("interrupts.noneHint")} /></div>
   {/if}
 </div>
 

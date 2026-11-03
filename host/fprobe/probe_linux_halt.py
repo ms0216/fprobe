@@ -54,6 +54,7 @@ class LinuxHaltService:
         self._halt_by: dict | None = None
         self._view: LinuxDebugView | None = None
         self._attach_target: str | None = None          # attach の fetch_from_target（止めているのはこの対象と分かる）
+        self._attach_options: dict | None = None        # attach に渡した設定（debug.status の options。画面が欄に映す）
         self._attaching: dict | None = None             # 進行中の attach（pid・始めた時刻）。状態の読みが待たずに返す
 
     def _linux_view(self) -> LinuxDebugView | None:
@@ -126,6 +127,7 @@ class LinuxHaltService:
         """閉じる（gdb のサーバの後始末を待つ）。デーモンの終了・機器の開き直しでも呼ぶ。錠を持ったまま呼ばない（gdb の
         スレッドが錠を待っていると、後始末が終わらない）。"""
         session, self._halt_session, self._halt_by, self._view = self._halt_session, None, None, None
+        self._attach_options = None
         if session is None:
             return None
         return session.close()
@@ -142,14 +144,12 @@ class LinuxHaltService:
         return self._halt_session
 
     def _occupancy(self) -> dict:
-        """他の操作との排他の事実。"""
+        """他の操作との排他の事実（識別子。言葉にするのは画面・読む側。仕様の description が意味を持つ）。"""
         if self._halt_session.options.backend == "fprobe":
             return {"probe_dap": True,
-                    "refused_while_open": ["target.connect", "線を直接動かす操作（jtag.scan・dp/ap・pins 等）",
-                                           "linux.memap.connect_jtag", "構成の書き替え（probe.design.switch・自動の書き替え）"],
-                    "device_lock": "コアの操作は 1 回ずつ機器の錠を取る（gdb のスレッドと他の操作が交互に使う）"}
-        return {"probe_dap": False, "refused_while_open": [],
-                "device_lock": "OpenOCD の経路（プローブの DAP は使わない）"}
+                    "refused_while_open": ["target.connect", "lowlevel", "linux.memap.connect_jtag", "probe.design.switch"],
+                    "device_lock": "per_call"}
+        return {"probe_dap": False, "refused_while_open": [], "device_lock": "openocd_path"}
 
     def linux_halt_open(self, backend: str, jtag_khz: int, offsets: str, page_offset: int, phys_offset: int,
                         linear_map_end: int, max_tasks: int, max_threads: int, mmu_format: str, journal: str,
@@ -278,6 +278,11 @@ class LinuxHaltService:
                                    kernel_isa=kernel_isa, max_step_retries=max_step_retries, bp_unmapped=bp_unmapped,
                                    max_halt_s=max_halt_s)
         self._attach_target = fetch_from_target
+        self._attach_options = {"pid": pid, "elf": elf, "skew_limit_ns": skew_limit_ns, "thread_id": thread_id,
+                                "kernel_isa": kernel_isa, "max_step_retries": max_step_retries, "bp_unmapped": bp_unmapped,
+                                "max_halt_s": max_halt_s, "fetch_from_target": fetch_from_target,
+                                "breakpoint_kind": breakpoint_kind, "step_max_instructions": step_max_instructions,
+                                "step_timeout_s": step_timeout_s}
         self._view = LinuxDebugView(session._debug, breakpoint_kind=breakpoint_kind, sources=sources,
                                     step_max_instructions=step_max_instructions, step_timeout_s=step_timeout_s)
         return {**out, "fetched": fetched, "breakpoint_kind": breakpoint_kind,
@@ -285,7 +290,7 @@ class LinuxHaltService:
                 "sources_fetched": [{"name": n, **v} for n, v in sorted((sources or {}).items())]}
 
     def linux_halt_debug_status(self) -> dict:
-        return self._halt().debug_status()
+        return {**self._halt().debug_status(), "options": self._attach_options}
 
     def linux_halt_debug_break_insert(self, location: str, kind: str) -> dict:
         return self._halt().debug_break_insert(location=location, kind=kind)

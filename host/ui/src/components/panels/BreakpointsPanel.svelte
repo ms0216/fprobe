@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Breakpoints: ブレークポイントとウォッチポイントの一覧（外す・すべて外す）。行をクリックするとそのソースへ。
   // ブレークポイントごとの条件・ヒット カウント・ログ メッセージの編集（VS Code の Edit Condition / Hit Count /
   // Log Message、Ozone の Breakpoint Properties）、ログ・ブレークポイントの記録（時刻があれば時間軸へ）、
@@ -12,6 +13,7 @@
   import { BREAKPOINT_LOG_KEEP } from "../../lib/breakpoints";
   import { breakpointMenu, openMenu } from "../../lib/contextmenu";
   import type { Breakpoint } from "../../lib/debugger";
+  import { breakpointEditable } from "../../lib/commands";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n, t, type Key } from "../../lib/i18n";
@@ -23,6 +25,9 @@
 
   const { app, conn, dbg, ui, tl, reveal, safety } = shared();
   const online = $derived($app.link === "open");
+  /** 置き外しを今できない理由（API が「止まっている間だけ」と申告した対象が走っている間）。無ければ null */
+  const editBlock = $derived(breakpointEditable({ link: $app.link, target: $app.target?.state, elf: $dbg.elf, selection: $ui.selection,
+                                              editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt }));
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
 
   let editing = $state<string | null>(null);            // 編集中のブレークポイントの location
@@ -203,15 +208,15 @@
 <div class="pane">
   <div class="pane-bar">
     <span class="spacer"></span>
-    <button class="small" disabled={!online || !$dbg.breakpoints.length && !$dbg.watchpoints.length}
-            title={$i18n("tip.removeAllBreakpoints")} onclick={async () => (await allowed(app)) && dbg.removeAllBreakpoints()}>
+    <button class="small" disabled={!online || !!editBlock || !$dbg.breakpoints.length && !$dbg.watchpoints.length}
+            title={editBlock ? $i18n(editBlock) : $i18n("tip.removeAllBreakpoints")} onclick={async () => (await allowed(app, undefined, t("cmd.removeAllBreakpoints"))) && dbg.removeAllBreakpoints()}>
       {$i18n("cmd.removeAllBreakpoints")}</button>
   </div>
   {#if $dbg.breakpoints.length || $dbg.watchpoints.length}
     <ul class="list mono">
       {#each $dbg.breakpoints as b (b.address)}
         <li oncontextmenu={(e) => rowContext(e, b)} class:off={b.enabled === false}>
-          <input type="checkbox" checked={b.enabled !== false} disabled={!online} title={$i18n("bp.enabledTip")}
+          <input type="checkbox" checked={b.enabled !== false} disabled={!online || !!editBlock} title={editBlock ? $i18n(editBlock) : $i18n("bp.enabledTip")}
                  aria-label={$i18n("bp.enabledTip")}
                  onclick={async (e) => { e.preventDefault(); if (await allowed(app)) await dbg.enableBreakpoint(b.location, b.enabled === false); }} />
           <span class="dot" class:log={b.action && b.action.log !== null} class:cond={b.action && b.action.log === null}></span>
@@ -225,10 +230,10 @@
             {#if b.action?.last_error}<span class="bad">{$i18n("bp.conditionError", { e: b.action.last_error })}</span>{/if}
           </span>
           <span class="buttons">
-            <button class="small" title={$i18n("bp.editTip")} disabled={!online || !!b.tool}
+            <button class="small" title={$i18n("bp.editTip")} disabled={!online || !!editBlock || !!b.tool}
                     onclick={() => (editing === b.location ? (editing = null) : startEdit(b.location, b.action))}>
               {$i18n("bp.edit")}</button>
-            <button class="small" aria-label={$i18n("common.remove")} title={$i18n("common.remove")} disabled={!online}
+            <button class="small" aria-label={$i18n("common.remove")} title={editBlock ? $i18n(editBlock) : $i18n("common.remove")} disabled={!online || !!editBlock}
                     onclick={async () => (await allowed(app)) && dbg.removeBreakpoint(b.location)}>×</button>
           </span>
         </li>
@@ -258,14 +263,14 @@
           <span>{hex32(w.address)} · {w.size} · {w.kind}</span>
           <span class="muted">{$i18n("breakpoints.watchpoints")}</span>
           <span class="buttons">
-            <button class="small" aria-label={$i18n("common.remove")} title={$i18n("common.remove")} disabled={!online}
+            <button class="small" aria-label={$i18n("common.remove")} title={editBlock ? $i18n(editBlock) : $i18n("common.remove")} disabled={!online || !!editBlock}
                     onclick={async () => (await allowed(app)) && dbg.clearWatchpoint(w.address)}>×</button>
           </span>
         </li>
       {/each}
     </ul>
   {:else}
-    <div class="empty"><span>{$i18n("breakpoints.none")}</span><span>{$i18n("breakpoints.hint")}</span></div>
+    <div class="empty"><span>{$i18n("breakpoints.none")}</span><Hint text={$i18n("breakpoints.hint")} /></div>
   {/if}
 
   <details open={open.log} ontoggle={(e) => toggleSection("log", e)}>
@@ -295,7 +300,7 @@
         </table>
       </div>
     {:else}
-      <div class="empty"><span>{$i18n("bp.logNone")}</span><span>{$i18n("bp.logNoneHint")}</span></div>
+      <div class="empty"><span>{$i18n("bp.logNone")}</span><Hint text={$i18n("bp.logNoneHint")} /></div>
     {/if}
   </details>
 

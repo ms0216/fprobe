@@ -3,6 +3,7 @@
 // 止めずに読む口の JTAG（linux.memap.connect_jtag）の欄もここ。Svelte に依らない
 
 import type { Methods, Params } from "./api";
+import { exampleOf } from "./apispec";
 
 // 組み立てた引数（メソッド M の引数の型）か、空・誤りの欄の名前。欄を 1 つずつ確かめて詰める（required が必ず送る欄を
 // 全部確かめた後だけ params を返す）ので、詰め終えた表を M の引数の型として返す
@@ -43,6 +44,25 @@ export const EMPTY_HALT_FORM: HaltForm = {
   ctiRequestBoundNs: "", ctiEventBoundNs: "", ctiHwWaitS: "", ctiAckPolls: "", ocdBoard: "", ocdPort: "", ocdTimeoutS: "",
   hwSlots: "", watchSlots: "",
 };
+
+/** 仕様の「例・推奨の値」で欄を埋めた最初の値（無い欄は空）。欄に見えて、書き換えられ、送るときは欄の値を明示して送る */
+const hexOr = (v: unknown, fallback: string): string => (typeof v === "number" && Number.isInteger(v) && v >= 0
+  ? "0x" + v.toString(16).toUpperCase() : fallback);
+
+const eg = (method: string, param: string): string => {
+  const v = exampleOf(method, param);
+  return v === undefined ? "" : String(v);
+};
+
+export function exampleHaltForm(): HaltForm {
+  const o = (p: string) => eg("linux.halt.open", p);
+  return { ...EMPTY_HALT_FORM, backend: o("backend") as HaltForm["backend"], jtagKhz: o("jtag_khz"),
+    pageOffset: hexOr(exampleOf("linux.halt.open", "page_offset"), o("page_offset")),
+    physOffset: hexOr(exampleOf("linux.halt.open", "phys_offset"), o("phys_offset")),
+    linearMapEnd: hexOr(exampleOf("linux.halt.open", "linear_map_end"), o("linear_map_end")), maxTasks: o("max_tasks"), maxThreads: o("max_threads"),
+    mmuFormat: o("mmu_format") as HaltForm["mmuFormat"], fpgaRequestTimes: o("fpga_request_times") as HaltForm["fpgaRequestTimes"],
+    part: o("part") };
+}
 
 export interface GdbServeForm {
   pid: string;
@@ -176,6 +196,15 @@ export const EMPTY_ATTACH_FORM: DebugAttachForm = { pid: "", elf: "", skewLimitN
   maxStepRetries: "", bpUnmapped: "", maxHaltS: "", fetchFromTarget: "", breakpointKind: "", stepMaxInstructions: "",
   stepTimeoutS: "" };
 
+export function exampleAttachForm(): DebugAttachForm {
+  const a = (p: string) => eg("linux.halt.debug.attach", p);
+  return { ...EMPTY_ATTACH_FORM, skewLimitNs: a("skew_limit_ns"), threadId: a("thread_id") as DebugAttachForm["threadId"],
+    kernelIsa: a("kernel_isa") as DebugAttachForm["kernelIsa"], maxStepRetries: a("max_step_retries"),
+    bpUnmapped: a("bp_unmapped") as DebugAttachForm["bpUnmapped"], maxHaltS: a("max_halt_s"),
+    breakpointKind: a("breakpoint_kind") as DebugAttachForm["breakpointKind"], stepMaxInstructions: a("step_max_instructions"),
+    stepTimeoutS: a("step_timeout_s") };
+}
+
 /** linux.halt.debug.attach の引数（既定なし: 必須の欄が空ならその名前。画面の道の欄は書いたときだけ送る） */
 export function haltDebugAttachParams(f: DebugAttachForm): Built<"linux.halt.debug.attach"> {
   const out: Record<string, unknown> = {};
@@ -191,4 +220,41 @@ export function haltDebugAttachParams(f: DebugAttachForm): Built<"linux.halt.deb
     ["step_timeout_s", f.stepTimeoutS, (s) => num(s)],
   ]);
   return bad ? { error: bad } : { params: out as Params<"linux.halt.debug.attach"> };
+}
+
+/** 使っている設定（API が返した options）を欄の値にする（欄に無い・null の設定は今の欄の値のまま）。AI が open / attach したときも、
+ *  人の画面の欄に同じ値が見える。数・真偽は欄の文字にする */
+const pick = (o: Record<string, unknown>, key: string, fallback: string): string => {
+  const v = o[key];
+  return v === undefined || v === null ? fallback : String(v);
+};
+
+export function haltFormOf(f: HaltForm, o: Record<string, unknown>): HaltForm {
+  return { ...f, backend: pick(o, "backend", f.backend) as HaltForm["backend"], jtagKhz: pick(o, "jtag_khz", f.jtagKhz),
+    offsets: pick(o, "offsets", f.offsets), pageOffset: hexOr(o.page_offset, f.pageOffset),
+    physOffset: hexOr(o.phys_offset, f.physOffset), linearMapEnd: hexOr(o.linear_map_end, f.linearMapEnd),
+    maxTasks: pick(o, "max_tasks", f.maxTasks), maxThreads: pick(o, "max_threads", f.maxThreads),
+    mmuFormat: pick(o, "mmu_format", f.mmuFormat) as HaltForm["mmuFormat"], journal: pick(o, "journal", f.journal),
+    fpgaRequestTimes: pick(o, "fpga_request_times", f.fpgaRequestTimes) as HaltForm["fpgaRequestTimes"],
+    part: pick(o, "part", f.part) };
+}
+
+export function attachFormOf(f: DebugAttachForm, o: Record<string, unknown>): DebugAttachForm {
+  return { ...f, pid: pick(o, "pid", f.pid), elf: pick(o, "elf", f.elf), skewLimitNs: pick(o, "skew_limit_ns", f.skewLimitNs),
+    threadId: pick(o, "thread_id", f.threadId) as DebugAttachForm["threadId"],
+    kernelIsa: pick(o, "kernel_isa", f.kernelIsa) as DebugAttachForm["kernelIsa"],
+    maxStepRetries: pick(o, "max_step_retries", f.maxStepRetries),
+    bpUnmapped: pick(o, "bp_unmapped", f.bpUnmapped) as DebugAttachForm["bpUnmapped"], maxHaltS: pick(o, "max_halt_s", f.maxHaltS),
+    fetchFromTarget: pick(o, "fetch_from_target", f.fetchFromTarget),
+    breakpointKind: pick(o, "breakpoint_kind", f.breakpointKind) as DebugAttachForm["breakpointKind"],
+    stepMaxInstructions: pick(o, "step_max_instructions", f.stepMaxInstructions),
+    stepTimeoutS: pick(o, "step_timeout_s", f.stepTimeoutS) };
+}
+
+/** パネルが状態を読み直す操作か。linux.halt.* のうち、状態を変える操作だけ（パネル自身の読み status・debug.status・threads 等の
+ *  読みの記録では読み直さない。読み直しが記録を生み、通知がまた読み直しを呼ぶ循環になる） */
+const HALT_READS = new Set(["linux.halt.status", "linux.halt.debug.status", "linux.halt.debug.threads", "linux.halt.debug.read",
+  "linux.halt.debug.memory", "linux.halt.threads", "linux.halt.processes", "linux.halt.gdb.status"]);
+export function shouldRefreshOn(method: string): boolean {
+  return method.startsWith("linux.halt.") && !HALT_READS.has(method);
 }

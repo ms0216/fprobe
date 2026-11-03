@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Event Log（Tracealyzer / SystemView の Events・TRACE32 のトレースリスト。G07）: 記録の出来事の構造化された検索
   // （recording.find）と結果の表・時間軸の印、区間の統計（timing.measure: 分布図・長い順の上位 ↔ 生データ）、調査の印とメモ
   // （annotation.mark・recording.mark）、記録の概要（stream・kind ごとの件数・割合・1 秒あたり・最初・最後 → 検索へ）。
@@ -291,7 +292,7 @@
   {#if !has}
     <div class="empty">
       <strong>{$i18n("eventLog.none")}</strong>
-      <span>{$i18n("eventLog.noneHint")}</span>
+      <Hint text={$i18n("eventLog.noneHint")} />
       <div class="actions">
         <button onclick={() => dock.show("recordings")}>{$i18n("eventLog.openRecordings")}</button>
         <button onclick={startRecording}>{$i18n("recordings.start")}</button>

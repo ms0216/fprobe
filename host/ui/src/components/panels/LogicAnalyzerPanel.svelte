@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   import type { LaChannel } from "../../lib/waveform";
   // Logic Analyzer（Saleae Logic 2 の Analyzers・DSView のトリガ・PulseView の測定。G09）:
   // - Decode: 解読器（la.decoders）の選択と設定 → la.decode の表（誤りだけ・種類で絞る、件数）と、時間軸の波形の上の注釈
@@ -411,7 +412,7 @@
     {#if noCapture && !result}
       <div class="empty">
         <strong>{$i18n("logic.noCapture")}</strong>
-        <span>{$i18n("logic.noCaptureHint")}</span>
+        <Hint text={$i18n("logic.noCaptureHint")} />
         <div class="actions">
           <button class="primary" onclick={capture}>{$i18n("logic.capture")}</button>
           <button onclick={() => dock.show("timeline")}>{$i18n("logic.openTimeline")}</button>

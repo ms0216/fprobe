@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Hint from "./Hint.svelte";
   // Dashboard（STM32CubeMonitor のダッシュボード・µC/Probe の部品を並べた操作パネル・MPLAB の DMCI）: ゲージ・数値・
   // 棒・グラフ・ボタン・スライダ・切り替え・ランプを並べて変数を読む・書く。配置はブラウザに覚え、JSON で書き出す・
   // 読み込む（読み込みは lib/dashboard の validateLayout で検証して直す）。
@@ -21,6 +22,7 @@
   import { exprWriteCall, exprWriteMethod } from "../../lib/valuewrite";
   import { inputText, parseInput } from "../../lib/vartree";
   import { i18n, type Key } from "../../lib/i18n";
+  import { suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import { displayValue, numberOf, SampleStore } from "../../lib/sampling";
   import { axisTime, usSeconds } from "../../lib/time";
@@ -45,7 +47,7 @@
   let running = $state<string[]>([]);          // 観測している式（全員の）
   let runningRate = $state(0);                 // 観測の組の周期（Hz。動いていなければ 0）
   // Live の周期: 観測が動いていなければ使う人が入れる（画面の既定を持たない）。動いていれば組の周期のまま
-  let rateText = $state(load("dashboard.rate", ""));
+  let rateText = $state(load("dashboard.rate", "") || String(suggestedOf("watch.set", "rate_hz") ?? ""));   // 最初の値は仕様の既定（見えて書き換えられる）
   let live = $state(false);                    // このビューで Live にした
   let busy = $state(false);
   let gen = $state(0);
@@ -267,7 +269,7 @@
 
   {#if !layout.widgets.length}
     <div class="empty">
-      <strong>{$i18n("dashboard.empty")}</strong><span>{$i18n("dashboard.emptyHint")}</span>
+      <strong>{$i18n("dashboard.empty")}</strong><Hint text={$i18n("dashboard.emptyHint")} />
       <div class="actions">
         <button onclick={() => (editing = true)}>{$i18n("dashboard.edit")}</button>
         <button title={$i18n("dashboard.exampleTip")} onclick={() => (layout = exampleLayout())}>{$i18n("dashboard.example")}</button>

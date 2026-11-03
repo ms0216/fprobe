@@ -10,7 +10,8 @@
   const { app, dbg, ui } = ctx;
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
-                                         selection: $ui.selection });
+                                         selection: $ui.selection,
+                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt });
   const missing = $derived.by(() => {
     if (need === "elf" && !$dbg.files.length) return "elf";
     if (!cs.target || cs.target === "DISCONNECTED") return "connected";

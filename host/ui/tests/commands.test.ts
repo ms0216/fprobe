@@ -152,3 +152,27 @@ describe("実行すると API を呼ぶ", () => {
     expect(ctx.ui.snapshot.dialog).toBe("openElf");
   });
 });
+
+describe("ブレークポイントの置き外し: API が「止まっている間だけ」と申告した対象（Linux のプロセス）は、走っている間は使えない", () => {
+  const running: CommandState = { ...halted, target: "RUNNING", editNeedsHalt: true };
+
+  it("走行中は、Remove All（Ctrl+Shift+F9）と F9 が、理由つきで使えない", () => {
+    expect(command("removeAllBreakpoints").blocked(running)).toBe("tip.haltToEditBreakpoints");
+    expect(command("toggleBreakpoint").blocked(running)).toBe("tip.haltToEditBreakpoints");
+  });
+
+  it("止まっていれば使える", () => {
+    expect(command("removeAllBreakpoints").blocked({ ...running, target: "HALTED" })).toBeNull();
+    expect(command("toggleBreakpoint").blocked({ ...running, target: "HALTED" })).toBeNull();
+  });
+
+  it("API が申告していない対象（MCU など）は、走っていても使える（画面が対象の種類を決めない）", () => {
+    const mcu: CommandState = { ...halted, target: "RUNNING" };
+    expect(command("removeAllBreakpoints").blocked(mcu)).toBeNull();
+    expect(command("toggleBreakpoint").blocked(mcu)).toBeNull();
+  });
+
+  it("理由の文は英語・日本語の両方にある", () => {
+    expect(t("tip.haltToEditBreakpoints")).toContain("halted");
+  });
+});

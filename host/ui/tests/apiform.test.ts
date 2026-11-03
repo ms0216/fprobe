@@ -1,7 +1,7 @@
 // API パネルの計算（lib/apiform.ts）: 仕様から欄を作り、欄の文字列から引数を組み立てる
 import { describe, expect, it } from "vitest";
 import spec from "../../api/fprobe_api.json";
-import { apiMethods, buildParams, confirmLevel, fieldsOf, valuesOf } from "../src/lib/apiform";
+import { apiMethods, buildParams, confirmLevel, fieldsOf, valuesOf, exampleValues, isAddressLike } from "../src/lib/apiform";
 
 describe("apiMethods", () => {
   it("MCP の道具と同じ範囲（session.* と binary を除く）を名前の順に", () => {
@@ -176,5 +176,26 @@ describe("UiState の API パネルへの依頼は 1 回だけ当たる", async 
     expect(ui.takeApi()).toMatchObject({ method: "recording.list", favorite: "fav-1" });
     expect(ui.takeApi()).toBeNull();
     expect(ui.snapshot.api).toBeNull();
+  });
+});
+
+describe("欄の最初の値は仕様の examples（見えて・書き換えられる。無い欄は空のまま）", () => {
+  it("examples のある欄だけ、その先頭が欄の文字になる", () => {
+    const fields = fieldsOf({ type: "object", required: ["a", "b", "c"], properties: {
+      a: { type: "integer", examples: [25000] }, b: { type: "string" }, c: { enum: ["x", "y"], examples: ["y"] },
+      d: { type: "boolean", examples: [true] } } } as any);
+    expect(exampleValues(fields)).toEqual({ a: "25000", c: "y", d: "true" });
+  });
+});
+
+describe("番地・オフセット・マスクの最初の値は 16 進（Linux の停止パネルと API パネルで同じ書き方）", () => {
+  it("名前が番地・オフセット・マスク・基準・_end の整数だけ 16 進。それ以外は 10 進のまま", () => {
+    const fields = fieldsOf({ type: "object", required: [], properties: {
+      page_offset: { type: "integer", examples: [2147483648] }, linear_map_end: { type: "integer", examples: [3141533696] },
+      mask: { type: "integer", examples: [255] }, max_tasks: { type: "integer", examples: [100000] },
+      skew_limit_ns: { type: "integer", examples: [50000000] } } } as any);
+    expect(exampleValues(fields)).toEqual({ page_offset: "0x80000000", linear_map_end: "0xBB400000", mask: "0xFF",
+                                            max_tasks: "100000", skew_limit_ns: "50000000" });
+    expect(isAddressLike("address", -1)).toBe(false);
   });
 });

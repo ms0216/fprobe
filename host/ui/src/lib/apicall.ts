@@ -18,7 +18,7 @@ export async function callApi(m: Pick<ApiMethod, "name" | "kind" | "irreversible
                               { conn, app, ask = confirmer }: CallDeps): Promise<{ ok: boolean; text: string } | null> {
   const level = confirmLevel(m);
   if (level !== "none") {
-    if (!(await allowed(app, ask))) return null;
+    if (!(await allowed(app, ask, m.name))) return null;
     const message = t(level === "danger" ? "api.confirmDanger" : "api.confirm",
                       { method: m.name, params: JSON.stringify(params, null, 2) });
     if (!(await ask.ask(message, { ok: t("api.call"), danger: level === "danger" }))) return null;
