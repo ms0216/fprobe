@@ -19228,7 +19228,10 @@
         "properties": {
           "ap": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "examples": [
+              0
+            ]
           },
           "register": {
             "type": "integer",
@@ -19276,7 +19279,10 @@
         "properties": {
           "ap": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "examples": [
+              0
+            ]
           },
           "register": {
             "type": "integer",
@@ -21213,7 +21219,10 @@
             "type": "string"
           },
           "enabled": {
-            "type": "boolean"
+            "type": "boolean",
+            "examples": [
+              true
+            ]
           }
         },
         "required": [
@@ -54785,7 +54794,10 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 255,
-            "description": "MEM-AP の番号（ADIv5 の APSEL。Zynq-7000 の AHB-AP は 0）"
+            "description": "MEM-AP の番号（ADIv5 の APSEL。Zynq-7000 の AHB-AP は 0）",
+            "examples": [
+              0
+            ]
           },
           "frequency_hz": {
             "type": "integer",
@@ -55350,7 +55362,10 @@
           "duration_s": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "maximum": 3600
+            "maximum": 3600,
+            "examples": [
+              1.0
+            ]
           },
           "pid": {
             "anyOf": [
@@ -55471,7 +55486,10 @@
           "duration_s": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "maximum": 600
+            "maximum": 600,
+            "examples": [
+              1.0
+            ]
           },
           "frequency_hz": {
             "type": "integer",
@@ -58140,7 +58158,10 @@
         "type": "object",
         "properties": {
           "variables": {
-            "type": "boolean"
+            "type": "boolean",
+            "examples": [
+              false
+            ]
           },
           "expressions": {
             "type": "array",
@@ -58151,7 +58172,10 @@
           "max_elements": {
             "type": "integer",
             "minimum": 1,
-            "description": "配列・構造体の要素を何個まで読むか"
+            "description": "配列・構造体の要素を何個まで読むか",
+            "examples": [
+              64
+            ]
           }
         },
         "required": [
@@ -58184,11 +58208,17 @@
           },
           "frame": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "examples": [
+              0
+            ]
           },
           "max_elements": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "examples": [
+              64
+            ]
           }
         },
         "required": [

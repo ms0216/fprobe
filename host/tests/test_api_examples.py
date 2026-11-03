@@ -2,13 +2,13 @@
 その引数の型・範囲に合う（例が仕様の検査で断られない）。"""
 from fprobe.api.spec import load_spec
 
-WITH_EXAMPLES = ("linux.halt.open", "linux.halt.debug.attach", "la.capture")
+WITH_EXAMPLES = None   # 全メソッド（examples を持つ引数すべて）
 
 
 def test_every_example_is_accepted_by_its_own_parameter_schema():
     spec = load_spec()
     found = 0
-    for name in WITH_EXAMPLES:
+    for name in (WITH_EXAMPLES or list(spec.methods)):
         props = spec.methods[name].params["properties"]
         for param, schema in props.items():
             for value in schema.get("examples", []):
@@ -21,4 +21,4 @@ def test_every_example_is_accepted_by_its_own_parameter_schema():
                     assert value >= schema["minimum"], (name, param, value)
                 if "maximum" in schema:
                     assert value <= schema["maximum"], (name, param, value)
-    assert found >= 17
+    assert found >= 27
