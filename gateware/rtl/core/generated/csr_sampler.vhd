@@ -45,13 +45,13 @@ architecture rtl of csr_sampler is
   signal start : boolean;
   signal index : natural range 0 to 15;
   signal control_run_r : std_logic := '0';
-  signal control_ap_r : std_logic_vector(7 downto 0) := "00000000";
-  signal control_jitter_r : std_logic_vector(3 downto 0) := "0000";
-  signal period_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal slot_index_r : std_logic_vector(2 downto 0) := "000";
-  signal slot_addr_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
+  signal control_ap_r : std_logic_vector(7 downto 0) := (others => '0');
+  signal control_jitter_r : std_logic_vector(3 downto 0) := (others => '0');
+  signal period_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal slot_index_r : std_logic_vector(2 downto 0) := (others => '0');
+  signal slot_addr_r : std_logic_vector(31 downto 0) := (others => '0');
   signal slot_config_enable_r : std_logic := '0';
-  signal slot_config_words_r : std_logic_vector(3 downto 0) := "0000";
+  signal slot_config_words_r : std_logic_vector(3 downto 0) := (others => '0');
   signal slot_write_r : std_logic := '0';
   signal check_words_r : std_logic_vector(6 downto 0) := "0000001";
 begin
@@ -67,13 +67,13 @@ begin
       slot_write_r <= '0';
       if rst = '1' then
         control_run_r <= '0';
-        control_ap_r <= "00000000";
-        control_jitter_r <= "0000";
-        period_r <= "00000000000000000000000000000000";
-        slot_index_r <= "000";
-        slot_addr_r <= "00000000000000000000000000000000";
+        control_ap_r <= (others => '0');
+        control_jitter_r <= (others => '0');
+        period_r <= (others => '0');
+        slot_index_r <= (others => '0');
+        slot_addr_r <= (others => '0');
         slot_config_enable_r <= '0';
-        slot_config_words_r <= "0000";
+        slot_config_words_r <= (others => '0');
         check_words_r <= "0000001";
       elsif start then
         ack   <= '1';

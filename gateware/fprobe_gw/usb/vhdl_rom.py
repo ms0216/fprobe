@@ -11,13 +11,18 @@ from ..rtl import RTL_ROOT
 from . import descriptors as d
 from .fprobe_device import MSOS20_VENDOR_CODE, FprobeUsbDevice
 
-__all__ = ["COMMITTED_PACKAGE", "endpoint_masks", "interface_endpoint_masks", "render_package",
-           "write_package"]
+__all__ = ["COMMITTED_PACKAGE", "endpoint_kinds", "endpoint_masks", "interface_endpoint_masks",
+           "render_package", "write_package"]
 
 COMMITTED_PACKAGE = RTL_ROOT / "usb" / "generated" / "usb_descriptors_pkg.vhd"
 
 SPEED_ANY, SPEED_HS, SPEED_FS = 0, 1, 2
 DTYPE_MSOS20 = 0xFF          # ROM 内の擬似種別: MS OS 2.0 記述子セット（ベンダー要求で返す）
+NUM_ENDPOINT_NUMBERS = 16    # エンドポイント番号 0〜15（usb_types_pkg の NUM_ENDPOINTS と同じ）
+
+# 転送の種類（bmAttributes の下位 2 ビット）→ VHDL の ep_kind_t の値。None = その方向にエンドポイントが無い
+_KIND_NAMES = {None: "EP_KIND_NONE", d.CONTROL: "EP_KIND_CONTROL", d.ISOCHRONOUS: "EP_KIND_ISOCHRONOUS",
+               d.BULK: "EP_KIND_BULK", d.INTERRUPT: "EP_KIND_INTERRUPT"}
 
 
 @dataclass(frozen=True)
@@ -68,11 +73,30 @@ def endpoint_masks(configuration: bytes) -> tuple[int, int]:
     return out_mask, in_mask
 
 
+def endpoint_kinds(configuration: bytes) -> tuple[list[int | None], list[int | None]]:
+    """構成ディスクリプタから、OUT / IN それぞれの番号ごとの転送の種類（d.BULK 等。無ければ None）を作る。EP0 は制御。"""
+    out_kinds: list[int | None] = [None] * NUM_ENDPOINT_NUMBERS
+    in_kinds: list[int | None] = [None] * NUM_ENDPOINT_NUMBERS
+    out_kinds[0] = in_kinds[0] = d.CONTROL
+    for desc in d.split(configuration[9:]):
+        if desc[1] == d.ENDPOINT:
+            kinds = in_kinds if desc[2] & 0x80 else out_kinds
+            kinds[desc[2] & 0x0F] = desc[3] & 0x03
+    return out_kinds, in_kinds
+
+
+def _kind_table(name: str, kinds: list[int | None]) -> list[str]:
+    lines = [f"  constant {name} : ep_kinds_t := ("]
+    lines += [f"    {n:2d} => {_KIND_NAMES[k]}{',' if n + 1 < len(kinds) else ''}" for n, k in enumerate(kinds)]
+    return [*lines, "  );"]
+
+
 def render_package(device: FprobeUsbDevice) -> str:
     entries = _entries(device)
     configuration = device.configuration(high_speed=True)
     if_masks = interface_endpoint_masks(configuration)
     out_mask, in_mask = endpoint_masks(configuration)
+    out_kinds, in_kinds = endpoint_kinds(configuration)
     rom = b"".join(e.data for e in entries)
     offsets, position = [], 0
     for e in entries:
@@ -119,6 +143,12 @@ def render_package(device: FprobeUsbDevice) -> str:
         "  -- 存在するエンドポイント（ビット n = エンドポイント n、EP0 を含む）",
         f'  constant OUT_ENDPOINTS : std_logic_vector(15 downto 0) := x"{out_mask:04X}";',
         f'  constant IN_ENDPOINTS : std_logic_vector(15 downto 0) := x"{in_mask:04X}";',
+        "",
+        "  -- エンドポイントの転送の種類（番号ごと、方向別。EP0 は制御、NONE はその方向に無い）",
+        "  type ep_kind_t is (EP_KIND_NONE, EP_KIND_CONTROL, EP_KIND_ISOCHRONOUS, EP_KIND_BULK, EP_KIND_INTERRUPT);",
+        f"  type ep_kinds_t is array (0 to {NUM_ENDPOINT_NUMBERS - 1}) of ep_kind_t;",
+        *_kind_table("OUT_EP_KINDS", out_kinds),
+        *_kind_table("IN_EP_KINDS", in_kinds),
         "",
         "  -- インターフェース番号ごとのエンドポイント番号マスク（SET_INTERFACE でトグルを戻す対象）",
         f"  constant NUM_INTERFACES : positive := {len(if_masks)};",

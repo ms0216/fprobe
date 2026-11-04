@@ -66,7 +66,7 @@ begin
 
   front_i : entity work.la_lane_front
     generic map (WIDTH => WIDTH, LANES => LANES, EXT_DELAY => EXT_DELAY, EXT_LANE => EXT_LANE)
-    port map (clk => clk, rst => rst, lane_data => lane_data, ext_trigger => ext_trigger, run => run, arm => arm,
+    port map (clk => clk, rst => rst, lane_data => lane_data, ext_trigger => ext_trigger, run => run,
               trig_mask => trig_mask, trig_value => trig_value, trig_rise => trig_rise, trig_fall => trig_fall,
               sample_valid => valid, sample => data, sample_hit => hit, sample_lane => lane);
 

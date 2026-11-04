@@ -46,13 +46,13 @@ architecture rtl of csr_inject is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal control_extra_r : std_logic_vector(2 downto 0) := "000";
-  signal entry_r : std_logic_vector(2 downto 0) := "000";
-  signal addr_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal value_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
+  signal control_extra_r : std_logic_vector(2 downto 0) := (others => '0');
+  signal entry_r : std_logic_vector(2 downto 0) := (others => '0');
+  signal addr_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal value_r : std_logic_vector(31 downto 0) := (others => '0');
   signal entry_write_r : std_logic := '0';
-  signal start_first_r : std_logic_vector(2 downto 0) := "000";
-  signal start_last_r : std_logic_vector(2 downto 0) := "000";
+  signal start_first_r : std_logic_vector(2 downto 0) := (others => '0');
+  signal start_last_r : std_logic_vector(2 downto 0) := (others => '0');
   signal start_go_r : std_logic := '0';
 begin
   start <= bus_req = '1' and ack = '0';
@@ -67,12 +67,12 @@ begin
       entry_write_r <= '0';
       start_go_r <= '0';
       if rst = '1' then
-        control_extra_r <= "000";
-        entry_r <= "000";
-        addr_r <= "00000000000000000000000000000000";
-        value_r <= "00000000000000000000000000000000";
-        start_first_r <= "000";
-        start_last_r <= "000";
+        control_extra_r <= (others => '0');
+        entry_r <= (others => '0');
+        addr_r <= (others => '0');
+        value_r <= (others => '0');
+        start_first_r <= (others => '0');
+        start_last_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is

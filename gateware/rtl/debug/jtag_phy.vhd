@@ -59,6 +59,8 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
+use work.dap_pkg.all;
 
 entity jtag_phy is
   port (
@@ -97,16 +99,11 @@ entity jtag_phy is
 end entity;
 
 architecture rtl of jtag_phy is
-  constant OP_SEQ_OUT  : std_logic_vector(1 downto 0) := "00";
-  constant OP_SEQ_IN   : std_logic_vector(1 downto 0) := "01";
-  constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
-  constant OP_PINS     : std_logic_vector(1 downto 0) := "11";
   constant IR_ABORT    : std_logic_vector(3 downto 0) := x"8";
   constant IR_DPACC    : std_logic_vector(3 downto 0) := x"A";
   constant IR_APACC    : std_logic_vector(3 downto 0) := x"B";
   constant IR_IDCODE   : std_logic_vector(3 downto 0) := x"E";
   constant RDBUFF_READ : std_logic_vector(34 downto 0) := x"00000000" & "111";   -- DPACC、A = 0xC、読み
-  constant COUNT_POSTED : natural := 2;                                  -- 転送の cmd_count: ポストの DP の読み
 
   -- ビット列は区間の並びとして 1 ビットずつ作る（ビット列全体を組み立てない）:
   --   IR スキャン: G_IR_HEAD（TMS 1,1,0,0）→ G_IR_BEFORE（1）→ G_IR_VALUE → G_IR_AFTER（1）→ G_IR_TAIL（TMS 1,0）
@@ -123,7 +120,6 @@ architecture rtl of jtag_phy is
   signal expired   : boolean := false;                         -- 相の最後の周期（swd_phy と同じ）
   signal hp_one    : boolean;                                  -- half_period = 1
   signal index     : natural range 0 to 255 := 0;              -- 区間の中のビット番号
-  signal length    : natural range 0 to 255 := 0;              -- シーケンスのビット数
   signal seg_len   : natural range 0 to 255 := 0;              -- 今の区間の長さ（区間に入るときに決める）
   signal shifting  : natural range 0 to 255 := 0;              -- シフトの残りビット数（1 なら最後 = TMS 1）
   signal din       : std_logic := '1';
@@ -190,14 +186,6 @@ architecture rtl of jtag_phy is
   signal r_data    : std_logic_vector(63 downto 0) := (others => '0');
   signal r_time    : unsigned(63 downto 0) := (others => '0');
 
-  function b2l(b : boolean) return std_logic is
-  begin
-    if b then
-      return '1';
-    end if;
-    return '0';
-  end function;
-
   function map_ack(a : std_logic_vector(2 downto 0)) return std_logic_vector is
   begin
     case a is
@@ -262,11 +250,22 @@ begin
   tdi       <= tdi_r;
 
   process (clk)
+    -- 半周期の時計: 積み直す（half_period 周期後に expired）・1 つ進める
+    procedure half_restart is
+    begin
+      timer   <= half_period - 1;
+      expired <= hp_one;
+    end procedure;
+    procedure half_tick is
+    begin
+      timer   <= timer - 1;
+      expired <= timer = 1;
+    end procedure;
+
     -- 区間 s の長さ
     impure function length_of(s : seg_t) return natural is
     begin
       case s is
-        when G_SEQ       => return length;
         when G_IR_HEAD   => return 4;
         when G_IR_BEFORE => return ir_before;
         when G_IR_VALUE  => return ir_len;
@@ -282,6 +281,7 @@ begin
         when G_DR_AFTER  => return dr_after;
         when G_IDLE      => return idle_cycles;
         when G_NONE | G_END => return 0;
+        when G_SEQ       => return 0;              -- 入らない（シーケンスの長さは命令を受けたときに seg_len へ直接）
       end case;
     end function;
 
@@ -317,8 +317,7 @@ begin
     begin
       tck_r   <= '0';
       half    <= H_LOW;
-      timer   <= half_period - 1;
-      expired <= hp_one;
+      half_restart;
     end procedure;
 
     -- 区間 s の i ビット目の TDI を出し、TCK を下げる（TMS は put_tms）
@@ -334,13 +333,13 @@ begin
             tdi_r <= seq_out(0);
           end if;
         when G_IR_HEAD =>
-          put_tms(b2l(i < 2));
+          put_tms(to_sl(i < 2));
           tdi_r <= '1';
         when G_IR_BEFORE | G_IR_AFTER =>
-          put_tms(b2l(shifting = 1));
+          put_tms(to_sl(shifting = 1));
           tdi_r <= '1';                                                -- 他の装置は BYPASS
         when G_IR_VALUE =>
-          put_tms(b2l(shifting = 1));
+          put_tms(to_sl(shifting = 1));
           tdi_r <= '1';                                                -- 4 ビットを超える IR の上位は 1
           for k in 0 to 3 loop
             if k = i then
@@ -348,16 +347,16 @@ begin
             end if;
           end loop;
         when G_DR_HEAD =>
-          put_tms(b2l(i = 0));
+          put_tms(to_sl(i = 0));
           tdi_r <= '0';
         when G_DR_BEFORE | G_DR_AFTER =>
-          put_tms(b2l(shifting = 1));
+          put_tms(to_sl(shifting = 1));
           tdi_r <= '0';
         when G_DR_BODY =>
-          put_tms(b2l(shifting = 1));
+          put_tms(to_sl(shifting = 1));
           tdi_r <= dr_shift(0);
         when G_IR_TAIL | G_DR_TAIL =>
-          put_tms(b2l(i = 0));                                         -- → Update、→ Idle
+          put_tms(to_sl(i = 0));                                         -- → Update、→ Idle
           tdi_r <= '1';
         when others =>                                                -- G_IDLE
           put_tms('0');
@@ -397,7 +396,6 @@ begin
           seq_op   <= cmd_op;
           seq_tms  <= cmd_request(0);
           seq_out  <= cmd_data;
-          length   <= cmd_count;
           seg      <= G_SEQ;
           index    <= 0;
           seg_len  <= cmd_count;
@@ -470,8 +468,7 @@ begin
               tms_r <= tms_next;                                      -- Low 相の中ほど（half_period = 2 なら立ち下がりの 1 周期後）
             end if;
             if not expired then
-              timer   <= timer - 1;
-              expired <= timer = 1;
+              half_tick;
             elsif seg = G_DR_TAIL and index + 1 = seg_len and dp_read and not ack_ready then
               -- RDBUFF を続けるかを決める ACK がまだ取り込めていない（本体の後に 2 ビット以上あるので実際には起きない
               -- 保険）: 立ち上げずに待つ（TMS = 0 の Low 相が延びるだけ）
@@ -480,14 +477,13 @@ begin
               -- Low 相の終わり: TCK を上げる。このビットの取り込みを決め、次のビットを決める
               tck_r   <= '1';
               half    <= H_HIGH;
-              timer   <= half_period - 1;
-              expired <= hp_one;
+              half_restart;
               if seg = G_SEQ then
-                now_take := ('1', '1', b2l(index = 0), b2l(index + 1 = seg_len), '0', '0', '0', cmd_par, scan_par);
+                now_take := ('1', '1', to_sl(index = 0), to_sl(index + 1 = seg_len), '0', '0', '0', cmd_par, scan_par);
                 seq_out <= '1' & seq_out(63 downto 1);
               elsif seg = G_DR_BODY then
-                now_take := ('1', '0', b2l(index = 0), b2l(index + 1 = seg_len), b2l(short_dr), b2l(ir = IR_ABORT),
-                             b2l(dp_read), cmd_par, scan_par);
+                now_take := ('1', '0', to_sl(index = 0), to_sl(index + 1 = seg_len), to_sl(short_dr), to_sl(ir = IR_ABORT),
+                             to_sl(dp_read), cmd_par, scan_par);
                 dr_shift <= '0' & dr_shift(34 downto 1);
               end if;
               cur_take <= now_take;
@@ -542,8 +538,7 @@ begin
 
           when H_HIGH =>
             if not expired then
-              timer   <= timer - 1;
-              expired <= timer = 1;
+              half_tick;
               if timer = 1 then
                 now_take := cur_take;                                 -- High 相の最後の周期の頭の辺で予約する
               end if;

@@ -103,7 +103,7 @@ python target_ip/fprobe_obs/examples/shrike_lite/build.py --firmware   # FPGA �
   書き込み 3.0 s・検証 0.87 s）。Shrike に MicroPython が残っていれば、書く前に Windows でドライブを取り出す。
 - 書く前に、今の Flash を退避する: `target.flash.read`（path に保存先、address 0x10000000、length 0x200000 = 2 MB）。
   MicroPython のデモに戻すには、その BIN を `target.flash`（address 0x10000000）で書く（作者の手元の退避は
-  `~/.fprobe/backups/shrike-lite_454D4A3330370016_micropython_20261021.bin`）。
+  `~/.fprobe/backups/shrike-lite_<Shrike のシリアル>_micropython_20261021.bin`）。
 - 退避が無いとき・fprobe が使えないときは UF2 で書く: RP2040 の BOOTSEL のボタン（場所は基板のシルクで確かめる）を押したまま USB をつなぐと RP2040 の
   ドライブが出るので、`zephyr.uf2`（このデモ）か Vicharak の MicroPython の UF2 をそこにコピーする。
 

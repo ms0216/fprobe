@@ -1,6 +1,8 @@
 -- CMSIS-DAP のパケットの枠: 要求パケットの先頭（コマンド ID）を読んで担当ユニットを起動し、ユニットに引数の読み取り
 -- （get）と応答への追記（put）を提供する。ユニットが終わったら応答の先頭を書き直し（header）、要求の残りを読み捨てて、
 -- 応答バッファから送る。仕様: docs/superpowers/specs/2026-10-16-dap-processor-split-design.md §2
+-- 応答バッファは 2 面（512 バイトずつ）。1 面を送っている間に、次のコマンドをもう 1 面に処理する（送り終えるのを待たない。
+-- 応答の順は要求の順のまま: 処理し終えた面は、前の面を送り終えてから送る）。送出は 1 周期に 1 バイト（読みを 1 つ先に出す）。
 --
 -- 応答の先頭はコマンド ID。担当のないコマンドは 0xFF の 1 バイトを返す。TransferAbort は応答を返さない。
 -- 足りない引数は 0（パケットが尽きた後の get は 0 を返す）。応答は packet_size バイトを超えた分を捨てる。
@@ -58,22 +60,27 @@ architecture rtl of dap_packet is
   signal val      : std_logic_vector(63 downto 0) := (others => '0');
   signal hdr      : std_logic_vector(23 downto 0) := (others => '0');
   signal hdr_n    : natural range 0 to 3 := 0;
-  -- 応答バッファ（書き込みは 1 ポート、読み出しは送出位置の同期読み出し。BSRAM に収める）
-  type buffer_t is array (0 to 511) of std_logic_vector(7 downto 0);
+  -- 応答バッファ 2 面（書き込みは 1 ポート、読み出しは同期読み出し。BSRAM 1 つに収める）。番地 = 面 × 512 + 位置
+  type buffer_t is array (0 to 1023) of std_logic_vector(7 downto 0);
   signal rbuf     : buffer_t;
   signal buf_we   : std_logic := '0';
   signal buf_waddr : natural range 0 to 511 := 0;
   signal buf_wdata : std_logic_vector(7 downto 0) := (others => '0');
+  signal wbank    : natural range 0 to 1 := 0;            -- 処理中のコマンドの応答を書く面
   signal rd_q     : std_logic_vector(7 downto 0) := (others => '0');
   signal wp       : natural range 0 to 512 := 0;          -- 書き込み位置 = 応答の長さ
-  -- 送出部
+  -- 送出部: 面 sbank の 0 .. slen-1 を送る。rd_q = 位置 sp のバイト（q_valid のとき）
+  signal sbank    : natural range 0 to 1 := 0;
+  signal slen     : natural range 0 to 512 := 0;
   signal sp       : natural range 0 to 512 := 0;
+  signal q_valid  : std_logic := '0';
+  signal move     : std_logic;                            -- この周期に rd_q を出力のレジスタへ移す
+  signal raddr    : natural range 0 to 1023;
   signal out_reg  : std_logic_vector(7 downto 0) := (others => '0');
   signal out_full : std_logic := '0';
   signal out_end  : std_logic := '0';
   signal send_go  : std_logic := '0';
   signal sending  : std_logic := '0';
-  signal fetching : std_logic := '0';
   signal get_ack_r, put_ack_r, start_r : std_logic := '0';
 begin
   accept   <= in_valid = '1' and ended = '0' and
@@ -91,9 +98,9 @@ begin
   begin
     if rising_edge(clk) then
       if buf_we = '1' then
-        rbuf(buf_waddr) <= buf_wdata;
+        rbuf(wbank * 512 + buf_waddr) <= buf_wdata;
       end if;
-      rd_q <= rbuf(sp mod 512);
+      rd_q <= rbuf(raddr);
     end if;
   end process;
 
@@ -214,50 +221,60 @@ begin
               if silent = '1' then
                 state <= S_COMMAND;
               else
-                send_go <= '1';
-                state   <= S_SEND;
+                state <= S_SEND;
               end if;
             elsif accept then
               ended <= in_last;
             end if;
 
           when S_SEND =>
-            -- 送出部が送り終えるのを待つ（send_go を出した次の周期から sending が立つ）
+            -- 前の応答を送り終えたら（send_go を出した次の周期から sending が立つ）、この面を送出部へ渡し、次のコマンドは
+            -- もう 1 面に処理する
             if send_go = '0' and sending = '0' then
-              state <= S_COMMAND;
+              send_go <= '1';
+              wbank   <= 1 - wbank;
+              state   <= S_COMMAND;
             end if;
         end case;
       end if;
     end if;
   end process;
 
-  -- 送出部: rbuf(0 .. wp-1) を順に出す（rd_q は sp の 1 周期遅れ）
+  -- 送出部: 面 sbank の 0 .. slen-1 を順に出す。読みの番地は次に要る位置（移す周期は sp + 1）なので、出力のレジスタが
+  -- 受けられれば 1 周期に 1 バイト
+  move  <= '1' when sending = '1' and q_valid = '1' and (out_full = '0' or out_ready = '1') else '0';
+  raddr <= sbank * 512 + ((sp + 1) mod 512) when move = '1' else sbank * 512 + (sp mod 512);
+
   process (clk)
   begin
     if rising_edge(clk) then
       if rst = '1' then
         sending  <= '0';
         out_full <= '0';
+        q_valid  <= '0';
       elsif send_go = '1' then
-        sending  <= '1';
-        fetching <= '1';
-        sp       <= 0;
+        sending <= '1';
+        sbank   <= 1 - wbank;                                 -- 渡された面（send_go を出した辺で wbank はもう 1 面に切り替わっている）
+        slen    <= wp;
+        sp      <= 0;
+        q_valid <= '0';
       elsif sending = '1' then
-        if out_full = '1' and out_ready = '1' then
-          out_full <= '0';
-        end if;
-        if fetching = '1' then
-          fetching <= '0';
-        elsif out_full = '0' or out_ready = '1' then
-          if sp /= wp then
-            out_reg  <= rd_q;
-            out_end  <= '1' when sp = wp - 1 else '0';
-            out_full <= '1';
-            sp       <= sp + 1;
-            fetching <= '1';
-          else
+        if move = '1' then
+          out_reg  <= rd_q;
+          out_end  <= '1' when sp = slen - 1 else '0';
+          out_full <= '1';
+          sp       <= sp + 1;
+          q_valid  <= '1' when sp + 1 < slen else '0';      -- 次の周期の rd_q は位置 sp + 1
+        else
+          if out_full = '1' and out_ready = '1' then
             out_full <= '0';
-            sending  <= '0';
+          end if;
+          if q_valid = '0' then
+            if sp < slen then
+              q_valid <= '1';                                 -- この周期の読み（位置 sp）が次の周期の rd_q
+            elsif out_full = '0' or out_ready = '1' then
+              sending <= '0';                                 -- 送り終えた
+            end if;
           end if;
         end if;
       end if;

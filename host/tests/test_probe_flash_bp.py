@@ -47,7 +47,7 @@ def connect(probe, chip) -> None:
     """target_connect を偽のセッションで通す（記録からの復元も行われる）。"""
     probe._session.debug = lambda **kw: SimpleNamespace(target=chip, open=lambda: None, close=lambda: None,
                                                         options={"frequency": 4_000_000})
-    return probe.target_connect("fake_target")
+    return probe.target_connect("fake_target", frequency_hz=4_000_000)
 
 
 def test_breakpoints_beyond_the_comparators_go_to_flash(probe):

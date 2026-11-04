@@ -86,7 +86,7 @@ architecture rtl of primer20k_fprobe_top is
   signal sd_req_valid, sd_req_ready, sd_rsp_valid, sd_rsp_ready, sd_rsp_last : std_logic;
   signal sd_req      : std_logic_vector(8 downto 0);
   signal sd_rsp_data : std_logic_vector(7 downto 0);
-  signal hs_s1, hs_s : std_logic := '0';
+  signal hs_s : std_logic;                            -- high_speed を sys に同期化
   signal packet_size : natural range 64 to 512;
   -- デバッグポート
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe : std_logic;
@@ -102,7 +102,7 @@ architecture rtl of primer20k_fprobe_top is
   -- UART の制御線（U52）
   signal u_host_rts, u_host_break, uart_cts, uart_cts_n, uart_rts_n, rts_claim, cts_claim : std_logic;
   signal rts_pin, cts_pin : std_logic_vector(1 downto 0);
-  signal cts_u1, cts_u : std_logic := '1';
+  signal cts_u : std_logic;
   -- SWO（sys → usb）
   signal ss_valid, ss_ready, us_valid, us_ready : std_logic;
   signal ss_flush, us_flush : std_logic;          -- 受信の開始で残りを捨てる（B10。sys の窓を usb へ同期化）
@@ -156,13 +156,9 @@ begin
               brk => u_host_break, serial_dcd => '1', serial_dsr => cts_u);
 
   -- CTS の状態を usb ドメインへ（ゆっくり変わる 1 ビット）
-  process (usb_clk)
-  begin
-    if rising_edge(usb_clk) then
-      cts_u1 <= uart_cts;
-      cts_u  <= cts_u1;
-    end if;
-  end process;
+  cts_sync_i : entity work.sync_bit
+    generic map (INIT => '1')
+    port map (clk => usb_clk, d => uart_cts, q => cts_u);
 
   uart_to_sys_i : entity work.async_fifo
     generic map (WIDTH => 8, DEPTH => 512)
@@ -224,13 +220,8 @@ begin
               out_data => ud_rsp);
 
   -- パケットサイズ（HS 512 / FS 64）。速度はリセット・ネゴシエーションの間しか変わらない
-  process (sys_clk)
-  begin
-    if rising_edge(sys_clk) then
-      hs_s1 <= high_speed;
-      hs_s  <= hs_s1;
-    end if;
-  end process;
+  hs_sync_i : entity work.sync_bit
+    port map (clk => sys_clk, d => high_speed, q => hs_s);
   packet_size <= 512 when hs_s = '1' else 64;
 
   mem_pll_i : entity work.gowin_rpll
@@ -249,18 +240,24 @@ begin
               ddr_dq => ddr_dq, ddr_dqs => ddr_dqs, ddr_dqs_n => ddr_dqs_n);
 
   core_i : entity work.fprobe_core
-    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => 23,
-                 MEM_TEST => work.design_caps_pkg.MEM_TEST,
-                 XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
+    -- 構成の機能はデザインの生成パッケージから全部渡す（ケイパビリティと回路を一致させる。tests/test_core_generics.py）
+    -- LA_INTERNAL: ロジアナは DDR3 の深いバッファ（内蔵 BSRAM 版は重複）
+    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, MEM_ADDR_BITS => work.design_caps_pkg.MEM_ADDR_BITS,
+                 MEM_TEST => work.design_caps_pkg.MEM_TEST, XTRIG => work.design_caps_pkg.XTRIG,
+                 TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ, SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH, SAMPLER_CHECK_MAX => work.design_caps_pkg.SAMPLER_CHECK_MAX,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
-                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
-                 UART_FLOW => work.design_caps_pkg.UART_FLOW,
-                 LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
-                 LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
-                 AUX => work.design_caps_pkg.AUX, SYNC => work.design_caps_pkg.SYNC, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
-                 LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS,
-                 LA_INTERNAL => false)        -- ロジアナは DDR3 の深いバッファ（内蔵 BSRAM 版は重複）
+                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER, UART_FLOW => work.design_caps_pkg.UART_FLOW,
+                 AUX => work.design_caps_pkg.AUX, SYNC => work.design_caps_pkg.SYNC,
+                 OBS_PORT => work.design_caps_pkg.OBS_PORT, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
+                 LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS, LA_FILTER => work.design_caps_pkg.LA_FILTER,
+                 LA_PULSE => work.design_caps_pkg.LA_PULSE, LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
+                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
+                 EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK, CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
+                 LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN, LA_LANES => work.design_caps_pkg.LA_LANES,
+                 LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS, LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,
+                 -- ボードで決まるもの
+                 CLK_HZ => SYS_CLK_HZ, LA_INTERNAL => false)
     port map (clk => sys_clk, rst => sys_rst,
               ctrl_in_valid => s_req_valid, ctrl_in_ready => s_req_ready,
               ctrl_in_data => s_req(7 downto 0), ctrl_in_last => s_req(8),
@@ -295,43 +292,14 @@ begin
               aux_rx => aux_rx, sync_in => sync_in, sync_out => sync_o);
   sync_out <= sync_o when work.design_caps_pkg.SYNC else 'Z';
 
-  -- デバッグポートの機能ピン（それ以外のピンは入力のまま）
-  process (all)
-  begin
-    func_o  <= (others => '0');
-    func_oe <= (others => '0');
-    func_o(DBG_SWCLK)   <= swclk_o;
-    func_oe(DBG_SWCLK)  <= swclk_oe;
-    func_o(DBG_SWDIO)   <= swdio_o;
-    func_oe(DBG_SWDIO)  <= swdio_oe;
-    func_o(DBG_NRESET)  <= '0';
-    func_oe(DBG_NRESET) <= nreset_low;
-    func_o(DBG_TDI)      <= tdi_o;
-    func_oe(DBG_TDI)     <= tdi_oe;
-    func_o(DBG_UART_TX)  <= uart_tx;
-    func_oe(DBG_UART_TX) <= uart_tx_oe;    -- ホストが UART に最初の 1 バイトを送るまで駆動しない（B29）
-    -- UART の RTS/CTS が取った端子（候補に無い番号は何もしない）
-    for j in UART_FLOW_PIN_CHOICES'range loop
-      if cts_claim = '1' and to_integer(unsigned(cts_pin)) = j then
-        func_oe(UART_FLOW_PIN_CHOICES(j)) <= '0';
-      end if;
-      if rts_claim = '1' and to_integer(unsigned(rts_pin)) = j then
-        func_o(UART_FLOW_PIN_CHOICES(j))  <= uart_rts_n;
-        func_oe(UART_FLOW_PIN_CHOICES(j)) <= '1';
-      end if;
-    end loop;
-  end process;
-
-  -- CTS の線（アクティブ Low）。取っていなければ出ているとみなす（'0'）
-  process (all)
-  begin
-    uart_cts_n <= '0';
-    for j in UART_FLOW_PIN_CHOICES'range loop
-      if cts_claim = '1' and to_integer(unsigned(cts_pin)) = j then
-        uart_cts_n <= pmod1(UART_FLOW_PIN_CHOICES(j));
-      end if;
-    end loop;
-  end process;
+  -- デバッグポートの機能ピン（それ以外のピンは入力のまま）と、UART の RTS/CTS が取った端子
+  pin_func_i : entity work.debug_pin_func
+    generic map (DBG_SWCLK => DBG_SWCLK, DBG_TDI => DBG_TDI, DBG_NRESET => DBG_NRESET, DBG_SWDIO => DBG_SWDIO,
+                 DBG_UART_TX => DBG_UART_TX, FLOW_PIN_CHOICES => (UART_FLOW_PIN_CHOICES(0), UART_FLOW_PIN_CHOICES(1)))
+    port map (swclk_o => swclk_o, swclk_oe => swclk_oe, swdio_o => swdio_o, swdio_oe => swdio_oe, nreset_low => nreset_low,
+              tdi_o => tdi_o, tdi_oe => tdi_oe, uart_tx => uart_tx, uart_tx_oe => uart_tx_oe,
+              rts_claim => rts_claim, rts_pin => rts_pin, uart_rts_n => uart_rts_n, cts_claim => cts_claim,
+              cts_pin => cts_pin, pins_in => pmod1, func_o => func_o, func_oe => func_oe, uart_cts_n => uart_cts_n);
 
   pin_select_i : entity work.pin_select
     generic map (PINS => 8, ACTIONS => 2, PIN_CHOICES => (XOUT_PIN_CHOICES(0), XOUT_PIN_CHOICES(1), XOUT_PIN_CHOICES(2), XOUT_PIN_CHOICES(3)))

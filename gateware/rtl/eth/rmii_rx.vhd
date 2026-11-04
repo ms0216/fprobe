@@ -8,6 +8,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.eth_pkg.all;
 
 entity rmii_rx is
   port (
@@ -41,19 +42,6 @@ architecture rtl of rmii_rx is
   signal ov     : std_logic := '0';
   signal od     : std_logic_vector(7 downto 0) := (others => '0');
   signal ol, og : std_logic := '0';
-
-  function crc_dibit(c : std_logic_vector(31 downto 0); d : std_logic_vector(1 downto 0)) return std_logic_vector is
-    variable x : std_logic_vector(31 downto 0) := c;
-  begin
-    for i in 0 to 1 loop
-      if (x(0) xor d(i)) = '1' then
-        x := ('0' & x(31 downto 1)) xor x"EDB88320";
-      else
-        x := '0' & x(31 downto 1);
-      end if;
-    end loop;
-    return x;
-  end function;
 begin
   out_valid <= ov;
   out_data  <= od;

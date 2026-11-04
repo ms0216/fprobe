@@ -112,17 +112,66 @@ def test_debug_methods_need_an_attach(world):
         world.s.debug_threads(variables=False, expressions=[], max_elements=16)
 
 
-def test_reading_and_breakpoints_are_refused_while_the_cores_run(world):
+def test_reading_is_refused_while_the_cores_run(world):
     world.s.debug_attach(**ATTACH)
     world.s.debug_run(wait_s=0)
     for call in (lambda: world.s.debug_threads(variables=False, expressions=[], max_elements=16),
-                 lambda: world.s.debug_break_insert(location="add_one", kind="hw"),
-                 lambda: world.s.debug_memory(address=world.addr("counter"), length=4),
                  lambda: world.s.debug_read(expressions=["counter"], tid=T_LEADER, frame=0, max_elements=16)):
         with pytest.raises(EngineError, match="running"):
             call()
     h = world.s.debug_halt()
     assert h["kind"] == "int" and h["stop"]["cores_halted"] == [0, 1, 2, 3] and all(world.cores.halted())
+
+
+def test_a_breakpoint_is_placed_and_removed_while_the_cores_run_and_they_run_again_after(world):
+    """一般のデバッガと同じ: 走行中にブレークポイントを置ける。デバッガが短く全コアを止めて置き、また走らせる。"""
+    w = world
+    original = w.read_user(w.addr("race.c:11"), 4)
+    w.s.debug_attach(**ATTACH)
+    w.s.debug_run(wait_s=0)
+    assert not any(w.cores.halted()) and w.s.debug_status()["brief_halts"]["count"] == 0
+
+    bp = w.s.debug_break_insert(location="race.c:11", kind="sw")
+    assert (bp["line"], bp["kind"]) == (11, "sw")
+    assert not any(w.cores.halted()), "置いたあとは、また走っている"
+    assert w.s.debug_status()["running"] is True
+    assert w.read_user(bp["address"], 4) == BKPT[4]                       # 走ったまま、BKPT が書いてある
+    assert w.s.debug_status()["brief_halts"]["count"] == 1
+
+    w.s.debug_break_remove(id=bp["id"])
+    assert not any(w.cores.halted()) and w.read_user(bp["address"], 4) == original
+    facts = w.s.debug_status()["brief_halts"]
+    assert facts["count"] == 2 and facts["total_s"] >= 0 and facts["max_s"] <= facts["total_s"]
+
+
+def test_memory_is_read_while_the_cores_run_by_a_brief_halt_and_they_run_again_after(world):
+    """画面のメモリパネルは自動更新で走行中も読む。デバッガが全コアを短く止めて読み、また走らせる。"""
+    w = world
+    addr = w.addr("counter")
+    w.s.debug_attach(**ATTACH)
+    w.s.debug_run(wait_s=0)
+    assert not any(w.cores.halted())
+    got = w.s.debug_memory(address=addr, length=4)
+    assert got["data"] == w.read_user(addr, 4).hex() and got["reason"] is None
+    assert not any(w.cores.halted()) and w.s.debug_status()["running"] is True
+    assert w.s.debug_status()["brief_halts"]["count"] == 1
+
+
+def test_a_breakpoint_placed_while_running_is_hit_afterwards(world):
+    w = world
+    w.s.debug_attach(**ATTACH)
+    w.s.debug_run(wait_s=0)
+    bp = w.s.debug_break_insert(location="race.c:11", kind="sw")
+    w.hit(core=1)
+    stop = w.s.debug_run(wait_s=5.0)
+    assert (stop["kind"], stop["tid"], stop["breakpoint"]) == ("swbreak", T_OTHER, bp["id"])
+    assert all(w.cores.halted())
+
+
+def test_placing_a_breakpoint_while_halted_does_not_count_a_brief_halt(world):
+    world.s.debug_attach(**ATTACH)
+    world.s.debug_break_insert(location="race.c:11", kind="sw")
+    assert all(world.cores.halted()) and world.s.debug_status()["brief_halts"]["count"] == 0
 
 
 def test_a_timeout_leaves_every_core_running_and_the_next_run_keeps_waiting(world):

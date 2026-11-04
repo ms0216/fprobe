@@ -1,7 +1,7 @@
 // API パネルの計算（lib/apiform.ts）: 仕様から欄を作り、欄の文字列から引数を組み立てる
 import { describe, expect, it } from "vitest";
 import spec from "../../api/fprobe_api.json";
-import { apiMethods, buildParams, confirmLevel, fieldsOf, valuesOf, exampleValues, isAddressLike } from "../src/lib/apiform";
+import { apiMethods, buildParams, confirmLevel, defaultText, fieldsOf, valuesOf, exampleValues, isAddressLike } from "../src/lib/apiform";
 
 describe("apiMethods", () => {
   it("MCP の道具と同じ範囲（session.* と binary を除く）を名前の順に", () => {
@@ -197,5 +197,16 @@ describe("番地・オフセット・マスクの最初の値は 16 進（Linux 
     expect(exampleValues(fields)).toEqual({ page_offset: "0x80000000", linear_map_end: "0xBB400000", mask: "0xFF",
                                             max_tasks: "100000", skew_limit_ns: "50000000" });
     expect(isAddressLike("address", -1)).toBe(false);
+  });
+});
+
+describe("既定値の見せ方（defaultText）", () => {
+  it("個数・回数は 10 進、番地・マスクは 16 進。既定が null の欄は値のように見せない", () => {
+    const f = (name: string, d: unknown) => ({ name, kind: "integer", nullable: true, required: false, default: d }) as any;
+    expect(defaultText(f("top", 20))).toBe("20");
+    expect(defaultText(f("tree_depth", 8))).toBe("8");
+    expect(defaultText(f("address", 0xE000EDF0))).toBe("0xE000EDF0");
+    expect(defaultText(f("task", null))).toBeNull();
+    expect(defaultText(f("x", undefined))).toBeNull();
   });
 });

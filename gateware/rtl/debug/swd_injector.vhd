@@ -38,6 +38,8 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.dap_pkg.all;
+use work.util_pkg.all;
 
 entity swd_injector is
   generic (
@@ -114,25 +116,16 @@ entity swd_injector is
 end entity;
 
 architecture rtl of swd_injector is
-  constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
-  constant ACK_OK      : std_logic_vector(2 downto 0) := "001";
-  constant ACK_WAIT    : std_logic_vector(2 downto 0) := "010";
-  constant ACK_FAULT   : std_logic_vector(2 downto 0) := "100";
-  -- 転送要求（CMSIS-DAP の並び: bit3-2 A[3:2], bit1 RnW, bit0 APnDP）
-  constant DP_W_SELECT : std_logic_vector(3 downto 0) := "1000";
-  constant DP_R_RDBUFF : std_logic_vector(3 downto 0) := "1110";
-  constant AP_R_CSW    : std_logic_vector(3 downto 0) := "0011";
-  constant AP_R_TAR    : std_logic_vector(3 downto 0) := "0111";
-  constant AP_W_CSW    : std_logic_vector(3 downto 0) := "0001";
-  constant AP_W_TAR    : std_logic_vector(3 downto 0) := "0101";
-  constant AP_W_DRW    : std_logic_vector(3 downto 0) := "1101";
-  constant DP_R_CTRL   : std_logic_vector(3 downto 0) := "0110";
-  constant STEP_CHECK  : natural := 7;                    -- 最後の語の後: CTRL/STAT を読む
-  constant STEP_RESTORE : natural := 8;                   -- CSW を戻す（→ TAR → SELECT）
-  constant LAST_STEP   : natural := 10;
-  constant STEP_ABORT  : natural := 11;                   -- 後始末: ABORT ← STKERRCLR
-  constant DP_W_ABORT  : std_logic_vector(3 downto 0) := "0000";
-  constant STICKYERR   : natural := 5;
+  -- 手順（並びの順に進む。step_t'succ が次の手順）
+  type step_t is (
+    P_SELECT,                                            -- SELECT ← ap（bank 0）
+    P_READ_CSW, P_READ_TAR, P_RDBUFF_TAR,                -- CSW・TAR を読んで保存（読みは 1 つ後で返る）
+    P_CSW,                                               -- CSW ← 32 ビット・増加なし
+    P_TAR, P_DRW,                                        -- 語ごとに TAR ← 番地 / DRW ← 値
+    P_CHECK,                                             -- 最後の語の後: CTRL/STAT を読む
+    P_RESTORE_CSW, P_RESTORE_TAR,                        -- CSW・TAR を戻す
+    P_RESTORE_SELECT,                                    -- SELECT ← ホストが最後に書いた値（最後の手順）
+    P_CLEAR);                                            -- 後始末: ABORT ← STKERRCLR
   type words_t is array (0 to 7) of std_logic_vector(31 downto 0);   -- 0 は使わない（語 0 は addr / value）
 
   type state_t is (S_IDLE, S_WAIT_BOUNDARY, S_WAIT_LINE, S_ISSUE, S_RESPONSE);
@@ -140,15 +133,11 @@ architecture rtl of swd_injector is
   signal mine        : boolean := false;                 -- PHY を借りている
   signal jtag_r      : boolean := false;                 -- 借りたときの接続の方式
   signal lost        : boolean;                          -- 切断・方式の切り替え（PHY は応答しない）
-  signal dap_out     : natural range 0 to 2 := 0;        -- DAP の命令で PHY が受けて応答をまだ返していない数（PHY は前の
-                                                         -- 応答の前に次を受けることがある: 2 まで）
-  signal dap_pending : boolean;                          -- DAP の命令が PHY に残っている
-  signal step        : natural range 0 to STEP_ABORT := 0;
+  signal mine_sl     : std_logic;
+  signal dap_pending : boolean;                          -- DAP の命令が PHY に残っている（dap_phy_borrow）
+  signal step        : step_t := P_SELECT;
   signal tries       : unsigned(15 downto 0) := (others => '0');
-  -- 再試行の回数はいったん受けて（めったに変わらない）、比べた結果もレジスタに。WAIT の応答は数十周期ごとなので、
-  -- 1 周期前の tries との比べで足りる（DAP の処理部からの長い経路と 16 ビットの比べを、応答の判定の経路から外す）
-  signal retry_r     : unsigned(15 downto 0) := (others => '0');
-  signal retry_more  : std_logic := '0';
+  signal retry_more  : std_logic;                        -- tries < wait_retry（dap_phy_borrow）
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
   signal fast        : boolean := false;                 -- 控えを使う（CSW・TAR を読まない）
   signal saved       : boolean := false;                 -- CSW・TAR の戻す値がある（控え、または読んで保存した）
@@ -188,49 +177,38 @@ begin
   cur_addr  <= addr when word = 0 else tbl_a(word);
   cur_value <= value when word = 0 else tbl_v(word);
 
-  retry_i : process (clk)
-  begin
-    if rising_edge(clk) then
-      retry_r <= wait_retry;
-      if tries < retry_r then
-        retry_more <= '1';
-      else
-        retry_more <= '0';
-      end if;
-    end if;
-  end process;
-
-  -- PHY の命令の切り替え（mine は境界でしか変わらない）
-  dap_pending   <= dap_out /= 0;
-  phy_cmd_valid <= valid_r when mine else dap_cmd_valid;
-  phy_cmd_cond  <= '0' when mine else dap_cmd_cond;
-  phy_cmd_op    <= OP_TRANSFER when mine else dap_cmd_op;
-  phy_cmd_count <= 1 when mine else dap_cmd_count;
-  phy_cmd_req   <= req_r when mine else dap_cmd_req;
-  phy_cmd_data  <= x"00000000" & data_r when mine else dap_cmd_data;
-  dap_cmd_ready <= '0' when mine else phy_cmd_ready;
-  dap_rsp_valid <= '0' when mine else phy_rsp_valid;
-  lost          <= enable = '0' or (mine and (jtag = '1') /= jtag_r);
+  -- PHY の命令の切り替え（mine は境界でしか変わらない）・DAP の命令の残り・WAIT の再試行の比べ
+  mine_sl <= to_sl(mine);
+  borrow_i : entity work.dap_phy_borrow
+    port map (clk => clk, rst => rst, own => mine_sl, enable => enable, jtag => jtag, own_valid => valid_r, own_count => 1, own_req => req_r,
+              own_data => data_r, wait_retry => wait_retry, tries => tries, retry_more => retry_more,
+              up_cmd_valid => dap_cmd_valid, up_cmd_ready => dap_cmd_ready, up_cmd_cond => dap_cmd_cond,
+              up_cmd_op => dap_cmd_op, up_cmd_count => dap_cmd_count, up_cmd_req => dap_cmd_req,
+              up_cmd_data => dap_cmd_data, up_rsp_valid => dap_rsp_valid, up_pending => dap_pending,
+              phy_cmd_valid => phy_cmd_valid, phy_cmd_ready => phy_cmd_ready, phy_cmd_cond => phy_cmd_cond,
+              phy_cmd_op => phy_cmd_op, phy_cmd_count => phy_cmd_count, phy_cmd_req => phy_cmd_req,
+              phy_cmd_data => phy_cmd_data, phy_rsp_valid => phy_rsp_valid);
+  lost <= enable = '0' or (mine and (jtag = '1') /= jtag_r);
 
   process (clk)
-    -- 手順 n の転送要求と書き込み値
-    procedure issue(n : natural) is
+    -- 手順 p の転送要求と書き込み値
+    procedure issue(p : step_t) is
     begin
       valid_r <= '1';
       data_r  <= (others => '0');
-      case n is
-        when 0 => req_r <= DP_W_SELECT; data_r <= ap & x"000000";
-        when 1 => req_r <= AP_R_CSW;                                  -- 読みは 1 つ後で返る
-        when 2 => req_r <= AP_R_TAR;                                  -- CSW が返る
-        when 3 => req_r <= DP_R_RDBUFF;                               -- TAR が返る
-        when 4 => req_r <= AP_W_CSW;    data_r <= csw(31 downto 6) & "00" & csw(3) & "010";   -- 32 ビット、増加なし
-        when 5 => req_r <= AP_W_TAR;    data_r <= cur_addr;
-        when 6 => req_r <= AP_W_DRW;    data_r <= cur_value;
-        when STEP_CHECK => req_r <= DP_R_CTRL;
-        when STEP_RESTORE => req_r <= AP_W_CSW; data_r <= csw;
-        when 9 => req_r <= AP_W_TAR;    data_r <= tar;
-        when STEP_ABORT => req_r <= DP_W_ABORT; data_r <= x"00000004";   -- STKERRCLR
-        when others => req_r <= DP_W_SELECT; data_r <= select_shadow;
+      case p is
+        when P_SELECT         => req_r <= DP_W_SELECT; data_r <= ap & x"000000";
+        when P_READ_CSW       => req_r <= AP_R_CSW;                      -- 読みは 1 つ後で返る
+        when P_READ_TAR       => req_r <= AP_R_TAR;                      -- CSW が返る
+        when P_RDBUFF_TAR     => req_r <= DP_R_RDBUFF;                   -- TAR が返る
+        when P_CSW            => req_r <= AP_W_CSW; data_r <= csw(31 downto 6) & "00" & csw(3) & "010";   -- 32 ビット、増加なし
+        when P_TAR            => req_r <= AP_W_TAR; data_r <= cur_addr;
+        when P_DRW            => req_r <= AP_W_DRW; data_r <= cur_value;
+        when P_CHECK          => req_r <= DP_R_CTRL;
+        when P_RESTORE_CSW    => req_r <= AP_W_CSW; data_r <= csw;
+        when P_RESTORE_TAR    => req_r <= AP_W_TAR; data_r <= tar;
+        when P_RESTORE_SELECT => req_r <= DP_W_SELECT; data_r <= select_shadow;
+        when P_CLEAR          => req_r <= DP_W_ABORT; data_r <= STKERRCLR;
       end case;
     end procedure;
   begin
@@ -240,19 +218,10 @@ begin
       if phy_cmd_ready = '1' then
         valid_r <= '0';
       end if;
-      if not mine and dap_cmd_valid = '1' and phy_cmd_ready = '1' then
-        if not (phy_rsp_valid = '1' and dap_out /= 0) then
-          dap_out <= dap_out + 1;
-        end if;
-      elsif phy_rsp_valid = '1' and dap_out /= 0 then
-        dap_out <= dap_out - 1;
-      end if;
-
       if rst = '1' then
         state       <= S_IDLE;
         mine        <= false;
         jtag_r      <= false;
-        dap_out     <= 0;
         valid_r     <= '0';
         result_r    <= "00";
         ack_r       <= "000";
@@ -295,7 +264,7 @@ begin
               jtag_r <= jtag = '1';
               issued <= (others => '0');
               words_r <= (others => '0');
-              step  <= 0;
+              step  <= P_SELECT;
               tries <= (others => '0');
               fast  <= shadow_valid = '1' and shadow_ap = ap;
               -- 控えがあれば、戻す値は借りた時点からある（最初の SELECT で失敗しても CSW・TAR を戻す。サンプラから直接
@@ -314,7 +283,7 @@ begin
               state    <= S_IDLE;
             elsif line_held = '0' then
               if fast and line_handed = '1' then
-                step <= 5;                                        -- SELECT・CSW は渡された線のまま（§3.7）: TAR から
+                step <= P_TAR;                                    -- SELECT・CSW は渡された線のまま（§3.7）: TAR から
               end if;
               state <= S_ISSUE;
             end if;
@@ -328,9 +297,7 @@ begin
               state    <= S_IDLE;
             else
               issue(step);
-              if issued /= 255 then
-                issued <= issued + 1;
-              end if;
+              issued <= sat_inc(issued);
               state <= S_RESPONSE;
             end if;
 
@@ -347,25 +314,25 @@ begin
                 tries <= (others => '0');
                 state <= S_ISSUE;
                 if cleanup then                                   -- 後始末: ABORT → CSW → TAR → SELECT の順に進む
-                  if step = STEP_ABORT then
+                  if step = P_CLEAR then
                     if saved then
-                      step <= STEP_RESTORE;
+                      step <= P_RESTORE_CSW;
                     else
-                      step <= LAST_STEP;
+                      step <= P_RESTORE_SELECT;
                     end if;
-                  elsif step = LAST_STEP then
+                  elsif step = P_RESTORE_SELECT then
                     mine  <= false;                               -- result は失敗（1）のまま
                     state <= S_IDLE;
                   else
-                    step <= step + 1;
+                    step <= step_t'succ(step);
                   end if;
                 else
-                  if step = 2 then
+                  if step = P_READ_TAR then
                     csw <= phy_rsp_data;
-                  elsif step = 3 then
+                  elsif step = P_RDBUFF_TAR then
                     tar <= phy_rsp_data;
                     saved <= true;
-                  elsif step = 6 then
+                  elsif step = P_DRW then
                     written_r <= '1';
                     w_addr    <= cur_addr;
                     w_value   <= cur_value;
@@ -375,23 +342,23 @@ begin
                       transfers_r <= issued;                      -- 最初の語の書き込みまで（この転送を含む）
                     end if;
                   end if;
-                  if step = 6 and word < last_w then
+                  if step = P_DRW and word < last_w then
                     word <= word + 1;
-                    step <= 5;                                    -- 次の語: TAR ← 番地
-                  elsif step = STEP_CHECK and phy_rsp_data(STICKYERR) = '1' then
+                    step <= P_TAR;                                -- 次の語: TAR ← 番地
+                  elsif step = P_CHECK and phy_rsp_data(STICKYERR) = '1' then
                     result_r <= "01";                             -- 書き込みのどれかがバスの誤り: 消してから全部戻す
                     cleanup  <= true;
-                    step     <= STEP_ABORT;
-                  elsif step = LAST_STEP then
+                    step     <= P_CLEAR;
+                  elsif step = P_RESTORE_SELECT then
                     result_r <= "00";
                     count_r  <= count_r + 1;
                     mine     <= false;
                     state    <= S_IDLE;
-                  elsif fast and step = 0 then
+                  elsif fast and step = P_SELECT then
                     saved <= true;
-                    step  <= 4;                                   -- 控えがあるので CSW・TAR を読まない
+                    step  <= P_CSW;                               -- 控えがあるので CSW・TAR を読まない
                   else
-                    step  <= step + 1;
+                    step  <= step_t'succ(step);
                   end if;
                 end if;
               elsif phy_rsp_ack = ACK_WAIT and retry_more = '1' then
@@ -399,11 +366,11 @@ begin
                 state <= S_ISSUE;
               elsif cleanup then                                  -- 後始末の最中にまた失敗: 先の戻しを諦めて SELECT へ（SELECT なら終える）
                 tries <= (others => '0');
-                if step = LAST_STEP then
+                if step = P_RESTORE_SELECT then
                   mine  <= false;
                   state <= S_IDLE;
                 else
-                  step  <= LAST_STEP;
+                  step  <= P_RESTORE_SELECT;
                   state <= S_ISSUE;
                 end if;
               else
@@ -412,11 +379,11 @@ begin
                 tries    <= (others => '0');
                 state    <= S_ISSUE;
                 if phy_rsp_ack = ACK_FAULT then
-                  step <= STEP_ABORT;                             -- バスの誤り: スティッキーエラーを消してから戻す
+                  step <= P_CLEAR;                                -- バスの誤り: スティッキーエラーを消してから戻す
                 elsif phy_rsp_ack = ACK_WAIT and saved then
-                  step <= STEP_RESTORE;                           -- WAIT の使い切り: CSW・TAR（戻す値がある）→ SELECT
+                  step <= P_RESTORE_CSW;                          -- WAIT の使い切り: CSW・TAR（戻す値がある）→ SELECT
                 else
-                  step <= LAST_STEP;                              -- 線の不調など: SELECT だけ
+                  step <= P_RESTORE_SELECT;                       -- 線の不調など: SELECT だけ
                 end if;
               end if;
             end if;

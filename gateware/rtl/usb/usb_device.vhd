@@ -1,7 +1,7 @@
 -- fprobe の USB 2.0 デバイス（ボード非依存、ULPI クロックドメインで動く）。
 -- 設計: docs/superpowers/specs/2026-10-15-m2-usb-hs-device-design.md
 --
--- 構成（エンドポイント番号は usb_descriptors_pkg の生成定数）:
+-- 構成（エンドポイントの番号・方向・種類は usb_descriptors_pkg の生成定数と表。ディスクリプタが定義元）:
 --   EP0              制御（usb_control_ep + CDC クラス要求ハンドラ）
 --   EP_DAP OUT/IN    CMSIS-DAP v2 のコマンド / 応答（dap_out / dap_in。1 パケット = 1 コマンド、応答に ZLP は付けない）
 --   EP_SWO IN        CMSIS-DAP の SWO のストリーム（swo_in。バイト列で、パケットの区切りに意味はない）
@@ -352,14 +352,24 @@ begin
               pl_data => in_pl_data(EP_UART_NOTIFY), pl_last => in_pl_last(EP_UART_NOTIFY),
               ack => in_ack(EP_UART_NOTIFY), retry => in_retry(EP_UART_NOTIFY));
 
-  -- 使わないエンドポイントは「送るものが無い・受け取れない」を明示的に返す（常に NAK）。
+  -- 上の実体の割り当てが、ディスクリプタから生成したエンドポイントの表（usb_descriptors_pkg）と合っていること。
+  -- バルクの口は usb_ep_out / usb_ep_in、CDC-ACM の通知はインタラプトの usb_cdc_notify。表に無い口に実体を置くと
+  -- 下の unused_g と二重に駆動し、表にある口に実体が無いと駆動されない配線が残る
+  assert OUT_EP_KINDS(0) = EP_KIND_CONTROL and IN_EP_KINDS(0) = EP_KIND_CONTROL
+         and OUT_EP_KINDS(EP_CONTROL) = EP_KIND_BULK and IN_EP_KINDS(EP_CONTROL) = EP_KIND_BULK
+         and OUT_EP_KINDS(EP_DAP) = EP_KIND_BULK and IN_EP_KINDS(EP_DAP) = EP_KIND_BULK
+         and IN_EP_KINDS(EP_SWO) = EP_KIND_BULK and IN_EP_KINDS(EP_STREAM) = EP_KIND_BULK
+         and OUT_EP_KINDS(EP_UART_DATA) = EP_KIND_BULK and IN_EP_KINDS(EP_UART_DATA) = EP_KIND_BULK
+         and IN_EP_KINDS(EP_UART_NOTIFY) = EP_KIND_INTERRUPT
+    report "usb_device: endpoint instances do not match usb_descriptors_pkg" severity failure;
+
+  -- 表に無いエンドポイントは「送るものが無い・受け取れない」を明示的に返す（usb_protocol はそのトークンを無視する）。
   -- 宣言の初期値は合成で無視され、駆動されない配線は実機で値が定まらない
   unused_g : for ep in 0 to NUM_ENDPOINTS - 1 generate
-    no_out_g : if ep /= 0 and ep /= EP_CONTROL and ep /= EP_DAP and ep /= EP_UART_DATA generate
+    no_out_g : if OUT_EP_KINDS(ep) = EP_KIND_NONE generate
       out_space(ep) <= '0';
     end generate;
-    no_in_g : if ep /= 0 and ep /= EP_CONTROL and ep /= EP_DAP and ep /= EP_SWO and ep /= EP_STREAM
-                 and ep /= EP_UART_DATA and ep /= EP_UART_NOTIFY generate
+    no_in_g : if IN_EP_KINDS(ep) = EP_KIND_NONE generate
       in_pkt_ready(ep) <= '0';
       in_pkt_empty(ep) <= '0';
       in_pl_valid(ep)  <= '0';

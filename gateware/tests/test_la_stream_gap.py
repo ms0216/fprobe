@@ -5,5 +5,5 @@ from fprobe_gw.toolchain.sim import run_cocotb
 
 
 def test_la_stream_gap(tmp_path):
-    run_cocotb(parallel=True, toplevel="la_stream_gap", sources=rtl("la/la_stream_gap.vhd"),
+    run_cocotb(parallel=True, toplevel="la_stream_gap", sources=rtl("core/generated/event_pkg.vhd", "la/la_pkg.vhd", "la/la_stream_gap.vhd"),
                generics={"SPB_LOG": 3, "Q_BITS": 10}, test_module="tests.tb.la_stream_gap_tb", build_dir=tmp_path)

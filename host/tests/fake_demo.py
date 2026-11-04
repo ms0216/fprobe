@@ -160,7 +160,7 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         else:
             self.state = "RUNNING"
 
-    def target_connect(self, target="stm32f401xe", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None,
+    def target_connect(self, target, frequency_hz, connect_mode="halt", jtag_chain=None,
                        script=None, core=None):
         if core is not None:
             raise unsupported_arg("target_connect", "core", core)

@@ -50,14 +50,14 @@ architecture rtl of csr_sampler_match is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal addr_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal mask_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal value_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
+  signal addr_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal mask_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal value_r : std_logic_vector(31 downto 0) := (others => '0');
   signal control_enable_r : std_logic := '0';
   signal control_once_r : std_logic := '0';
   signal control_after_start_r : std_logic := '0';
   signal control_first_sample_r : std_logic := '0';
-  signal addr_mask_r : std_logic_vector(31 downto 0) := "11111111111111111111111111111111";
+  signal addr_mask_r : std_logic_vector(31 downto 0) := x"FFFFFFFF";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -69,14 +69,14 @@ begin
       err   <= '0';
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
-        addr_r <= "00000000000000000000000000000000";
-        mask_r <= "00000000000000000000000000000000";
-        value_r <= "00000000000000000000000000000000";
+        addr_r <= (others => '0');
+        mask_r <= (others => '0');
+        value_r <= (others => '0');
         control_enable_r <= '0';
         control_once_r <= '0';
         control_after_start_r <= '0';
         control_first_sample_r <= '0';
-        addr_mask_r <= "11111111111111111111111111111111";
+        addr_mask_r <= x"FFFFFFFF";
       elsif start then
         ack   <= '1';
         case index is

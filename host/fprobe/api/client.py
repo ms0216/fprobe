@@ -70,8 +70,9 @@ class DaemonClient:
     def request(self, method: str, params: dict) -> dict:
         return self.request_with(method, params, source=self.source)
 
-    def request_with(self, method: str, params: dict, *, source: Any = None) -> dict:
-        """生の応答を返す。source を付ける（None なら付けない）。"""
+    def request_with(self, method: str, params: dict, *, source: Any = None, quiet: bool = False) -> dict:
+        """生の応答を返す。source を付ける（None なら付けない）。quiet は画面の自動の読みと同じ（状態を変えない読みを、
+        操作の記録に残さない。操作には効かない）。"""
         rid = next(self._ids)
         future: Future = Future()
         with self._lock:
@@ -82,6 +83,8 @@ class DaemonClient:
             message = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
             if source is not None:
                 message["source"] = source
+            if quiet:
+                message["quiet"] = True
             self._ws.send(json.dumps(message, allow_nan=False))
         except ConnectionClosed as e:
             with self._lock:
@@ -95,6 +98,14 @@ class DaemonClient:
 
     def call(self, method: str, /, **params: Any) -> Any:          # /: 引数の名前 method（rtos.timeline.start 等）とぶつからない
         reply = self.request(method, params)
+        if "error" in reply:
+            raise ApiError(reply["error"]["code"], reply["error"]["message"])
+        return reply["result"]
+
+    def call_quiet(self, method: str, /, **params: Any) -> Any:
+        """call と同じ。ただし、状態を変えない読みは操作の記録に残さない（画面の自動の読みと同じ。繰り返す読みが
+        アクティビティを埋めないため）。"""
+        reply = self.request_with(method, params, source=self.source, quiet=True)
         if "error" in reply:
             raise ApiError(reply["error"]["code"], reply["error"]["message"])
         return reply["result"]

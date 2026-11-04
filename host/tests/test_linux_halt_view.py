@@ -144,7 +144,9 @@ def test_a_source_not_on_this_pc_is_fetched_at_attach_before_the_cores_stop_and_
     asked = []
     monkeypatch.setattr(probe, "linux_core_fetch", _fetcher(world, asked))
     a = ai.call("linux.halt.debug.attach", **{**ATTACH, "elf": str(elf)}, fetch_from_target="pi", breakpoint_kind="hw")
-    assert asked == [("pi", f"/proc/{PID}/exe"), ("pi", "race.c")]   # 実行ファイルとソースを、止める前に
+    assert asked == [("pi", f"/proc/{PID}/exe"), ("pi", "race.c"),
+                     ("pi", f"/proc/{PID}/maps")]               # 実行ファイル・ソース・共有ライブラリの一覧を、止める前に
+    assert a["library_symbols"] == []                           # 模型の maps に共有ライブラリは無い
     local = elf.parent / "race_arm.sources" / "race.c"
     assert a["sources_fetched"] == [{"name": "race.c", "target": "pi", "path": "race.c", "local_path": str(local),
                                      "bytes": local.stat().st_size, "sha256": "ab" * 32}]
@@ -152,7 +154,7 @@ def test_a_source_not_on_this_pc_is_fetched_at_attach_before_the_cores_stop_and_
     files = gui.call("debug.source.list")["files"]
     assert files[0]["exists"] is False and files[0]["fetched"]["local_path"] == str(local)
     src = gui.call("debug.source.read", name="race.c")
-    assert len(asked) == 2                                   # 止まっている間は取りに行かない（写しを読む）
+    assert len(asked) == 3                                   # 止まっている間は取りに行かない（写しを読む）
     assert "counter = after;" in src["text"] and src["path"] == str(local) and src["fetched"]["path"] == "race.c"
 
 
@@ -316,11 +318,56 @@ def test_reads_and_writes_on_the_screen_answer_from_the_process_and_never_fall_t
     assert gui.call("target.registers.read", names=["r0"]) == {"r0": 0x1234}
     w = gui.call("debug.write_expression", expression="counter", value=7)
     assert w["value"]["value"] == 7 and world.read_user(world.addr("counter"), 4) == (7).to_bytes(4, "little")
-    for method, params in (("debug.run_until_halt", {}), ("target.memory.view", {"address": pc, "length": 4}),
+    for method, params in (("debug.run_until_halt", {}),
                            ("debug.watchpoint.set", {"location": "counter"}), ("target.reset", {}),
                            ("watch.write", {"expression": "counter", "value": 1})):
         with pytest.raises(ApiError, match="Linux"):
             gui.call(method, **params)
+
+
+def test_the_screen_reads_the_process_memory_in_the_same_shape_as_the_microcontroller_and_compares(race):  # noqa: F811
+    """113: 人の画面の「メモリ」パネルは target.memory.view を呼ぶ。Linux のプロセスに attach している間も、マイコンと同じ形
+    （rows・dump・names・compare の印）で、AI の linux.halt.debug.memory と同じバイトが読める。"""
+    world, _, ai, gui = race
+    ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
+    addr = world.addr("counter")
+    first = gui.call("target.memory.view", address=addr, length=16, unit=32, width=16, compare=True)
+    assert (first["memory"], first["address"], first["length"], first["unit"]) == ("target", addr, 16, 32)
+    assert first["rows"][0]["values"][0] == int.from_bytes(world.read_user(addr, 4), "little")
+    assert first["compared"] is False and first["changes"] == []
+    assert {"address": addr, "name": "counter", "kind": "symbol"} in first["names"]
+    assert first["dump"].startswith(f"{addr:08x}: ")
+    gui.call("debug.write_expression", expression="counter", value=7)
+    second = gui.call("target.memory.view", address=addr, length=16, unit=32, width=16, compare=True)
+    assert second["compared"] is True and second["rows"][0]["changed"][0] is True
+    assert [c["address"] for c in second["changes"]] == [addr] and second["rows"][0]["values"][0] == 7
+    ai_read = ai.call("linux.halt.debug.memory", address=addr, length=16)               # AI の読みと同じバイト
+    assert bytes.fromhex(ai_read["data"]) == b"".join(v.to_bytes(4, "little") for v in second["rows"][0]["values"])
+
+
+def test_the_screen_memory_view_says_why_an_address_cannot_be_read_and_refuses_elf_and_oversize(race):  # noqa: F811
+    world, _, ai, gui = race
+    ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
+    with pytest.raises(ApiError, match="読めない"):
+        gui.call("target.memory.view", address=0x10, length=4)
+    with pytest.raises(ApiError, match="from_elf"):
+        gui.call("target.memory.view", address=world.addr("counter"), length=4, from_elf=True)
+    with pytest.raises(ApiError, match="maximum of 4096"):                  # API の仕様の検査が先に断る
+        gui.call("target.memory.view", address=world.addr("counter"), length=5000)
+
+
+def test_the_status_reads_are_not_recorded_as_operations_so_the_screen_polling_does_not_flood_the_activity(race):  # noqa: F811
+    """画面（LinuxHaltPanel）は状態を読み続ける。読みの linux.halt.status・linux.halt.debug.status が操作として記録されると、
+    アクティビティが読みで埋まる（2026-11-05 実機: attach したままページを読み直すと毎秒数十回）。読みの種別にして記録しない。"""
+    _, _, ai, gui = race
+    ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
+    before = len(ai.call("session.activity.list")["entries"])
+    for _ in range(5):                                            # 画面の自動の読み（quiet）
+        gui.call_quiet("linux.halt.status")
+        gui.call_quiet("linux.halt.debug.status")
+    gui.call("linux.halt.debug.status")                           # quiet でない読みは、そのまま記録される（隠さない）
+    entries = ai.call("session.activity.list")["entries"]
+    assert [e["method"] for e in entries[before:]] == ["linux.halt.debug.status"]     # quiet の 10 回は記録に足さない
 
 
 # --- 止まっている間の linux.*（C2）: 止まった対象の ssh は答えない。叩かずに事実を誤りにする ----------------------------
@@ -530,16 +577,22 @@ def test_state_reads_do_not_wait_for_a_long_attach_and_say_it_is_attaching(race,
     wait_for(lambda: (s := seen.last()) and s.get("linux"))
 
 
-def test_the_status_tells_the_screen_that_breakpoint_edits_need_a_halt(race):  # noqa: F811
-    """画面が「走行中は置き外しを無効にして理由を出す」ための事実: target.status の linux に
-    breakpoint_edit_requires_halt（エンジンは走行中の置き外しを断る）。画面は対象の種類を決めず、この値を見る。"""
+def test_the_status_tells_the_screen_that_breakpoint_edits_work_while_running(race):  # noqa: F811
+    """画面が「走行中も置き外しを許す」ための事実: target.status の linux に breakpoint_edit_requires_halt = False
+    （エンジンが走行中の置き外しを、全コアを短く止めて行い、また走らせる）。画面は対象の種類を決めず、この値を見る。
+    人（画面）の操作も AI と同じに、走行中に通る。"""
     world, _, ai, gui = race
     ai.call("linux.halt.debug.attach", **ATTACH, **SCREEN)
     st = gui.call("target.status")
-    assert st["linux"]["breakpoint_edit_requires_halt"] is True
-    with pytest.raises(ApiError, match="cores are running"):
-        ai.call("linux.halt.debug.run", wait_s=0.01)
-        gui.call("debug.breakpoint.clear")
+    assert st["linux"]["breakpoint_edit_requires_halt"] is False
+    ai.call("linux.halt.debug.run", wait_s=0.01)                          # 走らせたままにする
+    assert not any(world.cores.halted())
+    gui.call("debug.breakpoint.set", location="race.c:11")                  # 人の画面のクリックと同じ呼び出し
+    assert not any(world.cores.halted()), "置いたあとは、また走っている"
+    assert gui.call("target.status")["state"] == "RUNNING"
+    gui.call("debug.breakpoint.clear")
+    assert not any(world.cores.halted())
+    assert ai.call("linux.halt.debug.status")["brief_halts"]["count"] == 2
 
 def test_a_step_on_a_dead_process_says_the_exit_status_and_the_killing_signal():
     """クラッシュで死んだプロセスへのステップの誤り: カーネルの終了コード（(状態 << 8) | シグナル）の読み方を事実として添える
@@ -569,3 +622,25 @@ def test_the_open_status_names_what_is_refused_and_how_the_lock_is_used_by_ident
     assert occ["probe_dap"] is True
     assert occ["refused_while_open"] == ["target.connect", "lowlevel", "linux.memap.connect_jtag", "probe.design.switch"]
     assert occ["device_lock"] == "per_call"
+
+
+def test_the_watched_state_says_linux_halt_is_open_before_any_process_is_attached(race, monkeypatch):  # noqa: F811
+    """backlog 80 番: linux.halt.open だけ（attach の前）の画面は、下の帯が「Not connected」、Linux の停止パネルは「開いている」
+    で、接続の言葉が食い違った。マイコンは未接続（DISCONNECTED）のまま、linux.halt が開いている事実（linux_halt_open）を
+    target.state と system.status に載せる。attach している間は linux の欄に変わり、閉じれば消える。"""
+    from types import SimpleNamespace
+    world, probe, ai, gui = race
+    probe._session.device = SimpleNamespace(time=lambda: 0)
+    monkeypatch.setattr(probe, "_caps", lambda: SimpleNamespace(timebase_hz=1, fpga_obs=False))
+    seen = Seen(gui)
+    st = wait_for(lambda: (s := seen.last()) and s.get("linux_halt_open") and s)
+    assert st["state"] == "DISCONNECTED" and st["linux_halt_open"] == {"backend": "fprobe"}
+    assert gui.call("system.status")["mcu"]["linux_halt_open"] == {"backend": "fprobe"}
+    ai.call("linux.halt.debug.attach", **ATTACH)
+    st = wait_for(lambda: (s := seen.last()) and s.get("linux") and s)
+    assert "linux_halt_open" not in st
+    ai.call("linux.halt.debug.close")
+    wait_for(lambda: (s := seen.last()) and s.get("linux_halt_open"))
+    ai.call("linux.halt.close")
+    st = wait_for(lambda: (s := seen.last()) and s["state"] == "DISCONNECTED" and "linux_halt_open" not in s and s)
+    assert "linux_halt_open" not in gui.call("system.status")["mcu"]

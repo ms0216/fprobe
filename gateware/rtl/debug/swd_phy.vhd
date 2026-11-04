@@ -37,6 +37,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.dap_pkg.all;
 
 entity swd_phy is
   port (
@@ -73,15 +74,6 @@ entity swd_phy is
 end entity;
 
 architecture rtl of swd_phy is
-  constant OP_SEQ_OUT  : std_logic_vector(1 downto 0) := "00";
-  constant OP_SEQ_IN   : std_logic_vector(1 downto 0) := "01";
-  constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
-  constant OP_PINS     : std_logic_vector(1 downto 0) := "11";
-
-  constant ACK_OK    : std_logic_vector(2 downto 0) := "001";
-  constant ACK_WAIT  : std_logic_vector(2 downto 0) := "010";
-  constant ACK_FAULT : std_logic_vector(2 downto 0) := "100";
-
   -- 相（同じ扱いのビットの並び）
   type phase_t is (P_NONE, P_SEQ_OUT, P_SEQ_IN, P_HEADER, P_TRN_ACK, P_ACK, P_RDATA, P_TRN_AFTER_READ,
                    P_TRN_BEFORE_WRITE, P_WDATA, P_DUMMY_READ, P_TRN_AFTER_FAIL, P_DUMMY_WRITE, P_BACKOFF,
@@ -135,15 +127,6 @@ architecture rtl of swd_phy is
     h := "10" & (request(0) xor request(1) xor request(2) xor request(3)) & request(3) & request(2)
          & request(1) & request(0) & '1';
     return h;
-  end function;
-
-  function xor_all(v : std_logic_vector) return std_logic is
-    variable r : std_logic := '0';
-  begin
-    for i in v'range loop
-      r := r xor v(i);
-    end loop;
-    return r;
   end function;
 
   function drives(p : phase_t) return std_logic is
@@ -256,6 +239,18 @@ begin
   swdio_oe         <= sdo_en and enable;
 
   process (clk)
+    -- 半周期の時計: 積み直す（half_period 周期後に expired）・1 つ進める
+    procedure half_restart is
+    begin
+      timer   <= half_period - 1;
+      expired <= hp_one;
+    end procedure;
+    procedure half_tick is
+    begin
+      timer   <= timer - 1;
+      expired <= timer = 1;
+    end procedure;
+
     impure function length(p : phase_t) return natural is
     begin
       case p is
@@ -280,8 +275,7 @@ begin
       sdo_en    <= drives(p);
       sclk      <= '0';
       half      <= H_LOW;
-      timer     <= half_period - 1;
-      expired   <= hp_one;
+      half_restart;
     end procedure;
 
     -- 命令を受けて始める（OP_PINS はこの辺で終える）
@@ -356,8 +350,7 @@ begin
 
           when H_LOW =>
             if not expired then
-              timer   <= timer - 1;
-              expired <= timer = 1;
+              half_tick;
             else
               -- Low 相の終わり: 取り込みを予約して立ち上げる
               index := 0;
@@ -372,14 +365,12 @@ begin
               end if;
               sclk    <= '1';
               half    <= H_HIGH;
-              timer   <= half_period - 1;
-              expired <= hp_one;
+              half_restart;
             end if;
 
           when H_HIGH =>
             if not expired then
-              timer   <= timer - 1;
-              expired <= timer = 1;
+              half_tick;
             elsif bits_left > 1 then
               bits_left <= bits_left - 1;
               tx        <= '1' & tx(63 downto 1);
@@ -388,8 +379,7 @@ begin
               end if;
               sclk    <= '0';
               half    <= H_LOW;
-              timer   <= half_period - 1;
-              expired <= hp_one;
+              half_restart;
             elsif not drained and (phase = P_ACK or following = P_NONE or drives(following) = '1') then
               -- 次を決める値（ACK・命令の結果）の取り込みを待つ。自分が線を駆動する相（読みの後の idle 等）の前も待つ: 遅れた
               -- 取り込みが自分の駆動とぶつかった線を読まないように（前は idle_cycles > 0 で読みのパリティを駆動の後に取った。
@@ -424,7 +414,7 @@ begin
                     sdo_en <= '1';
                   end if;
                 when P_WDATA =>
-                  begin_phase(P_WDATA, 33, (63 downto 33 => '1') & xor_all(wdata) & wdata);
+                  begin_phase(P_WDATA, 33, (63 downto 33 => '1') & (xor wdata) & wdata);
                 when P_DUMMY_WRITE | P_IDLE =>
                   begin_phase(following, length(following), (others => '0'));
                 when others =>

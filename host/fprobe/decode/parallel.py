@@ -5,6 +5,8 @@ enable を与えると、その線が enable_level の間だけ読む（edge・e
 クロックの無いバスでは settle サンプルより短く続いた値（線ごとの変化のずれの途中の値）を捨てる。
 """
 
+from typing import Literal
+
 from ..la import Transitions
 from .core import Annotation, Channel, Decoding, project
 
@@ -14,7 +16,7 @@ EDGES = ("rising", "falling", "both")
 
 
 def decode_parallel(tr: Transitions, *, data: list[Channel], clock: Channel | None, enable: Channel | None,
-                    edge: str | None = None, enable_level: int | None = None, settle: int = 0) -> Decoding:
+                    edge: Literal["rising", "falling", "both"] | None = None, enable_level: int | None = None, settle: int = 0) -> Decoding:
     """パラレルバスを解読する。clock・enable は既定を持たない（つながない線は None を明示）。edge は clock を、
     enable_level は enable を与えたときだけ、かつそのときは必ず渡す（既定の辺・極性で補わない）。"""
     if (clock is None) != (edge is None):

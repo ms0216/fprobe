@@ -11,6 +11,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.la_pkg.all;
 
 entity la_encoder is
   port (
@@ -145,7 +146,7 @@ begin
         elsif sample = value and count /= x"FFFF" and hit = '0' then
           count <= count + 1;
         else
-          push(std_logic_vector(count) & value, rec_trig, 3);    -- 作りかけのレコードを閉じて出す
+          push(rle_record(count, value), rec_trig, 3);    -- 作りかけのレコードを閉じて出す
           value    <= sample;
           count    <= (others => '0');
           rec_trig <= hit;

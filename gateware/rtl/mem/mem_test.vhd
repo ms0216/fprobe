@@ -9,6 +9,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity mem_test is
   generic (
@@ -108,9 +109,7 @@ begin
           if errors_r = 0 then
             first_r <= judge_addr;
           end if;
-          if errors_r /= x"FFFFFFFF" then
-            errors_r <= errors_r + 1;
-          end if;
+          errors_r <= sat_inc(errors_r);
         end if;
 
         case state is

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectParams, LinuxEvents, probeParams, syncParams, traceStartParams, type ConnectForm, type ProbeForm } from "../src/lib/linux";
+import { connectParams, LinuxEvents, probeParams, reconcileTarget, syncParams, traceStartParams, type ConnectForm, type ProbeForm } from "../src/lib/linux";
 import { FakeConn } from "./fake-conn";
 
 const conn: ConnectForm = { target: "pynq", host: "192.168.77.2", user: "xilinx", port: "22", key: "", sudo: false, sudoPasswordEnv: "" };
@@ -196,5 +196,22 @@ describe("LinuxEvents の画面の上限", () => {
     await ev.more("pynq");
     expect(ev.records.length).toBe(LINUX_KEEP);
     expect(ev.discarded).toBe(2);
+  });
+});
+
+describe("reconcileTarget（AI がつないだ Linux のターゲットも画面に映す）", () => {
+  const list = [{ target: "pi" }, { target: "pynq" }];
+  it("何も映していなければ、つながっている最初のターゲットを映す（AI がつないだものを画面が拾う）", () => {
+    expect(reconcileTarget(null, list)).toEqual({ target: "pi", changed: true });
+  });
+  it("映しているターゲットがまだつながっていれば、そのまま（変えない）", () => {
+    expect(reconcileTarget("pynq", list)).toEqual({ target: "pynq", changed: false });
+  });
+  it("映していたターゲットが切れていれば、別のつながっているものに、無ければ空に", () => {
+    expect(reconcileTarget("gone", list)).toEqual({ target: "pi", changed: true });
+    expect(reconcileTarget("pi", [])).toEqual({ target: null, changed: true });
+  });
+  it("どちらも無ければ、何も変わらない", () => {
+    expect(reconcileTarget(null, [])).toEqual({ target: null, changed: false });
   });
 });

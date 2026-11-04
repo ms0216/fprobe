@@ -377,29 +377,25 @@ begin
               line_rate => line_rate, line_changed => line_changed, diag => open);
 
   core_i : entity work.fprobe_core
-    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => MEM_BITS,
-                 MEM_TEST => work.design_caps_pkg.MEM_TEST,
-                 XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
+    -- 構成の機能はデザインの生成パッケージから全部渡す（ケイパビリティと回路を一致させる。tests/test_core_generics.py）
+    -- RESET_SPLIT: 最悪の経路が reset_sync の出力の扇出（約 3500）だった（docs/reports/fprobe-core-notes.md §2）
+    -- MEM_SAME_CLOCK: 深いバッファの mem_clk は sys_clk（下の port map）
+    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, MEM_ADDR_BITS => work.design_caps_pkg.MEM_ADDR_BITS,
+                 MEM_TEST => work.design_caps_pkg.MEM_TEST, XTRIG => work.design_caps_pkg.XTRIG,
+                 TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ, SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH, SAMPLER_CHECK_MAX => work.design_caps_pkg.SAMPLER_CHECK_MAX,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
-                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
-                 UART_FLOW => work.design_caps_pkg.UART_FLOW,
-                 RESET_SPLIT => true,        -- 最悪の経路が reset_sync の出力の扇出（約 3500）だった。docs/reports/fprobe-core-notes.md §2
-                 LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
-                 LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
-                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS,
-                 AUX => work.design_caps_pkg.AUX, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
-                 LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS,
-                 LA_INTERNAL => not DEEP, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
-                 OBS_PORT => work.design_caps_pkg.OBS_PORT, SYNC => work.design_caps_pkg.SYNC,
-                 CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
-                 LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN,
-                 LA_LANES => LANES, LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS,
-                 LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,
-                 LA_FINE_PINS => FINE_PINS,
-                 EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK,
-                 SAMPLER_CHECK_MAX => work.design_caps_pkg.SAMPLER_CHECK_MAX,
-                 MEM_SAME_CLOCK => true)     -- 深いバッファの mem_clk は sys_clk（下の port map）
+                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER, UART_FLOW => work.design_caps_pkg.UART_FLOW,
+                 AUX => work.design_caps_pkg.AUX, SYNC => work.design_caps_pkg.SYNC,
+                 OBS_PORT => work.design_caps_pkg.OBS_PORT, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
+                 LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS, LA_FILTER => work.design_caps_pkg.LA_FILTER,
+                 LA_PULSE => work.design_caps_pkg.LA_PULSE, LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
+                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
+                 EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK, CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
+                 LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN, LA_LANES => work.design_caps_pkg.LA_LANES,
+                 LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS, LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,
+                 -- ボードで決まるもの
+                 CLK_HZ => SYS_CLK_HZ, LA_INTERNAL => not DEEP, LA_FINE_PINS => FINE_PINS, RESET_SPLIT => true, MEM_SAME_CLOCK => true)
     port map (clk => sys_clk, cap_clk => cap_clk, rst => sys_rst,
               ctrl_in_valid => req_valid, ctrl_in_ready => req_ready, ctrl_in_data => req_data,
               ctrl_in_last => req_last,
@@ -447,41 +443,14 @@ begin
   obs_tms <= obs_tms_o when obs_oe = '1' else 'Z';
   obs_tdi <= obs_tdi_o when obs_oe = '1' else 'Z';
 
-  -- デバッグの線の機能（Primer の USB 版と同じ）
-  process (all)
-  begin
-    func_o  <= (others => '0');
-    func_oe <= (others => '0');
-    func_o(DBG_SWCLK)    <= swclk_o;
-    func_oe(DBG_SWCLK)   <= swclk_oe;
-    func_o(DBG_SWDIO)    <= swdio_o;
-    func_oe(DBG_SWDIO)   <= swdio_oe;
-    func_o(DBG_NRESET)   <= '0';
-    func_oe(DBG_NRESET)  <= nreset_low;
-    func_o(DBG_TDI)      <= tdi_o;
-    func_oe(DBG_TDI)     <= tdi_oe;
-    func_o(DBG_UART_TX)  <= uart_tx;
-    func_oe(DBG_UART_TX) <= uart_tx_oe;    -- ホストが UART に最初の 1 バイトを送るまで駆動しない（B29）
-    for j in UART_FLOW_PIN_CHOICES'range loop
-      if cts_claim = '1' and to_integer(unsigned(cts_pin)) = j then
-        func_oe(UART_FLOW_PIN_CHOICES(j)) <= '0';
-      end if;
-      if rts_claim = '1' and to_integer(unsigned(rts_pin)) = j then
-        func_o(UART_FLOW_PIN_CHOICES(j))  <= uart_rts_n;
-        func_oe(UART_FLOW_PIN_CHOICES(j)) <= '1';
-      end if;
-    end loop;
-  end process;
-
-  process (all)
-  begin
-    uart_cts_n <= '0';
-    for j in UART_FLOW_PIN_CHOICES'range loop
-      if cts_claim = '1' and to_integer(unsigned(cts_pin)) = j then
-        uart_cts_n <= ja_in(UART_FLOW_PIN_CHOICES(j));
-      end if;
-    end loop;
-  end process;
+  -- デバッグポートの機能ピン（それ以外のピンは入力のまま）と、UART の RTS/CTS が取った端子
+  pin_func_i : entity work.debug_pin_func
+    generic map (DBG_SWCLK => DBG_SWCLK, DBG_TDI => DBG_TDI, DBG_NRESET => DBG_NRESET, DBG_SWDIO => DBG_SWDIO,
+                 DBG_UART_TX => DBG_UART_TX, FLOW_PIN_CHOICES => (UART_FLOW_PIN_CHOICES(0), UART_FLOW_PIN_CHOICES(1)))
+    port map (swclk_o => swclk_o, swclk_oe => swclk_oe, swdio_o => swdio_o, swdio_oe => swdio_oe, nreset_low => nreset_low,
+              tdi_o => tdi_o, tdi_oe => tdi_oe, uart_tx => uart_tx, uart_tx_oe => uart_tx_oe,
+              rts_claim => rts_claim, rts_pin => rts_pin, uart_rts_n => uart_rts_n, cts_claim => cts_claim,
+              cts_pin => cts_pin, pins_in => ja_in, func_o => func_o, func_oe => func_oe, uart_cts_n => uart_cts_n);
 
   pin_select_i : entity work.pin_select
     generic map (PINS => 8, ACTIONS => 2, PIN_CHOICES => (XOUT_PIN_CHOICES(0), XOUT_PIN_CHOICES(1), XOUT_PIN_CHOICES(2), XOUT_PIN_CHOICES(3)))

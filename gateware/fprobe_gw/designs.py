@@ -66,22 +66,24 @@ _USB = ("usb/usb_types_pkg.vhd", "usb/usb_timing_pkg.vhd", "usb/usb_crc_pkg.vhd"
         "usb/usb_protocol.vhd", "usb/usb_control_ep.vhd", "usb/usb_cdc_acm_requests.vhd", "usb/usb_cdc_notify.vhd",
         "usb/usb_device.vhd")
 
-_CORE = ("common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.vhd", "core/timebase.vhd", "core/caps_rom.vhd",
-         "common/udiv.vhd", "common/udiv_shared.vhd", "common/reset_fanout.vhd", "debug/generated/dap_info_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
-         "debug/dap_pkg.vhd", "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
-         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
+_CORE = ("core/core_pkg.vhd", "common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.vhd", "core/timebase.vhd", "core/caps_rom.vhd",
+         "common/udiv.vhd", "common/udiv_shared.vhd", "common/reset_fanout.vhd", "debug/generated/dap_info_pkg.vhd", "debug/dap_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_pkg.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
+         "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
+         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
-         "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd", "la/la_front.vhd", "la/la_record.vhd", "la/la_capture.vhd", "la/la_lane_front.vhd", "la/la_lane_capture.vhd", "la/la_lane_inputs.vhd", "la/la_cap_domain.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
-         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/la_mem_writer.vhd",
-         "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "la/la_deep_buffer.vhd", "la/la_ps_port.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
-         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_byte_pack.vhd", "core/event_collector.vhd", "core/fprobe_core.vhd")
+         "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd", "la/la_pkg.vhd", "la/la_front.vhd", "la/la_record.vhd", "la/la_capture.vhd", "la/la_lane_front.vhd", "la/la_lane_capture.vhd", "la/la_lane_inputs.vhd", "la/la_cap_domain.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
+         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd",
+         "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "common/cdc_request.vhd", "common/hold_one.vhd", "la/la_run_cdc.vhd", "mem/la_write_track.vhd", "mem/mem_cmd_arb.vhd", "la/la_stream_sched.vhd", "la/la_deep_front.vhd", "la/la_deep_buffer.vhd", "la/la_ps_port.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
+         "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/debug_pin_func.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_byte_pack.vhd", "core/event_collector.vhd",
+         "core/core_debug.vhd", "core/core_xtrig.vhd", "core/core_periph.vhd", "core/core_la.vhd", "core/core_storage.vhd",
+         "core/fprobe_core.vhd")
 
 
 def core_sources(caps_package: Path) -> list[Path]:
     """fprobe_core とその依存（依存順）。caps_package はデザインのケイパビリティ生成パッケージ。"""
     return [*rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "core/csr_bus_pkg.vhd"),
             CORE_GENERATED / "csr_map_pkg.vhd", CORE_GENERATED / "timing_pkg.vhd", CORE_GENERATED / "ps_window_pkg.vhd",
-            build_info.DEFAULT_PACKAGE,
+            CORE_GENERATED / "event_pkg.vhd", build_info.DEFAULT_PACKAGE,
             *(CORE_GENERATED / f"csr_{b.name}.vhd" for b in FPROBE_MAP.blocks if not b.external),
             caps_package,
             *rtl(*_CORE)]
@@ -307,7 +309,7 @@ DESIGNS: dict[str, Design] = {
         sources=tuple(dict.fromkeys((
             *rtl(*_COMMON, *_PRIMER20K, "serial/uart_rx.vhd", "serial/uart_tx.vhd", "common/sdp_ram.vhd", "common/stream_slice.vhd", "hostlink/frame_mux.vhd", "hostlink/serial_link.vhd"),
             *core_sources(caps_package_path("fprobe_serial")),
-            *rtl("boards/primer20k/primer20k_fprobe_serial_top.vhd")))),
+            *rtl("designs/serial_fprobe.vhd", "boards/primer20k/primer20k_fprobe_serial_top.vhd")))),
         pin_groups=("clk27", "led", "uart", "pmod1", "aux"),
         clocks=(PRIMER20K.input_clock(), PRIMER20K.sys_clock()),
         cdc_max_delay_ns=8.0,
@@ -325,10 +327,12 @@ DESIGNS: dict[str, Design] = {
         sources=tuple(dict.fromkeys((
             *rtl(*_COMMON, *_PRIMER20K, *_REPORT, "common/async_fifo.vhd", "common/sdp_ram.vhd",
                  "boards/primer20k/primer20k_ulpi_reset.vhd",
-                 "eth/rmii_rx.vhd", "eth/rmii_tx.vhd", "eth/udp_stack.vhd", "common/stream_slice.vhd", "hostlink/frame_mux.vhd",
+                 "eth/eth_pkg.vhd", "eth/rmii_rx.vhd", "eth/rmii_tx.vhd", "eth/eth_rx_header.vhd", "eth/arp_rx.vhd",
+                 "eth/ipv4_rx.vhd", "eth/icmp_rx.vhd", "eth/udp_rx.vhd", "eth/udp_stack.vhd", "common/stream_slice.vhd",
+                 "hostlink/frame_mux.vhd",
                  "hostlink/eth_link.vhd"),
             *core_sources(caps_package_path("fprobe_eth")),
-            *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_fprobe_eth_top.vhd")))),
+            *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_eth_diag.vhd", "boards/primer20k/primer20k_fprobe_eth_top.vhd")))),
         pin_groups=("clk27", "led", "eth", "pmod1", "ddr3", "aux", "uart_tx"),
         clocks=(PRIMER20K.input_clock(), PRIMER20K.sys_clock(), PRIMER20K.eth_clock(), *PRIMER20K.mem_clocks()),
         ips=(PRIMER20K.ddr3.controller,),
@@ -350,7 +354,7 @@ DESIGNS: dict[str, Design] = {
             *rtl(*_COMMON, "boards/nano9k/nano9k_pkg.vhd", "boards/primer20k/gowin_rpll.vhd",
                  "serial/uart_rx.vhd", "serial/uart_tx.vhd", "common/sdp_ram.vhd", "common/stream_slice.vhd", "hostlink/frame_mux.vhd", "hostlink/serial_link.vhd"),
             *core_sources(caps_package_path("fprobe_nano9k")),
-            *rtl("boards/nano9k/nano9k_fprobe_top.vhd")))),
+            *rtl("designs/serial_fprobe.vhd", "boards/nano9k/nano9k_fprobe_top.vhd")))),
         pin_groups=("clk27", "led", "uart", "pmod1"),
         clocks=(NANO9K.input_clock(), NANO9K.sys_clock()),
         cdc_max_delay_ns=8.0,

@@ -19,7 +19,7 @@ def test_starts_connected_and_halted_in_the_demo_source(demo):
 
 
 def test_steps_follow_the_source(demo):
-    demo.target_connect()
+    demo.target_connect("cortex_m", frequency_hz=4_000_000)
     demo._go("reset_handler", 28)
     assert demo.step_line("into")["line"] == 17
     assert demo.step_line("over")["line"] == 18

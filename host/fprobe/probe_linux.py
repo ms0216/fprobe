@@ -122,7 +122,8 @@ class LinuxService:
            "linux_gdb_serve", "linux_gdb_status", "linux_gdb_stop", "linux_log_read", "linux_memap_connect",
            "linux_memap_connect_jtag", "linux_memap_disconnect", "linux_perf_record", "linux_perf_stat",
            "linux_probe_add", "linux_probe_list", "linux_probe_remove", "linux_ring_open", "linux_ring_read",
-           "linux_ring_unwatch", "linux_ring_watch", "linux_sync", "linux_trace_start", "linux_trace_stop")
+           "linux_ring_unwatch", "linux_ring_watch", "linux_sync", "linux_targets", "linux_trace_start",
+           "linux_trace_stop")
     # ほかの領域（Probe の委譲）・試験に出す名前
     SHARED = ("_close_linux", "_linux", "_linux_before_recording_stop", "_linux_event", "_linux_flush", "_linux_keep",
               "_linux_ring_cpu", "_linux_ring_record", "_running")
@@ -223,6 +224,11 @@ class LinuxService:
 
     def linux_capabilities(self, target: str) -> dict:
         return self._lt(target).caps
+
+    def linux_targets(self) -> dict:
+        """いま linux.connect でつないでいるターゲットの一覧（名前と、つないだときに採った能力。複数を同時に持てる）。
+        人の画面が、AI がつないだものも映すための読み（接続の状態の置き場所はデーモンの 1 か所）。"""
+        return {"targets": [{"target": name, "capabilities": t.caps} for name, t in self._linux.items()]}
 
     # --- エージェント ----------------------------------------------------------------
 

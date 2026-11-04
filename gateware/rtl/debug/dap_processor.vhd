@@ -51,6 +51,7 @@ entity dap_processor is
     swd_rsp_ack     : in  std_logic_vector(2 downto 0);
     swd_rsp_data    : in  std_logic_vector(63 downto 0);
     swd_rsp_parity  : in  std_logic;
+    swd_rsp_time    : in  unsigned(63 downto 0);     -- 応答の転送の線上の点（debug_port。DAP_Transfer のタイムスタンプ）
     -- nRESET（オープンドレイン）
     nreset_low      : out std_logic;                 -- '1' で Low を駆動
     nreset_in       : in  std_logic;                 -- ピンの値（非同期。中で同期化する）
@@ -107,6 +108,7 @@ architecture rtl of dap_processor is
   signal link_ok    : boolean;
   signal link_rdata : std_logic_vector(31 downto 0);
   signal link_val   : std_logic_vector(63 downto 0);
+  signal link_stamp : std_logic_vector(31 downto 0);
   signal seq_link_req, xfer_link_req : std_logic;
   signal seq_op     : std_logic_vector(1 downto 0);
   signal seq_count  : natural range 1 to 64;
@@ -235,6 +237,7 @@ begin
               put_ack => put_ack,
               link_req => xfer_link_req, link_request => xfer_request, link_data => xfer_data,
               link_ack => link_ack, link_take => xfer_take, link_resp => link_resp, link_ok => link_ok, link_rdata => link_rdata,
+              link_stamp => link_stamp, enable => enable,
               match_retry => match_retry, jtag => jtag_r, jtag_count => jtag_count, jtag_index => jtag_index);
 
   -- PHY を使うのはシーケンスと転送のユニットだけ（同時には動かない）
@@ -249,10 +252,11 @@ begin
     port map (clk => clk, rst => rst, enable => enable, wait_retry => wait_retry,
               req => link_req, op => link_op, count => link_count, request => link_request, data => link_data,
               ack => link_ack, ack_take => link_take, resp => link_resp, ok => link_ok, rdata => link_rdata, val => link_val,
+              stamp => link_stamp,
               phy_valid => swd_cmd_valid, phy_ready => swd_cmd_ready, phy_cond => swd_cmd_cond, phy_op => swd_cmd_op,
               phy_count => swd_cmd_count, phy_request => swd_cmd_request, phy_data => swd_cmd_data,
               phy_rsp_valid => swd_rsp_valid, phy_rsp_ack => swd_rsp_ack, phy_rsp_data => swd_rsp_data,
-              phy_rsp_parity => swd_rsp_parity);
+              phy_rsp_parity => swd_rsp_parity, phy_rsp_time => swd_rsp_time(31 downto 0));
 
   swd_enable <= enable;
   jtag       <= jtag_r;

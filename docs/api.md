@@ -280,8 +280,8 @@ Cortex-A・ARM11（JTAG で直接。pyOCD を使わない）: target="bcm2836"�
 
 | 引数 | 型 | 必須 |
 |---|---|---|
-| `target` | `string` |  |
-| `frequency_hz` | `number` |  |
+| `target` | `string` | ○ |
+| `frequency_hz` | `number` | ○ |
 | `connect_mode` | `string` |  |
 | `jtag_chain` | `Array<number> | null` |  |
 | `script` | `string | null` |  |
@@ -1940,7 +1940,7 @@ Record<string, never>
 応答:
 
 ```ts
-{ time_us: number; mcu: { connected: true; state: CoreState; target?: string; frequency_hz?: number; wire?: "swd" | "jtag"; core?: number; arch?: string; hart?: number; debug_module?: DebugModuleInfo; architecture?: "armv7-a" | "armv6"; debug_version?: number; breakpoints?: number; watchpoints?: number; core_count?: number; debug_base?: number; apb_ap?: number; discovery?: "ahb_system_map" | "rom_table" | "part_table"; jtag_chain?: Array<number>; tap?: number; pc?: number; where?: string; function?: string; file?: string; line?: number; halt_reason?: "request" | "breakpoint" | "bkpt_instruction" | "watchpoint" | "vector_catch" | "external"; halt_bits?: Array<"HALTED" | "BKPT" | "DWTTRAP" | "VCATCH" | "EXTERNAL">; debug_mode?: "monitor"; fatal?: FatalState; rescue_dp?: number; cores?: Array<CoreEntry>; memory: { [key: string]: number }; connect: LastConnect; linux?: LinuxTargetFacts } | { connected: false; connect: LastConnect; linux_attaching?: LinuxAttaching } | { connected: true; error: string; connect: LastConnect }; fpga: { available: false } | { available: true; running: boolean; id_ok: boolean; stuck: boolean; cmd_pending: boolean; overflow_seen: boolean; cmd_dropped: boolean; target_running: boolean; driving: boolean; id_timeout: boolean; scans: number; id: number; mode: "stream" | "snapshot"; config: { chain: { ir_len?: number; ir_before?: number; ir_after?: number; dr_before?: number; dr_after?: number } | null; user_ir: number; half_period: number; words: number; sync_period: number; id_scans: number; borrow_ratio: boolean } | null; declared: FpgaObsDeclared | null; auto_reopen: boolean; reopened: number; latest?: Array<{ time_us: number | null; time_lo_us: number | null; time_hi_us: number | null; copy: boolean; time_basis: "pairs" | "previous_ratio" | "nominal_ratio" | "assumption_broken" | "hold_limit" | null; target_cycles: number; kind: "value" | "gap" | "group" | "hidden"; group: number; value: number | null; lost: number; fields: { [key: string]: number | string }; age_us: number | null }>; gaps?: number; window?: { last: number; items: number }; latest_error?: string; tck_hz: number | null } }
+{ time_us: number; mcu: { connected: true; state: CoreState; target?: string; frequency_hz?: number; wire?: "swd" | "jtag"; core?: number; arch?: string; hart?: number; debug_module?: DebugModuleInfo; architecture?: "armv7-a" | "armv6"; debug_version?: number; breakpoints?: number; watchpoints?: number; core_count?: number; debug_base?: number; apb_ap?: number; discovery?: "ahb_system_map" | "rom_table" | "part_table"; jtag_chain?: Array<number>; tap?: number; pc?: number; where?: string; function?: string; file?: string; line?: number; halt_reason?: "request" | "breakpoint" | "bkpt_instruction" | "watchpoint" | "vector_catch" | "external"; halt_bits?: Array<"HALTED" | "BKPT" | "DWTTRAP" | "VCATCH" | "EXTERNAL">; debug_mode?: "monitor"; fatal?: FatalState; rescue_dp?: number; cores?: Array<CoreEntry>; memory: { [key: string]: number }; connect: LastConnect; linux?: LinuxTargetFacts } | { connected: false; connect: LastConnect; linux_attaching?: LinuxAttaching; linux_halt_open?: LinuxHaltOpen } | { connected: true; error: string; connect: LastConnect }; fpga: { available: false } | { available: true; running: boolean; id_ok: boolean; stuck: boolean; cmd_pending: boolean; overflow_seen: boolean; cmd_dropped: boolean; target_running: boolean; driving: boolean; id_timeout: boolean; scans: number; id: number; mode: "stream" | "snapshot"; config: { chain: { ir_len?: number; ir_before?: number; ir_after?: number; dr_before?: number; dr_after?: number } | null; user_ir: number; half_period: number; words: number; sync_period: number; id_scans: number; borrow_ratio: boolean } | null; declared: FpgaObsDeclared | null; auto_reopen: boolean; reopened: number; latest?: Array<{ time_us: number | null; time_lo_us: number | null; time_hi_us: number | null; copy: boolean; time_basis: "pairs" | "previous_ratio" | "nominal_ratio" | "assumption_broken" | "hold_limit" | null; target_cycles: number; kind: "value" | "gap" | "group" | "hidden"; group: number; value: number | null; lost: number; fields: { [key: string]: number | string }; age_us: number | null }>; gaps?: number; window?: { last: number; items: number }; latest_error?: string; tck_hz: number | null } }
 ```
 
 ## watch.set
@@ -5062,6 +5062,16 @@ LinuxCapabilities
 LinuxCapabilities
 ```
 
+## linux.targets
+
+種類: `read`。いま linux.connect でつないでいる Linux のターゲットの一覧（名前と、つないだときに採った能力。複数を同時に持てる）。人の画面の「Linux」パネルは、これを読んで、AI がつないだものも映す（接続の状態の置き場所はデーモンの 1 か所）。
+
+応答:
+
+```ts
+{ targets: Array<{ target: string; capabilities: LinuxCapabilities }> }
+```
+
 ## linux.agent.deploy
 
 種類: `control`。エージェント（C）の源をターゲットの ~/.fprobe に置き、ターゲットの gcc で作る。使った gcc（--version の 1 行目）と源の sha256 を返す。gcc が無ければ失敗。
@@ -5808,12 +5818,12 @@ LinuxCoreStatus
 応答:
 
 ```ts
-{ pid: number; comm: string; elf: HaltDebugElf; image: HaltDebugImage; libraries: HaltDebugLibraries; running: boolean; closed: boolean; max_halt_s: number; skew_limit_ns: number; breakpoints: Array<HaltDebugBreakpoint>; attach_stop: HaltStopVerdict | null; last_stop: HaltDebugEvent | null; auto_resumed: Array<{ at_unix_s: number; halted_s: number; result?: HaltDebugEvent; error?: string }>; stats: { counters: { foreign_bp_hits: number; foreign_watch_hits: number; kernel_mode_watch_hits: number; foreign_exit_hits: number; thread_exits: number; own_stops_without_breakpoint: number }; skew: { event: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; interrupt: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; request: { stops: number; max_ns: number | null; unknown: number; exceeded: number } }; resumes_cut_short: number }; close: HaltDebugClose | null; threads: Array<{ tid: number; comm: string }>; recovered: { restored: number; stale: number; journal_before: HaltJournal }; stop_for_reading: HaltStopReport | null; fetched: { path: string; local_path: string; bytes: number; sha256: string } | null; last_run: HaltDebugEvent | null; last_threads: HaltDebugThreads | null; breakpoint_kind: "sw" | "hw" | null; sources_fetched: Array<{ name: string; target: string; path: string; local_path: string; bytes: number; sha256: string } | { name: string; target: string; path: string; error: string }>; step_max_instructions: number | null; step_timeout_s: number | null }
+{ pid: number; comm: string; elf: HaltDebugElf; image: HaltDebugImage; libraries: HaltDebugLibraries; running: boolean; closed: boolean; max_halt_s: number; skew_limit_ns: number; breakpoints: Array<HaltDebugBreakpoint>; attach_stop: HaltStopVerdict | null; last_stop: HaltDebugEvent | null; auto_resumed: Array<{ at_unix_s: number; halted_s: number; result?: HaltDebugEvent; error?: string }>; brief_halts: { count: number; total_s: number; max_s: number }; library_symbols: Array<{ path: string; local_path: string | null; base: number | null; symbols: number | null; source: string | null; error: string | null }>; stats: { counters: { foreign_bp_hits: number; foreign_watch_hits: number; kernel_mode_watch_hits: number; foreign_exit_hits: number; thread_exits: number; own_stops_without_breakpoint: number }; skew: { event: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; interrupt: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; request: { stops: number; max_ns: number | null; unknown: number; exceeded: number } }; resumes_cut_short: number }; close: HaltDebugClose | null; threads: Array<{ tid: number; comm: string }>; recovered: { restored: number; stale: number; journal_before: HaltJournal }; stop_for_reading: HaltStopReport | null; fetched: { path: string; local_path: string; bytes: number; sha256: string } | null; last_run: HaltDebugEvent | null; last_threads: HaltDebugThreads | null; breakpoint_kind: "sw" | "hw" | null; sources_fetched: Array<{ name: string; target: string; path: string; local_path: string; bytes: number; sha256: string } | { name: string; target: string; path: string; error: string }>; step_max_instructions: number | null; step_timeout_s: number | null }
 ```
 
 ## linux.halt.debug.status
 
-種類: `control`。linux.halt.debug の持ち主の事実（止まっているか・ブレークポイント・最後の停止・自動の再開・停止の数え）。コアは触らない。
+種類: `read`。linux.halt.debug の持ち主の事実（止まっているか・ブレークポイント・最後の停止・自動の再開・停止の数え）。コアは触らない。
 
 応答:
 
@@ -6117,10 +6127,10 @@ RISC-V の Debug Module（fprobe.riscv_dm.DmInfo.as_dict）
 
 ### DecoderInfo
 
-解読器 1 つ（fprobe.decode.registry.Decoder.describe。origin = builtin / python / ファイルの絶対パス。params の type = 設定の型（分からなければ null）、default は省略できる設定だけ）
+解読器 1 つ（fprobe.decode.registry.Decoder.describe。origin = builtin / python / ファイルの絶対パス。params の type = 設定の型（分からなければ null）、default は省略できる設定だけ、choices = 受け付ける値の一覧（引数の型が Literal のとき。無ければ値は自由））
 
 ```ts
-{ name: string; lower: Array<string>; summary: string; params: Array<{ name: string; required: boolean; nullable: boolean; type: "channel" | "channels" | "integer" | "number" | "boolean" | "string" | "object" | null; default?: string | number | boolean | null }>; default_kinds: Array<string> | null; origin: string }
+{ name: string; lower: Array<string>; summary: string; params: Array<{ name: string; required: boolean; nullable: boolean; type: "channel" | "channels" | "integer" | "number" | "boolean" | "string" | "object" | null; default?: string | number | boolean | null; choices?: Array<string | number | boolean> }>; default_kinds: Array<string> | null; origin: string }
 ```
 
 ### DesignSwitch
@@ -6374,7 +6384,7 @@ linux.halt.debug の止まった（か、走らせたまま返った）事実。
 linux.halt.debug の持ち主の事実
 
 ```ts
-{ pid: number; comm: string; elf: HaltDebugElf; image: HaltDebugImage; libraries: HaltDebugLibraries; running: boolean; closed: boolean; max_halt_s: number; skew_limit_ns: number; breakpoints: Array<HaltDebugBreakpoint>; attach_stop: HaltStopVerdict | null; last_stop: HaltDebugEvent | null; auto_resumed: Array<{ at_unix_s: number; halted_s: number; result?: HaltDebugEvent; error?: string }>; stats: { counters: { foreign_bp_hits: number; foreign_watch_hits: number; kernel_mode_watch_hits: number; foreign_exit_hits: number; thread_exits: number; own_stops_without_breakpoint: number }; skew: { event: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; interrupt: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; request: { stops: number; max_ns: number | null; unknown: number; exceeded: number } }; resumes_cut_short: number }; close: HaltDebugClose | null; last_run: HaltDebugEvent | null; last_threads: HaltDebugThreads | null; options: { pid: number; elf: string; skew_limit_ns: number; thread_id: string; kernel_isa: string; max_step_retries: number; bp_unmapped: string; max_halt_s: number; fetch_from_target: string | null; breakpoint_kind: "sw" | "hw" | null; step_max_instructions: number | null; step_timeout_s: number | null } }
+{ pid: number; comm: string; elf: HaltDebugElf; image: HaltDebugImage; libraries: HaltDebugLibraries; running: boolean; closed: boolean; max_halt_s: number; skew_limit_ns: number; breakpoints: Array<HaltDebugBreakpoint>; attach_stop: HaltStopVerdict | null; last_stop: HaltDebugEvent | null; auto_resumed: Array<{ at_unix_s: number; halted_s: number; result?: HaltDebugEvent; error?: string }>; brief_halts: { count: number; total_s: number; max_s: number }; library_symbols: Array<{ path: string; local_path: string | null; base: number | null; symbols: number | null; source: string | null; error: string | null }>; stats: { counters: { foreign_bp_hits: number; foreign_watch_hits: number; kernel_mode_watch_hits: number; foreign_exit_hits: number; thread_exits: number; own_stops_without_breakpoint: number }; skew: { event: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; interrupt: { stops: number; max_ns: number | null; unknown: number; exceeded: number }; request: { stops: number; max_ns: number | null; unknown: number; exceeded: number } }; resumes_cut_short: number }; close: HaltDebugClose | null; last_run: HaltDebugEvent | null; last_threads: HaltDebugThreads | null; options: { pid: number; elf: string; skew_limit_ns: number; thread_id: string; kernel_isa: string; max_step_retries: number; bp_unmapped: string; max_halt_s: number; fetch_from_target: string | null; breakpoint_kind: "sw" | "hw" | null; step_max_instructions: number | null; step_timeout_s: number | null } }
 ```
 
 ### HaltDebugThreads
@@ -6615,6 +6625,14 @@ Linux のターゲットの出来事（method ごとの形。host_s・sync は�
 
 ```ts
 { port: number | null; connected: boolean; target_running: boolean; exit_code: number | null; bytes_to_target: number; bytes_from_target: number; closed_by: "error" | "gdb" | "target" | "stop" | null; error: string | null; stderr_tail: string }
+```
+
+### LinuxHaltOpen
+
+linux.halt は開いていて、プロセスへの attach はまだ（linux.halt.debug.attach の前。マイコンのターゲットは未接続のまま）。backend: 開いた口（linux.halt.open の backend）
+
+```ts
+{ backend: "fprobe" | "openocd" }
 ```
 
 ### LinuxProbe
@@ -7291,10 +7309,10 @@ DWARF の型で読んだ値（fprobe.dwarf.values.decode の形。kind で種類
 
 ### WatchedTargetState
 
-見張りが最後に見たターゲットの状態（target.state の通知と同じ: target.status の応答 + run = コアを動かし得る操作が終わった回数。未接続は DISCONNECTED と、USB を開き直した後なら link_lost）
+見張りが最後に見たターゲットの状態（target.state の通知と同じ: target.status の応答 + run = コアを動かし得る操作が終わった回数。未接続は DISCONNECTED と、USB を開き直した後なら link_lost・linux.halt を開いて attach の前なら linux_halt_open）
 
 ```ts
-{ state: "DISCONNECTED"; run: number; link_lost?: LinkLost; linux_attaching?: LinuxAttaching } | { state: CoreState; target?: string; frequency_hz?: number; wire?: "swd" | "jtag"; core?: number; arch?: string; hart?: number; debug_module?: DebugModuleInfo; architecture?: "armv7-a" | "armv6"; debug_version?: number; breakpoints?: number; watchpoints?: number; core_count?: number; debug_base?: number; apb_ap?: number; discovery?: "ahb_system_map" | "rom_table" | "part_table"; jtag_chain?: Array<number>; tap?: number; pc?: number; where?: string; function?: string; file?: string; line?: number; halt_reason?: "request" | "breakpoint" | "bkpt_instruction" | "watchpoint" | "vector_catch" | "external"; halt_bits?: Array<"HALTED" | "BKPT" | "DWTTRAP" | "VCATCH" | "EXTERNAL">; debug_mode?: "monitor"; fatal?: FatalState; rescue_dp?: number; cores?: Array<CoreEntry>; run: number; linux?: LinuxTargetFacts }
+{ state: "DISCONNECTED"; run: number; link_lost?: LinkLost; linux_attaching?: LinuxAttaching; linux_halt_open?: LinuxHaltOpen } | { state: CoreState; target?: string; frequency_hz?: number; wire?: "swd" | "jtag"; core?: number; arch?: string; hart?: number; debug_module?: DebugModuleInfo; architecture?: "armv7-a" | "armv6"; debug_version?: number; breakpoints?: number; watchpoints?: number; core_count?: number; debug_base?: number; apb_ap?: number; discovery?: "ahb_system_map" | "rom_table" | "part_table"; jtag_chain?: Array<number>; tap?: number; pc?: number; where?: string; function?: string; file?: string; line?: number; halt_reason?: "request" | "breakpoint" | "bkpt_instruction" | "watchpoint" | "vector_catch" | "external"; halt_bits?: Array<"HALTED" | "BKPT" | "DWTTRAP" | "VCATCH" | "EXTERNAL">; debug_mode?: "monitor"; fatal?: FatalState; rescue_dp?: number; cores?: Array<CoreEntry>; run: number; linux?: LinuxTargetFacts }
 ```
 
 ### WatchedVariable

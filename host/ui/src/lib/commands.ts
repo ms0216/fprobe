@@ -58,57 +58,58 @@ const withLine = (base: (s: CommandState) => Key | null) => (s: CommandState): K
   base(s) ?? (s.selection ? null : "tip.noLine");
 
 /** 人の操作の前の確認（AI がつながっていて一時停止していないとき）を通してから実行する */
-const guarded = (fn: (ctx: CommandContext, s: CommandState) => unknown) =>
-  async (ctx: CommandContext, s: CommandState) => ((await allowed(ctx.app)) ? fn(ctx, s) : undefined);
+//  label: 押した操作の名前（確認の文に載せる。backlog 82・110 番）
+const guarded = (label: Key, fn: (ctx: CommandContext, s: CommandState) => unknown) =>
+  async (ctx: CommandContext, s: CommandState) => ((await allowed(ctx.app, undefined, t(label))) ? fn(ctx, s) : undefined);
 /** コアを止める操作: 止めると壊れうるターゲットなら先に確かめる（lib/safety.ts） */
-const halting = (action: HaltAction, fn: (ctx: CommandContext, s: CommandState) => unknown) =>
-  guarded(async (ctx, s) => ((await ctx.safety.confirmHalt(action, t)) ? fn(ctx, s) : undefined));
+const halting = (action: HaltAction, label: Key, fn: (ctx: CommandContext, s: CommandState) => unknown) =>
+  guarded(label, async (ctx, s) => ((await ctx.safety.confirmHalt(action, t)) ? fn(ctx, s) : undefined));
 
 export const COMMANDS: Command[] = [
   { id: "openElf", label: "cmd.openElf", tip: "tip.openElf", shortcut: "Ctrl+O", icon: "open", blocked: online,
     run: ({ ui }) => ui.open("openElf") },
   { id: "loadDemo", label: "cmd.loadDemo", tip: "tip.loadDemo", icon: "demo", blocked: online,
-    run: guarded(async ({ dbg, ui }) => {
+    run: guarded("cmd.loadDemo", async ({ dbg, ui }) => {
       const path = await dbg.loadDemo();
       if (path) ui.remember(path);
     }) },
   { id: "programRam", label: "cmd.programRam", tip: "tip.programRam",
-    blocked: (s) => connected(s) ?? withElf(s), run: guarded(({ dbg }, s) => dbg.programRam(s.elf!)) },
+    blocked: (s) => connected(s) ?? withElf(s), run: guarded("cmd.programRam", ({ dbg }, s) => dbg.programRam(s.elf!)) },
   { id: "download", label: "cmd.download", tip: "tip.download", shortcut: "F8", icon: "download",
-    blocked: (s) => connected(s) ?? withElf(s), run: guarded(({ app }, s) => app.act("target.flash", { path: s.elf! })) },
+    blocked: (s) => connected(s) ?? withElf(s), run: guarded("cmd.download", ({ app }, s) => app.act("target.flash", { path: s.elf! })) },
   { id: "reset", label: "cmd.reset", tip: "tip.reset", shortcut: "Ctrl+Shift+F5", icon: "reset", blocked: connected,
-    run: guarded(({ app }) => app.act("target.reset", resetParams(execution.get()))) },
+    run: guarded("cmd.reset", ({ app }) => app.act("target.reset", resetParams(execution.get()))) },
   { id: "rescueReset", label: "cmd.rescueReset", tip: "tip.rescueReset",
     blocked: (s) => connected(s) ?? (s.rescueDp != null ? null : "tip.noRescue"),
-    run: guarded(({ app }) => app.act("target.reset", { kind: "rescue" })) },
+    run: guarded("cmd.rescueReset", ({ app }) => app.act("target.reset", { kind: "rescue" })) },
   { id: "continue", label: "cmd.continue", tip: "tip.continue", shortcut: "F5", icon: "continue", blocked: halted,
-    run: guarded(({ app }) => app.act("target.resume")) },
+    run: guarded("cmd.continue", ({ app }) => app.act("target.resume")) },
   { id: "halt", label: "cmd.halt", tip: "tip.halt", shortcut: "F6", icon: "halt", blocked: running,
-    run: halting("halt", ({ app }) => app.act("target.halt")) },
+    run: halting("halt", "cmd.halt", ({ app }) => app.act("target.halt")) },
   { id: "stepOver", label: "cmd.stepOver", tip: "tip.stepOver", shortcut: "F10", icon: "stepOver", blocked: halted,
-    run: halting("step", ({ dbg }) => dbg.step("over")) },
+    run: halting("step", "cmd.stepOver", ({ dbg }) => dbg.step("over")) },
   { id: "stepInto", label: "cmd.stepInto", tip: "tip.stepInto", shortcut: "F11", icon: "stepInto", blocked: halted,
-    run: halting("step", ({ dbg }) => dbg.step("into")) },
+    run: halting("step", "cmd.stepInto", ({ dbg }) => dbg.step("into")) },
   { id: "stepOut", label: "cmd.stepOut", tip: "tip.stepOut", shortcut: "Shift+F11", icon: "stepOut", blocked: halted,
-    run: halting("step", ({ dbg }) => dbg.step("out")) },
+    run: halting("step", "cmd.stepOut", ({ dbg }) => dbg.step("out")) },
   { id: "stepInstruction", label: "cmd.stepInstruction", tip: "tip.stepInstruction", shortcut: "Alt+F11",
-    icon: "stepInstruction", blocked: halted, run: halting("step", ({ dbg }) => dbg.stepInstruction()) },
+    icon: "stepInstruction", blocked: halted, run: halting("step", "cmd.stepInstruction", ({ dbg }) => dbg.stepInstruction()) },
   { id: "runToCursor", label: "cmd.runToCursor", tip: "tip.runToCursor", shortcut: "Ctrl+F10", icon: "runToCursor",
-    blocked: withLine(halted), run: halting("step", ({ dbg }, s) => dbg.runTo(s.selection!.file, s.selection!.line)) },
+    blocked: withLine(halted), run: halting("step", "cmd.runToCursor", ({ dbg }, s) => dbg.runTo(s.selection!.file, s.selection!.line)) },
   { id: "toggleBreakpoint", label: "cmd.toggleBreakpoint", tip: "tip.toggleBreakpoint", shortcut: "F9",
     icon: "breakpoint", blocked: withLine(breakpointEditable),
-    run: halting("breakpoint", ({ dbg }, s) => dbg.toggleAt(s.selection!.file, s.selection!.line)) },
+    run: halting("breakpoint", "cmd.toggleBreakpoint", ({ dbg }, s) => dbg.toggleAt(s.selection!.file, s.selection!.line)) },
   { id: "removeAllBreakpoints", label: "cmd.removeAllBreakpoints", tip: "tip.removeAllBreakpoints",
     shortcut: "Ctrl+Shift+F9", blocked: breakpointEditable,
     run: async ({ app, dbg }) => ((await allowed(app, undefined, t("cmd.removeAllBreakpoints"))) ? dbg.removeAllBreakpoints() : undefined) },
   { id: "connect", label: "cmd.connect", tip: "tip.connect", icon: "connect", blocked: online,
     run: ({ ui }) => ui.open("connect") },
   { id: "disconnect", label: "cmd.disconnect", tip: "tip.disconnect", shortcut: "Shift+F5", icon: "disconnect",
-    blocked: connected, run: guarded(({ app }) => app.act("target.disconnect")) },
+    blocked: connected, run: guarded("cmd.disconnect", ({ app }) => app.act("target.disconnect")) },
   { id: "loadSvd", label: "cmd.loadSvd", tip: "tip.loadSvd", icon: "chip", blocked: online,
     run: ({ ui }) => ui.open("loadSvd") },
   { id: "capture", label: "cmd.capture", tip: "tip.capture", icon: "capture", blocked: online,
-    run: guarded(({ tl }) => tl.captureSaved({ deep: false })) },
+    run: guarded("cmd.capture", ({ tl }) => tl.captureSaved({ deep: false })) },
 ];
 
 export const command = (id: string): Command => {

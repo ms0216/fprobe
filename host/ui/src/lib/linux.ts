@@ -301,3 +301,13 @@ export class LinuxEvents {
     this.dropped = r.dropped ?? 0;
   }
 }
+
+/** デーモンが持つ「いまつながっているターゲット」（linux.targets）に、画面が映すターゲットを合わせる。AI がつないだものも、
+ *  切ったものも映す（接続の状態の置き場所はデーモンの 1 か所。画面は自分で覚えない）。
+ *  今映しているターゲットがまだあればそのまま。無くなっていれば（別のものがあればそれに、無ければ）空に。
+ *  何も映していなければ、最初のターゲットを映す（パネルは 1 つのターゲットを映す）。 */
+export function reconcileTarget(current: string | null, targets: { target: string }[]): { target: string | null; changed: boolean } {
+  if (current !== null && targets.some((t) => t.target === current)) return { target: current, changed: false };
+  const next = targets.length ? targets[0].target : null;
+  return { target: next, changed: next !== current };
+}

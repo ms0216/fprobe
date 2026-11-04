@@ -10,6 +10,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity aux_link is
   generic (
@@ -32,7 +33,7 @@ end entity;
 
 architecture rtl of aux_link is
   constant DIVISOR_BITS : positive := 16;
-  constant DIVISOR : unsigned(DIVISOR_BITS - 1 downto 0) := to_unsigned((CLK_HZ + BAUD / 2) / BAUD, DIVISOR_BITS);
+  constant DIVISOR : unsigned(DIVISOR_BITS - 1 downto 0) := to_unsigned(baud_divisor(CLK_HZ, BAUD), DIVISOR_BITS);
   signal b_valid, frame_error : std_logic;
   signal b_data : std_logic_vector(7 downto 0);
   signal b_time : unsigned(47 downto 0);

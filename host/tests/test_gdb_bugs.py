@@ -37,7 +37,7 @@ def probe(tmp_path, monkeypatch):
 def connect(probe, chip) -> None:
     probe._session.debug = lambda **kw: SimpleNamespace(target=chip, open=lambda: None, close=lambda: None,
                                                         options={"frequency": 4_000_000})
-    probe.target_connect("fake_target")
+    probe.target_connect("fake_target", frequency_hz=4_000_000)
 
 
 def test_bug_gdb_flash_does_not_fold_or_forget_flash_breakpoints(probe):

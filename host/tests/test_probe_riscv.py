@@ -64,7 +64,7 @@ def test_connect_halts_the_selected_hart_and_reports_it():
 def test_registers_memory_and_breakpoints_through_the_usual_tools():
     dm = FakeHazard3Dm(memory={0x20000040 + i: i for i in range(8)})
     p, _ = make_probe(dm)
-    p.target_connect("rp2350_riscv")
+    p.target_connect("rp2350_riscv", frequency_hz=4_000_000)
     regs = p.read_registers()
     assert list(regs)[:3] == ["pc", "ra", "sp"] and len(regs) == 32
     p.write_register("a0", 0x1234)
@@ -88,11 +88,11 @@ def test_unsupported_things_are_refused_clearly():
     dm = FakeHazard3Dm()
     p, links = make_probe(dm)
     with pytest.raises(ValueError, match="script"):
-        p.target_connect("rp2350_riscv", script="builtin:reset_with_nreset")
+        p.target_connect("rp2350_riscv", frequency_hz=4_000_000, script="builtin:reset_with_nreset")
     with pytest.raises(ValueError, match="connect_mode"):
-        p.target_connect("rp2350_riscv", connect_mode="under-reset")
+        p.target_connect("rp2350_riscv", frequency_hz=4_000_000, connect_mode="under-reset")
     assert all(link.closed for link in links)                                # 断っても接続口は閉じる
-    p.target_connect("rp2350_riscv", connect_mode="attach")
+    p.target_connect("rp2350_riscv", frequency_hz=4_000_000, connect_mode="attach")
     assert not dm.harts[0].halted                                            # attach は止めない
     with pytest.raises(RuntimeError, match="リセット"):
         p.target_reset()

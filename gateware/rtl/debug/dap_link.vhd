@@ -5,6 +5,7 @@
 -- 転送（OP_TRANSFER）: WAIT は wait_retry 回まで再試行し、応答を CMSIS-DAP の転送応答に符号化して返す
 -- （OK でも読みのパリティ異常は ERROR）。未接続（enable = '0'）なら PHY に出さず無応答（7）。
 -- それ以外の命令（シーケンス・ピン）: 結果は val。未接続なら val = 0。
+-- stamp: 応答の転送の線上の点の時刻（PHY の rsp_time の下位 32 ビット。DAP_Transfer のタイムスタンプ）。未接続の応答は 0。
 --
 -- 2 段の待ち行列: ユニットは応答を待たずに次の命令を出せる（受けて応答をまだ取っていない命令は 2 つまで。ユニットが数えて
 -- 守る）。PHY には古い方から出す。前の転送の応答の前に出す次の転送は条件つき（phy_cond = 1: PHY は前の転送が OK のときだけ
@@ -36,6 +37,7 @@ entity dap_link is
     ok           : out boolean;                           -- resp = RESP_OK
     rdata        : out std_logic_vector(31 downto 0);
     val          : out std_logic_vector(63 downto 0);
+    stamp        : out std_logic_vector(31 downto 0);
     -- PHY 側
     phy_valid    : out std_logic;
     phy_ready    : in  std_logic;
@@ -47,7 +49,8 @@ entity dap_link is
     phy_rsp_valid : in std_logic;
     phy_rsp_ack  : in  std_logic_vector(2 downto 0);
     phy_rsp_data : in  std_logic_vector(63 downto 0);
-    phy_rsp_parity : in std_logic
+    phy_rsp_parity : in std_logic;
+    phy_rsp_time : in  unsigned(31 downto 0)
   );
 end entity;
 
@@ -62,9 +65,10 @@ architecture rtl of dap_link is
     answered : boolean;                                   -- 応答がある
     resp     : std_logic_vector(7 downto 0);
     val      : std_logic_vector(63 downto 0);
+    stamp    : std_logic_vector(31 downto 0);
   end record;
   constant ENTRY_NONE : entry_t := (OP_SEQ_OUT, 1, (others => '0'), (others => '0'), (others => '0'), false, false,
-                                    (others => '0'), (others => '0'));
+                                    (others => '0'), (others => '0'), (others => '0'));
   type entries_t is array (0 to 1) of entry_t;
   signal e        : entries_t := (others => ENTRY_NONE);
   signal n        : natural range 0 to 2 := 0;            -- 入っている命令の数（e(0) が古い）
@@ -100,6 +104,7 @@ begin
   ok    <= shown.resp = RESP_OK;
   rdata <= shown.val(31 downto 0);
   val   <= shown.val;
+  stamp <= shown.stamp;
 
   process (clk)
     variable v        : entries_t;
@@ -109,11 +114,13 @@ begin
     variable a        : natural range 0 to 1;
     variable r        : std_logic_vector(7 downto 0);
 
-    procedure answer(k : natural; code : std_logic_vector(7 downto 0); value : std_logic_vector(63 downto 0)) is
+    procedure answer(k : natural; code : std_logic_vector(7 downto 0); value : std_logic_vector(63 downto 0);
+                     at : std_logic_vector(31 downto 0)) is
     begin
       v(k).answered := true;
       v(k).resp     := code;
       v(k).val      := value;
+      v(k).stamp    := at;
       if v(k).op = OP_TRANSFER and code /= RESP_OK then
         fail_new := true;                                 -- 後ろの命令を捨てる
         m        := k + 1;
@@ -141,20 +148,20 @@ begin
             a := 1;
           end if;
           if v(a).op /= OP_TRANSFER then
-            answer(a, RESP_OK, phy_rsp_data);
+            answer(a, RESP_OK, phy_rsp_data, std_logic_vector(phy_rsp_time));
           elsif phy_rsp_ack = "010" and v(a).retry /= 0 then
             v(a).retry  := v(a).retry - 1;
             v(a).issued := false;                         -- WAIT: 再試行（次の命令は条件つきなので受けられていない）
           else
             r := transfer_response(phy_rsp_ack, phy_rsp_parity, v(a).request(1));
-            answer(a, r, phy_rsp_data);
+            answer(a, r, phy_rsp_data, std_logic_vector(phy_rsp_time));
           end if;
         end if;
         -- 未接続: 出す前の命令は PHY に出さず無応答
         if enable = '0' then
           for k in 0 to 1 loop
             if k < m and not v(k).issued and not v(k).answered then
-              answer(k, RESP_NO_ACK, (others => '0'));
+              answer(k, RESP_NO_ACK, (others => '0'), (others => '0'));
             end if;
           end loop;
         end if;
@@ -171,7 +178,8 @@ begin
           assert m < 2 report "dap_link: queue overflow" severity failure;
           if m < 2 then
             v(m) := (op => op, count => count, request => request, data => data, retry => wait_retry,
-                     issued => false, answered => false, resp => (others => '0'), val => (others => '0'));
+                     issued => false, answered => false, resp => (others => '0'), val => (others => '0'),
+                     stamp => (others => '0'));
             m := m + 1;
           end if;
         end if;

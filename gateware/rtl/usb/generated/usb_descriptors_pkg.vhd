@@ -34,6 +34,46 @@ package usb_descriptors_pkg is
   constant OUT_ENDPOINTS : std_logic_vector(15 downto 0) := x"0017";
   constant IN_ENDPOINTS : std_logic_vector(15 downto 0) := x"007F";
 
+  -- エンドポイントの転送の種類（番号ごと、方向別。EP0 は制御、NONE はその方向に無い）
+  type ep_kind_t is (EP_KIND_NONE, EP_KIND_CONTROL, EP_KIND_ISOCHRONOUS, EP_KIND_BULK, EP_KIND_INTERRUPT);
+  type ep_kinds_t is array (0 to 15) of ep_kind_t;
+  constant OUT_EP_KINDS : ep_kinds_t := (
+     0 => EP_KIND_CONTROL,
+     1 => EP_KIND_BULK,
+     2 => EP_KIND_BULK,
+     3 => EP_KIND_NONE,
+     4 => EP_KIND_BULK,
+     5 => EP_KIND_NONE,
+     6 => EP_KIND_NONE,
+     7 => EP_KIND_NONE,
+     8 => EP_KIND_NONE,
+     9 => EP_KIND_NONE,
+    10 => EP_KIND_NONE,
+    11 => EP_KIND_NONE,
+    12 => EP_KIND_NONE,
+    13 => EP_KIND_NONE,
+    14 => EP_KIND_NONE,
+    15 => EP_KIND_NONE
+  );
+  constant IN_EP_KINDS : ep_kinds_t := (
+     0 => EP_KIND_CONTROL,
+     1 => EP_KIND_BULK,
+     2 => EP_KIND_BULK,
+     3 => EP_KIND_BULK,
+     4 => EP_KIND_BULK,
+     5 => EP_KIND_INTERRUPT,
+     6 => EP_KIND_BULK,
+     7 => EP_KIND_NONE,
+     8 => EP_KIND_NONE,
+     9 => EP_KIND_NONE,
+    10 => EP_KIND_NONE,
+    11 => EP_KIND_NONE,
+    12 => EP_KIND_NONE,
+    13 => EP_KIND_NONE,
+    14 => EP_KIND_NONE,
+    15 => EP_KIND_NONE
+  );
+
   -- インターフェース番号ごとのエンドポイント番号マスク（SET_INTERFACE でトグルを戻す対象）
   constant NUM_INTERFACES : positive := 4;
   type if_endpoints_t is array (0 to NUM_INTERFACES - 1) of std_logic_vector(15 downto 0);

@@ -3,5 +3,5 @@ from fprobe_gw.toolchain.sim import run_cocotb
 
 
 def test_jtag_phy(tmp_path):
-    run_cocotb(toplevel="jtag_phy", sources=rtl("debug/jtag_phy.vhd"), test_module="tests.tb.jtag_phy_tb",
+    run_cocotb(toplevel="jtag_phy", sources=rtl("common/util_pkg.vhd", "debug/dap_pkg.vhd", "debug/jtag_phy.vhd"), test_module="tests.tb.jtag_phy_tb",
                build_dir=tmp_path)

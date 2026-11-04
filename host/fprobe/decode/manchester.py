@@ -8,6 +8,8 @@ error="phase_unknown" にする（中央とみなさない）。tolerance（1 �
 convention: "ieee"（IEEE 802.3: 中央の立ち上がりが 1）/ "thomas"（G. E. Thomas: 立ち下がりが 1）。
 """
 
+from typing import Literal
+
 from ..la import Transitions
 from .core import Annotation, Channel, ChannelLevels, Decoding
 
@@ -16,7 +18,7 @@ __all__ = ["decode_manchester"]
 CONVENTIONS = ("ieee", "thomas")
 
 
-def decode_manchester(tr: Transitions, channel: Channel, *, bitrate: float, tolerance: float, convention: str,
+def decode_manchester(tr: Transitions, channel: Channel, *, bitrate: float, tolerance: float, convention: Literal["ieee", "thomas"],
                       word_bits: int, msb_first: bool) -> Decoding:
     """Manchester を解読する。ビットを word_bits ごとの語にまとめる（フレームの最後の半端は error="incomplete"）。
     設定はすべて既定を持たない。"""

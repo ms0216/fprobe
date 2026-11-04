@@ -12,6 +12,8 @@ SFDP の値。よく見る値の表はプラグイン fprobe.plugins.heuristics.
 付けず、アドレス・データを切り出さず、許可の誤りも付けない。
 """
 
+from typing import Literal
+
 from collections.abc import Mapping
 
 from .core import Annotation, Decoding
@@ -61,7 +63,7 @@ def _extra(commands: Mapping[str, Mapping] | None) -> tuple[dict, set[int]]:
     return table, writes
 
 
-def decode_spiflash(lower: Decoding, *, address_bytes: int, extra_commands: dict | None = None) -> Decoding:
+def decode_spiflash(lower: Decoding, *, address_bytes: Literal[3, 4], extra_commands: dict | None = None) -> Decoding:
     """SPI の解読（cs あり・8 ビットの語）の上で SPI Flash のコマンドを読む。address_bytes は捕捉の始まりのアドレス長
     （3 か 4。機器と、それまでの EN4B / EX4B で決まるので既定を持たない）。extra_commands は JEDEC で決まった命令
     （JEDEC_COMMANDS）に足す機器の命令: {"0x20": {"name": "SECTOR_ERASE_4K", "address_bytes": null（今のモード）/ 0 / 3 / 4,

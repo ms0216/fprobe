@@ -8,7 +8,7 @@
   import { measuredVolts } from "../../lib/power";
   import { isFatal } from "../../lib/safety";
 
-  const { app, ui } = shared();
+  const { app, ui, dock } = shared();
 
   const probe = $derived($app.probe?.capabilities?.board
     ? `${$app.probe.capabilities.board}${$app.device ? ` · ${$app.device.link.toUpperCase()} ${$app.device.address ?? ""}` : ""}`
@@ -20,6 +20,10 @@
   // 上限で古い方が落ち、ほかの利用者の接続も混じるので頼らない）
   const link = $derived(linkOf($app.target));
   const haltKey = $derived(haltReasonKey($app.target));
+  // マイコンは未接続でも、linux.halt を開いている・attach が進行中なら、その事実を同じ場所に出す（backlog 80 番。API の
+  // target.state の linux_halt_open・linux_attaching）
+  const linuxOpen = $derived(targetState === "DISCONNECTED" ? $app.target?.linux_halt_open ?? null : null);
+  const linuxAttaching = $derived(targetState === "DISCONNECTED" ? $app.target?.linux_attaching ?? null : null);
   const aiClients = $derived($app.clients.filter((c) => c.role === "ai"));
 </script>
 
@@ -36,6 +40,12 @@
       {#if isFatal($app.target.fatal)}<span class="fatal">· {$i18n("status.target.fatal")}</span>
       {:else}<span class="tick">· {$i18n("status.target.tickStopped")}</span>{/if}
     {/if}</span>
+  {#if linuxAttaching}
+    <button class="item btn plain" onclick={() => dock.show("linuxHalt")}>{$i18n("status.target.linuxAttaching", { pid: linuxAttaching.pid })}</button>
+  {:else if linuxOpen}
+    <button class="item btn plain" title={$i18n("status.target.linuxHaltOpenTip", { backend: linuxOpen.backend })}
+            onclick={() => dock.show("linuxHalt")}>{$i18n("status.target.linuxHaltOpen")}</button>
+  {/if}
   {#if $app.target?.linux}
     {@const lx = $app.target.linux}
     <span class="item mono" title={lx.elf}>Linux {lx.comm} pid {lx.pid}{lx.tid !== null ? ` tid ${lx.tid}` : ""}</span>
@@ -63,9 +73,9 @@
   .fatal { color: var(--bad); font-weight: 600; }
   .tick { color: var(--warn); }
   .status { display: flex; align-items: center; gap: 2px; height: 24px; padding: 0 6px; font-size: 12px;
-            background: var(--accent); color: #fff; }
-  .status.running { background: color-mix(in srgb, var(--ok) 80%, #000); }
-  .status.halted { background: color-mix(in srgb, var(--warn) 85%, #000); }
+            background: var(--fill-accent); color: #fff; }
+  .status.running { background: var(--fill-running); }
+  .status.halted { background: var(--fill-halted); }
   .item { padding: 0 8px; white-space: nowrap; }
   .spacer { flex: 1; }
   .link.closed { color: #ffd0d0; }
@@ -73,5 +83,6 @@
   .held.some { font-weight: 700; }
   .btn { border: none; background: rgba(255, 255, 255, 0.15); color: #fff; border-radius: 3px; padding: 0 8px; height: 18px;
          font-size: 12px; }
+  .btn.plain { background: none; text-decoration: underline dotted; }
   .btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.3); border: none; }
 </style>

@@ -28,7 +28,7 @@ architecture rtl of csr_system is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal scratch_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
+  signal scratch_r : std_logic_vector(31 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -40,14 +40,14 @@ begin
       err   <= '0';
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
-        scratch_r <= "00000000000000000000000000000000";
+        scratch_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is
           when 0 =>   -- magic
-            rdata(31 downto 0) <= "01000010010100100101000001000110";
+            rdata(31 downto 0) <= x"42525046";
           when 1 =>   -- version
-            rdata(31 downto 0) <= "00000000000000000000000000000010";
+            rdata(31 downto 0) <= x"00000002";
           when 2 =>   -- scratch
             rdata(31 downto 0) <= scratch_r;
             if bus_we = '1' then

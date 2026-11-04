@@ -37,7 +37,7 @@ describe("画面とデーモン", () => {
   it("利用者の一覧が届き、AI の操作が記録として流れる", async () => {
     await vi.waitFor(() => expect(snap.clients.map((c) => c.name).sort()).toEqual(["claude", "gui"]));
     expect(state.aiConnectedUnpaused).toBe(true);
-    await ai.call("target.connect", { target: "stm32f401xe" });
+    await ai.call("target.connect", { target: "stm32f401xe", frequency_hz: 4000000 });
     await ai.call("target.halt");
     await vi.waitFor(() => expect(snap.activity.map((e) => e.method)).toContain("target.halt"));
     expect(snap.activity.find((e) => e.method === "target.connect")?.client).toBe("claude");
@@ -93,7 +93,7 @@ describe("画面のデバッガとデーモン", () => {
   });
 
   it("AI が RAM に読み込んだ ELF のソースが見え、画面で置いたブレークポイントで止まった行が開く", async () => {
-    await ai.call("target.connect", { target: "stm32f401xe" });
+    await ai.call("target.connect", { target: "stm32f401xe", frequency_hz: 4000000 });
     await ai.call("target.program_ram", { path: elf });
     await vi.waitFor(() => expect(d.files.map((f) => f.name)).toContain("sram_demo.c"));
     await dbg.openFile("sram_demo.c");

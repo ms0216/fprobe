@@ -34,7 +34,7 @@ architecture rtl of csr_sync is
   signal index : natural range 0 to 15;
   signal control_enable_r : std_logic := '0';
   signal control_master_r : std_logic := '0';
-  signal period_r : std_logic_vector(31 downto 0) := "00000000000000011000011010100000";
+  signal period_r : std_logic_vector(31 downto 0) := x"000186A0";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -48,7 +48,7 @@ begin
       if rst = '1' then
         control_enable_r <= '0';
         control_master_r <= '0';
-        period_r <= "00000000000000011000011010100000";
+        period_r <= x"000186A0";
       elsif start then
         ack   <= '1';
         case index is

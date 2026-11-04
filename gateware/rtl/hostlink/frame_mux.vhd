@@ -99,7 +99,9 @@ architecture rtl of frame_mux is
   signal rd_data   : std_logic_vector(7 downto 0) := (others => '0');
   signal ra        : unsigned(RAM_BITS - 1 downto 0) := (others => '0');
   signal rq        : std_logic_vector(7 downto 0);
-  signal dphase    : natural range 0 to 3 := 0;             -- 1 バイトの手順: 番地 → 待ち → 取る → 受理待ち
+  -- 1 バイトの手順: 番地を出す → RAM の読み → 取る → 受理待ち
+  type dphase_t is (D_ADDR, D_READ, D_TAKE, D_HAND);
+  signal dphase    : dphase_t := D_ADDR;
   signal line_sr   : std_logic_vector(31 downto 0) := (others => '0');
   signal out_valid : std_logic := '0';
   signal out_ready : std_logic;
@@ -201,22 +203,22 @@ begin
             if rx_commit = '1' and rx_len >= 2 then
               rd_last  <= rx_len - 1;
               rd_idx   <= 0;
-              dphase   <= 0;
+              dphase   <= D_ADDR;
               rx_state <= R_DELIVER;
             end if;
 
           when R_DELIVER =>
             case dphase is
-              when 0 =>
+              when D_ADDR =>
                 ra     <= to_unsigned(rd_idx, RAM_BITS);
-                dphase <= 1;
-              when 1 =>                                        -- rq に読み出される
-                dphase <= 2;
-              when 2 =>
+                dphase <= D_READ;
+              when D_READ =>                                   -- rq に読み出される
+                dphase <= D_TAKE;
+              when D_TAKE =>
                 if rd_idx = 0 then                             -- ch
                   rx_ch  <= to_integer(unsigned(rq));
                   rd_idx <= 1;
-                  dphase <= 0;
+                  dphase <= D_ADDR;
                   if to_integer(unsigned(rq)) > CH_LINE then
                     rx_state <= R_IDLE;                        -- 未知のチャンネル
                   end if;
@@ -235,17 +237,17 @@ begin
                     rx_state <= R_IDLE;
                   else
                     rd_idx <= rd_idx + 1;
-                    dphase <= 0;
+                    dphase <= D_ADDR;
                   end if;
                 else
                   rd_data   <= rq;
                   out_valid <= '1';
-                  dphase    <= 3;
+                  dphase    <= D_HAND;
                 end if;
-              when others =>
+              when D_HAND =>
                 if out_ready = '1' then
                   out_valid <= '0';
-                  dphase    <= 0;
+                  dphase    <= D_ADDR;
                   if rd_idx = rd_last then
                     rx_state <= R_IDLE;
                   else

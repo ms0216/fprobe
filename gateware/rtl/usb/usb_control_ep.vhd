@@ -130,6 +130,17 @@ architecture rtl of usb_control_ep is
   signal halts_out   : ep_mask_t := (others => '0');
   signal halts_in    : ep_mask_t := (others => '0');
 
+  -- 要求（SETUP の 8 バイト）の欄: bmRequestType = req(0)、bRequest = req(1)、wValue = req(3..2)、wIndex = req(5..4)、
+  -- wLength = req(7..6)。エンドポイント宛の要求の wIndex = 方向（bit 7、1 = IN）と番号（bit 3..0）
+  constant RT_DEV_OUT    : natural := 16#00#;           -- bmRequestType: 標準・デバイス宛・ホスト → デバイス
+  constant RT_IF_OUT     : natural := 16#01#;           -- 標準・インターフェース宛
+  constant RT_EP_OUT     : natural := 16#02#;           -- 標準・エンドポイント宛
+  constant RT_DEV_IN     : natural := 16#80#;           -- 標準・デバイス宛・デバイス → ホスト
+  constant RT_IF_IN      : natural := 16#81#;
+  constant RT_EP_IN      : natural := 16#82#;
+  constant RT_VENDOR_IN  : natural := 16#C0#;           -- ベンダー・デバイス宛・デバイス → ホスト
+  signal ep_num      : natural range 0 to NUM_ENDPOINTS - 1;   -- エンドポイント宛の要求の番号
+  signal ep_in       : boolean;                                 -- その方向は IN
   signal w_value     : natural range 0 to 65535;
   signal w_index     : natural range 0 to 65535;
   signal w_length    : natural range 0 to 65535;
@@ -143,14 +154,9 @@ architecture rtl of usb_control_ep is
     return to_integer(unsigned(word));
   end function;
 
-  function minimum(a, b : natural) return natural is
-  begin
-    if a < b then
-      return a;
-    end if;
-    return b;
-  end function;
 begin
+  ep_num   <= to_integer(unsigned(req(4)(3 downto 0)));
+  ep_in    <= req(4)(7) = '1';
   w_value  <= u16(req(2), req(3));
   w_index  <= u16(req(4), req(5));
   w_length <= u16(req(6), req(7));
@@ -219,7 +225,6 @@ begin
       ep_flush         <= mask;
     end procedure;
 
-    variable ep        : natural range 0 to NUM_ENDPOINTS - 1;
     variable entry     : desc_entry_t;
     variable speed_ok  : boolean;
     variable next_pos  : natural range 0 to 65535 + MPS;
@@ -264,40 +269,39 @@ begin
             null;
 
           when S_DECODE =>
-            ep     := to_integer(unsigned(req(4)(3 downto 0)));
             action <= A_NONE;
-            case to_integer(unsigned(req(0))) * 256 + to_integer(unsigned(req(1))) is
-              when 16#80_00# + GET_DESCRIPTOR =>
+            case to_integer(unsigned(req(0))) * 256 + to_integer(unsigned(req(1))) is   -- bmRequestType と bRequest
+              when RT_DEV_IN * 256 + GET_DESCRIPTOR =>
                 lookup_i <= 0;
                 state    <= S_LOOKUP;
-              when 16#00_00# + SET_ADDRESS =>
+              when RT_DEV_OUT * 256 + SET_ADDRESS =>
                 if w_value < 128 and w_length = 0 then
                   status_in(A_SET_ADDRESS);
                 else
                   stall;
                 end if;
-              when 16#00_00# + SET_CONFIGURATION =>
+              when RT_DEV_OUT * 256 + SET_CONFIGURATION =>
                 if w_value <= 1 and w_length = 0 then
                   status_in(A_SET_CONFIGURATION);
                 else
                   stall;
                 end if;
-              when 16#80_00# + GET_CONFIGURATION =>
+              when RT_DEV_IN * 256 + GET_CONFIGURATION =>
                 small_buf(0) <= config_r;
                 reply(1);
-              when 16#80_00# + GET_STATUS | 16#81_00# + GET_STATUS =>
+              when RT_DEV_IN * 256 + GET_STATUS | RT_IF_IN * 256 + GET_STATUS =>
                 small_buf(0) <= x"00";        -- バス給電・リモートウェイクアップ無し
                 small_buf(1) <= x"00";
                 reply(2);
-              when 16#82_00# + GET_STATUS =>
-                if req(4)(7) = '1' then
-                  small_buf(0) <= "0000000" & halts_in(ep);
+              when RT_EP_IN * 256 + GET_STATUS =>
+                if ep_in then
+                  small_buf(0) <= "0000000" & halts_in(ep_num);
                 else
-                  small_buf(0) <= "0000000" & halts_out(ep);
+                  small_buf(0) <= "0000000" & halts_out(ep_num);
                 end if;
                 small_buf(1) <= x"00";
                 reply(2);
-              when 16#02_00# + CLEAR_FEATURE | 16#02_00# + SET_FEATURE =>
+              when RT_EP_OUT * 256 + CLEAR_FEATURE | RT_EP_OUT * 256 + SET_FEATURE =>
                 if w_value = 0 and w_length = 0 then        -- ENDPOINT_HALT
                   if req(1) = std_logic_vector(to_unsigned(CLEAR_FEATURE, 8)) then
                     status_in(A_CLEAR_HALT);
@@ -307,20 +311,20 @@ begin
                 else
                   stall;
                 end if;
-              when 16#81_00# + GET_INTERFACE =>
+              when RT_IF_IN * 256 + GET_INTERFACE =>
                 if w_index < NUM_INTERFACES and config_r /= x"00" then
                   small_buf(0) <= x"00";
                   reply(1);
                 else
                   stall;
                 end if;
-              when 16#01_00# + SET_INTERFACE =>
+              when RT_IF_OUT * 256 + SET_INTERFACE =>
                 if w_index < NUM_INTERFACES and w_value = 0 and config_r /= x"00" then
                   status_in(A_SET_INTERFACE);
                 else
                   stall;
                 end if;
-              when 16#C0_00# + MSOS20_VENDOR_CODE =>
+              when RT_VENDOR_IN * 256 + MSOS20_VENDOR_CODE =>
                 if w_index = MSOS20_INDEX then
                   lookup_i <= 0;
                   state    <= S_LOOKUP;
@@ -345,8 +349,8 @@ begin
               entry    := DESC_ENTRIES(lookup_i);
               speed_ok := entry.speed = 0 or (entry.speed = 1 and high_speed = '1')
                           or (entry.speed = 2 and high_speed = '0');
-              if (req(0) = x"C0" and entry.dtype = DTYPE_MSOS20)
-                 or (req(0) = x"80" and entry.dtype = to_integer(unsigned(req(3)))
+              if (to_integer(unsigned(req(0))) = RT_VENDOR_IN and entry.dtype = DTYPE_MSOS20)
+                 or (to_integer(unsigned(req(0))) = RT_DEV_IN and entry.dtype = to_integer(unsigned(req(3)))
                      and entry.index = to_integer(unsigned(req(2))) and speed_ok) then
                 from_rom <= '1';
                 rom_base <= entry.offset;
@@ -447,22 +451,20 @@ begin
                   config_r <= req(2);
                   reinitialize(ALL_ENDPOINTS);
                 when A_CLEAR_HALT =>
-                  ep := to_integer(unsigned(req(4)(3 downto 0)));
                   -- HALT の解除はその方向のトグルだけを戻す
-                  if req(4)(7) = '1' then
-                    halts_in(ep)        <= '0';
-                    toggle_reset_in(ep) <= '1';
+                  if ep_in then
+                    halts_in(ep_num)        <= '0';
+                    toggle_reset_in(ep_num) <= '1';
                   else
-                    halts_out(ep)        <= '0';
-                    toggle_reset_out(ep) <= '1';
+                    halts_out(ep_num)        <= '0';
+                    toggle_reset_out(ep_num) <= '1';
                   end if;
                 when A_SET_HALT =>
-                  ep := to_integer(unsigned(req(4)(3 downto 0)));
-                  if ep /= 0 then
-                    if req(4)(7) = '1' then
-                      halts_in(ep) <= '1';
+                  if ep_num /= 0 then                    -- エンドポイント 0 は止めない
+                    if ep_in then
+                      halts_in(ep_num) <= '1';
                     else
-                      halts_out(ep) <= '1';
+                      halts_out(ep_num) <= '1';
                     end if;
                   end if;
                 when A_SET_INTERFACE =>

@@ -25,7 +25,7 @@ def bitstream():
 
 def fprobe_run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-m", "fprobe", "--serial", SERIAL, "run", str(RTT_DEMO),
-                           "--target", TARGET, *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
+                           "--target", TARGET, "--frequency", "4e6", *args], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
 
 def test_semihosting_exit_code_is_the_exit_status(tmp_path):

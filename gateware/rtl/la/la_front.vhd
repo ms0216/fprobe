@@ -23,6 +23,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.la_pkg.all;
 use work.timing_pkg.all;
 
 entity la_front is
@@ -101,8 +102,8 @@ begin
       edge_s2 := true;
       edge_prev := true;
     else
-      edge_s2 := ((rise_r and s1 and not s2) or (fall_r and s2 and not s1)) /= (s1'range => '0');
-      edge_prev := ((rise_r and s1 and not prev) or (fall_r and prev and not s1)) /= (s1'range => '0');
+      edge_s2 := trig_edge(rise_r, fall_r, s1, s2);
+      edge_prev := trig_edge(rise_r, fall_r, s1, prev);
     end if;
     if sel_r then                                        -- prev の次の値が s2 になる周期
       edge_next <= edge_s2;
@@ -135,7 +136,7 @@ begin
     if (trig_rise or trig_fall) = (trig_rise'range => '0') then
       edges := true;
     else
-      edges := ((trig_rise and s2 and not prev) or (trig_fall and prev and not s2)) /= (s2'range => '0');
+      edges := trig_edge(trig_rise, trig_fall, s2, prev);
     end if;
     live_hit <= (s2 and trig_mask) = (trig_value and trig_mask) and edges;
   end process;

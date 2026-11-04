@@ -15,6 +15,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.ps_window_pkg.all;
 
 entity la_ps_port is
@@ -104,8 +105,8 @@ begin
           la_r       <= (others => '0');
           ev_r       <= (others => '0');
           beats_r    <= (others => '0');
-          if pos_write and stale /= x"FFFFFFFF" then
-            stale <= stale + 1;
+          if pos_write then
+            stale <= sat_inc(stale);
           end if;
         elsif pos_write then
           if tag = cons_epoch then
@@ -116,8 +117,8 @@ begin
             else
               beats_r <= unsigned(bus_wdata);
             end if;
-          elsif stale /= x"FFFFFFFF" then
-            stale <= stale + 1;
+          else
+            stale <= sat_inc(stale);                         -- 前の流れの番号の書き（捨てる）
           end if;
         end if;
         if bus_wr = '1' and to_integer(bus_addr) = WIN_POS_TAG then

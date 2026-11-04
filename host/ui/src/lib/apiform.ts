@@ -58,7 +58,7 @@ export function exampleValues(fields: Field[]): FieldValues {
   const out: FieldValues = {};
   for (const f of fields) {
     if (f.example === undefined) continue;
-    out[f.name] = f.kind === "json" ? JSON.stringify(f.example) : isAddressLike(f.name, f.example) ? hexText(f.example as number) : String(f.example);
+    out[f.name] = f.kind === "json" ? JSON.stringify(f.example) : fieldText(f.name, f.example);
   }
   return out;
 }
@@ -67,6 +67,15 @@ export function exampleValues(fields: Field[]): FieldValues {
 const ADDRESS_NAME = new RegExp("(^|_)(address|addr|offset|mask|base)(_|$)|_end$");
 export const isAddressLike = (name: string, v: unknown): boolean => typeof v === "number" && Number.isInteger(v) && v >= 0 && ADDRESS_NAME.test(name);
 export const hexText = (v: number): string => "0x" + v.toString(16).toUpperCase();
+
+/** 欄の名前に合わせた値の文字（番地・オフセット・マスクは 16 進、ほかは 10 進・そのまま）。個数・回数を 16 進にしない */
+export const fieldText = (name: string, v: unknown): string =>
+  isAddressLike(name, v) ? hexText(v as number) : typeof v === "string" ? v : JSON.stringify(v);
+
+/** 省ける欄の既定（仕様の default）の表示。既定が無い・null（「指定しない」の意味）なら null（欄に値のように見せない） */
+export function defaultText(f: Field): string | null {
+  return f.default === undefined || f.default === null ? null : fieldText(f.name, f.default);
+}
 
 export function apiMethods(spec: ApiSpec): ApiMethod[] {
   return Object.entries(spec.methods)

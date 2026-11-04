@@ -139,6 +139,7 @@ export interface DebugSnapshot {
   gen: number;               // 変数を読み直した回数（木の展開したポインタの先を読み直す合図）
   stops: number;             // 止まって読み直した回数（変わった値の印は、前に止まったときの値と比べる）
   lastStep: StepInfo | null; // 最後のステップ操作の結果（デーモンが返した値。走り出したら null）
+  filesRead: boolean;        // つないでから、ソースの一覧を一度は読み終えた（読み終わる前に「プログラムが無い」と出さない。backlog 69 番）
 }
 
 /** ステップ操作の結果（debug.step の応答のまま）。steps・runs はデーモンが測った数（古いデーモンは無い = null）。
@@ -196,7 +197,7 @@ export class Debugger {
   private snap: DebugSnapshot = {
     elf: null, files: [], open: null, source: null, stop: null, stale: false, breakpoints: [], watchpoints: [],
     registers: null, backtrace: [], watches: savedWatches(), watchMode: "elf", locals: null, disasm: [], gen: 0, stops: 0,
-    frame: 0, focus: null, lastStep: null,
+    frame: 0, focus: null, lastStep: null, filesRead: false,
   };
   private liveUsers = 0;                     // ウォッチを走らせたまま読む利用者（開いているパネル）の数
   private liveTimer: ReturnType<typeof setInterval> | null = null;
@@ -212,6 +213,7 @@ export class Debugger {
   constructor(private conn: Conn, private app: AppState) {
     conn.onLink((link) => {
       if (link === "open") void this.reloadAll();
+      else if (this.snap.filesRead) this.set({ filesRead: false });
     });
     conn.on("activity", (e: { method: string }) => {
       if (ELF_METHODS.has(e.method)) void this.reloadFiles();
@@ -557,13 +559,17 @@ export class Debugger {
 
   private async reloadFiles(): Promise<void> {
     const list = await this.quiet("debug.source.list");
-    if (!list) return;
+    if (!list) {
+      if (!this.snap.filesRead) this.set({ filesRead: true });       // 読めなかった（ELF が無い等）も読み終えた
+      return;
+    }
     const status = await this.quiet("debug.elf.status");
     const files: SourceFile[] = list.files;
     const keep = files.some((f) => f.name === this.snap.open);
     // ELF が変わったら本文は読み直す
     this.members.clear();                                     // 型は ELF ごと
-    this.set({ files, open: keep ? this.snap.open : null, source: null, elf: status?.path ?? (files.length ? this.snap.elf : null) });
+    this.set({ files, open: keep ? this.snap.open : null, source: null, elf: status?.path ?? (files.length ? this.snap.elf : null),
+               filesRead: true });
     // 止まった知らせが一覧より先に来ていたら、止まったファイルを開く
     const stopped = this.snap.stop?.file;
     const name = keep ? this.snap.open : stopped && files.some((f) => f.name === stopped) ? stopped : null;

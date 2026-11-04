@@ -2,6 +2,9 @@
 -- AXI3 の 64 ビットのマスタにする（ボード非依存。Zynq の S_AXI_HP0 等）。仕様: docs/superpowers/specs/2026-10-19-pynq-z2-port-design.md §4.3
 --
 -- 1 拍 = 2 語の INCR のバースト（AxLEN = 1、AxSIZE = 3）。物理番地 = base + 拍の番号 × 16、下位 64 ビットが先の語。
+-- 書きの帯域: W の口（64 ビット）を休ませない = 2 周期に 1 拍（100 MHz で 800 MB/s。この口の上限）。送っている拍（AW・W）の
+-- 次の拍を 1 つ控え（nx_*）に受け、送っている拍の最後の W が渡る周期に送る側へ移す（控えが空なら直接送る側へ）。
+-- cmd_ready はレジスタだけで決まる（控えが空・出しっぱなしが上限未満。AXI の READY から上流への組み合わせの経路は無い）。
 -- base = 0、または 16 の倍数でない（下位 4 ビットが 0 でない）間はコマンドを受けない（ready = 0。PS の DDR の 0 番地を壊さない。
 -- 16 バイトのバーストが 4 KB の境界をまたぐ AXI 違反も防ぐ）。
 -- rst は PS 側の AXI を巻き戻せない: 書きの途中（AW だけ・W の一部だけ渡した後）や応答待ちの間に rst を入れると、相手に
@@ -68,6 +71,10 @@ architecture rtl of axi_mem_port is
   signal aw_pending, ar_pending : std_logic;
   signal w_left : unsigned(1 downto 0);               -- 送る残りの W の語（0〜2）
   signal wbuf : std_logic_vector(127 downto 0);
+  -- 次に送る書きの拍の控え（送っている拍が終わる周期に送る側へ移す）
+  signal nx_valid : std_logic;
+  signal nx_addr : unsigned(31 downto 0);
+  signal nx_data : std_logic_vector(127 downto 0);
   signal waddr, raddr : unsigned(31 downto 0);
   signal wr_out, rd_out : natural range 0 to MAX_OUTSTANDING;   -- B・R の返っていない数
   signal r_lo : std_logic_vector(63 downto 0);
@@ -79,9 +86,9 @@ architecture rtl of axi_mem_port is
 begin
   enabled <= '1' when base /= 0 and base(3 downto 0) = "0000" else '0';
   ready <= enabled;
-  can_write <= '1' when enabled = '1' and aw_pending = '0' and w_left = 0 and wr_out < MAX_OUTSTANDING else '0';
-  can_read  <= '1' when enabled = '1' and ar_pending = '0' and aw_pending = '0' and w_left = 0 and wr_out = 0
-                        and rd_out < MAX_OUTSTANDING else '0';
+  can_write <= '1' when enabled = '1' and nx_valid = '0' and wr_out < MAX_OUTSTANDING else '0';
+  can_read  <= '1' when enabled = '1' and ar_pending = '0' and aw_pending = '0' and w_left = 0 and nx_valid = '0'
+                        and wr_out = 0 and rd_out < MAX_OUTSTANDING else '0';
   cmd_ready <= can_write when cmd_write = '1' else can_read;
 
   m_axi_awaddr  <= std_logic_vector(waddr);
@@ -108,6 +115,8 @@ begin
   process (clk)
     variable wr_next, rd_next : natural range 0 to MAX_OUTSTANDING;
     variable errs : unsigned(15 downto 0);
+    variable free : boolean;                          -- 送っている拍（AW・W）がこの周期の終わりに無くなる
+    variable cmd_addr_b : unsigned(31 downto 0);
   begin
     if rising_edge(clk) then
       rd_valid <= '0';
@@ -117,6 +126,9 @@ begin
         w_left <= (others => '0');
         wbuf <= (others => '0');
         waddr <= (others => '0');
+        nx_valid <= '0';
+        nx_addr <= (others => '0');
+        nx_data <= (others => '0');
         raddr <= (others => '0');
         wr_out <= 0;
         rd_out <= 0;
@@ -129,24 +141,40 @@ begin
         wr_next := wr_out;
         rd_next := rd_out;
         errs := err_count;
-        -- コマンドを受ける
-        if cmd_valid = '1' and cmd_write = '1' and can_write = '1' then
-          waddr <= base + shift_left(resize(cmd_addr, 32), 4);
-          wbuf <= cmd_data;
-          aw_pending <= '1';
-          w_left <= "10";
-          wr_next := wr_next + 1;
-        elsif cmd_valid = '1' and cmd_write = '0' and can_read = '1' then
-          raddr <= base + shift_left(resize(cmd_addr, 32), 4);
-          ar_pending <= '1';
-          rd_next := rd_next + 1;
-        end if;
-        -- AXI の受け渡し
+        free := (aw_pending = '0' or m_axi_awready = '1') and (w_left = 0 or (w_left = 1 and m_axi_wready = '1'));
+        cmd_addr_b := base + shift_left(resize(cmd_addr, 32), 4);
+        -- AXI の受け渡し（送る側へ移す拍があれば、下で上書きする）
         if aw_pending = '1' and m_axi_awready = '1' then
           aw_pending <= '0';
         end if;
         if w_left /= 0 and m_axi_wready = '1' then
           w_left <= w_left - 1;
+        end if;
+        -- 控えの拍を送る側へ（送っている拍が終わる周期）
+        if nx_valid = '1' and free then
+          waddr <= nx_addr;
+          wbuf <= nx_data;
+          aw_pending <= '1';
+          w_left <= "10";
+          nx_valid <= '0';
+        end if;
+        -- コマンドを受ける（控えが空のときだけ。送る側が空くなら直接、でなければ控えに）
+        if cmd_valid = '1' and cmd_write = '1' and can_write = '1' then
+          if free then
+            waddr <= cmd_addr_b;
+            wbuf <= cmd_data;
+            aw_pending <= '1';
+            w_left <= "10";
+          else
+            nx_addr <= cmd_addr_b;
+            nx_data <= cmd_data;
+            nx_valid <= '1';
+          end if;
+          wr_next := wr_next + 1;
+        elsif cmd_valid = '1' and cmd_write = '0' and can_read = '1' then
+          raddr <= cmd_addr_b;
+          ar_pending <= '1';
+          rd_next := rd_next + 1;
         end if;
         if ar_pending = '1' and m_axi_arready = '1' then
           ar_pending <= '0';

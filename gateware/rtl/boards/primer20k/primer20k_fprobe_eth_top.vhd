@@ -11,7 +11,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.primer20k_pkg.all;
-use work.text_report_pkg.all;
 
 entity primer20k_fprobe_eth_top is
   port (
@@ -68,29 +67,7 @@ architecture rtl of primer20k_fprobe_eth_top is
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe, target_tx, target_tx_oe : std_logic;
   signal func_o, func_oe : std_logic_vector(7 downto 0);
   signal heartbeat : unsigned(25 downto 0) := (others => '0');
-  -- 診断
-  constant DIAG_MSG : template_t := lit("L") & hex(0) & hex(1) & lit(" C") & hex(2) & lit(" S") & hex(3)
-                                   & lit(" q") & hex(4) & lit(" r") & hex(5) & lit(" d") & hex(6) & hex(7)
-                                   & lit(" n") & hex(8) & hex(9) & lit(" b") & hex(10) & lit(" t") & hex(11) & hex(12)
-                                   & lit("" & CR & LF);
-  signal diag : std_logic_vector(15 downto 0);
-  constant DAP_MSG : template_t := lit("D") & hex(0) & lit(" ") & hex(1) & hex(2) & hex(3) & hex(4) & hex(5)
-                                  & hex(6) & hex(7) & hex(8) & hex(9) & hex(10) & hex(11) & hex(12) & hex(13)
-                                  & hex(14) & hex(15) & lit("" & CR & LF);
-  type tail_t is array (0 to 14) of std_logic_vector(7 downto 0);
-  signal dtail, dtail_last : tail_t := (others => (others => '0'));
-  signal dbytes, dlen : unsigned(7 downto 0) := (others => '0');
-  signal dfields : fields_t := (others => (others => '0'));
-  signal r2_valid, r2_ready, r1_busy : std_logic := '0';
-  signal r1_valid, r1_ready, r2_busy, d_valid2 : std_logic;
-  signal r1_data, r2_data : std_logic_vector(7 downto 0);
-  signal fields : fields_t := (others => (others => '0'));
-  signal req_n, rsp_n, dreq_n, drsp_n : unsigned(7 downto 0) := (others => '0');
-  signal req_bytes, req_len, req_len_prev, odd_n : unsigned(7 downto 0) := (others => '0');
-  signal req_first, req_first_prev : std_logic_vector(7 downto 0) := (others => '0');
-  signal tick : unsigned(23 downto 0) := (others => '0');
-  signal report_start, d_valid, d_ready : std_logic := '0';
-  signal d_byte : std_logic_vector(7 downto 0);
+  signal diag : std_logic_vector(15 downto 0);                 -- eth_link の状態（診断へ）
 begin
   phy_reset_i : entity work.primer20k_ulpi_reset
     port map (clk27 => clk27, resetb => eth_rst, released => phy_released);
@@ -137,17 +114,24 @@ begin
               ddr_dq => ddr_dq, ddr_dqs => ddr_dqs, ddr_dqs_n => ddr_dqs_n);
 
   core_i : entity work.fprobe_core
-    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, CLK_HZ => SYS_CLK_HZ, MEM_ADDR_BITS => 23,
-                 MEM_TEST => work.design_caps_pkg.MEM_TEST,
-                 XTRIG => work.design_caps_pkg.XTRIG, TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ,
-                 SAMPLER => work.design_caps_pkg.SAMPLER, SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH,
+    -- 構成の機能はデザインの生成パッケージから全部渡す（ケイパビリティと回路を一致させる。tests/test_core_generics.py）
+    -- LA_INTERNAL: ロジアナは DDR3 の深いバッファ
+    generic map (CAPS => work.design_caps_pkg.CAPS_ROM, MEM_ADDR_BITS => work.design_caps_pkg.MEM_ADDR_BITS,
+                 MEM_TEST => work.design_caps_pkg.MEM_TEST, XTRIG => work.design_caps_pkg.XTRIG,
+                 TRIG_SEQ => work.design_caps_pkg.TRIG_SEQ, SAMPLER => work.design_caps_pkg.SAMPLER,
+                 SAMPLER_MATCH => work.design_caps_pkg.SAMPLER_MATCH, SAMPLER_CHECK_MAX => work.design_caps_pkg.SAMPLER_CHECK_MAX,
                  HAS_JTAG => work.design_caps_pkg.HAS_JTAG, INJECTOR => work.design_caps_pkg.INJECTOR,
-                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER,
-                 UART_FLOW => work.design_caps_pkg.UART_FLOW,
-                 LA_FILTER => work.design_caps_pkg.LA_FILTER, LA_PULSE => work.design_caps_pkg.LA_PULSE,
-                 LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
-                 AUX => work.design_caps_pkg.AUX,
-                 LA_INTERNAL => false)        -- ロジアナは DDR3 の深いバッファ
+                 HAS_SWO_MANCHESTER => work.design_caps_pkg.SWO_MANCHESTER, UART_FLOW => work.design_caps_pkg.UART_FLOW,
+                 AUX => work.design_caps_pkg.AUX, SYNC => work.design_caps_pkg.SYNC,
+                 OBS_PORT => work.design_caps_pkg.OBS_PORT, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
+                 LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS, LA_FILTER => work.design_caps_pkg.LA_FILTER,
+                 LA_PULSE => work.design_caps_pkg.LA_PULSE, LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
+                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
+                 EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK, CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
+                 LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN, LA_LANES => work.design_caps_pkg.LA_LANES,
+                 LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS, LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,
+                 -- ボードで決まるもの
+                 CLK_HZ => SYS_CLK_HZ, LA_INTERNAL => false)
     port map (clk => sys_clk, rst => sys_rst,
               ctrl_in_valid => req_valid, ctrl_in_ready => req_ready, ctrl_in_data => req_data,
               ctrl_in_last => req_last,
@@ -175,21 +159,12 @@ begin
               aux_rx => aux_rx);
 
   -- デバッグポートの機能ピン（それ以外のピンは入力のまま）
-  process (all)
-  begin
-    func_o  <= (others => '0');
-    func_oe <= (others => '0');
-    func_o(DBG_SWCLK)    <= swclk_o;
-    func_oe(DBG_SWCLK)   <= swclk_oe;
-    func_o(DBG_SWDIO)    <= swdio_o;
-    func_oe(DBG_SWDIO)   <= swdio_oe;
-    func_o(DBG_NRESET)   <= '0';
-    func_oe(DBG_NRESET)  <= nreset_low;
-    func_o(DBG_TDI)      <= tdi_o;
-    func_oe(DBG_TDI)     <= tdi_oe;
-    func_o(DBG_UART_TX)  <= target_tx;
-    func_oe(DBG_UART_TX) <= target_tx_oe;    -- ホストが UART に最初の 1 バイトを送るまで駆動しない（B29）
-  end process;
+  pin_func_i : entity work.debug_pin_func
+    generic map (DBG_SWCLK => DBG_SWCLK, DBG_TDI => DBG_TDI, DBG_NRESET => DBG_NRESET, DBG_SWDIO => DBG_SWDIO,
+                 DBG_UART_TX => DBG_UART_TX)
+    port map (swclk_o => swclk_o, swclk_oe => swclk_oe, swdio_o => swdio_o, swdio_oe => swdio_oe, nreset_low => nreset_low,
+              tdi_o => tdi_o, tdi_oe => tdi_oe, uart_tx => target_tx, uart_tx_oe => target_tx_oe,
+              func_o => func_o, func_oe => func_oe, uart_cts_n => open);
 
   pins : for i in pmod1'range generate
     pmod1(i) <= gpio_drive(i) when gpio_enable(i) = '1' else
@@ -203,101 +178,16 @@ begin
     end if;
   end process;
 
-  -- 診断: 0.1 秒ごとに状態（frame_mux・udp_stack・チャンネルの valid/ready・メッセージの数）を出す
-  process (sys_clk)
-  begin
-    if rising_edge(sys_clk) then
-      report_start <= '0';
-      if tick = 10_028_571 then
-        tick <= (others => '0');
-        report_start <= '1';
-      else
-        tick <= tick + 1;
-      end if;
-      if req_valid = '1' and req_ready = '1' and req_last = '1' then req_n <= req_n + 1; end if;
-      -- コアが受け取った CONTROL の要求の長さ（8 = 読み、12 = 1 語の書き。それ以外を数える）
-      if req_valid = '1' and req_ready = '1' then
-        if req_bytes = 0 then
-          req_first <= req_data;
-        end if;
-        if req_last = '1' then
-          req_len      <= req_bytes + 1;
-          req_len_prev <= req_len;
-          req_first_prev <= req_first;
-          req_bytes    <= (others => '0');
-          if req_bytes + 1 /= 8 and req_bytes + 1 /= 12 then
-            odd_n <= odd_n + 1;
-          end if;
-        else
-          req_bytes <= req_bytes + 1;
-        end if;
-      end if;
-      if rsp_valid = '1' and rsp_ready = '1' and rsp_last = '1' then rsp_n <= rsp_n + 1; end if;
-      if dreq_valid = '1' and dreq_ready = '1' and dreq_last = '1' then dreq_n <= dreq_n + 1; end if;
-      if drsp_valid = '1' and drsp_ready = '1' and drsp_last = '1' then drsp_n <= drsp_n + 1; end if;
-    end if;
-  end process;
-  fields(0) <= diag(15 downto 8);
-  fields(1) <= diag(7 downto 0);
-  fields(2) <= req_valid & req_ready & rsp_valid & rsp_ready & dreq_valid & dreq_ready & drsp_valid & drsp_ready;
-  fields(3) <= st_valid & st_ready & swo_valid & swo_ready & uo_valid & uo_ready & ui_valid & ui_ready;
-  fields(4) <= std_logic_vector(req_n);
-  fields(5) <= std_logic_vector(rsp_n);
-  fields(6) <= std_logic_vector(dreq_n);
-  fields(7) <= std_logic_vector(drsp_n);
-  fields(8)  <= std_logic_vector(req_len_prev);
-  fields(9)  <= std_logic_vector(req_len);
-  fields(10) <= std_logic_vector(odd_n);
-  fields(11) <= req_first_prev;
-  fields(12) <= req_first;
-  fields(13 to fields'high) <= (others => (others => '0'));
-  -- DAP の要求の末尾 15 バイトと長さ（コアの入口で）
-  process (sys_clk)
-  begin
-    if rising_edge(sys_clk) then
-      if dreq_valid = '1' and dreq_ready = '1' then
-        dtail <= dtail(1 to 14) & dreq_data;
-        if dreq_last = '1' then
-          dlen <= dbytes + 1;
-          dbytes <= (others => '0');
-          dtail_last <= dtail(1 to 14) & dreq_data;
-        else
-          dbytes <= dbytes + 1;
-        end if;
-      end if;
-    end if;
-  end process;
-  dfields(0) <= std_logic_vector(dlen);
-  tail_fields : for k in 0 to 14 generate
-    dfields(k + 1) <= dtail_last(k);
-  end generate;
-  report_i : entity work.text_report
-    generic map (TEMPLATE => DIAG_MSG)
-    port map (clk => sys_clk, rst => sys_rst, start => report_start, fields => fields, busy => r1_busy,
-              out_valid => r1_valid, out_ready => r1_ready, out_data => r1_data);
-  -- 1 行目を出し終えたら 2 行目（busy の立ち下がり）
-  process (sys_clk)
-    variable prev : std_logic := '0';
-  begin
-    if rising_edge(sys_clk) then
-      r2_valid <= '0';
-      if prev = '1' and r1_busy = '0' then
-        r2_valid <= '1';
-      end if;
-      prev := r1_busy;
-    end if;
-  end process;
-  report2_i : entity work.text_report
-    generic map (TEMPLATE => DAP_MSG)
-    port map (clk => sys_clk, rst => sys_rst, start => r2_valid, fields => dfields, busy => r2_busy,
-              out_valid => d_valid2, out_ready => r2_ready, out_data => r2_data);
-  d_valid  <= r1_valid or d_valid2;
-  d_byte   <= r1_data when r1_valid = '1' else r2_data;
-  r1_ready <= d_ready;
-  r2_ready <= d_ready and not r1_valid;
-  diag_uart_i : entity work.uart_tx
-    port map (clk => sys_clk, rst => sys_rst, divisor => to_unsigned((SYS_CLK_HZ + 57_600) / 115_200, 16),
-              in_valid => d_valid, in_ready => d_ready, in_data => d_byte, tx => uart_tx, busy => open);
+  diag_i : entity work.primer20k_eth_diag
+    generic map (CLK_HZ => SYS_CLK_HZ)
+    port map (clk => sys_clk, rst => sys_rst, diag => diag,
+              req_valid => req_valid, req_ready => req_ready, req_last => req_last, req_data => req_data,
+              rsp_valid => rsp_valid, rsp_ready => rsp_ready, rsp_last => rsp_last,
+              dreq_valid => dreq_valid, dreq_ready => dreq_ready, dreq_last => dreq_last, dreq_data => dreq_data,
+              drsp_valid => drsp_valid, drsp_ready => drsp_ready, drsp_last => drsp_last,
+              st_valid => st_valid, st_ready => st_ready, swo_valid => swo_valid, swo_ready => swo_ready,
+              uo_valid => uo_valid, uo_ready => uo_ready, ui_valid => ui_valid, ui_ready => ui_ready,
+              uart_tx => uart_tx);
 
   led(0) <= not phy_released;
   led(1) <= not peer_known;

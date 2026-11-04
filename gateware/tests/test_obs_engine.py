@@ -7,7 +7,7 @@ from tests.rtl import TEST_RTL
 SOURCES = [*target_ip("fprobe_obs/rtl/obs_async_fifo.vhd", "fprobe_obs/rtl/obs_core.vhd",
                       "fprobe_obs/rtl/obs_tck_sampler.vhd", "fprobe_obs/rtl/obs_soft_tap.vhd",
                       "fprobe_obs/rtl/obs_soft_core.vhd", "fprobe_obs/rtl/obs_snap_core.vhd"),
-           *rtl("debug/jtag_phy.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd"), TEST_RTL / "obs_harness.vhd"]
+           *rtl("common/util_pkg.vhd", "debug/dap_pkg.vhd", "debug/jtag_phy.vhd", "debug/obs_pkg.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd"), TEST_RTL / "obs_harness.vhd"]
 
 
 @pytest.mark.parametrize("chain", [False, True])

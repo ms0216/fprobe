@@ -20,6 +20,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.dap_pkg.all;
 
 entity dap_monitor is
   port (
@@ -65,9 +66,6 @@ entity dap_monitor is
 end entity;
 
 architecture rtl of dap_monitor is
-  constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
-  constant ACK_OK      : std_logic_vector(2 downto 0) := "001";
-
   -- 受理して応答をまだ見ていない命令（0 が古い）
   type q_req_t is array (0 to 1) of std_logic_vector(3 downto 0);
   type q_data_t is array (0 to 1) of std_logic_vector(31 downto 0);

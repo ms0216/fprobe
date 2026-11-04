@@ -1,5 +1,7 @@
 """SPI の解読。仕様: docs/superpowers/specs/2026-10-17-f7-protocol-decode-design.md"""
 
+from typing import Literal
+
 from ..la import Transitions
 from .core import Annotation, Channel, Decoding, project
 
@@ -16,7 +18,7 @@ class _Word:
         self.miso = 0
 
 
-def decode_spi(tr: Transitions, *, sck: Channel, mosi: Channel | None, miso: Channel | None, cs: Channel | None, mode: int,
+def decode_spi(tr: Transitions, *, sck: Channel, mosi: Channel | None, miso: Channel | None, cs: Channel | None, mode: Literal[0, 1, 2, 3],
                msb_first: bool, word_bits: int, cs_active_low: bool) -> Decoding:
     """SPI を解読する。mode = CPOL × 2 + CPHA。設定はすべて既定を持たない（つながない線は None を明示）。
     cs = None のときは最初のクロックの辺から word_bits ごとに区切る。"""

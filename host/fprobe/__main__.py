@@ -145,8 +145,8 @@ def _add_run(commands) -> None:
                               description="終了コード: 0 合格 / ターゲットの SYS_EXIT の値 / 1 試験の失敗 / 3 プローブ・"
                                           "書き込みの失敗 / 124 時間切れ / 125 故障・思いがけない停止")
     run.add_argument("elf", type=Path)
-    run.add_argument("--target", default="cortex_m", help="pyOCD のターゲット名（例 stm32f401xe）")
-    run.add_argument("--frequency", type=float, default=4e6, help="SWD の周波数 [Hz]")
+    run.add_argument("--target", required=True, help="pyOCD のターゲット名（例 stm32f401xe、汎用の cortex_m）。既定は持たない")
+    run.add_argument("--frequency", type=float, required=True, help="SWD / JTAG の周波数 [Hz]（例 4e6）。既定は持たない")
     run.add_argument("--connect-mode", default="halt", choices=["halt", "attach", "under-reset"])
     run.add_argument("--load", default="auto", choices=["auto", "ram", "flash", "none"],
                      help="auto: ELF がすべて RAM なら ram、そうでなければ flash。none: 書かない")

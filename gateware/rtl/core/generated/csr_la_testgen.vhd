@@ -33,8 +33,8 @@ architecture rtl of csr_la_testgen is
   signal index : natural range 0 to 15;
   signal control_enable_r : std_logic := '0';
   signal control_edge_r : std_logic := '0';
-  signal period_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000010";
-  signal high_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000001";
+  signal period_r : std_logic_vector(31 downto 0) := x"00000002";
+  signal high_r : std_logic_vector(31 downto 0) := x"00000001";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -48,8 +48,8 @@ begin
       if rst = '1' then
         control_enable_r <= '0';
         control_edge_r <= '0';
-        period_r <= "00000000000000000000000000000010";
-        high_r <= "00000000000000000000000000000001";
+        period_r <= x"00000002";
+        high_r <= x"00000001";
       elsif start then
         ack   <= '1';
         case index is

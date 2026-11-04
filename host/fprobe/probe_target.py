@@ -37,10 +37,11 @@ class TargetService:
         self._host = HostView(host, self.NEEDS, type(self).__name__)
         self._last_connect: dict | None = None             # 最後の target_connect の頼み（つなぎ直し・system_status）
 
-    def target_connect(self, target: str = "cortex_m", frequency_hz: int = 4_000_000,
+    def target_connect(self, target: str, frequency_hz: int,
                        connect_mode: str = "halt", jtag_chain: list[int] | None = None,
                        script: str | None = None, core: int | None = None) -> dict:
-        """ターゲットに接続する。既定は SWD。jtag_chain（JTAG チェーンの IR 長、TDO 側から。例: STM32 は [4, 5]）を
+        """ターゲットに接続する。target（pyOCD のターゲット名）と frequency_hz（線の速さ）は使う側が明示する（既定を
+        持たない。例・推奨の値は仕様の examples: cortex_m・4 MHz。速すぎれば接続が失敗する）。既定は SWD。jtag_chain（JTAG チェーンの IR 長、TDO 側から。例: STM32 は [4, 5]）を
         指定すると JTAG。connect_mode: halt / attach / under-reset。target="auto" なら先に部品を判別して
         pyOCD のターゲット名を選ぶ（判別の結果は auto に。JTAG だけのターゲットなら jtag_chain も）。
         script: 接続・リセット等の手順を上書きする pyOCD のユーザスクリプト（"builtin:<名前>" かファイル。script_check）。

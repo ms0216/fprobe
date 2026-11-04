@@ -8,6 +8,8 @@
 --     - UDP（宛先ポート PORT）→ payload の ch | seq | data を frame_mux の受信バッファへ（番地 0 = ch、1〜 = data）。
 --       フレームが正しく終わったら commit し、送り主（MAC・IP・ポート）を以後の送信先にする。
 --   frame_mux が前のフレームを流している間（rx_busy）は受信を止める（手前の FIFO が受け持つ）。
+--   欄の読み取りは層ごとの entity（eth_rx_header: 見出しと位置、arp_rx、ipv4_rx、icmp_rx: ICMP のバッファへ、
+--   udp_rx: frame_mux のバッファへ）が受け持ち、ここはフレームの最後のバイトでの判定（応答の依頼・commit・送信先）だけ。
 -- 送信（out_*: Ethernet のフレームの全バイト、続けて start_* に 1 件）: 優先順 ARP 応答 > echo 応答 > frame_mux の
 --   フレーム（UDP、seq は通し番号）。送信先がまだ無ければ frame_mux のフレームは捨てる。
 --   ヘッダはまとめて hdr に組んでから送り出す（UDP: Ethernet 14 + IP 20 + UDP 8 + ch + seq = 44 バイト、
@@ -15,6 +17,8 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
+use work.eth_pkg.all;
 
 entity udp_stack is
   generic (
@@ -62,66 +66,41 @@ end entity;
 
 architecture rtl of udp_stack is
   constant PORT_V : std_logic_vector(15 downto 0) := std_logic_vector(to_unsigned(PORT_NUM, 16));
-  constant ICMP_BITS : natural := 7;
-  subtype byte_t is std_logic_vector(7 downto 0);
-  type bytes_t is array (natural range <>) of byte_t;
-
-  function mac_byte(m : std_logic_vector(47 downto 0); i : natural) return byte_t is
-  begin
-    return m(47 - 8 * i downto 40 - 8 * i);
-  end function;
-
-  function ip_byte(a : std_logic_vector(31 downto 0); i : natural) return byte_t is
-  begin
-    return a(31 - 8 * i downto 24 - 8 * i);
-  end function;
-
-  -- 16 ビットの 1 の補数の和の折り返し
-  function fold(s : unsigned(19 downto 0)) return unsigned is
-    variable t : unsigned(19 downto 0) := resize(s(15 downto 0), 20) + resize(s(19 downto 16), 20);
-  begin
-    t := resize(t(15 downto 0), 20) + resize(t(19 downto 16), 20);
-    return t(15 downto 0);
-  end function;
+  constant ICMP_BITS : natural := clog2(ICMP_MAX);
 
   ---------------------------------------------------------------------------------------------
-  -- 受信
+  -- 受信: 層ごとの読み取り（eth_rx_header・arp_rx・ipv4_rx・icmp_rx・udp_rx）と、フレームの終わりでの判定
   ---------------------------------------------------------------------------------------------
-  signal i         : natural range 0 to 2047 := 0;   -- フレーム内の位置
-  signal dst_me, dst_bc : boolean := true;
-  signal etype     : std_logic_vector(15 downto 0) := (others => '0');
-  signal src_mac   : std_logic_vector(47 downto 0) := (others => '0');
+  signal take_in   : std_logic;
+  signal rx_take   : std_logic;                      -- このバイトを各層が読む（リセット中は読まない）
+  signal pos       : frame_pos_t;                    -- in_data のフレーム内の位置
+  -- Ethernet
+  signal dst_me, dst_bc : std_logic;
+  signal src_mac   : std_logic_vector(47 downto 0);
+  signal etype     : std_logic_vector(15 downto 0);
   -- ARP
-  signal arp_ok    : boolean := true;                -- 固定の欄が要求の形か
-  signal arp_spa   : std_logic_vector(31 downto 0) := (others => '0');
-  signal arp_sha   : std_logic_vector(47 downto 0) := (others => '0');
-  signal tpa_me    : boolean := true;
+  signal arp_request, arp_tpa_me : std_logic;
+  signal arp_sha   : std_logic_vector(47 downto 0);
+  signal arp_spa   : std_logic_vector(31 downto 0);
   -- IPv4
-  signal ip_ok     : boolean := true;                -- バージョン・長さ・分割の欄
-  signal ip_total  : unsigned(15 downto 0) := (others => '0');
-  signal ip_proto  : byte_t := (others => '0');
-  signal ip_src    : std_logic_vector(31 downto 0) := (others => '0');
-  signal ip_dst_me : boolean := true;
-  signal ip_sum    : unsigned(19 downto 0) := (others => '0');
-  signal ip_hi     : byte_t := (others => '0');      -- 16 ビット語の上位（偶数番目のバイト）
-  -- UDP
-  signal udp_src   : std_logic_vector(15 downto 0) := (others => '0');
-  signal udp_dst   : std_logic_vector(15 downto 0) := (others => '0');
-  signal udp_len   : unsigned(15 downto 0) := (others => '0');
+  signal ip_ok     : std_logic;
+  signal ip_total  : unsigned(15 downto 0);
+  signal ip_proto  : byte_t;
+  signal ip_src    : std_logic_vector(31 downto 0);
   -- ICMP
-  signal icmp_type : byte_t := (others => '0');
-  signal icmp_w    : boolean := false;               -- ICMP のバッファに書いてよい（応答を送り終えている）
-  signal icmp_we   : std_logic := '0';
-  signal icmp_wa   : unsigned(ICMP_BITS - 1 downto 0) := (others => '0');
-  signal icmp_wd   : byte_t := (others => '0');
+  signal icmp_sel, icmp_hold, icmp_echo : std_logic;
+  signal icmp_sum_r : std_logic_vector(15 downto 0);  -- 要求の ICMP チェックサム
+  signal icmp_we   : std_logic;
+  signal icmp_wa   : unsigned(ICMP_BITS - 1 downto 0);
+  signal icmp_wd   : byte_t;
   signal icmp_ra   : unsigned(ICMP_BITS - 1 downto 0) := (others => '0');
   signal icmp_q    : byte_t;
-  signal rx_we_r   : std_logic := '0';
-  signal rx_wa_r   : unsigned(RAM_BITS - 1 downto 0) := (others => '0');
-  signal rx_wd_r   : byte_t := (others => '0');
+  -- UDP
+  signal udp_sel, udp_ok : std_logic;
+  signal udp_src   : std_logic_vector(15 downto 0);
+  signal udp_data_len : unsigned(15 downto 0);
   signal commit_r  : std_logic := '0';
   signal len_r     : natural range 0 to MAX_PAYLOAD + 1 := 0;
-  signal take_in   : std_logic;
 
   -- 応答の依頼（受信 → 送信）
   signal arp_due, icmp_due : boolean := false;
@@ -130,7 +109,6 @@ architecture rtl of udp_stack is
   signal icmp_mac_r : std_logic_vector(47 downto 0) := (others => '0');  -- echo 応答の宛先
   signal icmp_ip_r : std_logic_vector(31 downto 0) := (others => '0');
   signal icmp_len_r : natural range 0 to ICMP_MAX := 0;
-  signal icmp_sum_r : std_logic_vector(15 downto 0) := (others => '0');  -- 要求の ICMP チェックサム
   signal arp_clr, icmp_clr : std_logic := '0';
   -- 送信先（最後に受けた正しい UDP の送り主）
   signal peer_ok   : boolean := false;
@@ -164,9 +142,6 @@ architecture rtl of udp_stack is
   signal done_r    : std_logic := '0';
   signal ra        : unsigned(RAM_BITS - 1 downto 0) := (others => '0');
 begin
-  rx_we      <= rx_we_r;
-  rx_waddr   <= rx_wa_r;
-  rx_wdata   <= rx_wd_r;
   rx_commit  <= commit_r;
   rx_len     <= len_r;
   out_valid  <= ov;
@@ -187,19 +162,48 @@ begin
     end if;
   end process;
 
+  ---------------------------------------------------------------------------------------------
+  -- 受信
+  ---------------------------------------------------------------------------------------------
   take_in  <= in_valid and not rx_busy and not commit_r;
   in_ready <= take_in;
+  rx_take  <= take_in and not rst;
 
+  eth_i : entity work.eth_rx_header
+    generic map (MAC => MAC)
+    port map (clk => clk, rst => rst, valid => take_in, data => in_data, last => in_last, pos => pos,
+              dst_me => dst_me, dst_bc => dst_bc, src_mac => src_mac, etype => etype);
+
+  arp_i : entity work.arp_rx
+    generic map (IP => IP)
+    port map (clk => clk, valid => rx_take, data => in_data, pos => pos,
+              request => arp_request, tpa_me => arp_tpa_me, sha => arp_sha, spa => arp_spa);
+
+  ipv4_i : entity work.ipv4_rx
+    generic map (IP => IP)
+    port map (clk => clk, valid => rx_take, data => in_data, pos => pos,
+              ok => ip_ok, total => ip_total, proto => ip_proto, src => ip_src);
+
+  icmp_sel  <= '1' when ip_proto = IP_PROTO_ICMP else '0';
+  icmp_hold <= '1' when icmp_due else '0';
+  icmp_i : entity work.icmp_rx
+    generic map (ICMP_MAX => ICMP_MAX)
+    port map (clk => clk, valid => rx_take, data => in_data, pos => pos, sel => icmp_sel, hold => icmp_hold,
+              ip_total => ip_total, echo => icmp_echo, checksum => icmp_sum_r,
+              buf_we => icmp_we, buf_waddr => icmp_wa, buf_wdata => icmp_wd);
+
+  udp_sel <= '1' when etype = ETHERTYPE_IPV4 and ip_proto = IP_PROTO_UDP else '0';
+  udp_i : entity work.udp_rx
+    generic map (PORT_NUM => PORT_NUM, MAX_PAYLOAD => MAX_PAYLOAD, RAM_BITS => RAM_BITS)
+    port map (clk => clk, valid => rx_take, data => in_data, pos => pos, sel => udp_sel, ip_total => ip_total,
+              ok => udp_ok, src_port => udp_src, data_len => udp_data_len,
+              buf_we => rx_we, buf_waddr => rx_waddr, buf_wdata => rx_wdata);
+
+  -- フレームの最後のバイトで、正しく受けたフレームなら応答の依頼・commit・送信先の更新をする
   process (clk)
-    variable b  : byte_t;
-    variable n  : natural range 0 to 2047;
-    variable pl : natural range 0 to 2047;            -- UDP の payload（ch | seq | data）の位置
-    variable fl : natural;
   begin
     if rising_edge(clk) then
-      rx_we_r  <= '0';
       commit_r <= '0';
-      icmp_we  <= '0';
       if arp_clr = '1' then
         arp_due <= false;
       end if;
@@ -207,130 +211,29 @@ begin
         icmp_due <= false;
       end if;
       if rst = '1' then
-        i        <= 0;
         arp_due  <= false;
         icmp_due <= false;
         peer_ok  <= false;
-      elsif take_in = '1' then
-        b := in_data;
-        n := i;
-        if i < 2047 then
-          i <= i + 1;
-        end if;
-        -- Ethernet
-        if n <= 5 then
-          if n = 0 then
-            dst_me <= b = mac_byte(MAC, 0);
-            dst_bc <= b = x"FF";
-          else
-            dst_me <= dst_me and b = mac_byte(MAC, n);
-            dst_bc <= dst_bc and b = x"FF";
+      elsif take_in = '1' and in_last = '1' and in_good = '1' and (dst_me = '1' or dst_bc = '1') then
+        if etype = ETHERTYPE_ARP and arp_request = '1' and arp_tpa_me = '1' and to_integer(pos) >= ARP_END_POS - 1 then
+          if not arp_due then
+            arp_due   <= true;
+            arp_mac_r <= arp_sha;
+            arp_ip_r  <= arp_spa;
           end if;
-        elsif n <= 11 then
-          src_mac <= src_mac(39 downto 0) & b;
-        elsif n <= 13 then
-          etype <= etype(7 downto 0) & b;
-        end if;
-        -- ARP（14〜41）
-        case n is
-          when 14 => arp_ok <= b = x"00";
-          when 15 => arp_ok <= arp_ok and b = x"01";
-          when 16 => arp_ok <= arp_ok and b = x"08";
-          when 17 => arp_ok <= arp_ok and b = x"00";
-          when 18 => arp_ok <= arp_ok and b = x"06";
-          when 19 => arp_ok <= arp_ok and b = x"04";
-          when 20 => arp_ok <= arp_ok and b = x"00";
-          when 21 => arp_ok <= arp_ok and b = x"01";       -- 要求
-          when 38 => tpa_me <= b = ip_byte(IP, 0);
-          when 39 | 40 | 41 => tpa_me <= tpa_me and b = ip_byte(IP, n - 38);
-          when others => null;
-        end case;
-        if n >= 22 and n <= 27 then
-          arp_sha <= arp_sha(39 downto 0) & b;
-        end if;
-        if n >= 28 and n <= 31 then
-          arp_spa <= arp_spa(23 downto 0) & b;
-        end if;
-        -- IPv4（14〜33）
-        case n is
-          when 14 => ip_ok <= b = x"45";
-          when 16 => ip_total(15 downto 8) <= unsigned(b);
-          when 17 => ip_total(7 downto 0) <= unsigned(b);
-          when 20 => ip_ok <= ip_ok and b(5 downto 0) = "000000" and b(7) = '0';   -- MF なし・位置 0
-          when 21 => ip_ok <= ip_ok and b = x"00";
-          when 23 => ip_proto <= b;
-          when 30 => ip_dst_me <= b = ip_byte(IP, 0);
-          when 31 | 32 | 33 => ip_dst_me <= ip_dst_me and b = ip_byte(IP, n - 30);
-          when others => null;
-        end case;
-        if n >= 26 and n <= 29 then
-          ip_src <= ip_src(23 downto 0) & b;
-        end if;
-        if n >= 14 and n <= 33 then                    -- ヘッダのチェックサム（1 の補数の和）
-          if n mod 2 = 0 then
-            ip_hi <= b;
-          elsif n = 15 then
-            ip_sum <= resize(unsigned(std_logic_vector'(ip_hi & b)), 20);
-          else
-            ip_sum <= ip_sum + unsigned(std_logic_vector'(ip_hi & b));
-          end if;
-        end if;
-        -- UDP（34〜41）/ ICMP（34〜）
-        case n is
-          when 34 => udp_src(15 downto 8) <= b; icmp_type <= b;
-          when 35 => udp_src(7 downto 0) <= b;
-          when 36 => udp_dst(15 downto 8) <= b; icmp_sum_r(15 downto 8) <= b;
-          when 37 => udp_dst(7 downto 0) <= b; icmp_sum_r(7 downto 0) <= b;
-          when 38 => udp_len(15 downto 8) <= unsigned(b);
-          when 39 => udp_len(7 downto 0) <= unsigned(b);
-          when others => null;
-        end case;
-        if n = 34 then
-          icmp_w <= not icmp_due;                      -- 応答待ちの間はバッファを上書きしない
-        end if;
-        if n >= 34 and n < 34 + ICMP_MAX and ip_proto = x"01" and ((n = 34 and not icmp_due) or (n > 34 and icmp_w)) then
-          icmp_we <= '1';
-          icmp_wa <= to_unsigned(n - 34, ICMP_BITS);
-          icmp_wd <= b;
-        end if;
-        -- UDP の payload を frame_mux のバッファへ（42 = ch、43 = seq は捨てる、44〜 = data）
-        if n >= 42 and etype = x"0800" and ip_proto = x"11" and udp_dst = PORT_V then
-          pl := n - 42;
-          if pl + 8 < to_integer(udp_len) and pl <= MAX_PAYLOAD + 1 and pl /= 1 then
-            rx_we_r <= '1';
-            rx_wa_r <= to_unsigned(pl - 1, RAM_BITS) when pl /= 0 else (others => '0');
-            rx_wd_r <= b;
-          end if;
-        end if;
-
-        if in_last = '1' then
-          i <= 0;
-          if in_good = '1' and (dst_me or dst_bc) then
-            if etype = x"0806" and arp_ok and tpa_me and n >= 41 then
-              if not arp_due then
-                arp_due   <= true;
-                arp_mac_r <= arp_sha;
-                arp_ip_r  <= arp_spa;
-              end if;
-            elsif etype = x"0800" and ip_ok and ip_dst_me and fold(ip_sum) = x"FFFF" and n + 1 >= 14 + to_integer(ip_total)
-                  and dst_me then
-              if ip_proto = x"01" and icmp_type = x"08" and icmp_w and not icmp_due
-                 and to_integer(ip_total) - 20 <= ICMP_MAX and to_integer(ip_total) >= 28 then
-                icmp_due   <= true;
-                icmp_mac_r <= src_mac;
-                icmp_ip_r  <= ip_src;
-                icmp_len_r <= to_integer(ip_total) - 20;
-              elsif ip_proto = x"11" and udp_dst = PORT_V and to_integer(udp_len) >= 10
-                    and to_integer(udp_len) <= MAX_PAYLOAD + 10 and to_integer(udp_len) + 20 <= to_integer(ip_total) then
-                fl := to_integer(udp_len) - 9;               -- ch + data
-                commit_r  <= '1';
-                len_r     <= fl;
-                peer_ok   <= true;
-                peer_mac  <= src_mac;
-                peer_ip   <= ip_src;
-                peer_port <= udp_src;
-              end if;
-            end if;
+        elsif etype = ETHERTYPE_IPV4 and ip_ok = '1' and dst_me = '1' then
+          if icmp_echo = '1' then
+            icmp_due   <= true;
+            icmp_mac_r <= src_mac;
+            icmp_ip_r  <= ip_src;
+            icmp_len_r <= to_integer(ip_total) - IP_HDR_LEN;
+          elsif udp_ok = '1' then
+            commit_r  <= '1';
+            len_r     <= to_integer(udp_data_len);
+            peer_ok   <= true;
+            peer_mac  <= src_mac;
+            peer_ip   <= ip_src;
+            peer_port <= udp_src;
           end if;
         end if;
       end if;
@@ -378,8 +281,8 @@ begin
               kind      <= K_ICMP;
               dst_mac_t <= icmp_mac_r;
               dst_ip_t  <= icmp_ip_r;
-              ip_len_t  <= to_unsigned(20 + icmp_len_r, 16);
-              proto_t   <= x"01";
+              ip_len_t  <= to_unsigned(IP_HDR_LEN + icmp_len_r, 16);
+              proto_t   <= IP_PROTO_ICMP;
               body_i    <= 4;
               body_end  <= icmp_len_r;
               tx_state  <= T_SUM;
@@ -390,8 +293,8 @@ begin
                 kind      <= K_UDP;
                 dst_mac_t <= peer_mac;
                 dst_ip_t  <= peer_ip;
-                ip_len_t  <= to_unsigned(20 + 8 + 1 + tx_len, 16);
-                proto_t   <= x"11";
+                ip_len_t  <= to_unsigned(IP_HDR_LEN + UDP_HDR_LEN + 1 + tx_len, 16);   -- + seq
+                proto_t   <= IP_PROTO_UDP;
                 body_i    <= 1;
                 body_end  <= tx_len;
                 tx_state  <= T_CH_WAIT;
@@ -415,68 +318,60 @@ begin
 
           when T_HDR =>
             if hdr_n = 0 then                          -- ヘッダを組む（1 周期）
-              s := not fold(sum_t);
+              s := not csum_fold(sum_t);
+              h := (others => x"00");
               for k in 0 to 5 loop
-                h(k)     := mac_byte(dst_mac_t, k);
-                h(6 + k) := mac_byte(MAC, k);
+                h(ETH_DST_POS + k) := mac_byte(dst_mac_t, k);
+                h(ETH_SRC_POS + k) := mac_byte(MAC, k);
               end loop;
-              h(12) := x"08";
               if kind = K_ARP then
-                h(13) := x"06";
-                h(14 to 21) := (x"00", x"01", x"08", x"00", x"06", x"04", x"00", x"02");   -- 応答
+                h(ETH_TYPE_POS)     := ETHERTYPE_ARP(15 downto 8);
+                h(ETH_TYPE_POS + 1) := ETHERTYPE_ARP(7 downto 0);
+                h(ARP_HEAD_POS to ARP_SHA_POS - 1) := ARP_REPLY_HEAD;
                 for k in 0 to 5 loop
-                  h(22 + k) := mac_byte(MAC, k);
-                  h(32 + k) := mac_byte(arp_mac_r, k);
+                  h(ARP_SHA_POS + k) := mac_byte(MAC, k);
+                  h(ARP_THA_POS + k) := mac_byte(arp_mac_r, k);
                 end loop;
                 for k in 0 to 3 loop
-                  h(28 + k) := ip_byte(IP, k);
-                  h(38 + k) := ip_byte(arp_ip_r, k);
+                  h(ARP_SPA_POS + k) := ip_byte(IP, k);
+                  h(ARP_TPA_POS + k) := ip_byte(arp_ip_r, k);
                 end loop;
-                h(42) := x"00";
-                h(43) := x"00";
-                hdr_n <= 42;
+                hdr_n <= ARP_END_POS;
               else
-                h(13) := x"00";
-                h(14) := x"45";
-                h(15) := x"00";
-                h(16) := std_logic_vector(ip_len_t(15 downto 8));
-                h(17) := std_logic_vector(ip_len_t(7 downto 0));
-                h(18) := x"00";
-                h(19) := x"00";
-                h(20) := x"40";                        -- DF
-                h(21) := x"00";
-                h(22) := x"40";                        -- TTL 64
-                h(23) := proto_t;
-                h(24) := std_logic_vector(s(15 downto 8));
-                h(25) := std_logic_vector(s(7 downto 0));
+                h(ETH_TYPE_POS)     := ETHERTYPE_IPV4(15 downto 8);
+                h(ETH_TYPE_POS + 1) := ETHERTYPE_IPV4(7 downto 0);
+                h(IP_VER_IHL_POS)   := x"45";
+                h(IP_TOTAL_LEN_POS)     := std_logic_vector(ip_len_t(15 downto 8));
+                h(IP_TOTAL_LEN_POS + 1) := std_logic_vector(ip_len_t(7 downto 0));
+                h(IP_FLAGS_POS)     := x"40";                -- DF
+                h(IP_TTL_POS)       := x"40";                -- TTL 64
+                h(IP_PROTO_POS)     := proto_t;
+                h(IP_CHECKSUM_POS)     := std_logic_vector(s(15 downto 8));
+                h(IP_CHECKSUM_POS + 1) := std_logic_vector(s(7 downto 0));
                 for k in 0 to 3 loop
-                  h(26 + k) := ip_byte(IP, k);
-                  h(30 + k) := ip_byte(dst_ip_t, k);
+                  h(IP_SRC_POS + k) := ip_byte(IP, k);
+                  h(IP_DST_POS + k) := ip_byte(dst_ip_t, k);
                 end loop;
                 if kind = K_ICMP then
-                  -- 型 8 → 0: チェックサムに 0x0800 を足す（1 の補数の和）
+                  -- 型 8 → 0（エコー応答）: チェックサムに 0x0800 を足す（1 の補数の和）。ICMP の残りは本体から
                   c := resize(unsigned(icmp_sum_r), 17) + to_unsigned(16#0800#, 17);
                   c := resize(c(15 downto 0), 17) + resize(c(16 downto 16), 17);
-                  h(34) := x"00";
-                  h(35) := x"00";
-                  h(36) := std_logic_vector(c(15 downto 8));
-                  h(37) := std_logic_vector(c(7 downto 0));
-                  h(38 to 43) := (others => x"00");
-                  hdr_n <= 38;
+                  h(ICMP_CHECKSUM_POS)     := std_logic_vector(c(15 downto 8));
+                  h(ICMP_CHECKSUM_POS + 1) := std_logic_vector(c(7 downto 0));
+                  hdr_n <= ICMP_CHECKSUM_POS + 2;
                 else
-                  udp_l := ip_len_t - 20;
-                  h(34) := PORT_V(15 downto 8);
-                  h(35) := PORT_V(7 downto 0);
-                  h(36) := peer_port(15 downto 8);
-                  h(37) := peer_port(7 downto 0);
-                  h(38) := std_logic_vector(udp_l(15 downto 8));
-                  h(39) := std_logic_vector(udp_l(7 downto 0));
-                  h(40) := x"00";                      -- チェックサムなし
-                  h(41) := x"00";
-                  h(42) := ch_t;
-                  h(43) := std_logic_vector(seq);
+                  udp_l := ip_len_t - IP_HDR_LEN;
+                  h(UDP_SRC_POS)     := PORT_V(15 downto 8);
+                  h(UDP_SRC_POS + 1) := PORT_V(7 downto 0);
+                  h(UDP_DST_POS)     := peer_port(15 downto 8);
+                  h(UDP_DST_POS + 1) := peer_port(7 downto 0);
+                  h(UDP_LEN_POS)     := std_logic_vector(udp_l(15 downto 8));
+                  h(UDP_LEN_POS + 1) := std_logic_vector(udp_l(7 downto 0));
+                  -- チェックサムなし（UDP_CHECKSUM_POS = 0）
+                  h(UDP_PAYLOAD_POS)     := ch_t;
+                  h(UDP_PAYLOAD_POS + 1) := std_logic_vector(seq);
                   seq   <= seq + 1;
-                  hdr_n <= 44;
+                  hdr_n <= UDP_PAYLOAD_POS + 2;
                 end if;
               end if;
               hdr <= h;

@@ -21,6 +21,7 @@ from ..dwarf.cexpr import ExpressionError
 from ..dwarf.location import NotAvailable
 from ..symbols import Symbols
 from .bp import NoFreeSlot
+from .libsyms import LibraryModules
 from .engine import Engine, EngineError, Stop
 from .image import ElfImage, executable_image, shared_libraries
 from .mmu import Unmapped
@@ -71,12 +72,14 @@ class HaltDebugger:
     """1 つのプロセスの持ち主（attach から close まで）。HaltSession.debug_attach が作る。"""
 
     def __init__(self, engine: Engine, image: ElfImage, *, skew_limit_ns: int, max_halt_s: float, attach_stop,
-                 cleanup, clock=time.monotonic, wall=time.time, lock=None):
+                 cleanup, clock=time.monotonic, wall=time.time, lock=None, libraries: list[dict] | None = None):
         """lock: 機器の錠（RLock。コアの口 _Locked と同じもの）。無ければ（CLI）自分の RLock。"""
         self.engine, self.proc, self.image = engine, engine.p, image
         self.symbols = Symbols(image.path)
         self.info = DebugInfo(image.path) if image.has_dwarf else None
         self.skew_limit_ns, self.max_halt_s = skew_limit_ns, max_halt_s
+        # 共有ライブラリのシンボル（attach のとき取り寄せた分。無ければ空）: ライブラリの中の番地に名前を付ける・ARM / Thumb を知る
+        self.libs = LibraryModules(libraries)
         self._cleanup, self._clock, self._wall = cleanup, clock, wall
         self.exe = executable_image(image, self.proc.auxv(), self.proc.mem.read)
         self.load_bias = self.exe["load_bias"]
@@ -88,6 +91,8 @@ class HaltDebugger:
         self.breakpoints: dict[int, dict] = {}
         self._next_id = 1
         self.auto_resumed: list[dict] = []
+        # 走行中のブレークポイントの置き外しのために、短く全コアを止めた回数と時間（事実。判定はしない）
+        self.brief_halts: dict = {"count": 0, "total_s": 0.0, "max_s": 0.0}
         self.last_stop: dict | None = None
         # 画面（人）にも AI と同じものを見せるため、最後の run の結果（当たらなかった回も）と最後に読んだ全スレッドを持つ
         self.last_run: dict | None = None
@@ -109,18 +114,54 @@ class HaltDebugger:
         self._watch.start()
 
     # ------------------------------------------------------------------ 共通
-    def _call(self, fn, *, halted: bool):
-        """API の 1 回の呼び出し: 見張りと交互に、閉じていないこと（と止まっていること）を確かめてから。"""
+    def _call(self, fn, *, halted: bool | str):
+        """API の 1 回の呼び出し: 見張りと交互に、閉じていないこと（と止まっていること）を確かめてから。
+        halted: True = 止まっていること（走っていれば断る）、False = どちらでもよい、"auto" = 走っていれば短く全コアを止めて
+        fn を実行し、終わったらまた走らせる（走行中にブレークポイントを置ける。一般のデバッガと同じ）。"""
         with self._cv:
             if self.closed:
                 raise EngineError("the debugger is closed (linux.halt.debug.attach again)")
-            if halted and self.engine.running:
+            if halted is True and self.engine.running:
                 raise EngineError("the cores are running: stop them first (linux.halt.debug.halt, or "
                                   "linux.halt.debug.run until a stop)")
+            if halted == "auto" and self.engine.running:
+                return self._briefly_halted(fn)
             try:
                 return fn()
             finally:
                 self._touch()
+
+    def _briefly_halted(self, fn):
+        """走っている全コアを短く止めて fn を実行し、また走らせる（鍵の中で呼ぶ）。止めた瞬間に対象が自分で止まっていた
+        ときは（ブレークポイントに当たった等）、その止まりを last_stop・last_run に残し、止めたまま fn を実行して返す
+        （黙って走らせ直して当たりを失わない）。止めていた時間は brief_halts に数える（事実）。"""
+        began = self._clock()
+        stop = self.engine.halt()
+        if stop.kind != "int":
+            out = self._stop_dict(stop)
+            self.last_stop = self.last_run = out
+            try:
+                return fn()
+            finally:
+                self._count_brief_halt(began)
+                self._touch()
+        try:
+            return fn()
+        finally:
+            try:
+                resumed = self.engine.run(0, clock=self._clock)    # 見張りの自動の再開と同じ（全コアを走らせたまま返る）
+                if resumed.kind != "timeout":                      # 走らせ直す間に対象が止まった: その止まりを残す
+                    out = self._stop_dict(resumed)
+                    self.last_stop = self.last_run = out
+            finally:
+                self._count_brief_halt(began)
+                self._touch()
+
+    def _count_brief_halt(self, began: float) -> None:
+        took = self._clock() - began
+        self.brief_halts["count"] += 1
+        self.brief_halts["total_s"] += took
+        self.brief_halts["max_s"] = max(self.brief_halts["max_s"], took)
 
     def use(self, fn, *, halted: bool):
         """外の読み手（fprobe.linux_halt.view）が、API の 1 回の呼び出しとして fn を走らせる（_call と同じ: 見張りと交互、
@@ -163,7 +204,18 @@ class HaltDebugger:
     def _where(self, address: int) -> dict:
         """実行時の番地 → 関数・ファイル・行（ELF のリンク時の番地 address − load_bias で引いた事実。外なら None）。"""
         loc = self.symbols.describe(self._link(address))
-        return {"function": loc.function, "file": loc.file, "line": loc.line}
+        out = {"function": loc.function, "file": loc.file, "line": loc.line}
+        if loc.function is None and (lib := self.libs.lookup(address)) is not None:     # 共有ライブラリの中（関数の名前だけ）
+            out["function"] = lib.function
+        return out
+
+    def module_of(self, address: int) -> tuple[str, int] | None:
+        """番地が共有ライブラリの中なら (ファイル名, ライブラリの中の番地)。シンボルが無くても分かる事実。"""
+        return self.libs.module_of(address)
+
+    def lib_location(self, address: int):
+        """番地が共有ライブラリの関数の中なら、その場所（モジュール名・関数・先頭からのバイト数・Thumb か）。外なら None。"""
+        return self.libs.lookup(address)
 
     def _bp_at(self, address: int) -> int | None:
         return next((i for i, b in self.breakpoints.items() if b["address"] == address), None)
@@ -222,7 +274,8 @@ class HaltDebugger:
                     "max_halt_s": self.max_halt_s, "skew_limit_ns": self.skew_limit_ns,
                     "breakpoints": [dict(b) for b in self.breakpoints.values()], "attach_stop": self.attach_stop,
                     "last_stop": self.last_stop, "last_run": self.last_run, "last_threads": self.last_threads,
-                    "auto_resumed": [dict(a) for a in self.auto_resumed],
+                    "auto_resumed": [dict(a) for a in self.auto_resumed], "brief_halts": dict(self.brief_halts),
+                    "library_symbols": self.libs.facts(),
                     "stats": asdict(stats), "close": self.close_result}
 
     def halt_budget_left(self) -> float | None:
@@ -334,7 +387,7 @@ class HaltDebugger:
             self.breakpoints[self._next_id] = bp
             self._next_id += 1
             return dict(bp)
-        return self._call(run, halted=True)
+        return self._call(run, halted="auto")
 
     def break_remove(self, bp_id: int) -> dict:
         def run():
@@ -344,7 +397,7 @@ class HaltDebugger:
             self.engine.bps.remove(self.proc.tgid, bp["address"], kind=bp["kind"])
             del self.breakpoints[bp_id]
             return {"removed": dict(bp)}
-        return self._call(run, halted=True)
+        return self._call(run, halted="auto")
 
     # ------------------------------------------------------------------ 走らせる・止める
     def run(self, wait_s: float) -> dict:
@@ -494,7 +547,7 @@ class HaltDebugger:
                 return {"address": address, "length": length, "data": None, "reason": str(e)}
             data = self.engine.bps.shadow(self.proc.tgid, address, data)    # 置いた BKPT ではなく元の命令を見せる
             return {"address": address, "length": length, "data": data.hex(), "reason": None}
-        return self._call(go, halted=True)
+        return self._call(go, halted="auto")                 # 走行中なら、全コアを短く止めて読み、また走らせる
 
     # ------------------------------------------------------------------ 1 行
     def _key(self, pc: int):
@@ -611,8 +664,11 @@ class HaltDebugger:
         """実行時の番地の命令の幅（その番地を含む関数が Thumb なら 2、ARM なら 4）。関数の外なら EngineError。"""
         fn = self.symbols.function_at(self._link(address))
         if fn is None:
-            raise EngineError("0x%08x: no function of %s contains it, so its instruction set (ARM or Thumb) is not "
-                              "known" % (address, self.image.path.name))
+            thumb = self.libs.thumb_at(address)                     # 共有ライブラリの関数（取り寄せたシンボルの bit 0）
+            if thumb is None:
+                raise EngineError("0x%08x: no function of %s or of a loaded shared library contains it, so its instruction "
+                                  "set (ARM or Thumb) is not known" % (address, self.image.path.name))
+            return 2 if thumb else 4
         return 2 if fn.address in self.image.thumb_functions else 4
 
     def _run_to_here(self, tid: int, address: int, timeout_s: float, start_pc: int) -> dict:

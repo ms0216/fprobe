@@ -49,19 +49,19 @@ architecture rtl of csr_la is
   signal start : boolean;
   signal index : natural range 0 to 15;
   signal control_run_r : std_logic := '0';
-  signal rate_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal pretrigger_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal trig_mask_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal trig_value_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal trig_rise_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal trig_fall_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal filter_channels_r : std_logic_vector(15 downto 0) := "0000000000000000";
-  signal filter_cycles_r : std_logic_vector(7 downto 0) := "00000000";
-  signal pulse_mode_r : std_logic_vector(1 downto 0) := "00";
+  signal rate_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal pretrigger_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal trig_mask_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal trig_value_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal trig_rise_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal trig_fall_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal filter_channels_r : std_logic_vector(15 downto 0) := (others => '0');
+  signal filter_cycles_r : std_logic_vector(7 downto 0) := (others => '0');
+  signal pulse_mode_r : std_logic_vector(1 downto 0) := (others => '0');
   signal pulse_level_r : std_logic := '1';
-  signal pulse_channel_r : std_logic_vector(3 downto 0) := "0000";
-  signal pulse_min_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal pulse_max_r : std_logic_vector(31 downto 0) := "11111111111111111111111111111111";
+  signal pulse_channel_r : std_logic_vector(3 downto 0) := (others => '0');
+  signal pulse_min_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal pulse_max_r : std_logic_vector(31 downto 0) := x"FFFFFFFF";
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -74,19 +74,19 @@ begin
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
         control_run_r <= '0';
-        rate_r <= "0000000000000000";
-        pretrigger_r <= "00000000000000000000000000000000";
-        trig_mask_r <= "0000000000000000";
-        trig_value_r <= "0000000000000000";
-        trig_rise_r <= "0000000000000000";
-        trig_fall_r <= "0000000000000000";
-        filter_channels_r <= "0000000000000000";
-        filter_cycles_r <= "00000000";
-        pulse_mode_r <= "00";
+        rate_r <= (others => '0');
+        pretrigger_r <= (others => '0');
+        trig_mask_r <= (others => '0');
+        trig_value_r <= (others => '0');
+        trig_rise_r <= (others => '0');
+        trig_fall_r <= (others => '0');
+        filter_channels_r <= (others => '0');
+        filter_cycles_r <= (others => '0');
+        pulse_mode_r <= (others => '0');
         pulse_level_r <= '1';
-        pulse_channel_r <= "0000";
-        pulse_min_r <= "00000000000000000000000000000000";
-        pulse_max_r <= "11111111111111111111111111111111";
+        pulse_channel_r <= (others => '0');
+        pulse_min_r <= (others => '0');
+        pulse_max_r <= x"FFFFFFFF";
       elsif start then
         ack   <= '1';
         case index is

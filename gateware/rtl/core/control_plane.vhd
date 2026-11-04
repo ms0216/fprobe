@@ -41,6 +41,11 @@ end entity;
 architecture rtl of control_plane is
   type state_t is (S_HEADER, S_WDATA, S_WRITE, S_READ, S_READ_OUT, S_DRAIN, S_TRAILER);
   type header_t is array (0 to CTRL_REQUEST_HEADER_BYTES - 1) of std_logic_vector(7 downto 0);
+  -- 要求のヘッダの並び（fprobe_gw.protocol の REQUEST_HEADER_BYTES: op, tag, count(2), addr(4)。リトルエンディアン）
+  constant H_OP    : natural := 0;
+  constant H_TAG   : natural := 1;
+  constant H_COUNT : natural := 2;
+  constant H_ADDR  : natural := 4;
 
   signal state   : state_t := S_HEADER;
   signal header  : header_t := (others => (others => '0'));
@@ -65,9 +70,9 @@ architecture rtl of control_plane is
   attribute max_fanout : integer;
   attribute max_fanout of cur, word, state : signal is 16;
 begin
-  op      <= header(0);
-  count   <= unsigned(header(3)) & unsigned(header(2));
-  aligned <= header(4)(1 downto 0) = "00";
+  op      <= header(H_OP);
+  count   <= unsigned(header(H_COUNT + 1)) & unsigned(header(H_COUNT));
+  aligned <= header(H_ADDR)(1 downto 0) = "00";
   fixed   <= op = CTRL_OP_EXCHANGE;
 
   in_ready <= '1' when state = S_HEADER or state = S_WDATA or state = S_DRAIN else '0';
@@ -88,7 +93,7 @@ begin
       out_data <= word(8 * byte_n + 7 downto 8 * byte_n);
     else
       case byte_n is
-        when 0      => out_data <= header(1);                     -- tag（無ければ 0）
+        when 0      => out_data <= header(H_TAG);                 -- tag（無ければ 0）
         when 1      => out_data <= status;
         when 2      => out_data <= std_logic_vector(done(7 downto 0));
         when others => out_data <= std_logic_vector(done(15 downto 8));
@@ -108,6 +113,23 @@ begin
         state <= S_TRAILER;
       else
         state <= S_DRAIN;
+      end if;
+    end procedure;
+
+    -- WRITE・EXCHANGE の 1 ワードを終えた（done は数え終えた値）: 最後のワードなら長さを検査して応答、でなければ次のワードを受ける
+    procedure word_done(last : boolean) is
+    begin
+      if last then
+        if ended = '1' then
+          respond(CTRL_STATUS_OK, true);
+        else
+          respond(CTRL_STATUS_BAD_LENGTH, false);         -- データが余った
+        end if;
+      elsif ended = '1' then
+        respond(CTRL_STATUS_BAD_LENGTH, true);            -- データが足りない
+      else
+        byte_n <= 0;
+        state  <= S_WDATA;
       end if;
     end procedure;
   begin
@@ -133,7 +155,7 @@ begin
                 -- ヘッダが揃った（op / count / addr の整列は格納済みの 0〜4 バイト目で決まる）
                 hdr_n  <= 0;
                 last_n <= count - 1;
-                addr   := in_data & header(6) & header(5) & header(4);   -- 最後のバイトはこの周期の入力
+                addr   := in_data & header(H_ADDR + 2) & header(H_ADDR + 1) & header(H_ADDR);   -- 最後のバイトはこの周期の入力
                 cur    <= unsigned(addr(31 downto 2));
                 if op /= CTRL_OP_READ and op /= CTRL_OP_WRITE and op /= CTRL_OP_EXCHANGE then
                   respond(CTRL_STATUS_BAD_OP, in_last = '1');
@@ -176,20 +198,9 @@ begin
                 respond(CTRL_STATUS_BUS_ERROR, ended = '1');
               elsif fixed then
                 state <= S_READ;                                  -- EXCHANGE: 同じ番地を読む
-              elsif done = last_n then
-                done <= done + 1;
-                if ended = '1' then
-                  respond(CTRL_STATUS_OK, true);
-                else
-                  respond(CTRL_STATUS_BAD_LENGTH, false);         -- データが余った
-                end if;
               else
                 done <= done + 1;
-                if ended = '1' then
-                  respond(CTRL_STATUS_BAD_LENGTH, true);          -- データが足りない
-                else
-                  state <= S_WDATA;
-                end if;
+                word_done(done = last_n);
               end if;
             end if;
 
@@ -217,17 +228,8 @@ begin
                   else
                     state <= S_READ;
                   end if;
-                elsif done = last_n then                          -- EXCHANGE: WRITE と同じ長さの検査
-                  if ended = '1' then
-                    respond(CTRL_STATUS_OK, true);
-                  else
-                    respond(CTRL_STATUS_BAD_LENGTH, false);       -- データが余った
-                  end if;
-                elsif ended = '1' then
-                  respond(CTRL_STATUS_BAD_LENGTH, true);          -- データが足りない
                 else
-                  byte_n <= 0;
-                  state  <= S_WDATA;
+                  word_done(done = last_n);                       -- EXCHANGE: WRITE と同じ長さの検査
                 end if;
               else
                 byte_n <= byte_n + 1;

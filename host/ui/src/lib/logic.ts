@@ -11,7 +11,12 @@ import { parseNumber } from "./eventlog";
 export type ParamType = "channel" | "channels" | "integer" | "number" | "boolean" | "string" | "object";
 /** 解読器の設定（la.decoders の params）。required = 既定を持たない（通信の設定は必須）、nullable = null を渡せる
  *  （つながない線等）、type = 型の申告 */
-export interface DecoderParam { name: string; required: boolean; nullable?: boolean; default?: unknown; type?: ParamType | null }
+export interface DecoderParam { name: string; required: boolean; nullable?: boolean; default?: unknown; type?: ParamType | null;
+                                choices?: unknown[] }
+
+/** 選んで決める欄の選択肢（解読器の申告: choices = 引数の型の Literal、boolean = true / false）。無ければ null（文字の欄） */
+export const choicesOf = (p: DecoderParam): unknown[] | null =>
+  p.choices?.length ? p.choices : p.type === "boolean" ? [true, false] : null;
 export interface DecoderInfo {
   name: string;
   lower: string[];                    // 積み重ねる解読器が受け付ける下の解読（空なら波形を読む）

@@ -315,7 +315,10 @@
   }
   // MCU の SWD がはずれた（対象のリセット・書き直しで複数ドロップの選択が外れた等）: 前と同じ設定でつなぎ直す
   async function reconnectMcu() {
-    const args = Object.fromEntries(Object.entries(status?.mcu.connect ?? {}).filter(([, v]) => v !== null));
+    const last = status?.mcu.connect;
+    if (!last) return;
+    const { target, frequency_hz, ...rest } = last;                 // 前の接続の設定（target・frequency_hz は必ずある）
+    const args = { target, frequency_hz, ...Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== null)) };
     await app.act("target.disconnect", {});
     await app.act("target.connect", args);
     await poll();
@@ -538,8 +541,16 @@
                     onclick={() => ["registers", "disassembly", "callStack"].forEach((id) => dock.show(id))}>{$i18n("system.inspect")}</button>
           {/if}
           {#if mcu.target}<span class="muted">{mcu.target}{mcu.core !== undefined ? ` core ${mcu.core}` : ""}</span>{/if}
+        {:else if status === null && linkOpen && error === null}
+          <span class="muted" aria-busy="true">{$i18n("load.loading")}</span>
         {:else}
           <span class="muted">{$i18n("system.notConnected")}</span>
+          {#if status && "linux_attaching" in status.mcu && status.mcu.linux_attaching}
+            <button onclick={() => dock.show("linuxHalt")}>{$i18n("status.target.linuxAttaching", { pid: status.mcu.linux_attaching.pid })}</button>
+          {:else if status && "linux_halt_open" in status.mcu && status.mcu.linux_halt_open}
+            <button title={$i18n("status.target.linuxHaltOpenTip", { backend: status.mcu.linux_halt_open.backend })}
+                    onclick={() => dock.show("linuxHalt")}>{$i18n("status.target.linuxHaltOpen")}</button>
+          {/if}
         {/if}
       </header>
       {#if mcuError !== null}

@@ -41,9 +41,9 @@ architecture rtl of csr_uart is
   signal index : natural range 0 to 15;
   signal flow_auto_r : std_logic := '0';
   signal flow_rts_claim_r : std_logic := '0';
-  signal flow_rts_pin_r : std_logic_vector(1 downto 0) := "00";
+  signal flow_rts_pin_r : std_logic_vector(1 downto 0) := (others => '0');
   signal flow_cts_claim_r : std_logic := '0';
-  signal flow_cts_pin_r : std_logic_vector(1 downto 0) := "00";
+  signal flow_cts_pin_r : std_logic_vector(1 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -57,9 +57,9 @@ begin
       if rst = '1' then
         flow_auto_r <= '0';
         flow_rts_claim_r <= '0';
-        flow_rts_pin_r <= "00";
+        flow_rts_pin_r <= (others => '0');
         flow_cts_claim_r <= '0';
-        flow_cts_pin_r <= "00";
+        flow_cts_pin_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is

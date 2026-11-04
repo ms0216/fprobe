@@ -18,10 +18,12 @@ describe("対象の品種に偏った既定の値を欄に入れない（?9）",
   it("Memory の番地は空から（Cortex-M の SRAM 0x20000000 を入れない）", () => {
     expect(source("components/panels/MemoryPanel.svelte")).toMatch(/load\("memory\.address", ""\)/);
   });
-  it("Connect のターゲット名・SWD の速さは空から（stm32f401xe・4 MHz を入れない）", () => {
+  it("Connect のターゲット名・速さは画面のコードに値を書かない（最初の値は仕様の target.connect の値。CLAUDE.md 2026-11-03）", () => {
     const s = source("components/shell/Dialogs.svelte");
-    expect(s).toMatch(/load\("connect\.target", ""\)/);
-    expect(s).toMatch(/load\("connect\.mhz", ""\)/);
+    expect(s).not.toMatch(/stm32f401xe"|"4"|4000000/);
+    expect(s).toMatch(/load\("connect\.target", firstConnect\.target\)/);
+    expect(s).toMatch(/load\("connect\.mhz", firstConnect\.mhz\)/);
+    expect(s).toMatch(/connectDefaults\(suggestedOf\)/);
   });
 });
 

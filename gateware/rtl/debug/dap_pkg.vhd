@@ -37,14 +37,27 @@ package dap_pkg is
   constant DAP_OK    : std_logic_vector(7 downto 0) := x"00";
   constant DAP_ERROR : std_logic_vector(7 downto 0) := x"FF";
 
-  -- 転送要求のビット（bit0 APnDP, bit1 RnW, bit2-3 A[3:2], bit4 値一致, bit5 一致マスク）
+  -- 転送要求のビット（bit0 APnDP, bit1 RnW, bit2-3 A[3:2], bit4 値一致, bit5 一致マスク, bit7 タイムスタンプ）
   constant REQ_APNDP       : natural := 0;
   constant REQ_RNW         : natural := 1;
   constant REQ_MATCH_VALUE : natural := 4;
   constant REQ_MATCH_MASK  : natural := 5;
-  constant DP_RDBUFF_READ  : std_logic_vector(3 downto 0) := "1110";   -- A = 0xC, RnW
-  constant DP_IDCODE_READ  : std_logic_vector(3 downto 0) := "0010";   -- A = 0x0, RnW（DPIDR / JTAG の IDCODE）
-  constant DP_ABORT_WRITE  : std_logic_vector(3 downto 0) := "0000";
+  constant REQ_TIMESTAMP   : natural := 7;
+  -- 転送要求の 4 ビット（bit3-2 A[3:2], bit1 RnW, bit0 APnDP）
+  constant DP_W_ABORT      : std_logic_vector(3 downto 0) := "0000";   -- A = 0x0
+  constant DP_R_IDCODE     : std_logic_vector(3 downto 0) := "0010";   -- A = 0x0, RnW（DPIDR / JTAG の IDCODE）
+  constant DP_R_CTRL       : std_logic_vector(3 downto 0) := "0110";   -- A = 0x4, RnW（CTRL/STAT）
+  constant DP_W_SELECT     : std_logic_vector(3 downto 0) := "1000";   -- A = 0x8
+  constant DP_R_RDBUFF     : std_logic_vector(3 downto 0) := "1110";   -- A = 0xC, RnW
+  constant AP_W_CSW        : std_logic_vector(3 downto 0) := "0001";
+  constant AP_R_CSW        : std_logic_vector(3 downto 0) := "0011";
+  constant AP_W_TAR        : std_logic_vector(3 downto 0) := "0101";
+  constant AP_R_TAR        : std_logic_vector(3 downto 0) := "0111";
+  constant AP_W_DRW        : std_logic_vector(3 downto 0) := "1101";
+  constant AP_R_DRW        : std_logic_vector(3 downto 0) := "1111";
+  -- DP のレジスタのビット
+  constant STICKYERR       : natural := 5;                                 -- CTRL/STAT.STICKYERR
+  constant STKERRCLR       : std_logic_vector(31 downto 0) := x"00000004"; -- ABORT.STKERRCLR
 
   -- 転送応答
   constant RESP_OK       : std_logic_vector(7 downto 0) := x"01";
@@ -57,6 +70,13 @@ package dap_pkg is
   constant OP_SEQ_IN   : std_logic_vector(1 downto 0) := "01";
   constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
   constant OP_PINS     : std_logic_vector(1 downto 0) := "11";
+  -- 転送の cmd_count: ポストの DP の読み（jtag_phy は続く RDBUFF をスキャンしない）
+  constant COUNT_POSTED : natural := 2;
+
+  -- PHY の転送の応答（ACK の 3 ビット）
+  constant ACK_OK    : std_logic_vector(2 downto 0) := "001";
+  constant ACK_WAIT  : std_logic_vector(2 downto 0) := "010";
+  constant ACK_FAULT : std_logic_vector(2 downto 0) := "100";
 
   -- コマンドを受け持つユニット
   type dap_unit_t is (U_NONE, U_CONFIG, U_SWO, U_SEQUENCE, U_TRANSFER);
@@ -68,6 +88,10 @@ package dap_pkg is
   -- v の i 番目のバイト（下位から）。範囲が定数のスライスだけで書く（合成ツールの制約）
   function byte_of(v : std_logic_vector(63 downto 0); i : natural) return std_logic_vector;
   function bytes_for(bits : natural) return natural;
+  -- 応答の 1 バイト b を、put の値（64 ビット、下位から送る）にする
+  function byte_word(b : std_logic_vector(7 downto 0)) return std_logic_vector;
+  -- 1 µs の周期数（四捨五入。DAP_Delay・SWJ_Pins の待ち）
+  function us_cycles(clk_hz : positive) return positive;
   -- 転送応答: OK / WAIT / FAULT はそのまま、それ以外（無応答 111 等）は 3 ビットの値。OK でもパリティ異常は ERROR
   function transfer_response(ack : std_logic_vector(2 downto 0); parity_error, reading : std_logic)
     return std_logic_vector;
@@ -107,6 +131,16 @@ package body dap_pkg is
   function bytes_for(bits : natural) return natural is
   begin
     return (bits + 7) / 8;
+  end function;
+
+  function byte_word(b : std_logic_vector(7 downto 0)) return std_logic_vector is
+  begin
+    return x"00000000000000" & b;
+  end function;
+
+  function us_cycles(clk_hz : positive) return positive is
+  begin
+    return (clk_hz + 500_000) / 1_000_000;
   end function;
 
   function transfer_response(ack : std_logic_vector(2 downto 0); parity_error, reading : std_logic)

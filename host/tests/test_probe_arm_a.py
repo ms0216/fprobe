@@ -57,7 +57,7 @@ def test_pi2_core_selection_registers_memory_breakpoints_and_step():
 
 def test_pi_zero_through_the_arm11_tap():
     p, links, fakes = make_probe(zero)
-    status = p.target_connect("bcm2835")
+    status = p.target_connect("bcm2835", frequency_hz=4_000_000)
     core = fakes[0][0]
     assert status["state"] == "HALTED" and status["arch"] == "armv6" and status["core"] == 0
     p.write_register("pc", 0xC000)
@@ -69,17 +69,17 @@ def test_pi_zero_through_the_arm11_tap():
         p.dp_read("DPIDR")
     p.target_disconnect()
     with pytest.raises(ValueError, match="core"):
-        p.target_connect("bcm2835", core=1)
+        p.target_connect("bcm2835", frequency_hz=4_000_000, core=1)
 
 
 def test_unsupported_things_are_refused_clearly():
     p, links, _ = make_probe(pi2)
     with pytest.raises(ValueError, match="script"):
-        p.target_connect("bcm2836", script="builtin:reset_with_nreset")
+        p.target_connect("bcm2836", frequency_hz=4_000_000, script="builtin:reset_with_nreset")
     with pytest.raises(ValueError, match="connect_mode"):
-        p.target_connect("bcm2836", connect_mode="under-reset")
+        p.target_connect("bcm2836", frequency_hz=4_000_000, connect_mode="under-reset")
     assert all(link.closed for link in links)                                # 断っても接続口は閉じる
-    p.target_connect("bcm2836", connect_mode="attach")
+    p.target_connect("bcm2836", frequency_hz=4_000_000, connect_mode="attach")
     with pytest.raises(RuntimeError, match="リセット"):
         p.target_reset()
     with pytest.raises(RuntimeError, match="Cortex-A"):

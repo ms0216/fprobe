@@ -7,7 +7,7 @@
 --   room = '1'（下流の FIFO が半分未満）・受け口が空いた周期に、欠けの記録（イベント、out_kind = '1'）を 1 件出して拍を出すのを
 --   再開する。欠けは拍の境で始まり拍の境で終わる（捨てたのは拍まるごと）ので、ホストは記録の位置 b（その前に出した拍の数）と
 --   長さ q で、届いた拍の列の中の欠けの位置を一意に決められる（埋めない・補わない）。
---   記録（128 ビット。種類 = fprobe_gw.csr.fprobe_map の EVENT_KIND_LA_GAP と一致させる）:
+--   記録（128 ビット。種類 EVENT_KIND_LA_GAP = event_pkg。定義元は fprobe_gw/events.py）:
 --     [47:0] 拍を捨て始めた周期の time、[79:48] b（この流れで欠けの前に出したロジアナの拍の数。32 ビットで折り返す。
 --     ストリームの見出しのロジアナの通し番号と同じ数え）、[119:80] q（捨てたサンプルの数。流れのサンプルの単位）、[127:120] 種類。
 --   q が 2^(Q_BITS − 1) に達したら、その時点までを 1 件にして（同じ b のまま）次の件を続ける（記録の 40 ビットの欄に収める）。
@@ -21,6 +21,8 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.event_pkg.all;
+use work.la_pkg.all;
 
 entity la_stream_gap is
   generic (
@@ -55,7 +57,6 @@ entity la_stream_gap is
 end entity;
 
 architecture rtl of la_stream_gap is
-  constant KIND_LA_GAP : std_logic_vector(7 downto 0) := x"13";   -- 19（fprobe_map の EVENT_KIND_LA_GAP）
   signal run_prev : std_logic := '0';
   signal en_r, rle_r : std_logic := '0';
   signal pack_r : unsigned(2 downto 0) := (others => '0');
@@ -82,7 +83,7 @@ architecture rtl of la_stream_gap is
     if is_rle = '1' then
       n := to_unsigned(4, 19);
       for r in 0 to 3 loop
-        n := n + resize(unsigned(d(32 * r + 31 downto 32 * r + 16)), 19);
+        n := n + resize(rle_run_minus_1(d, r), 19);
       end loop;
     else
       n := shift_left(to_unsigned(1, 19), SPB_LOG + to_integer(p));
@@ -92,7 +93,7 @@ architecture rtl of la_stream_gap is
 
   function record_of(t : unsigned(47 downto 0); b : unsigned(31 downto 0); n : unsigned) return std_logic_vector is
   begin
-    return KIND_LA_GAP & std_logic_vector(resize(n, 40)) & std_logic_vector(b) & std_logic_vector(t);
+    return EVENT_KIND_LA_GAP & std_logic_vector(resize(n, 40)) & std_logic_vector(b) & std_logic_vector(t);
   end function;
 begin
   assert Q_BITS >= 2 and Q_BITS <= 40 and SPB_LOG + 4 <= 18 report "la_stream_gap: 2 <= Q_BITS <= 40, SPB_LOG <= 14" severity failure;

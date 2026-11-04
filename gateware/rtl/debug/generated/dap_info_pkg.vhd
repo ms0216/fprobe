@@ -6,7 +6,7 @@ use ieee.std_logic_1164.all;
 package dap_info_pkg is
 
   -- DAP_Info の Capabilities（ID 0xF0）。JTAG・SWO の Manchester の bit は構成（ジェネリック）で足す
-  constant DAP_CAPABILITIES    : std_logic_vector(7 downto 0) := x"45";
+  constant DAP_CAPABILITIES    : std_logic_vector(7 downto 0) := x"65";
   constant DAP_CAPABILITY_JTAG : std_logic_vector(7 downto 0) := x"02";
   constant DAP_CAPABILITY_SWO_MANCHESTER : std_logic_vector(7 downto 0) := x"08";
   constant DAP_PACKET_COUNT    : natural := 4;

@@ -17,7 +17,7 @@ import time
 
 from .api import NotConnected
 from .linux_halt.service import FileLog, HaltOptions, HaltSession, journal_facts
-from .linux_halt.view import LinuxDebugView, prefetch_sources
+from .linux_halt.view import LinuxDebugView, prefetch_libraries, prefetch_sources
 from .probe_service import HostView
 
 __all__ = ["DapOccupied", "LinuxHaltService", "OWNER"]
@@ -43,7 +43,8 @@ class LinuxHaltService:
     # ほかの領域（Probe の委譲）に出す名前: DAP の占有の確かめ（ターゲット・低レベル・構成）と、後始末の段 linux_halt
     # _linux_view: attach している間、マイコンのデバッガの API を Linux のデバッグで答える層（各サービスの入口が使う）
     # request_halt_now・target_status_unqueued: デーモンが作業スレッドの順番を待たずに呼ぶ（止める要求・見張りの読み）
-    SHARED = ("_close_linux_halt", "_linux_attaching", "_linux_halted_reason", "_linux_view", "_require_dap_free",
+    SHARED = ("_close_linux_halt", "_linux_attaching", "_linux_halt_opened", "_linux_halted_reason", "_linux_view",
+              "_require_dap_free",
               "_require_halt_budget", "read_unqueued", "request_halt_now", "target_status_unqueued")
     NEEDS = ("_close_lowlevel", "_ensure_design", "_linux", "_lock", "_require_disconnected", "linux_core_fetch", "session",
              "system_status")
@@ -94,6 +95,14 @@ class LinuxHaltService:
         a = self._attaching
         return None if a is None else dict(a)
 
+    def _linux_halt_opened(self) -> dict | None:
+        """linux.halt が開いていて、プロセスへの attach はまだ（進行中でもない）の事実（backend）。無ければ None。
+        マイコンのターゲットは未接続のまま（DISCONNECTED）なので、画面が「開いている」を同じ場所に出す（backlog 80 番）。"""
+        session = self._halt_session
+        if session is None or self._linux_view() is not None or self._attaching is not None:
+            return None
+        return {"backend": session.options.backend}
+
     def read_unqueued(self, method: str, params: dict):
         """作業スレッドを通さない状態の読み（デーモンの UNQUEUED_READS）。Linux のプロセスに attach している・attach が進行中
         の間だけ答える（それ以外は None: いつもの道）。機器の錠だけを短く取るので、attach の取り寄せ・長い run の後ろに並ばない。
@@ -117,7 +126,14 @@ class LinuxHaltService:
         view = self._linux_view()
         if view is None:
             attaching = self._linux_attaching()
-            return None if attaching is None else {"state": "DISCONNECTED", "linux_attaching": attaching}
+            if attaching is not None:
+                return {"state": "DISCONNECTED", "linux_attaching": attaching}
+            opened = self._linux_halt_opened()
+            # プローブの DAP を使う backend では開いている間 target.connect を断るので、マイコンは未接続（事実）。openocd の
+            # backend はマイコンの接続と並びうるので、いつもの道に任せる
+            if opened is not None and opened["backend"] == "fprobe":
+                return {"state": "DISCONNECTED", "linux_halt_open": opened}
+            return None
         try:
             return view.target_status_unqueued()
         except Exception:  # noqa: BLE001 - 閉じた直後等: いつもの道に任せる
@@ -274,9 +290,14 @@ class LinuxHaltService:
             # PC に無いソースもいま（コアを止める前）取り寄せる: 止まった対象の ssh は答えない（2026-11-03 実機）
             sources = prefetch_sources(elf, fetch_from_target, lambda target, path, local: self._host.linux_core_fetch(
                 target=target, path=path, local_path=local))
+            # 共有ライブラリ（libc など）も、いま取り寄せる（関数の名前・ARM / Thumb の別を引くため）
+            libraries = prefetch_libraries(elf, fetch_from_target, pid, lambda target, path, local: self._host.linux_core_fetch(
+                target=target, path=path, local_path=local))
+        else:
+            libraries = None
         out = session.debug_attach(pid=pid, elf=elf, skew_limit_ns=skew_limit_ns, thread_id=thread_id,
                                    kernel_isa=kernel_isa, max_step_retries=max_step_retries, bp_unmapped=bp_unmapped,
-                                   max_halt_s=max_halt_s)
+                                   max_halt_s=max_halt_s, libraries=libraries)
         self._attach_target = fetch_from_target
         self._attach_options = {"pid": pid, "elf": elf, "skew_limit_ns": skew_limit_ns, "thread_id": thread_id,
                                 "kernel_isa": kernel_isa, "max_step_retries": max_step_retries, "bp_unmapped": bp_unmapped,

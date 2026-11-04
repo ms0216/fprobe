@@ -17,8 +17,14 @@ def _type(width: int) -> str:
 
 
 def _literal(value: int, width: int) -> str:
-    bits = format(value, f"0{width}b")
-    return f"'{bits}'" if width == 1 else f'"{bits}"'
+    """幅 width の値の VHDL のリテラル。0 は (others => '0')、4 の倍数の幅は 16 進（x"…"）、それ以外は 2 進。"""
+    if width == 1:
+        return f"'{value}'"
+    if value == 0:
+        return "(others => '0')"
+    if width % 4 == 0:
+        return f'x"{value:0{width // 4}X}"'
+    return f'"{value:0{width}b}"'
 
 
 def _slice(name: str, f: Field) -> str:

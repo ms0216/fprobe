@@ -16,6 +16,8 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
+use work.mem_ring_pkg.all;
 
 entity la_mem_writer is
   generic (
@@ -60,9 +62,8 @@ entity la_mem_writer is
 end entity;
 
 architecture rtl of la_mem_writer is
-  constant EV_BITS  : natural := ADDR_BITS - 4;
-  constant LA_BEATS : unsigned(ADDR_BITS downto 0) :=
-    shift_left(to_unsigned(1, ADDR_BITS + 1), ADDR_BITS) - shift_left(to_unsigned(1, ADDR_BITS + 1), EV_BITS);
+  constant EV_BITS  : natural := ring_ev_bits(ADDR_BITS);
+  constant LA_BEATS : unsigned(ADDR_BITS downto 0) := ring_la_beats(ADDR_BITS);
   constant LA_LAST  : unsigned(ADDR_BITS - 1 downto 0) := resize(LA_BEATS - 1, ADDR_BITS);
   type state_t is (S_IDLE, S_RUN, S_POST, S_DONE);
   signal state     : state_t := S_IDLE;
@@ -118,9 +119,7 @@ begin
         ev_count <= count_start;
       elsif fire and in_kind = '1' then
         ev_ptr <= ev_ptr + 1;
-        if ev_count /= (ev_count'range => '1') then
-          ev_count <= ev_count + 1;
-        end if;
+        ev_count <= sat_inc(ev_count);
       end if;
 
       if rst = '1' then

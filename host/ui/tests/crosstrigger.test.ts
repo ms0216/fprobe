@@ -2,10 +2,11 @@
 // 引数）、出力の端子の源（xtrig.output_status ↔ xtrig.output_set）、源ごとの回数・時刻（API が返す事実だけ）、条件の欄
 import { describe, expect, it } from "vitest";
 import {
-  ACTIONS, actionAvailability, cellBlock, defaultText, formCall, formValues, hexText, injectFacts, methodFields, outputColumns,
+  ACTIONS, actionAvailability, cellBlock, formCall, formValues, hexText, injectFacts, methodFields, outputColumns,
   outputSourcesCall, routeChanged, routeOf, routeParams, sourceAvailability, sourceFacts, toggleRoute,
   type LaTriggerStatus, type OutputPin, type Route, type Statuses, type XtrigStatus,
 } from "../src/lib/crosstrigger";
+import { defaultText } from "../src/lib/apiform";
 import { SOURCES } from "../src/lib/logic";
 
 /** 契約（API の応答の型）の外の応答: 古い・新しいデーモンが返しうる形。型を外して渡し、画面が落ちないことを見る */
@@ -204,7 +205,7 @@ describe("条件の欄（API の仕様の引数から）", () => {
 
   it("既定の値の表示: 0 以上の整数は大きさによらず 16 進（値の大きさで意味を推さない）、ほかはそのまま", () => {
     expect(defaultText(methodFields("xtrig.set_inject").find((f) => f.name === "address")!)).toBe("0xE000EDF0");
-    expect(defaultText(methodFields("xtrig.set_inject").find((f) => f.name === "ap")!)).toBe("0x0");
+    expect(defaultText(methodFields("xtrig.set_inject").find((f) => f.name === "ap")!)).toBe("0");
     expect(defaultText(methodFields("xtrig.set_match").find((f) => f.name === "on_write")!)).toBe("true");
     expect(defaultText(methodFields("xtrig.set_match").find((f) => f.name === "address")!)).toBeNull();
   });

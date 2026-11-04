@@ -11,7 +11,7 @@ from tests.tb.axi3_slave_mem import Axi3SlaveMem
 BASE = 0x1E00_0000
 
 
-async def setup(dut, base=BASE, seed=1):
+async def setup(dut, base=BASE, seed=1, stall=0.3):
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     dut.rst.value = 1
     dut.base.value = base
@@ -19,7 +19,7 @@ async def setup(dut, base=BASE, seed=1):
     dut.cmd_write.value = 0
     dut.cmd_addr.value = 0
     dut.cmd_data.value = 0
-    mem = Axi3SlaveMem(dut, dut.clk, seed=seed)
+    mem = Axi3SlaveMem(dut, dut.clk, seed=seed, stall=stall)
     got = []
 
     async def collect():
@@ -161,3 +161,28 @@ async def wr_pending_counts_the_writes_whose_response_has_not_returned(dut):
     task.cancel()
     assert state["peak"] >= 2, state                                  # 応答待ちが重なる（模型が応答を遅らせる）
     assert int(dut.wr_pending.value) == 0                              # 全部の応答が返ると 0
+
+
+@cocotb.test()
+async def writes_keep_the_w_channel_busy(dut):
+    # 相手が止めなければ、続けて出した書きは 2 周期に 1 拍で受ける（W の口 64 ビットが休まない = この口の上限）
+    from cocotb.triggers import ReadOnly
+    mem, got = await setup(dut, stall=0.0)
+    n = 64
+    dut.cmd_valid.value = 1
+    dut.cmd_write.value = 1
+    accepted, cycles = 0, 0
+    while accepted < n:
+        dut.cmd_addr.value = 100 + accepted
+        dut.cmd_data.value = (0xA5 << 120) | accepted
+        await ReadOnly()
+        take = dut.cmd_ready.value == 1                                 # この周期の辺で受ける
+        await RisingEdge(dut.clk)
+        cycles += 1
+        accepted += int(take)
+    dut.cmd_valid.value = 0
+    assert cycles <= 2 * n + 2, cycles
+    await ClockCycles(dut.clk, 50)
+    for i in range(n):
+        lo, hi = mem.mem.get((BASE >> 3) + 2 * (100 + i)), mem.mem.get((BASE >> 3) + 2 * (100 + i) + 1)
+        assert lo == i and hi == 0xA5 << 56, (i, lo, hi)

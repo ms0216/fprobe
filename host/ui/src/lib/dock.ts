@@ -27,6 +27,11 @@ export function panelMenuLabel(p: Pick<PanelDef, "title" | "about">, t: (key: Ke
 
 const LAYOUT_KEY = "dock.layout.v2";            // v2: 既定が解析の配置に（2026-10-24）。前の保存は使わない
 
+/** 既定の配置の窓の大きさ: 画面の大きさの割合で、上限は大きな画面での大きさ（狭い画面で、中央の時間軸・ソースが脇の列に
+ *  押しつぶされない。見せ方だけ） */
+export const share = (total: number, fraction: number, max: number): number =>
+  total > 0 ? Math.round(Math.min(max, total * fraction)) : max;        // 大きさがまだ分からない（0）なら上限
+
 /** デバッグの配置（日常のデバッグ。表示メニューから選ぶ）: 中央 = Source、右 = Watch・Locals・Registers / Call Stack・
  *  Threads / Breakpoints・Peripherals・Memory、下 = Timeline・Terminal・Disassembly・Activity（Ozone・VS Code の型） */
 function debugLayout(api: DockviewApi, add: (id: string, position?: object) => void): void {
@@ -49,8 +54,8 @@ function debugLayout(api: DockviewApi, add: (id: string, position?: object) => v
   api.getPanel("timeline")?.api.setActive();
   api.getPanel("source")?.api.setActive();
   // 大きさ: 右の列は狭く、下の段は低く
-  api.getPanel("watch")?.group.api.setSize({ width: 460 });
-  api.getPanel("timeline")?.group.api.setSize({ height: 300 });
+  api.getPanel("watch")?.group.api.setSize({ width: share(api.width, 0.34, 460) });
+  api.getPanel("timeline")?.group.api.setSize({ height: share(api.height, 0.36, 300) });
 }
 
 /** システム解析の配置: 時間軸（MCU と FPGA が同じ時刻の上に並ぶ）を大きく、右の列はシステム解析（MCU と FPGA の今・
@@ -68,8 +73,8 @@ function systemLayout(api: DockviewApi, add: (id: string, position?: object) => 
   api.getPanel("system")?.api.setActive();
   api.getPanel("fpgaObs")?.api.setActive();
   api.getPanel("timeline")?.api.setActive();
-  api.getPanel("system")?.group.api.setSize({ width: 560 });
-  api.getPanel("fpgaObs")?.group.api.setSize({ height: 260 });
+  api.getPanel("system")?.group.api.setSize({ width: share(api.width, 0.4, 560) });
+  api.getPanel("fpgaObs")?.group.api.setSize({ height: share(api.height, 0.32, 260) });
 }
 
 /** 解析の配置（既定。画面の作り直しの仕様 §3.3 の案 2。利用者の承認 2026-10-24）。
@@ -99,9 +104,9 @@ function analysisLayout(api: DockviewApi, add: (id: string, position?: object) =
   api.getPanel("source")?.api.setActive();
   api.getPanel("logicAnalyzer")?.api.setActive();
   api.getPanel("timeline")?.api.setActive();
-  api.getPanel("system")?.group.api.setSize({ width: 600 });
-  api.getPanel("source")?.group.api.setSize({ height: 430 });
-  api.getPanel("logicAnalyzer")?.group.api.setSize({ height: 290 });
+  api.getPanel("system")?.group.api.setSize({ width: share(api.width, 0.42, 600) });
+  api.getPanel("source")?.group.api.setSize({ height: share(api.height, 0.55, 430) });
+  api.getPanel("logicAnalyzer")?.group.api.setSize({ height: share(api.height, 0.3, 290) });
 }
 
 export type LayoutName = "analysis" | "debug" | "system";

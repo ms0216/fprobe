@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   // Linux（R26）: SSH でつないだ Linux のターゲットの能力の事実・エージェント・プローブ・時刻合わせ・出来事、
   // 道 B（物理メモリのリングを JTAG で読む）・止めずに読む口（memap）・gdb・ftrace・journal。
   // 設定はすべて欄に出し、値は API の事実のまま並べる（隠さない。仕様 §2）
@@ -11,7 +12,7 @@
     perfRecordParams, perfStatParams, type CoreForm, type PerfForm, ftraceParams, gdbBatchParams, gdbServeParams, LinuxEvents, logParams, memapParams,
     probeParams, ringOpenParams, ringReadParams, ringWatchParams, syncParams, traceStartParams, type ConnectForm, type GdbForm, type LinuxEvent, type LogForm,
     type MemapForm, type ProbeForm, type RingForm } from "../../lib/linux";
-  import { LINUX_KEEP } from "../../lib/linux";
+  import { LINUX_KEEP, reconcileTarget } from "../../lib/linux";
   import { memapJtagParams, type MemapJtagForm } from "../../lib/linuxhalt";
   import { load, save } from "../../lib/prefs";
 
@@ -76,7 +77,29 @@
     return app.act(method as never, params as never);
   }
 
+  /** デーモンが持つ「いまつながっているターゲット」に、映すターゲットを合わせる（AI がつないだものも、切ったものも映す） */
+  async function syncTargets() {
+    try {
+      const r = (await conn.call("linux.targets", {}, { quiet: true })) as { targets: { target: string; capabilities: Record<string, any> }[] };
+      const next = reconcileTarget(target, r.targets);
+      if (next.changed) {
+        target = next.target;
+        caps = r.targets.find((t) => t.target === target)?.capabilities ?? null;
+        agent = null;
+        probes = [];
+        clearResults();
+        events.reset();
+        records = [];
+      } else if (target) {
+        caps = r.targets.find((t) => t.target === target)?.capabilities ?? caps;
+      }
+    } catch (e) {
+      error = errorText(e);
+    }
+  }
+
   async function refresh() {
+    await syncTargets();
     if (!target) return;
     try {
       agent = (await conn.call("linux.agent.status" as never, { target } as never, { quiet: true })) as any;
@@ -138,6 +161,11 @@
     const timer = setInterval(() => void pull(), POLL_MS);
     return () => clearInterval(timer);
   });
+  // 開いたとき・つながったとき（ページの再読み込みの後を含む）に、デーモンの接続の状態を読む
+  // $app 全体ではなく「開いているか」だけを見る（$app は読み直しの記録のたびに更新され、読み直し → 記録 → $app の更新 →
+  // 読み直し… の循環になった。2026-11-05 実機: attach したままページを読み直すと、毎秒数十回の linux.halt.debug.status）
+  const linkOpen = $derived($app.link === "open");
+  $effect(() => { if (linkOpen) untrack(() => void refresh()); });
   // だれが（AI も）操作しても読み直す
   $effect(() => conn.on("activity", (e: { method: string }) => {
     if (e.method.startsWith("linux.") && !e.method.startsWith("linux.halt.")) void refresh();     // linux.halt.* は SSH の状態ではない（停止デバッグの読みの記録で SSH の読み直しを呼ばない）

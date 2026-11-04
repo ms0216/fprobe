@@ -64,8 +64,10 @@ class Decoder:
             if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 continue
             required = p.default is p.empty
+            choices = _choices(p.annotation)
             out.append({"name": p.name, "required": required, "nullable": _nullable(p.annotation),
                         "type": _param_type(p.annotation),
+                        **({} if choices is None else {"choices": choices}),
                         **({} if required else {"default": _jsonable(p.default)})})
         return out
 
@@ -92,6 +94,16 @@ def _nullable(annotation) -> bool:
 _TYPES = {bool: "boolean", int: "integer", float: "number", str: "string", dict: "object"}
 
 
+def _choices(annotation) -> list | None:
+    """引数の型が Literal[...]（受け付ける値の一覧の申告）なら、その値の並び（None を除く）。それ以外は None。"""
+    args = typing.get_args(annotation) if isinstance(annotation, types.UnionType) or \
+        typing.get_origin(annotation) is typing.Union else (annotation,)
+    literals = [a for a in args if typing.get_origin(a) is typing.Literal]
+    if len(literals) != 1:
+        return None
+    return [v for v in typing.get_args(literals[0]) if v is not None]
+
+
 def _param_type(annotation) -> str | None:
     """引数の型の注釈 → 設定の型（申告の事実）: channel（core.Channel）/ channels（list[Channel]）/ integer / number /
     boolean / string / object。None を除いて 1 つの型に決まらない・注釈が無い・知らない型は None（分からない）。"""
@@ -102,6 +114,11 @@ def _param_type(annotation) -> str | None:
     if len(kinds) != 1:
         return None
     t = kinds[0]
+    if typing.get_origin(t) is typing.Literal:                 # 値の一覧の申告: その値の型（そろっていれば）
+        values = {type(v) for v in typing.get_args(t) if v is not None}
+        if values and values <= {int, float}:                  # 数の並び（1・1.5・2 等）は数
+            return "integer" if values == {int} else "number"
+        t = values.pop() if len(values) == 1 else None
     if _is_channel(t):
         return "channel"
     if typing.get_origin(t) is list and len(typing.get_args(t)) == 1 and _is_channel(typing.get_args(t)[0]):

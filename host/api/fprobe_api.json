@@ -1621,7 +1621,7 @@
       "additionalProperties": false
     },
     "DecoderInfo": {
-      "description": "解読器 1 つ（fprobe.decode.registry.Decoder.describe。origin = builtin / python / ファイルの絶対パス。params の type = 設定の型（分からなければ null）、default は省略できる設定だけ）",
+      "description": "解読器 1 つ（fprobe.decode.registry.Decoder.describe。origin = builtin / python / ファイルの絶対パス。params の type = 設定の型（分からなければ null）、default は省略できる設定だけ、choices = 受け付ける値の一覧（引数の型が Literal のとき。無ければ値は自由））",
       "type": "object",
       "properties": {
         "name": {
@@ -1675,6 +1675,16 @@
                   "boolean",
                   "null"
                 ]
+              },
+              "choices": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "number",
+                    "boolean"
+                  ]
+                }
               }
             },
             "required": [
@@ -5462,6 +5472,78 @@
           },
           "description": "見張りが max_halt_s で全コアを走らせた記録（時刻・止めていた秒数・結果）"
         },
+        "brief_halts": {
+          "type": "object",
+          "description": "走行中のブレークポイントの置き外しのために、デバッガが全コアを短く止めた回数と時間（事実。count 回、合計 total_s 秒、最長 max_s 秒）。止めている間、対象のカーネルは動けない（max_halt_s の注を参照）",
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "total_s": {
+              "type": "number"
+            },
+            "max_s": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "count",
+            "total_s",
+            "max_s"
+          ],
+          "additionalProperties": false
+        },
+        "library_symbols": {
+          "type": "array",
+          "description": "attach のとき（コアを止める前）に対象の /proc/<pid>/maps から取り寄せた共有ライブラリ（libc など）のシンボルの事実。path = 対象の上の道、base = ファイルの先頭の対応の始まり（実行時の番地）、symbols = 関数のシンボルの数、source = 読んだ表（.symtab か .dynsym）、error = 取り寄せ・読みの失敗の理由。関数の名前と ARM / Thumb の別を引くのに使う（C のソースは出ない。行番号の情報が無いため）",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "local_path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "base": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "symbols": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "local_path",
+              "base",
+              "symbols",
+              "source",
+              "error"
+            ],
+            "additionalProperties": false
+          }
+        },
         "stats": {
           "type": "object",
           "properties": {
@@ -5725,6 +5807,8 @@
         "attach_stop",
         "last_stop",
         "auto_resumed",
+        "brief_halts",
+        "library_symbols",
         "stats",
         "close",
         "last_run",
@@ -9184,6 +9268,22 @@
         "closed_by",
         "error",
         "stderr_tail"
+      ],
+      "additionalProperties": false
+    },
+    "LinuxHaltOpen": {
+      "type": "object",
+      "description": "linux.halt は開いていて、プロセスへの attach はまだ（linux.halt.debug.attach の前。マイコンのターゲットは未接続のまま）。backend: 開いた口（linux.halt.open の backend）",
+      "properties": {
+        "backend": {
+          "enum": [
+            "fprobe",
+            "openocd"
+          ]
+        }
+      },
+      "required": [
+        "backend"
       ],
       "additionalProperties": false
     },
@@ -15923,7 +16023,7 @@
       "additionalProperties": false
     },
     "WatchedTargetState": {
-      "description": "見張りが最後に見たターゲットの状態（target.state の通知と同じ: target.status の応答 + run = コアを動かし得る操作が終わった回数。未接続は DISCONNECTED と、USB を開き直した後なら link_lost）",
+      "description": "見張りが最後に見たターゲットの状態（target.state の通知と同じ: target.status の応答 + run = コアを動かし得る操作が終わった回数。未接続は DISCONNECTED と、USB を開き直した後なら link_lost・linux.halt を開いて attach の前なら linux_halt_open）",
       "anyOf": [
         {
           "type": "object",
@@ -15939,6 +16039,9 @@
             },
             "linux_attaching": {
               "$ref": "#/$defs/LinuxAttaching"
+            },
+            "linux_halt_open": {
+              "$ref": "#/$defs/LinuxHaltOpen"
             }
           },
           "required": [
@@ -17755,12 +17858,18 @@
         "properties": {
           "target": {
             "type": "string",
-            "default": "cortex_m"
+            "examples": [
+              "cortex_m"
+            ],
+            "description": "pyOCD のターゲット名（例 stm32f401xe・nrf52840・rp2040、汎用の cortex_m、判別する auto）。既定は持たない"
           },
           "frequency_hz": {
             "type": "integer",
-            "default": 4000000,
-            "minimum": 1
+            "minimum": 1,
+            "examples": [
+              4000000
+            ],
+            "description": "線（SWD / JTAG）の速さ（Hz）。既定は持たない。速すぎると配線・対象によって接続が失敗する（Diagnose で速さを試せる）"
           },
           "connect_mode": {
             "type": "string",
@@ -17796,7 +17905,10 @@
             "default": null
           }
         },
-        "required": [],
+        "required": [
+          "target",
+          "frequency_hz"
+        ],
         "additionalProperties": false
       },
       "result": {
@@ -19078,7 +19190,10 @@
           "length": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 4294967296
+            "maximum": 4294967296,
+            "examples": [
+              64
+            ]
           }
         },
         "required": [
@@ -20451,7 +20566,10 @@
           "length": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4096
+            "maximum": 4096,
+            "examples": [
+              256
+            ]
           },
           "unit": {
             "enum": [
@@ -22449,7 +22567,10 @@
           "length": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4096
+            "maximum": 4096,
+            "examples": [
+              64
+            ]
           },
           "from_elf": {
             "type": "boolean",
@@ -26801,7 +26922,10 @@
           },
           "last": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "examples": [
+              2000
+            ]
           }
         },
         "required": [
@@ -27186,6 +27310,9 @@
                   },
                   "linux_attaching": {
                     "$ref": "#/$defs/LinuxAttaching"
+                  },
+                  "linux_halt_open": {
+                    "$ref": "#/$defs/LinuxHaltOpen"
                   }
                 },
                 "required": [
@@ -53300,6 +53427,44 @@
         "$ref": "#/$defs/LinuxCapabilities"
       }
     },
+    "linux.targets": {
+      "kind": "read",
+      "impl": "linux_targets",
+      "summary": "いま linux.connect でつないでいる Linux のターゲットの一覧（名前と、つないだときに採った能力。複数を同時に持てる）。人の画面の「Linux」パネルは、これを読んで、AI がつないだものも映す（接続の状態の置き場所はデーモンの 1 か所）。",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "type": "string"
+                },
+                "capabilities": {
+                  "$ref": "#/$defs/LinuxCapabilities"
+                }
+              },
+              "required": [
+                "target",
+                "capabilities"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "targets"
+        ],
+        "additionalProperties": false
+      }
+    },
     "linux.agent.deploy": {
       "kind": "control",
       "impl": "linux_agent_deploy",
@@ -54802,7 +54967,10 @@
           "frequency_hz": {
             "type": "integer",
             "minimum": 1,
-            "description": "TCK の周波数（Hz）"
+            "description": "TCK の周波数（Hz）",
+            "examples": [
+              25000000
+            ]
           }
         },
         "required": [
@@ -55931,28 +56099,19 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "カーネルの線形マップの仮想アドレスの始まり（--page-offset）",
-            "examples": [
-              2147483648
-            ]
+            "description": "カーネルの線形マップの仮想アドレスの始まり（--page-offset）"
           },
           "phys_offset": {
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "線形マップが対応する物理アドレスの始まり（--phys-offset）",
-            "examples": [
-              0
-            ]
+            "description": "線形マップが対応する物理アドレスの始まり（--phys-offset）"
           },
           "linear_map_end": {
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295,
-            "description": "線形マップの上端の仮想アドレス（high_memory。--linear-map-end）",
-            "examples": [
-              3141533696
-            ]
+            "description": "線形マップの上端の仮想アドレス（high_memory。--linear-map-end）"
           },
           "max_tasks": {
             "type": "integer",
@@ -55976,10 +56135,7 @@
               "short",
               "lpae"
             ],
-            "description": "ページテーブルの形式（--mmu-format）",
-            "examples": [
-              "short"
-            ]
+            "description": "ページテーブルの形式（--mmu-format）"
           },
           "journal": {
             "type": "string",
@@ -55996,10 +56152,7 @@
           "part": {
             "type": "string",
             "minLength": 1,
-            "description": "[fprobe] 部品の名前（arm_a_part。例 zynq7000・bcm2836。--part）",
-            "examples": [
-              "bcm2836"
-            ]
+            "description": "[fprobe] 部品の名前（arm_a_part。例 zynq7000・bcm2836。--part）"
           },
           "fpga_halt_watch_bound_ns": {
             "anyOf": [
@@ -57327,7 +57480,10 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 65535,
-            "description": "gdb が来る TCP ポート（127.0.0.1 だけ。0 なら OS が選び、応答の port が開いたポート。--port）"
+            "description": "gdb が来る TCP ポート（127.0.0.1 だけ。0 なら OS が選び、応答の port が開いたポート。--port）",
+            "examples": [
+              0
+            ]
           },
           "skew_limit_ns": {
             "type": "integer",
@@ -57353,7 +57509,10 @@
           "max_step_retries": {
             "type": "integer",
             "minimum": 0,
-            "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか"
+            "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか",
+            "examples": [
+              8
+            ]
           },
           "bp_unmapped": {
             "type": "string",
@@ -57361,7 +57520,10 @@
               "error",
               "hw"
             ],
-            "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）"
+            "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）",
+            "examples": [
+              "error"
+            ]
           },
           "log": {
             "type": "string",
@@ -57461,30 +57623,21 @@
           "skew_limit_ns": {
             "type": "integer",
             "minimum": 0,
-            "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）",
-            "examples": [
-              50000000
-            ]
+            "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）"
           },
           "thread_id": {
             "enum": [
               "stack",
               "contextidr"
             ],
-            "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）",
-            "examples": [
-              "stack"
-            ]
+            "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）"
           },
           "kernel_isa": {
             "enum": [
               "arm",
               "thumb"
             ],
-            "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）",
-            "examples": [
-              "arm"
-            ]
+            "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）"
           },
           "max_step_retries": {
             "type": "integer",
@@ -57507,10 +57660,7 @@
           "max_halt_s": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す。注意: 全コアを止めている間、対象のカーネルは動けないので、対象のハードウェアのウォッチドッグ（例: Raspberry Pi の BCM2835 は上限が約 15 秒）に餌をやれず、対象がハードウェアリセットされる（2026-11-04 実機: 6 回中 6 回、止めて約 15〜25 秒後）。max_halt_s がその上限より長いなら、先に対象のウォッチドッグを止める（systemd なら RuntimeWatchdogSec=0）",
-            "examples": [
-              120
-            ]
+            "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す。注意: 全コアを止めている間、対象のカーネルは動けないので、対象のハードウェアのウォッチドッグ（例: Raspberry Pi の BCM2835 は上限が約 15 秒）に餌をやれず、対象がハードウェアリセットされる（2026-11-04 実機: 6 回中 6 回、止めて約 15〜25 秒後）。max_halt_s がその上限より長いなら、先に対象のウォッチドッグを止める（systemd なら RuntimeWatchdogSec=0）"
           },
           "fetch_from_target": {
             "anyOf": [
@@ -57538,10 +57688,7 @@
               }
             ],
             "default": null,
-            "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）",
-            "examples": [
-              "sw"
-            ]
+            "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）"
           },
           "step_max_instructions": {
             "anyOf": [
@@ -57669,6 +57816,78 @@
               "additionalProperties": false
             },
             "description": "見張りが max_halt_s で全コアを走らせた記録（時刻・止めていた秒数・結果）"
+          },
+          "brief_halts": {
+            "type": "object",
+            "description": "走行中のブレークポイントの置き外しのために、デバッガが全コアを短く止めた回数と時間（事実。count 回、合計 total_s 秒、最長 max_s 秒）。止めている間、対象のカーネルは動けない（max_halt_s の注を参照）",
+            "properties": {
+              "count": {
+                "type": "integer"
+              },
+              "total_s": {
+                "type": "number"
+              },
+              "max_s": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "count",
+              "total_s",
+              "max_s"
+            ],
+            "additionalProperties": false
+          },
+          "library_symbols": {
+            "type": "array",
+            "description": "attach のとき（コアを止める前）に対象の /proc/<pid>/maps から取り寄せた共有ライブラリ（libc など）のシンボルの事実。path = 対象の上の道、base = ファイルの先頭の対応の始まり（実行時の番地）、symbols = 関数のシンボルの数、source = 読んだ表（.symtab か .dynsym）、error = 取り寄せ・読みの失敗の理由。関数の名前と ARM / Thumb の別を引くのに使う（C のソースは出ない。行番号の情報が無いため）",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "local_path": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "base": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "symbols": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "source": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "path",
+                "local_path",
+                "base",
+                "symbols",
+                "source",
+                "error"
+              ],
+              "additionalProperties": false
+            }
           },
           "stats": {
             "type": "object",
@@ -58026,6 +58245,8 @@
           "attach_stop",
           "last_stop",
           "auto_resumed",
+          "brief_halts",
+          "library_symbols",
           "stats",
           "close",
           "threads",
@@ -58043,7 +58264,7 @@
       }
     },
     "linux.halt.debug.status": {
-      "kind": "control",
+      "kind": "read",
       "impl": "linux_halt_debug_status",
       "summary": "linux.halt.debug の持ち主の事実（止まっているか・ブレークポイント・最後の停止・自動の再開・停止の数え）。コアは触らない。",
       "params": {
@@ -58331,7 +58552,10 @@
           "length": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 65536
+            "maximum": 65536,
+            "examples": [
+              64
+            ]
           }
         },
         "required": [
@@ -58398,12 +58622,18 @@
           "max_instructions": {
             "type": "integer",
             "minimum": 1,
-            "description": "1 命令のステップの上限（使う側が明示する）"
+            "description": "1 命令のステップの上限（使う側が明示する）",
+            "examples": [
+              200000
+            ]
           },
           "timeout_s": {
             "type": "number",
             "minimum": 0,
-            "description": "時間の上限（秒。使う側が明示）。命令の間と、呼び出しの踏み越え・カーネルから戻るのを待つ間（run_to）に確かめる。過ぎたら全コアを止めたまま、その時の位置と timed_out = true"
+            "description": "時間の上限（秒。使う側が明示）。命令の間と、呼び出しの踏み越え・カーネルから戻るのを待つ間（run_to）に確かめる。過ぎたら全コアを止めたまま、その時の位置と timed_out = true",
+            "examples": [
+              5
+            ]
           }
         },
         "required": [

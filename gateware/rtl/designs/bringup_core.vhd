@@ -11,6 +11,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity bringup_core is
   generic (
@@ -32,7 +33,7 @@ entity bringup_core is
 end entity;
 
 architecture rtl of bringup_core is
-  constant RX_DIVISOR : natural := (SYS_CLK_HZ + BAUD / 2) / BAUD;
+  constant RX_DIVISOR : natural := baud_divisor(SYS_CLK_HZ, BAUD);
   -- 送信を速める量（Hz）。整数演算で 0 に丸まらないよう最低 1 Hz とする
   constant TX_MARGIN_HZ : positive := maximum(1, BAUD * (TX_MARGIN_PPM / 100) / 10_000);
   constant TX_DIVISOR   : natural  := SYS_CLK_HZ / (BAUD + TX_MARGIN_HZ);

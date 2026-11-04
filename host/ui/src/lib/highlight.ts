@@ -1,7 +1,8 @@
-// ソースの構文の色（C / C++ とアセンブラのソースだけ。キーワード・型・文字列・数・コメント・前処理）。画面の見せ方だけで、
-// 意味の判断（どれが関数か・変数か）はしない。依存を増やさない小さな字句解析。Svelte に依らない
+// ソースの構文の色（C / C++ とアセンブラのソースだけ。キーワード・型・文字列・数・コメント・前処理）と、逆アセンブルの
+// 1 命令の色（ニーモニック・レジスタ・即値・記号・コメント）。画面の見せ方だけで、意味の判断（どれが関数か・変数か・
+// 命令が何をするか）はしない。依存を増やさない小さな字句解析。Svelte に依らない
 
-export type TokenKind = "kw" | "type" | "str" | "num" | "cm" | "pp" | "pl";
+export type TokenKind = "kw" | "type" | "str" | "num" | "cm" | "pp" | "pl" | "reg" | "sym";
 export interface Token { t: TokenKind; s: string }
 
 const KEYWORDS = new Set([
@@ -72,4 +73,56 @@ export function highlightLines(lines: string[]): Token[][] {
     }
     return out;
   });
+}
+
+// 逆アセンブル（debug.disassemble の mnemonic・operands）の色。レジスタの名前は ARM（r0〜r15・sp・lr・pc・VFP の s/d/q・
+// 特殊レジスタ）と RISC-V（x0〜x31・ABI の名前）の綴りだけを見る（綴りの見分けで、命令の意味は読まない）
+const REGISTER = new RegExp("^(r([0-9]|1[0-5])|sp|lr|pc|ip|fp|sb|sl|apsr|cpsr|spsr|fpscr|xpsr|ipsr|epsr|primask|basepri"
+  + "|basepri_max|faultmask|control|msp|psp|[sdq]([0-9]|[12][0-9]|3[01])|x([0-9]|[12][0-9]|3[01])|zero|ra|gp|tp|t[0-6]"
+  + "|a[0-7]|s1[01])$", "i");
+const SHIFTS = new Set(["lsl", "lsr", "asr", "ror", "rrx", "uxtw", "sxtw", "uxtb", "sxtb", "uxth", "sxth"]);
+const ASM_NUMBER = /^#?-?(0[xX][0-9a-fA-F]+|\d+)/;
+
+/** 1 命令を、トークンの並びにする（ニーモニック・空白・オペランド。つなぐと `${mnemonic} ${operands}` に戻る） */
+export function highlightAsm(mnemonic: string, operands: string): Token[] {
+  const out: Token[] = [];
+  const push = (t: TokenKind, s: string) => {
+    if (!s) return;
+    const last = out[out.length - 1];
+    if (last && last.t === t) last.s += s;
+    else out.push({ t, s });
+  };
+  push("kw", mnemonic);
+  push("pl", " ");
+  let i = 0;
+  while (i < operands.length) {
+    const rest = operands.slice(i);
+    if (rest[0] === ";" || rest[0] === "@" || rest.startsWith("//")) {        // 逆アセンブラの添え書き（番地・記号）
+      push("cm", rest);
+      break;
+    }
+    if (rest[0] === "<") {                                                     // <記号+オフセット>
+      const end = rest.indexOf(">");
+      const n = end < 0 ? rest.length : end + 1;
+      push("sym", rest.slice(0, n));
+      i += n;
+      continue;
+    }
+    const id = IDENT.exec(rest);
+    if (id) {
+      const w = id[0];
+      push(REGISTER.test(w) ? "reg" : SHIFTS.has(w.toLowerCase()) ? "kw" : "sym", w);
+      i += w.length;
+      continue;
+    }
+    const num = ASM_NUMBER.exec(rest);
+    if (num) {
+      push("num", num[0]);
+      i += num[0].length;
+      continue;
+    }
+    push("pl", rest[0]);
+    i += 1;
+  }
+  return out;
 }

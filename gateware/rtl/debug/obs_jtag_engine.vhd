@@ -28,6 +28,9 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
+use work.dap_pkg.all;
+use work.obs_pkg.all;
 
 entity obs_jtag_engine is
   port (
@@ -88,11 +91,12 @@ entity obs_jtag_engine is
 end entity;
 
 architecture rtl of obs_jtag_engine is
-  constant OP_SEQ_OUT : std_logic_vector(1 downto 0) := "00";
-  constant OP_SEQ_IN  : std_logic_vector(1 downto 0) := "01";
-  constant OP_READ    : std_logic_vector(3 downto 0) := x"2";
-  constant OP_SYNC    : std_logic_vector(3 downto 0) := x"3";
-  constant HEADER_WORDS : natural := 1;
+  constant HEADER_WORDS : natural := OBS_HEADER_WORDS;
+  -- TMS の列（OP_SEQ_OUT。下位から出す）
+  constant TMS_TO_RESET   : std_logic_vector(63 downto 0) := x"00000000_0000001F";   -- 1 × 5（→ Test-Logic-Reset）、続けて 0 で Idle
+  constant TMS_TO_SHIFT_IR : std_logic_vector(63 downto 0) := x"00000000_00000003";  -- 1,1,0,0（Idle → Shift-IR）
+  constant TMS_TO_SHIFT_DR : std_logic_vector(63 downto 0) := x"00000000_00000001";  -- 1,0,0（Idle → Shift-DR）
+  constant TMS_TO_IDLE    : std_logic_vector(63 downto 0) := x"00000000_00000001";   -- 1,0（Exit1 → Update → Idle）
   constant CMD_DEPTH  : natural := 4;
 
   -- 手順。E_IR・E_DR は区間の並び（BEFORE → BODY → AFTER）を 1 片ずつ送る
@@ -125,7 +129,7 @@ architecture rtl of obs_jtag_engine is
   signal tail_rises    : unsigned(1 downto 0);
 
   -- スキャン
-  signal m_words     : unsigned(8 downto 0);          -- このスキャンの記録の語数（始めに cfg_words から決める）
+  signal m_words     : unsigned(8 downto 0);          -- このスキャンの記録の語数（始めに cfg.words から決める）
   -- 判定に使う値をレジスタに置く（2026-10-29、sys を上げるため。最後の区間かの判定が、語数の足し算・設定の比較を毎回
   -- 組み合わせ回路で行い、最も遅い経路だった）: last_body = DR の最後の本体の区間の番号（m_words + HEADER_WORDS − 1。
   -- m_words と同じ所で決める）、*_after0 = 後ろの区間が無い（設定。スキャンの間は変えない）
@@ -136,7 +140,6 @@ architecture rtl of obs_jtag_engine is
   signal sync_count  : unsigned(15 downto 0);
   signal id_reads    : unsigned(1 downto 0);          -- 出した ID の読み（下位・上位の 2 つ）
   signal id_wait     : unsigned(7 downto 0);          -- ID がそろうまでのスキャンの数
-  signal cfg_id_scans : unsigned(7 downto 0);
   signal upd_time    : unsigned(47 downto 0);        -- このスキャンの Update-DR の時刻
   signal cap_time    : unsigned(47 downto 0);        -- このスキャンの Capture-DR を出る時刻
   signal head_rises  : unsigned(1 downto 0);
@@ -160,11 +163,15 @@ architecture rtl of obs_jtag_engine is
   signal id_ok_r, id_known, ovf_r, tgt_run_r : std_logic;   -- obs_record_rx から
   signal stop_req : std_logic;                       -- 止める指示を見た（すぐ戻されても区切りで止めて始め直す）
   -- 設定は開始のときに写す（走っている間に CSR を書き換えても、今のスキャンに効かない。jtag_phy は実行中に変えない）
-  signal cfg_half_period, cfg_sync_period : unsigned(15 downto 0);
-  signal cfg_ir_len, cfg_ir_before, cfg_ir_after : unsigned(5 downto 0);
-  signal cfg_dr_before, cfg_dr_after : unsigned(2 downto 0);
-  signal cfg_user_ir : std_logic_vector(31 downto 0);
-  signal cfg_words : unsigned(8 downto 0);
+  type cfg_t is record
+    half_period, sync_period : unsigned(15 downto 0);
+    ir_len, ir_before, ir_after : unsigned(5 downto 0);
+    dr_before, dr_after : unsigned(2 downto 0);
+    user_ir : std_logic_vector(31 downto 0);
+    words : unsigned(8 downto 0);
+    id_scans : unsigned(7 downto 0);
+  end record;
+  signal cfg : cfg_t;
   signal read_value_r, id_r : std_logic_vector(31 downto 0);
 
   -- obs_record_rx への脈。レジスタ信号だけから作る（下のプロセスの同じ条件と一致させる）
@@ -178,21 +185,21 @@ architecture rtl of obs_jtag_engine is
   begin
     if ir_scan then
       case s is
-        when SEG_BEFORE => return to_integer(cfg_ir_before);
+        when SEG_BEFORE => return to_integer(cfg.ir_before);
         when SEG_BODY   =>
-          if cfg_ir_len = 0 then
+          if cfg.ir_len = 0 then
             return 1;
-          elsif cfg_ir_len > 32 then
+          elsif cfg.ir_len > 32 then
             return 32;
           end if;
-          return to_integer(cfg_ir_len);
-        when SEG_AFTER  => return to_integer(cfg_ir_after);
+          return to_integer(cfg.ir_len);
+        when SEG_AFTER  => return to_integer(cfg.ir_after);
       end case;
     else
       case s is
-        when SEG_BEFORE => return to_integer(cfg_dr_before);
+        when SEG_BEFORE => return to_integer(cfg.dr_before);
         when SEG_BODY   => return 32;
-        when SEG_AFTER  => return to_integer(cfg_dr_after);
+        when SEG_AFTER  => return to_integer(cfg.dr_after);
       end case;
     end if;
   end function;
@@ -225,13 +232,13 @@ begin
   process (clk)
   begin
     if rising_edge(clk) then
-      dr_after0 <= cfg_dr_after = 0;
-      ir_after0 <= cfg_ir_after = 0;
+      dr_after0 <= cfg.dr_after = 0;
+      ir_after0 <= cfg.ir_after = 0;
     end if;
   end process;
 
   phy_i : entity work.jtag_phy
-    port map (clk => clk, rst => rst, enable => phy_enable, half_period => cfg_half_period, idle_cycles => 0,
+    port map (clk => clk, rst => rst, enable => phy_enable, half_period => cfg.half_period, idle_cycles => 0,
               dr_before => 0, dr_after => 0, ir_before => 0, ir_after => 0, ir_len => 1, sample_delay => sample_delay,
               now => (others => '0'), rsp_time => open,          -- 観測の口はスキャンの点を自分で取る（cap_time・upd_time）
               cmd_valid => phy_cmd_valid, cmd_ready => phy_cmd_ready, cmd_op => phy_cmd_op,
@@ -248,7 +255,7 @@ begin
     port map (clk => clk, rst => rst, clear => flush_now, scan_start => scan_start_c,
               word_valid => rx_word_valid, word => rx_word, part => part, scan_index => scan_count,
               time_count => time_count, cap_time => cap_time,
-              scan_end => rx_scan_end, sync_mark => sync_mark, sync_num => scan_cmd(15 downto 8), sync_time => upd_time,
+              scan_end => rx_scan_end, sync_mark => sync_mark, sync_num => obs_cmd_arg(scan_cmd), sync_time => upd_time,
               id_ok => id_ok_r, id_known => id_known, bad => bad, snap_mode => snap_mode, rec_count => rec_count,
               ovf => ovf_r, tgt_run => tgt_run_r, read_value => read_value_r, id => id_r,
               obs_valid => obs_valid_r, obs_v => obs_v_r,
@@ -275,12 +282,13 @@ begin
   rx_word_valid <= '1' when step = E_DR and rsp_c = '1' and seg = SEG_BODY
                             and not (is_last(SEG_BODY, part, false) and split = '0') else '0';
   rx_word <= phy_rsp_data(0) & partial when is_last(SEG_BODY, part, false) else phy_rsp_data(31 downto 0);
-  sync_mark <= '1' when scan_cmd(3 downto 0) = OP_SYNC else '0';
+  sync_mark <= '1' when obs_cmd_op(scan_cmd) = OBS_OP_SYNC else '0';
 
   tck <= phy_tck;
-  oe  <= '0' when step = E_OFF or step = E_HALT or free_pins = '1' else '1';
-  driving <= '0' when step = E_OFF or step = E_HALT or free_pins = '1' else '1';
+  -- 線を駆動する（PHY を動かす）のは、止めている・止まった・線を放す指示のとき以外
   phy_enable <= '0' when step = E_OFF or step = E_HALT or free_pins = '1' else '1';
+  oe         <= phy_enable;
+  driving    <= phy_enable;
 
   running       <= running_r;
   target_running <= tgt_run_r;
@@ -407,13 +415,13 @@ begin
               -- スキャンの終わり（印のイベントと id_ok は obs_record_rx。rx_scan_end）
               scan_count <= scan_count + 1;
               if id_ok_r = '0' then
-                if id_known = '0' and id_wait /= cfg_id_scans and rec_count <= m_words then
+                if id_known = '0' and id_wait /= cfg.id_scans and rec_count <= m_words then
                   -- 前の観測の読まれていない記録が FIFO に残っていると、ID の応答はその後ろに並ぶ。吸い出し終えて
                   -- （見出しの数が 1 スキャンで読む語数以下）から数える
                   id_wait <= id_wait + 1;
                 end if;
               end if;
-              if bad = '1' or (id_known = '0' and cfg_id_scans /= 0 and id_wait = cfg_id_scans) then   -- ID が今のスキャンで揃ったなら打ち切らない
+              if bad = '1' or (id_known = '0' and cfg.id_scans /= 0 and id_wait = cfg.id_scans) then   -- ID が今のスキャンで揃ったなら打ち切らない
                 stuck_r <= '1';
                 id_timeout_r <= not bad;
                 running_r <= '0';
@@ -437,16 +445,9 @@ begin
             stop_req <= '0';
             if enable = '1' and free_pins = '0' then
               step <= E_RESET;                                -- 前の観測で送っていない命令は捨てる（flush_now。R17）
-              cfg_half_period <= half_period;
-              cfg_sync_period <= sync_period;
-              cfg_ir_len <= ir_len;
-              cfg_ir_before <= ir_before;
-              cfg_ir_after <= ir_after;
-              cfg_dr_before <= dr_before;
-              cfg_dr_after <= dr_after;
-              cfg_user_ir <= user_ir;
-              cfg_words <= words;
-              cfg_id_scans <= id_scans;
+              cfg <= (half_period => half_period, sync_period => sync_period, ir_len => ir_len, ir_before => ir_before,
+                      ir_after => ir_after, dr_before => dr_before, dr_after => dr_after, user_ir => user_ir, words => words,
+                      id_scans => id_scans);
               stuck_r <= '0';
               id_timeout_r <= '0';
               id_reads <= (others => '0');
@@ -460,14 +461,14 @@ begin
               step <= E_OFF;
             end if;
           when E_RESET =>
-            issue(OP_SEQ_OUT, 6, '1', x"00000000_0000001F");     -- TMS 1 × 5 → Test-Logic-Reset、0 → Idle
+            issue(OP_SEQ_OUT, 6, '1', TMS_TO_RESET);               -- → Test-Logic-Reset、0 → Idle
           when E_IR_HEAD =>
-            issue(OP_SEQ_OUT, 4, '1', x"00000000_00000003");     -- 1,1,0,0 → Shift-IR
+            issue(OP_SEQ_OUT, 4, '1', TMS_TO_SHIFT_IR);
           when E_IR_TAIL | E_DR_TAIL =>
-            issue(OP_SEQ_OUT, 2, '1', x"00000000_00000001");     -- 1,0 → Update → Idle
+            issue(OP_SEQ_OUT, 2, '1', TMS_TO_IDLE);
             tail_rises <= (others => '0');
           when E_EXIT =>
-            issue(OP_SEQ_OUT, 5, '1', x"00000000_0000001F");     -- TMS 1 × 5 → Test-Logic-Reset
+            issue(OP_SEQ_OUT, 5, '1', TMS_TO_RESET);               -- → Test-Logic-Reset（Idle に戻らない）
           when E_DR_HEAD =>
             if want_stop_c = '1' then
               step <= E_EXIT;
@@ -476,30 +477,22 @@ begin
               if snap_mode = '1' then
                 scan_cmd <= (others => '0');                         -- 標本型は命令を受けない
               elsif id_reads /= 2 then
-                scan_cmd <= x"00" & "000" & std_logic(id_reads(0)) & OP_READ;   -- ID の下位（番地 0）・上位（1）
+                scan_cmd <= obs_cmd(OBS_OP_READ, "000" & std_logic(id_reads(0)), x"00");   -- ID の下位（番地 0）・上位（1）
                 id_reads <= id_reads + 1;
               elsif q_nonempty = '1' then
                 scan_cmd <= q_front;                                 -- 待ち行列から取る（pop_now）
-              elsif cfg_sync_period /= 0 and sync_count + 1 >= cfg_sync_period then
-                scan_cmd <= std_logic_vector(sync_seq) & x"0" & OP_SYNC;
+              elsif cfg.sync_period /= 0 and sync_count + 1 >= cfg.sync_period then
+                scan_cmd <= obs_cmd(OBS_OP_SYNC, x"0", std_logic_vector(sync_seq));
                 sync_seq <= sync_seq + 1;
                 sync_count <= (others => '0');
               else
                 scan_cmd <= (others => '0');
                 sync_count <= sync_count + 1;
               end if;
-              if cfg_words = 0 then
-                m_words   <= to_unsigned(1, 9);
-                last_body <= to_unsigned(1 + HEADER_WORDS - 1, 9);
-              elsif cfg_words > 256 then
-                m_words   <= to_unsigned(256, 9);
-                last_body <= to_unsigned(256 + HEADER_WORDS - 1, 9);
-              else
-                m_words   <= cfg_words;
-                last_body <= cfg_words + HEADER_WORDS - 1;
-              end if;
+              m_words   <= clamp(cfg.words, 1, 256);                 -- 1〜256 語
+              last_body <= clamp(cfg.words, 1, 256) + HEADER_WORDS - 1;
               running_r <= id_ok_r;
-              issue(OP_SEQ_OUT, 3, '1', x"00000000_00000001");   -- 1,0,0 → Shift-DR
+              issue(OP_SEQ_OUT, 3, '1', TMS_TO_SHIFT_DR);
               head_rises <= (others => '0');
               snap_scan <= snap_mode;
             end if;
@@ -509,7 +502,7 @@ begin
             last := is_last(seg, part, ir);
             if ir then
               fill := '1';                                         -- 他の装置の IR は BYPASS（すべて 1）
-              data := cfg_user_ir;
+              data := cfg.user_ir;
             else
               fill := '0';
               if seg = SEG_BODY and part = last_body then
@@ -548,7 +541,7 @@ begin
         running_r <= '0';
         stuck_r <= '0';
         id_timeout_r <= '0';
-        cfg_id_scans <= (others => '0');
+        cfg.id_scans <= (others => '0');
         scan_count <= (others => '0');
         sync_seq <= (others => '0');
         id_reads <= (others => '0');

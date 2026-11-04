@@ -18,6 +18,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.la_pkg.all;
 
 entity la_lane_front is
   generic (
@@ -32,7 +33,6 @@ entity la_lane_front is
     lane_data        : in  std_logic_vector(LANES * WIDTH - 1 downto 0);
     ext_trigger  : in  std_logic;
     run          : in  std_logic;
-    arm          : in  std_logic;            -- 使わない（外部トリガも成立の印に入れ、トリガ待ちかは la_record が見る。la_front と同じ口）
     trig_mask    : in  std_logic_vector(WIDTH - 1 downto 0);
     trig_value   : in  std_logic_vector(WIDTH - 1 downto 0);
     trig_rise    : in  std_logic_vector(WIDTH - 1 downto 0);
@@ -84,7 +84,7 @@ begin
         p := lane(w1, k - 1);
       end if;
       match := (s and mask_r) = vm_r;
-      edge := no_edges_r or ((rise_r and s and not p) or (fall_r and p and not s)) /= (s'range => '0');
+      edge := no_edges_r or trig_edge(rise_r, fall_r, s, p);
       hv(k) <= '1' when match and edge else '0';
       if k = 0 then
         hv0_plain <= '1' when match and no_edges_r else '0';

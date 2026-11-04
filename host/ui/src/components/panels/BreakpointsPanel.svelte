@@ -17,6 +17,7 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n, t, type Key } from "../../lib/i18n";
+  import { errorText } from "../../lib/api";
   import { load, save } from "../../lib/prefs";
   import { nearestAtOrBefore, onTimeline } from "../../lib/timeline/events";
   import SafetyConditions from "./SafetyConditions.svelte";
@@ -39,6 +40,10 @@
   let selected = $state<number | null>(null);           // 選んだログの seq
   let flashBp = $state<any>(null);
   let mode = $state<any>(null);                         // target.debug_mode.get
+  // 接続中に読みを API が断った理由（画面は対象の種類で項目を決めず、API の文をそのまま出す。backlog 65 番）
+  let vcError = $state<string | null>(null);
+  let modeError = $state<string | null>(null);
+  let flashError = $state<string | null>(null);
   const MODES = ["halt", "monitor"] as const;
   let open = $state<Record<string, boolean>>(sections());
   let logList = $state<HTMLElement>();
@@ -127,7 +132,7 @@
   // --- ベクタ キャッチ・Flash ブレークポイント（接続したら・誰かが変えたら読む） ---
   $effect(() => {
     if (online && connected) void readCatch();
-    else vc = null;
+    else { vc = null; vcError = null; }
   });
   $effect(() => conn.on("activity", (e: { method: string; params?: unknown }) => {
     if (changesCatch(e) && connected) void readCatch();
@@ -136,14 +141,16 @@
   }));
   $effect(() => {
     if (online && connected) void readMode();
-    else mode = null;
+    else { mode = null; modeError = null; }
   });
 
   async function readMode() {
     try {
       mode = await conn.call("target.debug_mode.get", {}, { quiet: true });
-    } catch {
+      modeError = null;
+    } catch (e) {
       mode = null;
+      modeError = errorText(e);
     }
   }
 
@@ -163,8 +170,10 @@
   async function readCatch() {
     try {
       vc = catchState(await conn.call("target.vector_catch.get", {}, { quiet: true }), vc ?? undefined);
-    } catch {
+      vcError = null;
+    } catch (e) {
       vc = null;
+      vcError = errorText(e);
     }
   }
 
@@ -177,8 +186,10 @@
   async function readFlash() {
     try {
       flashBp = await conn.call("debug.breakpoint.flash", {}, { quiet: true });
-    } catch {
+      flashError = null;
+    } catch (e) {
       flashBp = null;
+      flashError = connected ? errorText(e) : null;
     }
   }
 
@@ -318,7 +329,7 @@
         {/each}
       </div>
     {:else}
-      <div class="empty"><span>{$i18n("vc.connect")}</span></div>
+      <div class="empty"><span>{connected && vcError ? $i18n("bp.notReadable", { error: vcError }) : $i18n("vc.connect")}</span></div>
     {/if}
   </details>
 
@@ -344,7 +355,7 @@
         <div class="stats muted">{mode.reason}</div>
       {/if}
     {:else}
-      <div class="empty"><span>{$i18n("dm.connect")}</span></div>
+      <div class="empty"><span>{connected && modeError ? $i18n("bp.notReadable", { error: modeError }) : $i18n("dm.connect")}</span></div>
     {/if}
   </details>
 
@@ -374,7 +385,8 @@
         {$i18n("bp.flashStats")}: {Object.entries(flashBp.stats).map(([k, v]) => `${k} ${v}`).join(" · ")}
       </div>
     {:else}
-      <div class="empty"><span>{$i18n("bp.flashUnavailable")}</span></div>
+      <div class="empty"><span>{connected && flashError ? $i18n("bp.notReadable", { error: flashError })
+        : $i18n("bp.flashUnavailable")}</span></div>
     {/if}
   </details>
 </div>

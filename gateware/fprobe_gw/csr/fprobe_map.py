@@ -3,6 +3,7 @@
 変更したら `python -m fprobe_gw gen` で生成物を更新する（tests/test_generated.py が一致を検査する）。
 """
 
+from ..events import EVENT_KINDS
 from ..protocol import PROTOCOL_VERSION
 from .model import Block, CsrMap, Field, Register
 
@@ -46,7 +47,7 @@ STREAM_PL_CHUNK_BEATS = 256   # PL と中継の複写の道が作るかたまり
 # ロジアナの垂れ流しの欠けの記録のイベントの種類（la_stream_gap の KIND_LA_GAP と一致させる。
 # docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12 段 B）: [47:0] 拍を捨て始めた時刻、[79:48] 欠けの前に出した
 # ロジアナの拍の数（流れの開始から。32 ビットで折り返す）、[119:80] 捨てたサンプルの数、[127:120] 種類
-EVENT_KIND_LA_GAP = 19         # 並行して作った段階 S2 の 16〜18（PHY の設定・サンプラ）の次（la-deep-fast §12.7）
+EVENT_KIND_LA_GAP = EVENT_KINDS["LA_GAP"][0]   # 定義元は fprobe_gw/events.py（la-deep-fast §12.7）
 
 FPROBE_MAP = CsrMap(blocks=(
     Block("system", 0x0000, 0x40, doc="識別と疎通確認", registers=(

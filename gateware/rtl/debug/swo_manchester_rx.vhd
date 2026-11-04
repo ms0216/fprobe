@@ -23,6 +23,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity swo_manchester_rx is
   generic (
@@ -76,9 +77,7 @@ begin
       rx_prev <= rx_sync;
       valid_r <= '0';
       error_r <= '0';
-      if timer /= (timer'range => '1') then
-        timer <= timer + 1;
-      end if;
+      timer <= sat_inc(timer);
 
       if rst = '1' then
         state     <= S_IDLE;

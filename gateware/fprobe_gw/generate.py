@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import build_info, caps, dap_info, ps_window, timing
+from . import build_info, caps, dap_info, events, ps_window, timing
 from .csr import fprobe_map
 from .csr.fprobe_map import FPROBE_MAP, MEM_BEAT_BYTES
 from .csr.host import render_host_module
@@ -38,6 +38,7 @@ def artifacts() -> list[Artifact]:
         Artifact(USB_PACKAGE, lambda: render_usb_package(FPROBE_DEVICE)),
         Artifact(CORE_GENERATED / "csr_map_pkg.vhd", lambda: render_map_package(FPROBE_MAP)),
         Artifact(CORE_GENERATED / "timing_pkg.vhd", timing.render_package),
+        Artifact(CORE_GENERATED / "event_pkg.vhd", events.render_vhdl_package),
         Artifact(CORE_GENERATED / "ps_window_pkg.vhd", ps_window.render_vhdl_package),
         Artifact(REPO_ROOT / "host" / "pynq" / "fprobe-relay" / "window_regs.h", ps_window.render_c_header),
         Artifact(REPO_ROOT / "docs" / "ps-window.md", ps_window.render_markdown),
@@ -52,7 +53,8 @@ def artifacts() -> list[Artifact]:
             "ストリームの見出し（ロジアナとイベントを 1 本に流す構成）":
                 {n: getattr(fprobe_map, n) for n in ("STREAM_SEG_MAGIC", "STREAM_SEG_LA", "STREAM_SEG_EVENTS",
                                                      "STREAM_SEG_MAX_BEATS", "STREAM_PL_CHUNK_BEATS")},
-            "イベントの種類（回路の定義が fprobe_gw に在るもの）": {"EVENT_KIND_LA_GAP": fprobe_map.EVENT_KIND_LA_GAP},
+            "イベントの種類（fprobe_gw/events.py。回路の event_pkg と同じ値）":
+                {f"EVENT_KIND_{n}": v for n, (v, _) in events.EVENT_KINDS.items()},
             "PYNQ の PS と PL の窓（zynq_frame_link。バイト番地。fprobe_gw/ps_window.py）": ps_window.render_host_constants(),
             "Primer の構成（線・機能 → デザイン。ホストが書き替えに使う）":
                 {f"DESIGN_FOR_{p.upper()}": d for p, d in {**PROTOCOL_DESIGNS, **FEATURE_DESIGNS}.items()}})),

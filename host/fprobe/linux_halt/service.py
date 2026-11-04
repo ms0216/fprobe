@@ -660,7 +660,8 @@ class HaltSession:
                 "breakpoints": len(d.breakpoints)}
 
     def debug_attach(self, *, pid: int, elf: str, skew_limit_ns: int, thread_id: str, kernel_isa: str,
-                     max_step_retries: int, bp_unmapped: str, max_halt_s: float) -> dict:
+                     max_step_retries: int, bp_unmapped: str, max_halt_s: float,
+                     libraries: list[dict] | None = None) -> dict:
         """プロセス pid を gdb を通さずに止めて調べる持ち主を開く: 全コアを止めてプロセスを読み、前のデバッガが残した BKPT を
         戻し、ELF（PC の上のパス）の読み込み位置を補助ベクタから求め、全コアを**止めたまま**返す。max_halt_s 秒、呼び出しが
         無いまま止めたままなら、見張りが全コアを走らせる。"""
@@ -690,7 +691,7 @@ class HaltSession:
         try:
             attach = engine.attach()                          # 全コアを止める（止めたまま返す）
             debugger = HaltDebugger(engine, image, skew_limit_ns=skew_limit_ns, max_halt_s=float(max_halt_s),
-                                    lock=self._device_lock,
+                                    lock=self._device_lock, libraries=libraries,
                                     attach_stop=attach, cleanup=self._cleanup_reconnecting)
         except BaseException:
             self._cleanup_reconnecting(engine)                # 途中で失敗: BKPT・HW の bp を外して全コアを走らせる

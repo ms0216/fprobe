@@ -103,26 +103,28 @@ describe("linux.halt.debug.attach の欄（人も画面から attach する）",
 });
 
 describe("欄の最初の値は API の仕様の「例・推奨の値」（見えて・書き換えられ・送るときは欄の値を明示して送る）", () => {
-  it("open の欄: 仕様の examples が欄に入り、パス（offsets・journal）は空のまま。書き足せば、欄の値がそのまま引数になる", () => {
+  // 最初の値の基準（CLAUDE.md 2026-11-04）: A・B（間違えれば失敗が見える・どの対象にも通じる）は仕様の examples から入り、
+  // C・D・E（判定の閾値・対象のカーネルに固有・書き換える・壊す）は空から
+  it("open の欄: A・B の欄は仕様の examples が入り、対象のカーネルに固有の欄（番地・MMU の形式・部品）とパスは空のまま", () => {
     const f = exampleHaltForm();
-    expect([f.backend, f.jtagKhz, f.pageOffset, f.maxThreads, f.mmuFormat, f.fpgaRequestTimes, f.part])
-      .toEqual(["fprobe", "25000", "0x80000000", "4096", "short", "true", "bcm2836"]);
-    expect([f.offsets, f.journal]).toEqual(["", ""]);                         // 使う人のパスは例に入れない
-    const built = haltOpenParams({ ...f, offsets: "C:/x/o.json", journal: "C:/x/j.json" });
+    expect([f.backend, f.jtagKhz, f.maxTasks, f.maxThreads, f.fpgaRequestTimes]).toEqual(["fprobe", "25000", "100000", "4096", "true"]);
+    expect([f.pageOffset, f.physOffset, f.linearMapEnd, f.mmuFormat, f.part, f.offsets, f.journal]).toEqual(["", "", "", "", "", "", ""]);
+    const built = haltOpenParams({ ...f, offsets: "C:/x/o.json", journal: "C:/x/j.json", pageOffset: "0x80000000", physOffset: "0",
+                                   linearMapEnd: "0xBB400000", mmuFormat: "short" });
     expect("params" in built && built.params).toMatchObject({ backend: "fprobe", jtag_khz: 25000, page_offset: 2147483648,
-      linear_map_end: 3141533696, max_tasks: 100000, max_threads: 4096, mmu_format: "short", fpga_request_times: true, part: "bcm2836" });
+      linear_map_end: 3141533696, max_tasks: 100000, max_threads: 4096, mmu_format: "short", fpga_request_times: true });
   });
 
   it("欄を書き換えれば、書き換えた値が送られる（画面が既定を黙って補わない）", () => {
-    const built = haltOpenParams({ ...exampleHaltForm(), offsets: "o", journal: "j", jtagKhz: "1000" });
+    const built = haltOpenParams({ ...exampleHaltForm(), offsets: "o", journal: "j", jtagKhz: "1000", pageOffset: "0x80000000",
+                                   physOffset: "0", linearMapEnd: "0xBB400000", mmuFormat: "short" });
     expect("params" in built && (built.params as { jtag_khz: number }).jtag_khz).toBe(1000);
   });
 
-  it("attach の欄: 仕様の examples が入り、pid・elf は空のまま", () => {
+  it("attach の欄: A・B の欄は仕様の examples が入り、判定の閾値・対象に固有・書き換える・壊しうる欄と pid・elf は空のまま", () => {
     const f = exampleAttachForm();
-    expect([f.skewLimitNs, f.threadId, f.kernelIsa, f.maxStepRetries, f.bpUnmapped, f.maxHaltS, f.breakpointKind])
-      .toEqual(["50000000", "stack", "arm", "8", "error", "120", "sw"]);
-    expect([f.pid, f.elf]).toEqual(["", ""]);
+    expect([f.maxStepRetries, f.bpUnmapped, f.stepMaxInstructions, f.stepTimeoutS]).toEqual(["8", "error", "200000", "5"]);
+    expect([f.skewLimitNs, f.threadId, f.kernelIsa, f.maxHaltS, f.breakpointKind, f.pid, f.elf]).toEqual(["", "", "", "", "", "", ""]);
   });
 });
 

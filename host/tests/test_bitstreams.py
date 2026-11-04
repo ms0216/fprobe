@@ -165,14 +165,14 @@ def make_probe(board, tmp_path):
 def test_a_jtag_connection_switches_to_the_jtag_design_and_back(board, tmp_path):
     p = make_probe(board, tmp_path)
     try:
-        status = p.target_connect("cortex_m", jtag_chain=[4, 5])
+        status = p.target_connect("cortex_m", frequency_hz=4_000_000, jtag_chain=[4, 5])
         switch = status["design_switch"]
         assert (switch["before"], switch["after"]) == ("fprobe", "fprobe_jtag")
         assert board.programmed == [tmp_path / "fprobe_jtag" / "top.fs"] and board.connected["jtag_chain"] == [4, 5]
         assert p.probe_design_get()["design"] == "fprobe_jtag"
-        status = p.target_connect("stm32f401xe")                 # SWD: 標準に戻す
+        status = p.target_connect("stm32f401xe", frequency_hz=4_000_000)                 # SWD: 標準に戻す
         assert status["design_switch"]["after"] == "fprobe" and len(board.programmed) == 2
-        assert "design_switch" not in p.target_connect("stm32f401xe")    # もう要らない
+        assert "design_switch" not in p.target_connect("stm32f401xe", frequency_hz=4_000_000)    # もう要らない
     finally:
         p.close()
 
@@ -196,7 +196,7 @@ def test_switching_explicitly_and_what_is_reported(board, tmp_path):
             p.probe_design_switch()
         with pytest.raises(ValueError, match="切り替えられる"):
             p.probe_design_switch(design="fprobe_eth")
-        p.target_connect("cortex_m", jtag_chain=[4])
+        p.target_connect("cortex_m", frequency_hz=4_000_000, jtag_chain=[4])
         with pytest.raises(RuntimeError, match="接続中"):
             p.probe_design_switch(protocol="swd")
     finally:
@@ -208,11 +208,11 @@ def test_without_auto_switch_jtag_is_refused_and_swd_stays(board, tmp_path, monk
     p = make_probe(board, tmp_path)
     try:
         with pytest.raises(bs.DesignSwitchError, match="自動の書き替えは切ってある"):
-            p.target_connect("cortex_m", jtag_chain=[4, 5])
+            p.target_connect("cortex_m", frequency_hz=4_000_000, jtag_chain=[4, 5])
         assert board.programmed == []
         board.design = "fprobe_jtag"
         p.close()
-        assert "design_switch" not in p.target_connect("stm32f401xe")    # SWD はどちらの構成にもある
+        assert "design_switch" not in p.target_connect("stm32f401xe", frequency_hz=4_000_000)    # SWD はどちらの構成にもある
         assert board.programmed == []
     finally:
         p.close()
@@ -223,13 +223,13 @@ def test_a_missing_bitstream_or_a_device_that_does_not_come_back_is_an_error(boa
     try:
         (tmp_path / "fprobe_jtag" / "top.fs").unlink()
         with pytest.raises(bs.DesignSwitchError, match="fprobe_gw build fprobe_jtag"):
-            p.target_connect("cortex_m", jtag_chain=[4, 5])
+            p.target_connect("cortex_m", frequency_hz=4_000_000, jtag_chain=[4, 5])
         assert board.programmed == []
         (tmp_path / "fprobe_jtag" / "top.fs").write_bytes(b"bitstream")
         board.absent_polls = 10 ** 6
         p._reenumerate_s = 0.0
         with pytest.raises(bs.DesignSwitchError, match="USB に現れない"):
-            p.target_connect("cortex_m", jtag_chain=[4, 5])
+            p.target_connect("cortex_m", frequency_hz=4_000_000, jtag_chain=[4, 5])
     finally:
         p.close()
 
@@ -246,7 +246,7 @@ def lost(p):
 def test_a_probe_that_comes_back_on_usb_is_reopened_and_says_what_changed(board, tmp_path):
     p = make_probe(board, tmp_path)
     try:
-        p.target_connect("stm32f401xe")
+        p.target_connect("stm32f401xe", frequency_hz=4_000_000)
         board.unplug(sampler=False, jtag=True)          # 電源が落ち、Flash の古い版で立ち上がった
         out = p.recover_link(lost(p))
         assert "つなぎ直した" in out["message"] and "ターゲット" in out["message"]
@@ -398,7 +398,7 @@ def test_switching_the_design_ends_the_recording_first(board, tmp_path, monkeypa
 def test_a_lost_link_ends_the_recording_and_tells_whether_the_timebase_restarted(board, tmp_path, monkeypatch):
     p = make_probe(board, tmp_path)
     try:
-        p.target_connect("stm32f401xe")
+        p.target_connect("stm32f401xe", frequency_hz=4_000_000)
         rec = _recording(p, monkeypatch, last_ticks=1_000)
         board.unplug()
         out = p.recover_link(lost(p))                                   # 開き直した機器のタイムベースは 0

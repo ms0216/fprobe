@@ -10,6 +10,16 @@ package util_pkg is
 
   -- 真なら 1、偽なら 0
   function to_natural(b : boolean) return natural;
+  function to_sl(b : boolean) return std_logic;
+
+  -- 1 を足す。全部 1 なら止める（飽和の数え。数えた値が折り返して小さく見えないように）
+  function sat_inc(a : unsigned) return unsigned;
+
+  -- a を lo〜hi に収める（a と同じ幅）
+  function clamp(a : unsigned; lo, hi : natural) return unsigned;
+
+  -- UART 等の 1 ビットの周期数（clk_hz / baud を四捨五入）
+  function baud_divisor(clk_hz, baud : positive) return natural;
 
   -- 2^n で折り返す総数（書いた拍・読んだ拍など、流れの開始から数えて n ビットで回るもの）どうしの差と比べ。
   -- 総数は折り返すので、大小の比べ（>=・<=）を直接使わない（2^32 拍 = 68.7 GB、66.7 MB/s で 17 分で折り返す）。
@@ -43,6 +53,41 @@ package body util_pkg is
       return 1;
     end if;
     return 0;
+  end function;
+
+  function to_sl(b : boolean) return std_logic is
+  begin
+    if b then
+      return '1';
+    end if;
+    return '0';
+  end function;
+
+  function sat_inc(a : unsigned) return unsigned is
+    variable r : unsigned(a'length - 1 downto 0);
+  begin
+    r := a;
+    if r /= (r'range => '1') then
+      r := r + 1;
+    end if;
+    return r;
+  end function;
+
+  function clamp(a : unsigned; lo, hi : natural) return unsigned is
+    variable r : unsigned(a'length - 1 downto 0);
+  begin
+    r := a;
+    if r < lo then
+      r := to_unsigned(lo, r'length);
+    elsif r > hi then
+      r := to_unsigned(hi, r'length);
+    end if;
+    return r;
+  end function;
+
+  function baud_divisor(clk_hz, baud : positive) return natural is
+  begin
+    return (clk_hz + baud / 2) / baud;
   end function;
 
   function mod_diff(a, b : unsigned) return unsigned is

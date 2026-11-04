@@ -181,7 +181,7 @@ begin
               swd_cmd_valid => cmd_valid, swd_cmd_ready => cmd_ready, swd_cmd_cond => cmd_cond, swd_cmd_op => cmd_op,
               swd_cmd_count => cmd_count, swd_cmd_request => cmd_request, swd_cmd_data => cmd_data,
               swd_rsp_valid => d_rsp_valid, swd_rsp_ack => rsp_ack, swd_rsp_data => rsp_data,
-              swd_rsp_parity => rsp_parity, nreset_low => nreset_low, nreset_in => rst_in,
+              swd_rsp_parity => rsp_parity, swd_rsp_time => p_time, nreset_low => nreset_low, nreset_in => rst_in,
               wait_retry_out => wait_retry,
               jtag => jtag, jtag_dr_before => dr_before, jtag_dr_after => dr_after,
               jtag_ir_before => ir_before, jtag_ir_after => ir_after, jtag_ir_len => ir_len,

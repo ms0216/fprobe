@@ -13,12 +13,17 @@
   } from "../../lib/diagnose";
   import { hex32 } from "../panels/format";
   import { svdLoadParams } from "../../lib/peripherals";
+  import { suggestedOf } from "../../lib/apispec";
+  import { connectDefaults, rememberTarget, recentTargets } from "../../lib/connectform";
 
   const { app, conn, dbg, ui } = shared();
 
   let path = $state(load("elf", ""));
-  let device = $state(load("connect.target", ""));
-  let mhz = $state(load("connect.mhz", ""));   // 使う人が入れる（品種・速さを初めから入れない）
+  // 最初の値: 前に使った値、無ければ仕様の値（target.connect の examples。欄に見えて書き換えられ、送るときは明示して送る）
+  const firstConnect = connectDefaults(suggestedOf);
+  let device = $state(load("connect.target", firstConnect.target));
+  let mhz = $state(load("connect.mhz", firstConnect.mhz));
+  let recent = $state<string[]>(recentTargets(load("connect.recentTargets", "[]")));
   let diagMhz = $state(load("diagnose.mhz", ""));   // 診断で試す速さ（MHz のカンマ区切り。空なら接続の速さ 1 つ）
   let svd = $state(load("svd.device", ""));
   // デバイス名かパスかは使う人が選ぶ（文字の形で推さない）
@@ -87,6 +92,8 @@
     if (hz === null || jtagChain === null || !(await allowed(app))) return;
     save("connect.target", device);
     save("connect.mhz", mhz);
+    recent = rememberTarget(recent, device);
+    save("connect.recentTargets", JSON.stringify(recent));
     save("connect.jtagChain", chain);
     busy = true;
     const done = await app.act("target.connect", { target: device, frequency_hz: hz,
@@ -162,13 +169,15 @@
     <h2>{$i18n("dialog.connect")}</h2>
     <form class="grid" onsubmit={(e) => { e.preventDefault(); void connect(); }}>
       <label for="dev">{$i18n("dialog.device")}<span class="req" aria-hidden="true">*</span></label>
-      <input id="dev" class="mono" bind:value={device} aria-required="true" title={$i18n("dialog.deviceHint")} />
+      <input id="dev" class="mono" bind:value={device} aria-required="true" title={$i18n("dialog.deviceHint")}
+             list="recent-targets" autocomplete="off" />
+      <datalist id="recent-targets">{#each recent as r (r)}<option value={r}></option>{/each}</datalist>
+      <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
       <label for="clk">{$i18n("dialog.clock")}<span class="req" aria-hidden="true">*</span></label>
       <span><input id="clk" class="num" bind:value={mhz} inputmode="decimal" aria-required="true" /> MHz</span>
-      <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
       <label for="dclk">{$i18n("diagnose.speeds")}</label>
       <span><input id="dclk" class="mono" bind:value={diagMhz} placeholder={mhz} title={$i18n("diagnose.speedsTip")} /> MHz</span>
-      <label for="chain" title={$i18n("jtagScan.chainTip")}>jtag_chain</label>
+      <label for="chain" title={$i18n("jtagScan.chainTip")}>{$i18n("jtagScan.chain")}</label>
       <span><input id="chain" class="mono" bind:value={chain} placeholder="4, 5" title={$i18n("jtagScan.chainTip")}
                    aria-invalid={badChain} /></span>
       <span></span><span class="row"><button class="primary" disabled={!online || !device.trim() || !mhz.trim() || busy}>{$i18n("cmd.connect")}</button>

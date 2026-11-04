@@ -198,3 +198,16 @@ PYNQ の既定は `|/usr/share/apport/apport ...`（apport に渡す）。
   perf script の既定の書式の µs（resolution_ns = 1000。`--ns` は `--clockid` と組むと書式が崩れた）。
 - 実機（Pi 2B、linux-perf 6.18.50 を入れた）: 回り続ける題材に stat（task-clock・cycles・instructions）と record（499 Hz で
   0.5 秒、247 標本 = perf の言った数、読めない行 0）。`gateware/tests/hil/test_linux_perf_pi_hw.py`。PYNQ には perf が無い。
+
+## 別の PC から Pi 2B に入る（PYNQ 経由。2026-11-05）
+
+PYNQ-Z2（<家の LAN のアドレス>、ユーザー `xilinx`）に、Pi 2B 用の鍵と接続の設定を置きました。PYNQ に SSH できる PC なら、Pi 2B の鍵や
+IP・ユーザー名を知らなくても、PYNQ を通して Pi 2B に入れます。
+
+- PYNQ の上: 鍵 `~/.ssh/id_ed25519_pi2`（パスフレーズなし）と、`~/.ssh/config` の `Host pi2`（HostName <Pi のアドレス>、
+  User ms0216、その鍵）。公開鍵は Pi 2B の `~/.ssh/authorized_keys` に `pynq-to-pi2 (fprobe)` の名前で登録済み。
+- 入る: `ssh -t xilinx@<家の LAN のアドレス> ssh pi2`（1 つのコマンドだけなら `ssh xilinx@<家の LAN のアドレス> ssh pi2 uname -m`）。
+- 注意: PYNQ に入れる人は、誰でも Pi 2B に入れる（鍵にパスフレーズが無い）。外すときは、Pi 2B の `authorized_keys` から
+  `pynq-to-pi2 (fprobe)` の行を消す。
+- Pi 2B の IP は DHCP: 変わったら、PYNQ の `~/.ssh/config` の HostName を直す（fprobe-pi2.local は PYNQ から引けない）。
+- fprobe の `linux.connect`（PC から Pi 2B へ直接 SSH）は、まだこの道を使わない（ProxyJump の対応は未実装）。

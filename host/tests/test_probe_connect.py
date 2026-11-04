@@ -64,12 +64,12 @@ def test_target_connect_passes_the_script_to_pyocd(tmp_path):
         seen.update(options)
         return session
     p._session = SimpleNamespace(device=FakeDevice(), debug=debug)
-    status = p.target_connect("cortex_m", script="builtin:reset_with_nreset")
+    status = p.target_connect("cortex_m", frequency_hz=4_000_000, script="builtin:reset_with_nreset")
     assert seen["user_script"].endswith("reset_with_nreset.py") and status["script"]["hooks"][0]["name"] == "will_reset"
     bad = tmp_path / "bad.py"
     bad.write_text("def will_reset(core\n", encoding="utf-8")
     with pytest.raises(ValueError, match="構文"):
-        p.target_connect("cortex_m", script=str(bad))
+        p.target_connect("cortex_m", frequency_hz=4_000_000, script=str(bad))
 
 
 def test_status_tells_the_connected_target_speed_and_wire():

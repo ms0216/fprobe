@@ -12,6 +12,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.obs_pkg.all;
 
 entity obs_record_rx is
   port (
@@ -58,7 +59,7 @@ architecture rtl of obs_record_rx is
   constant SNAP_MARK : std_logic_vector(7 downto 0) := x"A7";          -- 標本型の印
   constant SNAP_ID   : std_logic_vector(31 downto 0) := x"534E4150";   -- 標本型の id の表示（"SNAP"）
   constant RESPONSE  : std_logic_vector(5 downto 0) := "110001";        -- 記録の 31:26（制御・応答）
-  constant HEADER_WORDS : natural := 1;
+  constant HEADER_WORDS : natural := OBS_HEADER_WORDS;
 
   signal id_ok_r, bad_r, snap_mode_r, ovf_r, tgt_run_r, id_lo_ok, id_hi_ok, snap_seen : std_logic;
   signal rec_count_r  : unsigned(15 downto 0);

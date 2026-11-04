@@ -77,6 +77,9 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.event_pkg.all;
+use work.util_pkg.all;
+use work.dap_pkg.all;
 
 entity dap_sampler is
   generic (
@@ -156,25 +159,6 @@ entity dap_sampler is
 end entity;
 
 architecture rtl of dap_sampler is
-  constant OP_TRANSFER : std_logic_vector(1 downto 0) := "10";
-  constant ACK_OK      : std_logic_vector(2 downto 0) := "001";
-  constant ACK_WAIT    : std_logic_vector(2 downto 0) := "010";
-  constant ACK_FAULT   : std_logic_vector(2 downto 0) := "100";
-  constant STICKYERR   : natural := 5;                    -- CTRL/STAT
-  constant COUNT_POSTED : natural := 2;                   -- jtag_phy: ポストの DP の読み（続く RDBUFF をスキャンしない）
-  -- 転送要求（CMSIS-DAP の並び: bit3-2 A[3:2], bit1 RnW, bit0 APnDP）
-  constant DP_W_SELECT : std_logic_vector(3 downto 0) := "1000";
-  constant DP_R_RDBUFF : std_logic_vector(3 downto 0) := "1110";
-  constant DP_R_CTRL   : std_logic_vector(3 downto 0) := "0110";
-  constant DP_W_ABORT  : std_logic_vector(3 downto 0) := "0000";
-  constant AP_R_CSW    : std_logic_vector(3 downto 0) := "0011";
-  constant AP_R_TAR    : std_logic_vector(3 downto 0) := "0111";
-  constant AP_R_DRW    : std_logic_vector(3 downto 0) := "1111";
-  constant AP_W_CSW    : std_logic_vector(3 downto 0) := "0001";
-  constant AP_W_TAR    : std_logic_vector(3 downto 0) := "0101";
-  constant KIND_SAMPLE : std_logic_vector(7 downto 0) := x"07";
-  constant KIND_BOUND  : std_logic_vector(7 downto 0) := x"11";   -- 17: 値を返した転送の点
-  constant KIND_GAP    : std_logic_vector(7 downto 0) := x"12";   -- 18: 誤りの区間
 
   -- 手順。P_POSTED_CTRL は JTAG だけ（直前の DRW の値を受け取る CTRL/STAT の読み）、P_RDBUFF・P_CHECK は残りの値の回収
   -- （SWD: RDBUFF で値、CTRL/STAT で確認。JTAG: RDBUFF のスキャンで CTRL/STAT を受け取る）
@@ -190,9 +174,8 @@ architecture rtl of dap_sampler is
   signal mine        : boolean := false;                 -- PHY を借りている（held。ホストの値に戻すまで）
   signal jtag_r      : boolean := false;                 -- 借りたときの接続の方式（手順を選ぶ）
   signal lost        : boolean;                          -- 切断か、借りた後に接続の方式が変わった: 戻さずに放す
-  signal up_out      : natural range 0 to 2 := 0;        -- 上流の命令で PHY が受けて応答をまだ返していない数（PHY は前の
-                                                         -- 応答の前に次を受けることがある: 2 まで）
-  signal up_pending  : boolean;                          -- 上流の命令が PHY に残っている
+  signal mine_sl     : std_logic;
+  signal up_pending  : boolean;                          -- 上流の命令が PHY に残っている（dap_phy_borrow）
   signal in_round    : boolean := false;
   signal pending     : boolean := false;                 -- 巡回の最中に周期が来た: 終わったらすぐ次の巡回
   signal slot        : natural range 0 to SLOTS := 0;
@@ -210,10 +193,38 @@ architecture rtl of dap_sampler is
   signal p_time      : std_logic_vector(47 downto 0) := (others => '0');
   signal to_idle     : boolean := false;               -- 回収の後: 巡回の終わり（でなければ か所の境界に戻る）
   signal collecting  : boolean := false;               -- JTAG の回収: CTRL/STAT を読んだら次は RDBUFF
-  -- 確認を待つ語（値を受け取った語の件。確認が通ったら順に出す）。[176:170] 番号、[169:138] 番地、[137:106] 値、[105:58] 時刻、
-  -- [57:53] 値を返した転送の WAIT の回数、[52] その転送は次の語の読みでない（種類 17 を続ける）、[51:4] その転送の点、
-  -- [3:0] その転送の要求
-  constant ENTRY_BITS : natural := 177;
+  -- 確認を待つ語（値を受け取った語の件。確認が通ったら順に出す）
+  -- 確認を待つ語の記録（buf の 1 語。分散 RAM に置くので、buf にはビット列で入れる: to_bits / to_entry）
+  type entry_t is record
+    index    : std_logic_vector(6 downto 0);     -- 標本の番号
+    addr     : std_logic_vector(31 downto 0);
+    value    : std_logic_vector(31 downto 0);
+    stamp    : std_logic_vector(47 downto 0);    -- 標本の時刻（読みに行った転送の線上の点）
+    waits    : std_logic_vector(4 downto 0);     -- WAIT の回数（31 で止める）
+    bound    : std_logic;                        -- 値を返した転送が読みに行った転送と別（種類 17 の件も出す）
+    rsp_time : std_logic_vector(47 downto 0);    -- 値を返した転送の線上の点
+    req      : std_logic_vector(3 downto 0);     -- 値を返した転送の要求
+  end record;
+  constant ENTRY_BITS : natural := 7 + 32 + 32 + 48 + 5 + 1 + 48 + 4;
+
+  function to_bits(e : entry_t) return std_logic_vector is
+  begin
+    return e.index & e.addr & e.value & e.stamp & e.waits & e.bound & e.rsp_time & e.req;
+  end function;
+
+  function to_entry(v : std_logic_vector(ENTRY_BITS - 1 downto 0)) return entry_t is
+    variable e : entry_t;
+  begin
+    e.req      := v(3 downto 0);
+    e.rsp_time := v(51 downto 4);
+    e.bound    := v(52);
+    e.waits    := v(57 downto 53);
+    e.stamp    := v(105 downto 58);
+    e.value    := v(137 downto 106);
+    e.addr     := v(169 downto 138);
+    e.index    := v(176 downto 170);
+    return e;
+  end function;
   type buf_t is array (0 to CHECK_MAX - 1) of std_logic_vector(ENTRY_BITS - 1 downto 0);
   signal buf         : buf_t;
   signal buf_we      : std_logic := '0';
@@ -244,10 +255,7 @@ architecture rtl of dap_sampler is
   -- 2 周期後に発火し、同じ周期に up_busy に入る）。§3.2: 一致した標本のか所の次を読まずに線を渡す
   signal since_emit  : natural range 0 to 2 := 2;
   signal tries       : unsigned(15 downto 0) := (others => '0');
-  -- 再試行の回数はいったん受けて（めったに変わらない）、比べた結果もレジスタに。WAIT の応答は数十周期ごとなので、
-  -- 1 周期前の tries との比べで足りる（DAP の処理部からの長い経路と 16 ビットの比べを、応答の判定の経路から外す）
-  signal retry_r     : unsigned(15 downto 0) := (others => '0');
-  signal retry_more  : std_logic := '0';
+  signal retry_more  : std_logic;                        -- tries < wait_retry（dap_phy_borrow）
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
   signal fast        : boolean := false;
   signal same        : boolean := false;               -- 有効なか所が 1 つで 1 語: 自動増加なしで TAR を動かさない
@@ -279,26 +287,7 @@ architecture rtl of dap_sampler is
   signal s_time      : unsigned(47 downto 0) := (others => '0');
   signal rounds_r, errors_r, overruns_r : unsigned(31 downto 0) := (others => '0');
   signal restores_r  : unsigned(15 downto 0) := (others => '0');
-
-  function bit_of(b : boolean) return std_logic is
-  begin
-    if b then
-      return '1';
-    end if;
-    return '0';
-  end function;
 begin
-  retry_i : process (clk)
-  begin
-    if rising_edge(clk) then
-      retry_r <= wait_retry;
-      if tries < retry_r then
-        retry_more <= '1';
-      else
-        retry_more <= '0';
-      end if;
-    end if;
-  end process;
 
   -- 確認を待つ語（分散 RAM に推論させるため、リセットの無い別のプロセス）
   buf_i : process (clk)
@@ -310,17 +299,57 @@ begin
     end if;
   end process;
 
-  -- PHY の命令の切り替え（mine は境界でしか変わらない）
-  up_pending    <= up_out /= 0;
-  phy_cmd_valid <= valid_r when mine else up_cmd_valid;
-  phy_cmd_cond  <= '0' when mine else up_cmd_cond;
-  phy_cmd_op    <= OP_TRANSFER when mine else up_cmd_op;
-  phy_cmd_count <= count_r when mine else up_cmd_count;
-  phy_cmd_req   <= req_r when mine else up_cmd_req;
-  phy_cmd_data  <= x"00000000" & data_r when mine else up_cmd_data;
-  up_cmd_ready  <= '0' when mine else phy_cmd_ready;
-  up_rsp_valid  <= '0' when mine else phy_rsp_valid;
-  lost          <= enable = '0' or (mine and (jtag = '1') /= jtag_r);
+  -- 周期の時計とゆらぎ（巡回の始まりの due だけを本体へ）
+  period_timer : process (clk)
+  begin
+    if rising_edge(clk) then
+      -- ゆらぎ: LFSR（x^16 + x^14 + x^13 + x^11 + 1）を毎周期進め、次の周期 = period + 乱数 − 2^(jitter−1)
+      lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
+      jit_on     <= jitter /= 0 and period > shift_left(to_unsigned(1, 32), jitter);
+      jit_mask   <= shift_left(to_unsigned(1, 32), jitter) - 1;
+      if jitter = 0 then
+        jit_base <= period;
+      else
+        jit_base <= period - shift_left(to_unsigned(1, 32), jitter - 1);
+      end if;
+      jit_masked <= resize(unsigned(lfsr), 32) and jit_mask;
+      if jit_on then
+        reload <= jit_base + jit_masked;
+      else
+        reload <= period;
+      end if;
+
+      -- 周期の時計（下り。period を積んで 1 まで数える = period 周期ごと）。満了は due に登録し、巡回を始めるのは
+      -- 次の周期（31 ビットの 0 の検出から slot・state 等への経路を切る。周期の長さは変わらない）
+      due <= false;
+      if run = '0' or period = 0 then
+        timer   <= period;
+      elsif timer(31 downto 1) = 0 then
+        timer <= reload;
+        due   <= true;
+      else
+        timer <= timer - 1;
+      end if;
+      if rst = '1' then
+        timer <= (others => '0');
+        due   <= false;
+        lfsr  <= x"ACE1";
+      end if;
+    end if;
+  end process;
+
+  -- PHY の命令の切り替え（mine は境界でしか変わらない）・上流の命令の残り・WAIT の再試行の比べ
+  mine_sl <= to_sl(mine);
+  borrow_i : entity work.dap_phy_borrow
+    port map (clk => clk, rst => rst, own => mine_sl, enable => enable, jtag => jtag, own_valid => valid_r, own_count => count_r, own_req => req_r,
+              own_data => data_r, wait_retry => wait_retry, tries => tries, retry_more => retry_more,
+              up_cmd_valid => up_cmd_valid, up_cmd_ready => up_cmd_ready, up_cmd_cond => up_cmd_cond,
+              up_cmd_op => up_cmd_op, up_cmd_count => up_cmd_count, up_cmd_req => up_cmd_req,
+              up_cmd_data => up_cmd_data, up_rsp_valid => up_rsp_valid, up_pending => up_pending,
+              phy_cmd_valid => phy_cmd_valid, phy_cmd_ready => phy_cmd_ready, phy_cmd_cond => phy_cmd_cond,
+              phy_cmd_op => phy_cmd_op, phy_cmd_count => phy_cmd_count, phy_cmd_req => phy_cmd_req,
+              phy_cmd_data => phy_cmd_data, phy_rsp_valid => phy_rsp_valid);
+  lost <= enable = '0' or (mine and (jtag = '1') /= jtag_r);
 
   process (clk)
     procedure issue(p : step_t) is
@@ -345,7 +374,7 @@ begin
         when P_POSTED_CTRL    => req_r <= DP_R_CTRL; count_r <= COUNT_POSTED;   -- 直前の DRW の値が返る（CTRL/STAT は次のスキャンで）
         when P_RDBUFF         => req_r <= DP_R_RDBUFF;
         when P_CHECK          => req_r <= DP_R_CTRL;
-        when P_CLEAR          => req_r <= DP_W_ABORT; data_r <= x"00000004";       -- STKERRCLR
+        when P_CLEAR          => req_r <= DP_W_ABORT; data_r <= STKERRCLR;
         when P_RESTORE_CSW    => req_r <= AP_W_CSW; data_r <= csw;
         when P_RESTORE_TAR    => req_r <= AP_W_TAR; data_r <= tar;
         when P_RESTORE_SELECT => req_r <= DP_W_SELECT; data_r <= select_shadow;
@@ -466,7 +495,7 @@ begin
       end if;
       if n /= 0 then
         gap_pend <= true;
-        gap_word <= "000" & '0' & bit_of(sticky) & phy_rsp_ack & std_logic_vector(to_unsigned(n, 9))
+        gap_word <= "000" & '0' & to_sl(sticky) & phy_rsp_ack & std_logic_vector(to_unsigned(n, 9))
                     & std_logic_vector(first_i) & std_logic_vector(phy_rsp_time(47 downto 0)) & first_t;
       end if;
       forget;
@@ -509,8 +538,9 @@ begin
       end if;
       buf_we <= '1';
       buf_wa <= nbuf;
-      buf_wd <= std_logic_vector(p_index) & p_addr & value & p_time & w & bit_of(not by_read)
-                & std_logic_vector(phy_rsp_time(47 downto 0)) & req_r;
+      buf_wd <= to_bits((index => std_logic_vector(p_index), addr => p_addr, value => value,
+                         stamp => p_time, waits => w, bound => to_sl(not by_read),
+                         rsp_time => std_logic_vector(phy_rsp_time(47 downto 0)), req => req_r));
       pend   <= false;
     end procedure;
 
@@ -530,7 +560,7 @@ begin
 
     variable k : natural range 0 to SLOTS;
     variable bad, shown : boolean;
-    variable e : std_logic_vector(ENTRY_BITS - 1 downto 0);
+    variable e : entry_t;
     variable ucount : natural range 0 to CHECK_MAX + 1;
     variable nb : natural range 0 to CHECK_MAX;
   begin
@@ -558,23 +588,23 @@ begin
       if draining and dr_wait then
         dr_wait <= false;
       elsif draining then
-        e := buf(dr_idx);
+        e := to_entry(buf(dr_idx));
         r_valid <= '1';
         if not dr_second then
-          r_kind  <= KIND_SAMPLE;
-          r_word  <= e(57 downto 53) & ACK_OK & e(137 downto 106) & e(169 downto 138) & e(105 downto 58);
+          r_kind  <= EVENT_KIND_SAMPLE;
+          r_word  <= e.waits & ACK_OK & e.value & e.addr & e.stamp;
           s_valid <= '1';
-          s_addr  <= e(169 downto 138);
-          s_data  <= e(137 downto 106);
+          s_addr  <= e.addr;
+          s_data  <= e.value;
           s_ack   <= ACK_OK;
-          s_index <= unsigned(e(176 downto 170));
-          s_time  <= unsigned(e(105 downto 58));
+          s_index <= unsigned(e.index);
+          s_time  <= unsigned(e.stamp);
           since_emit <= 0;
         else
-          r_kind  <= KIND_BOUND;
-          r_word  <= x"0" & e(3 downto 0) & x"00000000" & e(169 downto 138) & e(51 downto 4);
+          r_kind  <= EVENT_KIND_SAMPLE_BOUND;
+          r_word  <= x"0" & e.req & x"00000000" & e.addr & e.rsp_time;
         end if;
-        if not dr_second and e(52) = '1' then
+        if not dr_second and e.bound = '1' then
           dr_second <= true;
         else
           dr_second <= false;
@@ -586,18 +616,13 @@ begin
         end if;
       elsif gap_pend then
         r_valid  <= '1';
-        r_kind   <= KIND_GAP;
+        r_kind   <= EVENT_KIND_SAMPLE_GAP;
         r_word   <= gap_word;
         gap_pend <= false;
       end if;
 
       if not mine and up_cmd_valid = '1' and phy_cmd_ready = '1' then
         handed_r   <= false;                                 -- 上流が線を使った: 渡した SELECT・CSW はもう分からない
-        if not (phy_rsp_valid = '1' and up_out /= 0) then
-          up_out <= up_out + 1;
-        end if;
-      elsif phy_rsp_valid = '1' and up_out /= 0 then
-        up_out <= up_out - 1;
       end if;
       -- 判定の登録（持っている間は上流の命令は PHY に届かないので、1 周期遅れても追い越されない）
       give_back <= up_cmd_valid = '1' or up_injector_held = '1' or run = '0' or stale;
@@ -605,33 +630,9 @@ begin
                    up_injector_ap = ap and shadow_valid = '1' and shadow_ap = ap;
       single  <= unsigned(enables) /= 0 and (unsigned(enables) and (unsigned(enables) - 1)) = 0;
 
-      -- ゆらぎ: LFSR（x^16 + x^14 + x^13 + x^11 + 1）を毎周期進め、次の周期 = period + 乱数 − 2^(jitter−1)
-      lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
-      jit_on     <= jitter /= 0 and period > shift_left(to_unsigned(1, 32), jitter);
-      jit_mask   <= shift_left(to_unsigned(1, 32), jitter) - 1;
-      if jitter = 0 then
-        jit_base <= period;
-      else
-        jit_base <= period - shift_left(to_unsigned(1, 32), jitter - 1);
-      end if;
-      jit_masked <= resize(unsigned(lfsr), 32) and jit_mask;
-      if jit_on then
-        reload <= jit_base + jit_masked;
-      else
-        reload <= period;
-      end if;
-
-      -- 周期の時計（下り。period を積んで 1 まで数える = period 周期ごと）。満了は due に登録し、巡回を始めるのは
-      -- 次の周期（31 ビットの 0 の検出から slot・state 等への経路を切る。周期の長さは変わらない）
-      due <= false;
+      -- 止まっている間（周期の時計は period を積み直す。period_timer）は、待っている巡回も無い
       if run = '0' or period = 0 then
-        timer   <= period;
         pending <= false;
-      elsif timer(31 downto 1) = 0 then
-        timer <= reload;
-        due   <= true;
-      else
-        timer <= timer - 1;
       end if;
       if due and run = '1' then
         if in_round then
@@ -649,13 +650,9 @@ begin
       if rst = '1' then
         state      <= S_IDLE;
         mine       <= false;
-        up_out     <= 0;
         in_round   <= false;
         pending    <= false;
         valid_r    <= '0';
-        timer      <= (others => '0');
-        due        <= false;
-        lfsr       <= x"ACE1";
         enables    <= (others => '0');
         stale      <= false;
         give_back  <= false;

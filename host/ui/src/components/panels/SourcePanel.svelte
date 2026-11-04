@@ -4,7 +4,7 @@
   // 逆アセンブルの混在表示（Mixed）。何も開いていなければ Open ELF / Load Demo / 最近使った項目。
   import { tick } from "svelte";
   import { command, type CommandState } from "../../lib/commands";
-  import { highlightLines } from "../../lib/highlight";
+  import { highlightAsm, highlightLines } from "../../lib/highlight";
   import { shared } from "../../lib/context";
   import { lineMenu, openMenu } from "../../lib/contextmenu";
   import { frameLine, markedLines, type Instruction } from "../../lib/debugger";
@@ -206,7 +206,6 @@
         {#each $dbg.files as f (f.name)}<option value={f.name} title={f.path}>{f.name}</option>{/each}
       </select>
       <span class="muted mono path" title={$dbg.source?.path ?? ""}>{$dbg.source?.path ?? ""}</span>
-      <span class="spacer"></span>
       <label title={$i18n("source.mixedTip")}><input type="checkbox" bind:checked={mixed} /> {$i18n("source.mixed")}</label>
       <button class="small" class:on={cyclesOpen} title={$i18n("cycles.tip")} onclick={() => (cyclesOpen = !cyclesOpen)}>
         {$i18n("cycles.title")}</button>
@@ -257,13 +256,13 @@
                   title={heat?.has(n) ? $i18n("profile.heatLine", { p: `${(heat.get(n)!.fraction * 100).toFixed(1)}%`, n: heat.get(n)!.samples })
                          : missed?.has(n) ? $i18n("profile.missedLine") : null}>{n}</span>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <span class="text" onclick={() => ui.select($dbg.open!, n)}>{#each tokens[i] ?? [] as tk, k (k)}<span class={tk.t}>{tk.s}</span>{/each}{text ? "" : " "}</span>
+            <span class="text code" onclick={() => ui.select($dbg.open!, n)}>{#each tokens[i] ?? [] as tk, k (k)}<span class={tk.t}>{tk.s}</span>{/each}{text ? "" : " "}</span>
           </div>
           {#each byLine.get(n) ?? [] as ins (ins.address)}
             <div class="asm" class:pc={ins.address === $dbg.stop?.pc} class:frame={ins.address === framePc}>
               <span></span><span class="arrow">{ins.address === $dbg.stop?.pc ? "▶" : ""}</span>
               <span class="no">{hex(ins.address)}</span>
-              <span class="text">{ins.mnemonic} {ins.operands}</span>
+              <span class="text code">{#each highlightAsm(ins.mnemonic, ins.operands) as tk, k (k)}<span class={tk.t}>{tk.s}</span>{/each}</span>
             </div>
           {/each}
         {/each}
@@ -273,6 +272,8 @@
     {:else}
       <p class="empty">{$i18n("source.pickFile")}</p>
     {/if}
+  {:else if online && !$dbg.filesRead}
+    <div class="empty" aria-busy="true"><span>{$i18n("load.loading")}</span></div>
   {:else}
     <div class="empty start">
       <strong class="title">{$i18n("source.noProgram")}</strong>
@@ -300,16 +301,10 @@
   .cycles .note { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30em; }
   button.on { outline: 1px solid var(--accent); }
   .source { display: flex; flex-direction: column; }
-  .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; font-size: 12px; }
+  /* パスは幅 0 から伸びて余りを埋める（長いパスで後ろのボタンが次の段へ押し出されない。backlog 28 番） */
+  .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 0; min-width: 0; font-size: 12px; }
   .lines { flex: 1; overflow: auto; padding: 4px 0; }
   .line, .asm { display: grid; grid-template-columns: 18px 14px 44px 1fr; align-items: center; min-height: 19px; }
-  /* 構文の色（lib/highlight.ts）。明暗は色の変数に従う */
-  .text :global(.kw) { color: var(--accent); }
-  .text :global(.type) { color: color-mix(in srgb, var(--accent) 55%, var(--ok)); }
-  .text :global(.str) { color: var(--ok); }
-  .text :global(.num) { color: var(--warn); }
-  .text :global(.cm) { color: var(--muted); font-style: italic; }
-  .text :global(.pp) { color: color-mix(in srgb, var(--bad) 55%, var(--accent)); }
   .line.selected { background: var(--select); }
   .line.stop { background: color-mix(in srgb, var(--warn) 22%, transparent); }
   .line.frame { background: color-mix(in srgb, var(--ok) 18%, transparent); }

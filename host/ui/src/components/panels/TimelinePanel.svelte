@@ -218,6 +218,7 @@
   label { display: flex; gap: 4px; align-items: center; }
   .num { width: 70px; }
   .goto { display: flex; gap: 4px; align-items: center; }
+  .goto .num { width: 9ch; }                         /* 「例 1.5 ms」が切れない幅 */
   .bad-input { border-color: var(--bad); outline-color: var(--bad); }
   .info { font-size: 12px; }
   .bad { color: var(--bad); }

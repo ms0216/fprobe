@@ -94,18 +94,18 @@ def test_auto_connect_speed_and_dp_through_pyocd(probe):
 
 def test_option_bytes_are_only_read(probe):
     """読むだけ。書き込み・解除はしない（この関数の外でも呼ばない）。"""
-    probe.target_connect("stm32f401xe")
+    probe.target_connect("stm32f401xe", frequency_hz=4_000_000)
     ob = probe.option_bytes_read()
     assert ob["family"] == "f4" and ob["rdp_level"] == 0 and ob["fields"]["RDP"] == 0xAA, ob
     assert ob["part"]["name"] == "STM32F401xD/E" and ob["fields"]["nWRP"] == 0xFF
 
 
 def test_connect_with_a_builtin_script(probe):
-    status = probe.target_connect("stm32f401xe", script="builtin:reset_with_nreset")
+    status = probe.target_connect("stm32f401xe", frequency_hz=4_000_000, script="builtin:reset_with_nreset")
     assert status["script"]["hooks"][0]["name"] == "will_reset"
     after = probe.target_reset(halt=True)
     assert after["state"] == "HALTED", after
-    probe.target_connect("stm32f401xe", script="builtin:stm32_debug_low_power")
+    probe.target_connect("stm32f401xe", frequency_hz=4_000_000, script="builtin:stm32_debug_low_power")
     assert probe.read_memory(0xE0042004, 4) != "00000000"            # DBGMCU_CR の DBG_SLEEP 等
     probe.target_reset()
 

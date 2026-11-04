@@ -8,6 +8,8 @@ SCK の立ち上がりで WS と SD（直前の値）を読む。WS が変わる
 終わりが見えていないので error = "truncated"（ビット数で完全かを推し量らない。読めたビット数は fields.bits）。
 """
 
+from typing import Literal
+
 from ..la import Transitions
 from .core import Annotation, Channel, Decoding, project
 
@@ -16,7 +18,7 @@ __all__ = ["FORMATS", "decode_i2s"]
 FORMATS = {"i2s": (1, 0), "left_justified": (0, 1), "right_justified": (0, 1)}     # (遅れ, 左の WS)
 
 
-def decode_i2s(tr: Transitions, *, sck: Channel, ws: Channel, sd: Channel, format: str, word_bits: int | None,
+def decode_i2s(tr: Transitions, *, sck: Channel, ws: Channel, sd: Channel, format: Literal["i2s", "left_justified", "right_justified"], word_bits: int | None,
                signed: bool) -> Decoding:
     """I2S を解読する。設定はすべて既定を持たない。word_bits = None はスロットの全ビットを値とする
     （right_justified では数が要る）。"""

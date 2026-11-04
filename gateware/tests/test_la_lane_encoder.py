@@ -5,11 +5,11 @@ from fprobe_gw.rtl import CORE_GENERATED, RTL_ROOT, rtl
 from fprobe_gw.toolchain.sim import run_cocotb
 
 DEEP_LANES_SOURCES = [RTL_ROOT.parent / "tests" / "rtl" / "sim_xilinx_prims.vhd", CORE_GENERATED / "timing_pkg.vhd",
-                      *rtl("common/util_pkg.vhd", "boards/pynq_z2/pynq_z2_pkg.vhd", "boards/pynq_z2/xilinx_la_iserdes.vhd",
+                      *rtl("core/generated/event_pkg.vhd", "common/util_pkg.vhd", "boards/pynq_z2/pynq_z2_pkg.vhd", "boards/pynq_z2/xilinx_la_iserdes.vhd",
                            "common/sync_bit.vhd", "common/cdc_value.vhd", "common/sync_fifo.vhd", "common/async_fifo.vhd",
-                           "common/stream_unpack.vhd", "common/stream_slice.vhd", "la/la_front.vhd", "la/la_pack.vhd",
+                           "common/stream_unpack.vhd", "common/stream_slice.vhd", "la/la_pkg.vhd", "la/la_front.vhd", "la/la_pack.vhd",
                            "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd",
-                           "mem/la_mem_writer.vhd", "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "la/la_deep_buffer.vhd"),
+                           "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "common/cdc_request.vhd", "common/hold_one.vhd", "la/la_run_cdc.vhd", "mem/la_write_track.vhd", "mem/mem_cmd_arb.vhd", "la/la_stream_sched.vhd", "la/la_deep_front.vhd", "la/la_deep_buffer.vhd"),
                       RTL_ROOT.parent / "tests" / "rtl" / "la_deep_lanes_harness.vhd"]
 
 
@@ -19,13 +19,13 @@ def test_la_lane_raw(tmp_path):
 
 
 def test_la_lane_rle(tmp_path):
-    run_cocotb(parallel=True, toplevel="la_lane_rle", sources=rtl("la/la_lane_rle.vhd"),
+    run_cocotb(parallel=True, toplevel="la_lane_rle", sources=rtl("la/la_pkg.vhd", "la/la_lane_rle.vhd"),
                test_module="tests.tb.la_lane_rle_tb", build_dir=tmp_path)
 
 
 def test_la_lane_encoder(tmp_path):
     run_cocotb(parallel=True, toplevel="la_lane_encoder",
-               sources=rtl("common/util_pkg.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd"),
+               sources=rtl("common/util_pkg.vhd", "la/la_pkg.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd"),
                test_module="tests.tb.la_lane_encoder_tb", build_dir=tmp_path)
 
 

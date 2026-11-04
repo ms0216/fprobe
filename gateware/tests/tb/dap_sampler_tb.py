@@ -8,7 +8,7 @@ from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
 from tests.tb.dap_jtag_tb import setup as jtag_setup
 from tests.tb.dap_processor_tb import AP_DRW_R, AP_DRW_W, AP_TAR_W, DP_SELECT_W, OK, setup
-from tests.tb.swd_injector_tb import AP_IDR_R, connected
+from tests.tb.swd_injector_tb import AP_IDR_R, connected, inject_and_cut, works_again
 
 AP_IDR = 0x24770011
 
@@ -343,6 +343,26 @@ async def a_disconnect_while_holding_the_line_drops_it(dut):
     task.cancel()
     assert count(model, mark, SELECT_W) >= 1 and count(model, mark, CSW_W) >= 1 and count(model, mark, TAR_W) >= 1
     assert got and all(a == 0x20000000 and d == 10 for a, d, _ in got)
+    dut.smp_run.value = 0
+    await ClockCycles(dut.clk, 2000)
+
+
+@cocotb.test()
+async def the_sampler_still_borrows_after_a_disconnect_drops_a_transfer(dut):
+    """上流（割り込み書き込み）の転送が線に出ている最中に切断され、PHY が転送を捨てて応答を出さなくても、サンプラは
+    「上流の命令が PHY に残っている」と数え続けない（dap_phy_borrow が切断で数えを 0 に戻す）。つなぎ直した後にサンプラが
+    線を借りて読む（前は捨てられた分が残り、サンプラは以後ずっと境界を待って読まなかった）。"""
+    dap, model = await connected(dut, seed=12)
+    assert await inject_and_cut(dut, dap, model, bytes([0x03])) == 2
+    await works_again(dap, model)
+    model.memory[0x20000000] = 0x77
+    await configure(dut, [(0x20000000, 1)], period=2000)
+    got = []
+    task = collect(dut, got)
+    dut.smp_run.value = 1
+    await rounds(dut, 2, timeout=200_000)
+    task.cancel()
+    assert got and all(a == 0x20000000 and d == 0x77 for a, d, _ in got)
     dut.smp_run.value = 0
     await ClockCycles(dut.clk, 2000)
 

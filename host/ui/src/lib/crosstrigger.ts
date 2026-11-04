@@ -229,11 +229,6 @@ function valueText(v: unknown): string {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 
-/** 省ける欄の既定（仕様の default）の表示。既定が無ければ null */
-export function defaultText(f: Field): string | null {
-  return f.default === undefined ? null : valueText(f.default);
-}
-
 /** 読み戻した設定（xtrig.status の match・inject 等）から、メソッドの欄の文字（その引数の名前の値だけ） */
 export function formValues(method: string, read: Record<string, unknown> | null | undefined): FieldValues {
   if (!read) return {};

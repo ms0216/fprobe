@@ -264,7 +264,8 @@ class ScriptedProbe:
 
 
 def options(tmp_path, **kw) -> RunOptions:
-    base = dict(elf=RTT_DEMO, out_dir=tmp_path / "out", timeout_s=2.0, poll_s=0.001, load="ram")
+    base = dict(elf=RTT_DEMO, out_dir=tmp_path / "out", target="cortex_m", frequency_hz=4_000_000, timeout_s=2.0, poll_s=0.001,
+                load="ram")
     base.update(kw)
     return RunOptions(**base)
 
@@ -467,12 +468,25 @@ def test_cli_run_builds_options_and_exits_with_the_code(tmp_path, monkeypatch):
         return SimpleNamespace(exit_code=7)
     monkeypatch.setattr(run_mod, "run_firmware", fake_run)
     with pytest.raises(SystemExit) as e:
-        cli.main(["--serial", "S1", "run", str(RTT_DEMO), "--target", "stm32f401xe", "--timeout", "9",
+        cli.main(["--serial", "S1", "run", str(RTT_DEMO), "--target", "stm32f401xe", "--frequency", "4e6", "--timeout", "9",
                   "--load", "ram", "--junit", str(tmp_path / "j.xml"), "--set", "semihosting_enabled=1",
                   "--rtt", "--swo", "2000000", "--pass", "DONE", "--fail", "BAD", "--out", str(tmp_path / "o")])
     assert e.value.code == 7
     o = seen["opts"]
     assert o.elf == RTT_DEMO and o.target == "stm32f401xe" and o.timeout_s == 9 and o.load == "ram"
+    assert o.frequency_hz == 4_000_000
     assert o.set_values == {"semihosting_enabled": "1"} and o.rtt is True and o.swo_baud == 2_000_000
     assert o.pass_pattern == "DONE" and o.fail_pattern == "BAD" and o.junit == tmp_path / "j.xml"
     assert seen["probe"] == {"serial": "S1", "port": None, "eth": None, "link_up_wait_s": None}   # USB では待たない
+
+
+def test_cli_run_needs_the_target_and_the_frequency_named(tmp_path):
+    """接続のターゲット名・線の速さは使う側が明示する（既定を持たない。target.connect と同じ。CLAUDE.md 2026-11-04）。"""
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--serial", "S1", "run", str(RTT_DEMO), "--out", str(tmp_path / "o")])
+    assert e.value.code == 2                                   # argparse: 必須の引数が無い
+
+
+def test_connecting_without_the_target_or_the_frequency_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="target と frequency_hz"):
+        Runner(ScriptedProbe([]), options(tmp_path, target=None))._prepare()

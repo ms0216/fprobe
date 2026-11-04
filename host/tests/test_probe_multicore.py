@@ -97,11 +97,11 @@ def test_target_connect_picks_the_pyocd_target_of_the_core():
         return S()
     p._session = SimpleNamespace(device=FakeDevice(), debug=debug)
     p._multicore_status = lambda status: status                 # 覗くのは別の試験で（ここは接続の名前だけ）
-    status = p.target_connect("rp2040", core=1)
+    status = p.target_connect("rp2040", frequency_hz=4_000_000, core=1)
     assert seen["target_override"] == "rp2040_core1"
     assert status["target"] == "rp2040_core1" and status["core"] == 1
     with pytest.raises(ValueError, match="core を選べる"):
-        p.target_connect("stm32f401xe", core=1)
+        p.target_connect("stm32f401xe", frequency_hz=4_000_000, core=1)
 
 
 def test_status_shows_both_cores_and_returns_to_the_connected_dp():
@@ -170,7 +170,7 @@ def test_core_select_reconnects_to_the_other_core_without_halting():
     status = p.target_core_select(1)
     assert seen[-1]["target_override"] == "rp2040_core1" and seen[-1]["connect_mode"] == "attach"
     assert seen[-1]["frequency"] == 2_000_000 and status["core"] == 1
-    p.target_connect("cortex_m")
+    p.target_connect("cortex_m", frequency_hz=4_000_000)
     with pytest.raises(ValueError, match="複数ドロップ"):
         p.target_core_select(1)
 

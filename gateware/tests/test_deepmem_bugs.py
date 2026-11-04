@@ -7,7 +7,7 @@ from fprobe_gw.rtl import rtl
 from fprobe_gw.toolchain.sim import run_cocotb
 from tests.rtl import TEST_RTL
 
-RING_SOURCES = ("common/util_pkg.vhd", "common/sync_fifo.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd")
+RING_SOURCES = ("common/util_pkg.vhd", "common/sync_fifo.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd")
 
 
 def _ring(tmp_path, name):

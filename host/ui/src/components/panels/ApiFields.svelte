@@ -2,8 +2,7 @@
   import { readable } from "../../lib/fieldnames";
   // API の引数の欄を 1 行に並べる（仕様の fieldsOf から。DecoderFields と同じ形）: 必須の欄は空から始め、名前に赤い
   // アスタリスク。省ける欄は空 = 送らない（既定はデーモンが決める。既定の値は薄い字で見せるだけ）。真偽・列挙は選択
-  import type { Field, FieldError, FieldValues } from "../../lib/apiform";
-  import { defaultText } from "../../lib/crosstrigger";
+  import { defaultText, type Field, type FieldError, type FieldValues } from "../../lib/apiform";
   import { i18n, type Key } from "../../lib/i18n";
 
   let { fields, values = $bindable(), errors = {}, disabled = false }:

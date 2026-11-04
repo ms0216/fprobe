@@ -16,7 +16,8 @@ from pathlib import Path, PurePosixPath
 from ..disasm import SYNC_LIMIT, Disassembler, Instruction
 from ..dwarf import Inspector
 from ..dwarf.inspector import check_expression
-from ..memview import MemoryReadError
+from ..memview import MemoryReadError, diff, format_hexdump, hexdump
+from .libsyms import library_bases, parse_maps
 from ..symbols import Location, Symbols, is_line_location, is_network_path
 from .debugger import REG_NAMES, HaltDebugger, _ThreadAccess
 from .engine import EngineError
@@ -45,6 +46,7 @@ class LinuxDebugView:
         self.breakpoint_kind = breakpoint_kind
         self.step_max_instructions, self.step_timeout_s = step_max_instructions, step_timeout_s
         self._disabled: dict[str, dict] = {}            # 無効にしたブレークポイント: location → 置いたときの事実
+        self._view_previous: dict[tuple[int, int], bytes] = {}      # memory_view の compare 用: (番地, 長さ) → 前回の読み
         self.sources = dict(sources or {})
         self.loaded_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         try:
@@ -84,6 +86,10 @@ class LinuxDebugView:
             out["pc"] = f["pc"]
             out["where"] = str(Location(f["pc"], loc.function, loc.offset, loc.file, loc.line)) \
                 if loc.function is not None or loc.file else f"0x{f['pc']:08X}"
+            if loc.function is None and not loc.file:
+                _, _, text = self._in_library(f["pc"])
+                if text is not None:
+                    out["where"] = text
             for key in ("function", "file", "line"):
                 if where[key] is not None:
                     out[key] = where[key]
@@ -94,7 +100,7 @@ class LinuxDebugView:
                         "threads": f["threads"], "stop_kind": None if f["running"] else stop_kind,
                         "registers_from": f["registers_from"], "pc_error": f["pc_error"], "elf": f["elf"],
                         "load_bias": f["load_bias"],
-                        "breakpoint_edit_requires_halt": True}   # 置き外しは全コアが止まっている間だけ（走行中は断る。エンジンの事実）
+                        "breakpoint_edit_requires_halt": False}  # 走行中の置き外しは、エンジンが全コアを短く止めて行い、また走らせる
         return out
 
     def read_words(self, addresses: list[int]) -> dict[str, int]:
@@ -216,6 +222,17 @@ class LinuxDebugView:
             return {n: regs[alias.get(n.lower(), n.lower())] for n in names}
         return self.d.use(go, halted=True)
 
+    def _in_library(self, pc: int) -> tuple[str | None, int | None, str | None]:
+        """pc が共有ライブラリの中なら (関数名, 先頭からのバイト数, 表示の文字)。関数の名前が引けなくても、どのライブラリの
+        中かは分かる（ライブラリ名!ライブラリの中の番地）。ライブラリの外なら (None, None, None)。"""
+        lib = self.d.lib_location(pc)
+        if lib is not None:
+            return lib.function, lib.offset, f"{lib.function}+{lib.offset} ({lib.module})"
+        module = self.d.module_of(pc)
+        if module is not None:
+            return None, None, f"{module[0]}!0x{module[1]:08X}"
+        return None, None, None
+
     def backtrace(self, variables: bool = False, max_frames: int = 64, max_elements: int = 64,
                   assume_leaf: bool = False) -> list[dict]:
         def go():
@@ -225,6 +242,11 @@ class LinuxDebugView:
                 pc = entry["pc"]
                 where = (str(Location(pc, entry["function"], entry["offset"], entry["file"], entry["line"]))
                          if entry["function"] is not None or entry["file"] else f"0x{pc:08X}")
+                if entry["function"] is None and not entry["file"]:       # 共有ライブラリの中: 名前（引ければ）とライブラリ名
+                    function, offset, text = self._in_library(pc)
+                    if text is not None:
+                        entry = {**entry, "function": function, "offset": offset}
+                        where = text
                 out.append({"index": entry["index"], "pc": pc, "where": where, "note": entry["note"], "cfa": entry["cfa"],
                             "function": entry["function"], "offset": entry["offset"], "file": entry["file"],
                             "line": entry["line"],
@@ -294,7 +316,44 @@ class LinuxDebugView:
 
     def memory_view(self, address: int, length: int, unit: int = 8, width: int = 16, compare: bool = False,
                     from_elf: bool = False) -> dict:
-        raise RuntimeError("Linux のプロセスのメモリは linux.halt.debug.memory で読む（target.memory.view はマイコンの道）")
+        """プロセスの仮想メモリの 16 進表示（マイコンの target.memory.view と同じ形。4096 バイトまで）。全コアが止まって
+        いるときだけ読む。置いた BKPT は元の命令で見せる（linux.halt.debug.memory と同じ読み）。compare なら前回の同じ範囲との
+        差（変わった単位に印）。番地にシンボル（ELF。リンク時の番地 + load bias）の名前を付ける。"""
+        from ..probe_inspect import VIEW_HISTORY, VIEW_LIMIT
+        if from_elf:
+            raise ValueError("Linux のプロセスのメモリ表示では from_elf は使わない（ELF の中身は debug.elf の道）")
+        if not 0 < length <= VIEW_LIMIT:
+            raise ValueError(f"length は 1〜{VIEW_LIMIT}")
+        if not 0 <= address < 1 << 32:
+            raise ValueError(f"番地 0x{address:X} は 32 ビットの番地の空間の外")
+        length = min(length, (1 << 32) - address)          # 番地の空間の終わりで止める（折り返して 0 番地を読まない）
+        read = self.d.memory(address, length)
+        if read["data"] is None:                           # 未マップ: 読めた事実だけを返す（理由は読みの結果のまま）
+            raise MemoryReadError(f"0x{address:08X} から {length} バイトは読めない: {read['reason']}")
+        data = bytes.fromhex(read["data"])
+        key = (address, length)
+        stored = self._view_previous.pop(key, None)
+        previous = stored if compare else None
+        self._view_previous[key] = data                    # 新しいものを後ろへ。古い範囲から忘れる
+        while len(self._view_previous) > VIEW_HISTORY:
+            del self._view_previous[next(iter(self._view_previous))]
+        rows = hexdump(data, address, width=width, unit=unit, previous=previous)
+        out = {"memory": "target", "address": address, "length": length, "unit": unit,
+               "rows": [{"address": r.address, "values": list(r.values), "text": r.text, "changed": list(r.changed)}
+                        for r in rows],
+               "dump": format_hexdump(rows, unit), "names": self._names_in(address, length)}
+        if compare:
+            out["compared"] = previous is not None
+            out["changes"] = [{"address": c.address, "before": c.before.hex(), "after": c.after.hex()}
+                              for c in (diff(previous, data, address) if previous is not None else [])]
+        return out
+
+    def _names_in(self, address: int, length: int) -> list[dict]:
+        """範囲の中で始まる ELF のシンボル（実行時の番地 = リンク時の番地 + load bias）。"""
+        bias = self.d.load_bias
+        found = [{"address": (s.address + bias) & 0xFFFFFFFF, "name": s.name, "kind": "symbol"}
+                 for s in self.d.symbols.names()]
+        return sorted((n for n in found if address <= n["address"] < address + length), key=lambda n: n["address"])
 
     # ------------------------------------------------------------------ 書く
     def write_register(self, name: str, value: int) -> None:
@@ -353,7 +412,7 @@ class LinuxDebugView:
                 self.d.break_remove(bp["id"])
                 self._disabled[bp["location"]] = bp
             return self.breakpoint_list()
-        return self.d.use(go, halted=True)
+        return self.d.use(go, halted="auto")                   # 走行中なら短く止めて置き外し、また走らせる（一般のデバッガと同じ）
 
     def breakpoint_set(self, location: str, condition: str | None = None, ignore_count: int = 0,
                        log: list[str] | None = None, message: str | None = None) -> dict:
@@ -390,7 +449,7 @@ class LinuxDebugView:
             for bp_id in ids:
                 self.d.break_remove(bp_id)
             return self.breakpoint_list()
-        return self.d.use(go, halted=True)
+        return self.d.use(go, halted="auto")                   # 走行中なら短く止めて外し、また走らせる
 
     # ------------------------------------------------------------------ ELF・ソース
     def elf_status(self) -> dict:
@@ -466,6 +525,30 @@ def prefetch_sources(elf: str, target: str, fetch: Callable[[str, str, str], dic
                          "sha256": got["sha256"]}
         except Exception as e:  # noqa: BLE001 - 取り寄せられなかった事実を残し、他のファイルは続ける
             out[name] = {"target": target, "path": remote, "error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+def prefetch_libraries(elf: str, target: str, pid: int, fetch: Callable[[str, str, str], dict]) -> list[dict]:
+    """attach のとき（コアを止める前）に、対象の /proc/<pid>/maps が指す共有ライブラリを取り寄せ、ELF と同じ所の
+    <ELF の名前>.libs/<対象の上の道> に写す。[{path, local_path, base（ファイルの先頭の対応の始まり）, bytes, sha256}]、
+    取り寄せられなければ {path, base, error}（1 つの失敗で他をやめない）。maps が読めなければ、その事実の 1 件だけ。"""
+    maps_local = Path(elf).parent / f"{Path(elf).name}.maps"
+    try:
+        got = fetch(target, f"/proc/{pid}/maps", str(maps_local))
+        maps = parse_maps(Path(got["local_path"]).read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:  # noqa: BLE001 - 読めなかった事実を残す
+        return [{"path": f"/proc/{pid}/maps", "base": None, "error": f"{type(e).__name__}: {e}"}]
+    root = Path(elf).parent / f"{Path(elf).name}.libs"
+    out: list[dict] = []
+    for path, base in sorted(library_bases(maps).items()):          # 名前に .so を含むファイルだけ（実行ファイルは ELF として別に取り寄せ済み）
+        parts = [p for p in PurePosixPath(path).parts if p not in ("/", "..", ".")]
+        local = root.joinpath(*parts)
+        try:
+            got = fetch(target, path, str(local))
+            out.append({"path": path, "local_path": got["local_path"], "base": base, "bytes": got["bytes"],
+                        "sha256": got["sha256"]})
+        except Exception as e:  # noqa: BLE001 - 取り寄せられなかった事実を残し、他は続ける
+            out.append({"path": path, "base": base, "error": f"{type(e).__name__}: {e}"})
     return out
 
 

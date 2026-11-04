@@ -6,7 +6,7 @@
   // 省ける欄は空 = 解読器の既定。
   // 積み重ねる解読器（Modbus・SPI Flash 等）は下の解読の選択と、その欄を入れ子に（このコンポーネント自身）
   import { i18n } from "../../lib/i18n";
-  import { isChannelParam, newForm, type DecoderForm, type DecoderInfo } from "../../lib/logic";
+  import { choicesOf, isChannelParam, newForm, type DecoderForm, type DecoderInfo } from "../../lib/logic";
   import { channelName } from "../../lib/waveform";
   import Self from "./DecoderFields.svelte";
 
@@ -26,6 +26,13 @@
           <option value=""></option>
           {#if p.required && p.nullable}<option value="null">{$i18n("logic.notConnected")}</option>{/if}
           {#each channels as ch (ch)}<option value={String(ch)}>{channelName(ch, laLayout)}</option>{/each}
+        </select>
+      {:else if choicesOf(p)}
+        <!-- 受け付ける値が決まっている欄（解読器の申告）: 選ぶ。必須なら最初は空（既定を持たない） -->
+        <select bind:value={form.values[p.name]} aria-required={p.required}>
+          <option value="">{p.required ? "" : $i18n("api.defaultIs", { value: shown(p.default) || "—" })}</option>
+          {#if p.nullable}<option value="null">null</option>{/if}
+          {#each choicesOf(p) ?? [] as c (String(c))}<option value={String(c)}>{String(c)}</option>{/each}
         </select>
       {:else}
         <input class="mono" bind:value={form.values[p.name]} size="8" aria-required={p.required}

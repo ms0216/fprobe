@@ -4,7 +4,7 @@ from fprobe_gw.rtl import CORE_GENERATED, rtl
 from fprobe_gw.toolchain.sim import run_cocotb
 
 SOURCES = [CORE_GENERATED / "timing_pkg.vhd",
-           *rtl("common/util_pkg.vhd", "la/la_front.vhd", "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd",
+           *rtl("common/util_pkg.vhd", "la/la_pkg.vhd", "la/la_front.vhd", "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd",
                 "la/la_record.vhd", "la/la_capture.vhd", "la/la_cap_domain.vhd")]
 
 

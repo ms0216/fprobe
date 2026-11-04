@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { COMMANDS, command, commandForKey, shortcutOf, tooltip, type CommandState } from "../src/lib/commands";
 import { Debugger } from "../src/lib/debugger";
+import { confirmer } from "../src/lib/confirm";
 import { execution } from "../src/lib/execution";
 import { t } from "../src/lib/i18n";
 import { Safety } from "../src/lib/safety";
@@ -91,6 +92,27 @@ describe("実行すると API を呼ぶ", () => {
     expect(conn.calls.map(([m]) => m)).not.toContain("debug.breakpoint.set");
     await command("continue").run(ctx, halted);                         // 続行は止めない: 聞かない
     expect(asked.length).toBe(2);
+  });
+
+  it("AI がつながっていて一時停止していなければ、確認の文に押した操作の名前と AI の名前を載せる（backlog 82・110 番）", async () => {
+    const { conn, ctx } = setup();
+    conn.emit("clients", { clients: [{ id: 1, name: "claude", role: "ai" }] });
+    const message = new Promise<string>((done) => {
+      const off = confirmer.subscribe((r) => {
+        if (!r) return;
+        queueMicrotask(() => {
+          off();
+          confirmer.answer(false);
+          done(r.message);
+        });
+      });
+    });
+    const ran = command("continue").run(ctx, halted);
+    const text = await message;
+    await ran;
+    expect(text).toContain(t("cmd.continue"));
+    expect(text).toContain("claude");
+    expect(conn.calls.map(([m]) => m)).not.toContain("target.resume");      // 断ったら呼ばない
   });
 
   it("ステップ・Run to Cursor・ブレークポイント・続行", async () => {

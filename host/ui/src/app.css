@@ -9,6 +9,10 @@
   --warn: #b45309;
   --bad: #b91c1c;
   --select: #e8effd;
+  /* 白い字を載せる塗り（主ボタン・ステータスバー）。暗い配色でも白い字が読める濃さにする */
+  --fill-accent: #2563eb;
+  --fill-running: #11692f;
+  --fill-halted: #99470a;
   color-scheme: light;
   font-family: system-ui, "Segoe UI", "Yu Gothic UI", "Hiragino Sans", sans-serif;
   font-size: 14px;
@@ -25,6 +29,9 @@
     --warn: #fbbf24;
     --bad: #f87171;
     --select: #26324d;
+    --fill-accent: #2f5fd0;
+    --fill-running: #166534;
+    --fill-halted: #92400e;
     color-scheme: dark;
   }
 }
@@ -37,7 +44,7 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.5; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--fill-accent); border-color: var(--fill-accent); color: #fff; }
 input, select {
   font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px;
 }
@@ -53,6 +60,8 @@ section.panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-w
 .pane-bar { display: flex; gap: 6px; align-items: center; padding: 4px 8px; border-bottom: 1px solid var(--line);
             position: sticky; top: 0; background: var(--panel); z-index: 1; flex-wrap: wrap; }
 .pane-bar .spacer { flex: 1; }
+/* 上段のボタン・チェックの名前は折り返さない（幅が狭いと 1 つのボタンが 2 段になって崩れる。backlog 28 番） */
+.pane-bar > button, .pane-bar > label { white-space: nowrap; }
 .empty { padding: 16px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .empty strong { color: var(--text); font-weight: 600; }
 .empty .actions { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -93,3 +102,13 @@ button.link { border: none; background: none; padding: 0; color: var(--accent); 
   font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 3px;
 }
 .dock-actions button:hover { background: var(--hover, rgba(127, 127, 127, 0.15)); color: inherit; }
+
+/* 構文の色（lib/highlight.ts のトークン。ソース・逆アセンブル共通）。明暗は色の変数に従う */
+.code .kw { color: var(--accent); }
+.code .type { color: color-mix(in srgb, var(--accent) 55%, var(--ok)); }
+.code .str { color: var(--ok); }
+.code .num { color: var(--warn); }
+.code .cm { color: var(--muted); font-style: italic; }
+.code .pp { color: color-mix(in srgb, var(--bad) 55%, var(--accent)); }
+.code .reg { color: color-mix(in srgb, var(--accent) 55%, var(--ok)); }
+.code .sym { color: color-mix(in srgb, var(--bad) 55%, var(--accent)); }

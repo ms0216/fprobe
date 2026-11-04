@@ -36,6 +36,7 @@ end package body;
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.sync_link_pkg.all;
 
 entity sync_link is
@@ -211,8 +212,8 @@ begin
                   valid_r  <= '1';
                   local_r  <= rx_local;
                   parent_r <= rx_data;
-                elsif errors /= x"FFFF" and enable = '1' then
-                  errors <= errors + 1;
+                elsif enable = '1' then
+                  errors <= sat_inc(errors);
                 end if;
               end if;
               rx_bit <= rx_bit + 1;

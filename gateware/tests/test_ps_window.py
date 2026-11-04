@@ -7,7 +7,7 @@ from tests.rtl import TEST_RTL
 def test_ps_window_port(tmp_path):
     """窓 + la_ps_port: 位置の約束（流れの番号で 0 に戻す・古い番号の書きを捨てる・読みで写す）。"""
     run_cocotb(toplevel="ps_window_harness",
-               sources=[CORE_GENERATED / "ps_window_pkg.vhd", *rtl("hostlink/zynq_frame_link.vhd", "la/la_ps_port.vhd"),
+               sources=[CORE_GENERATED / "ps_window_pkg.vhd", *rtl("common/util_pkg.vhd", "hostlink/zynq_frame_link.vhd", "la/la_ps_port.vhd"),
                         TEST_RTL / "ps_window_harness.vhd"],
                test_module="tests.tb.ps_window_tb", build_dir=tmp_path)
 

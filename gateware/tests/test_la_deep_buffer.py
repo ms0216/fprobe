@@ -1,10 +1,10 @@
 from fprobe_gw.rtl import CORE_GENERATED, rtl
 from fprobe_gw.toolchain.sim import run_cocotb
 
-SOURCES = ("common/util_pkg.vhd", "common/sync_bit.vhd", "common/cdc_value.vhd", "common/sync_fifo.vhd",
-           "common/async_fifo.vhd", "common/stream_unpack.vhd", "common/stream_slice.vhd", "la/la_front.vhd",
+SOURCES = ("core/generated/event_pkg.vhd", "common/util_pkg.vhd", "common/sync_bit.vhd", "common/cdc_value.vhd", "common/sync_fifo.vhd",
+           "common/async_fifo.vhd", "common/stream_unpack.vhd", "common/stream_slice.vhd", "la/la_pkg.vhd", "la/la_front.vhd",
            "la/la_pack.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd",
-           "la/la_lane_encoder.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "la/la_deep_buffer.vhd")
+           "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "common/cdc_request.vhd", "common/hold_one.vhd", "la/la_run_cdc.vhd", "mem/la_write_track.vhd", "mem/mem_cmd_arb.vhd", "la/la_stream_sched.vhd", "la/la_deep_front.vhd", "la/la_deep_buffer.vhd")
 
 
 def test_la_deep_buffer(tmp_path):

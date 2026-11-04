@@ -1,7 +1,7 @@
 // Logic Analyzer: 解読器の欄 → settings、注釈 → 印、トリガの欄 ↔ xtrig の引数、段の図、測定の範囲
 import { describe, expect, it } from "vitest";
 import {
-  decodeMarks, hiddenKinds, invalidSettings, isChannelParam, measureCall, measureRange, measuredChannels, missingSettings, newForm,
+  choicesOf, decodeMarks, hiddenKinds, invalidSettings, isChannelParam, measureCall, measureRange, measuredChannels, missingSettings, newForm,
   patternForm, patternOf, settingValue, settingsOf,
   stageForms, stageLabel, stageState, stagesOf, type DecoderInfo, type StageState,
 } from "../src/lib/logic";
@@ -52,6 +52,10 @@ describe("解読器の設定", () => {
   it("チャンネルの欄かは解読器が申告した型（type = channel）で決める。設定の名前では推さない", () => {
     expect(isChannelParam({ name: "rx", required: true, type: "channel" })).toBe(true);        // 利用者の解読器の線の名前
     expect(isChannelParam({ name: "enable", required: true, type: "boolean" })).toBe(false);   // 線でない enable
+    // 選ぶ欄: 解読器が申告した値の一覧（Literal）か真偽。ほかは文字の欄
+    expect(choicesOf({ name: "parity", required: true, type: "string", choices: ["none", "even"] })).toEqual(["none", "even"]);
+    expect(choicesOf({ name: "invert", required: true, type: "boolean" })).toEqual([true, false]);
+    expect(choicesOf({ name: "baud", required: true, type: "number" })).toBeNull();
     expect(isChannelParam({ name: "channel", required: true })).toBe(false);                   // 型の申告が無い
   });
 

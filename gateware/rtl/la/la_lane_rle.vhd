@@ -16,6 +16,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.la_pkg.all;
 
 entity la_lane_rle is
   generic (
@@ -70,11 +71,8 @@ architecture rtl of la_lane_rle is
   end function;
 
   function rec(len : unsigned; v : val_t) return rec_t is
-    variable r : rec_t := (others => '0');
   begin
-    r(31 downto 16) := std_logic_vector(resize(len - 1, 16));
-    r(WIDTH - 1 downto 0) := v;
-    return r;
+    return rle_record(resize(len - 1, 16), v);
   end function;
 begin
   assert WIDTH <= 16 and LANES <= 8 and BUF >= 4 + LANES

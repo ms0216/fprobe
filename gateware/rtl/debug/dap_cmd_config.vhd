@@ -8,6 +8,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.dap_pkg.all;
 use work.dap_info_pkg.all;
 
@@ -61,7 +62,7 @@ entity dap_cmd_config is
 end entity;
 
 architecture rtl of dap_cmd_config is
-  constant CYCLES_PER_US : positive := (CLK_HZ + 500_000) / 1_000_000;
+  constant CYCLES_PER_US : positive := us_cycles(CLK_HZ);
   constant HALF_CLOCK_HZ : natural := CLK_HZ / 2;          -- SWCLK = TCK = HALF_CLOCK_HZ / half_period（swd_phy・jtag_phy とも 1 ビット 2 × half_period 周期）
   -- SWJ_Clock は要求を 1% まで超えてよい（sys 100.29 MHz で 25 MHz の要求に 16.7 MHz でなく 25.07 MHz を選ぶ）
   constant HALF_CLOCK_TOL_HZ : natural := HALF_CLOCK_HZ / 101 * 100;
@@ -182,7 +183,7 @@ begin
 
     procedure reply_status(s : std_logic_vector(7 downto 0)) is
     begin
-      put(1, x"00000000000000" & s, S_DONE);
+      put(1, byte_word(s), S_DONE);
     end procedure;
   begin
     if rising_edge(clk) then
@@ -244,6 +245,8 @@ begin
           -- DAP_Info
           when S_INFO =>
             case to_integer(unsigned(arg(7 downto 0))) is
+              when 16#08# =>                                          -- タイムスタンプの時計（共通タイムベース = clk）
+                put(5, x"000000" & std_logic_vector(to_unsigned(CLK_HZ, 32)) & x"04", S_DONE);
               when 16#F0# =>
                 put(2, x"000000000000" & CAPS_INFO & x"01", S_DONE);
               when 16#FD# =>
@@ -252,7 +255,7 @@ begin
                 put(2, x"000000000000" & std_logic_vector(to_unsigned(DAP_PACKET_COUNT, 8)) & x"01", S_DONE);
               when 16#FF# =>
                 put(3, x"0000000000" & std_logic_vector(to_unsigned(packet_size, 16)) & x"02", S_DONE);
-              when 0 to DAP_INFO_SLOTS - 1 =>
+              when 0 to 7 | 9 to DAP_INFO_SLOTS - 1 =>
                 -- 文字列（NUL 込み）か、未知の ID（長さ 0）: ROM の枠の先頭（長さ）を読む
                 rom_addr <= to_unsigned(to_integer(unsigned(arg(3 downto 0))) * DAP_INFO_SLOT_BYTES, DAP_INFO_ADDR_BITS);
                 state    <= S_INFO_FETCH;
@@ -266,7 +269,7 @@ begin
           when S_INFO_LENGTH =>
             info_len <= to_integer(unsigned(rom_q(4 downto 0)));
             rom_addr <= rom_addr + 1;
-            put(1, x"00000000000000" & rom_q, S_INFO_STRING);
+            put(1, byte_word(rom_q), S_INFO_STRING);
 
           when S_INFO_STRING =>
             -- rom_q は rom_addr の文字（put の応答待ちで 1 周期以上たっている）
@@ -275,7 +278,7 @@ begin
             else
               info_len <= info_len - 1;
               rom_addr <= rom_addr + 1;
-              put(1, x"00000000000000" & rom_q, S_INFO_STRING);
+              put(1, byte_word(rom_q), S_INFO_STRING);
             end if;
 
           when S_CONNECT =>
@@ -336,13 +339,7 @@ begin
             end if;
 
           when S_CLOCK_DONE =>
-            if div_quot < 1 then
-              half_r <= to_unsigned(1, 16);
-            elsif div_quot > 65535 then
-              half_r <= to_unsigned(65535, 16);
-            else
-              half_r <= div_quot(15 downto 0);
-            end if;
+            half_r <= resize(clamp(div_quot, 1, 65535), 16);
             reply_status(DAP_OK);
 
           -- JTAG_Configure: count、IR 長 × count

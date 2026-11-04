@@ -203,8 +203,9 @@ def junit_xml(suite: str, cases: list[TestCase], output: str = "", duration_s: f
 class RunOptions:
     elf: Path
     out_dir: Path = Path("fprobe-run")
-    target: str = "cortex_m"
-    frequency_hz: int = 4_000_000
+    # つなぐ（connect=True）ときは使う側が明示する（既定を持たない。target.connect と同じ。CLAUDE.md 2026-11-04）
+    target: str | None = None
+    frequency_hz: int | None = None
     connect_mode: str = "halt"
     connect: bool = True                     # False: 接続済みの Probe を使う
     load: str = "auto"                       # auto / ram / flash / none（書き込まない）
@@ -315,6 +316,8 @@ class Runner:
     def _prepare(self) -> None:
         p, o = self.probe, self.o
         if o.connect:
+            if o.target is None or o.frequency_hz is None:
+                raise ValueError("つなぐには target と frequency_hz を明示する（既定は持たない。例 cortex_m・4000000）")
             p.target_connect(o.target, frequency_hz=o.frequency_hz, connect_mode=o.connect_mode)
         load = o.load if o.load != "auto" else choose_load(o.elf, self._ram_ranges())
         if load == "ram":

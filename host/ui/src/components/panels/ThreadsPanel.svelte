@@ -10,6 +10,7 @@
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
   import { isRunning } from "../../lib/commands";
+  import { linkOf } from "../../lib/target";
   import { missingText } from "../../lib/codeat";
   import { nextRun, taskStateText, waitText } from "../../lib/rtos";
   import { timeText } from "../../lib/time";
@@ -40,6 +41,8 @@
   let mspTop = $state(load("stack.top", ""));
 
   const linux = $derived(Boolean($app.target?.linux));      // Linux のプロセスに attach している（API の事実）
+  // 主スタックの欄は接続中だけ（未接続で中身の無い項目を並べない。backlog 43 番）
+  const connected = $derived(linkOf($app.target) !== null);
   const halted = $derived($app.target?.state === "HALTED" && !linux);
   const running = $derived(isRunning($app.target?.state) && !linux);
   const key = $derived(halted ? `${$app.target?.pc}/${$app.target?.run}` : "");
@@ -230,6 +233,7 @@
   {:else}
     <Empty need="halted" />
   {/if}
+  {#if connected}
   <details class="msp">
     <summary>{$i18n("stack.msp")}</summary>
     <div class="msp-bar">
@@ -254,6 +258,7 @@
       {#each msp.notes ?? [] as n, k (k)}<div class="muted note">{n}</div>{/each}
     {/if}
   </details>
+  {/if}
   {/if}
 </div>
 

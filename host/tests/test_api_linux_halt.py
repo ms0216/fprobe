@@ -98,7 +98,7 @@ def test_open_occupies_the_probe_dap_and_the_other_dap_users_are_refused(rig):
     assert r["occupies"]["probe_dap"] is True and r["opened_by"]["name"] == "claude"
     assert r["journal"] == {"path": opts["journal"], "exists": False, "entries": []}
     assert probe._session.dap_opened == 1
-    for method, params in (("target.connect", {"target": "zynq7000"}), ("probe.pins.read", {})):
+    for method, params in (("target.connect", {"target": "zynq7000", "frequency_hz": 4_000_000}), ("probe.pins.read", {})):
         with pytest.raises(ApiError, match="linux.halt が使っている") as e:
             gui.call(method, **params)
         assert e.value.code == E_DEVICE

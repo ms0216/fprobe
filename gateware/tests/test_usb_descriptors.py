@@ -98,6 +98,28 @@ def test_endpoint_direction_masks_include_ep0():
     assert in_mask == (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6)
 
 
+def test_endpoint_kinds_are_derived_from_configuration():
+    from fprobe_gw.usb.vhdl_rom import endpoint_kinds, endpoint_masks
+    configuration = FPROBE_DEVICE.configuration(high_speed=True)
+    out_kinds, in_kinds = endpoint_kinds(configuration)
+    assert out_kinds[:5] == [d.CONTROL, d.BULK, d.BULK, None, d.BULK]
+    assert in_kinds[:7] == [d.CONTROL, d.BULK, d.BULK, d.BULK, d.BULK, d.INTERRUPT, d.BULK]
+    assert out_kinds[5:] == [None] * 11 and in_kinds[7:] == [None] * 9
+    # 種類の表と存在のマスクは同じエンドポイントを指す
+    out_mask, in_mask = endpoint_masks(configuration)
+    assert out_mask == sum(1 << n for n, k in enumerate(out_kinds) if k is not None)
+    assert in_mask == sum(1 << n for n, k in enumerate(in_kinds) if k is not None)
+    # FS の構成でも種類は同じ（最大パケットサイズだけが違う）
+    assert endpoint_kinds(FPROBE_DEVICE.configuration(high_speed=False)) == (out_kinds, in_kinds)
+
+
+def test_package_exports_endpoint_kind_tables():
+    text = render_package(FPROBE_DEVICE)
+    for line in ("  constant OUT_EP_KINDS : ep_kinds_t := (", "  constant IN_EP_KINDS : ep_kinds_t := (",
+                 "     5 => EP_KIND_INTERRUPT,", "     3 => EP_KIND_NONE,"):
+        assert line in text, line
+
+
 def test_package_exports_named_constants():
     text = render_package(FPROBE_DEVICE)
     for line in ("constant EP_CONTROL : natural := 1;", "constant EP_STREAM : natural := 6;",

@@ -52,6 +52,16 @@ describe("Debugger", () => {
     expect(get().breakpoints).toEqual([]);
   });
 
+  it("ソースの一覧を読み終えるまでは filesRead が false（画面は「プログラムが無い」ではなく読み込み中を出す。backlog 69 番）", async () => {
+    const { conn, get } = setup({ "debug.source.list": () => { throw new Error("ELF が読み込まれていない"); } });
+    expect(get().filesRead).toBe(false);
+    conn.link!("open", {});
+    await settle();
+    expect(get().filesRead).toBe(true);                                  // 読めなかったのも、読み終えた
+    conn.link!("closed", {});
+    expect(get().filesRead).toBe(false);
+  });
+
   it("止まったら、止まったファイルを開いてレジスタ・呼び出し履歴・変数を読み直す。同じ pc では読み直さない", async () => {
     const { conn, dbg, get } = setup();
     conn.link!("open", {});

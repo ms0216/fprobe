@@ -168,3 +168,16 @@ def test_decoder_must_return_a_decoding():
             decode("bad", capture(), uart={"channel": 1, "baud": BAUD, **F8N1})
     finally:
         unregister("bad")
+
+
+def test_settings_typed_as_a_literal_say_their_choices_so_a_screen_can_offer_them():
+    """引数の型が Literal なら、受け付ける値の一覧を choices として申告する（画面・AI が欄を選択にできる。既定は持たない）。"""
+    from fprobe.decode import decoders
+    params = {d.name: {p["name"]: p for p in d.describe()["params"]} for d in decoders()}
+    uart = params["uart"]
+    assert uart["parity"]["choices"] == ["none", "even", "odd", "mark", "space"] and uart["parity"]["type"] == "string"
+    assert uart["stop_bits"]["choices"] == [1, 1.5, 2] and uart["stop_bits"]["type"] == "number"
+    assert uart["data_bits"]["type"] == "integer" and uart["parity"]["required"] is True
+    assert "choices" not in uart["baud"] and "choices" not in uart["invert"]
+    assert params["spi"]["mode"]["choices"] == [0, 1, 2, 3]
+    assert params["parallel"]["edge"]["choices"] == ["rising", "falling", "both"] and params["parallel"]["edge"]["nullable"]

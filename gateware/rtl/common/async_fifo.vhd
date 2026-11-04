@@ -77,6 +77,9 @@ architecture rtl of async_fifo is
   attribute syn_srlstyle : string;
   attribute syn_preserve of rd_gray_s1, rd_gray_s2, wr_gray_s1, wr_gray_s2 : signal is 1;
   attribute syn_srlstyle of rd_gray_s1, rd_gray_s2, wr_gray_s1, wr_gray_s2 : signal is "registers";
+  -- Vivado: 同期化の FF として隣に置き、準安定の解析の対象にする（UG901 の ASYNC_REG。sync_bit と同じ）
+  attribute ASYNC_REG : string;
+  attribute ASYNC_REG of rd_gray_s1, rd_gray_s2, wr_gray_s1, wr_gray_s2 : signal is "TRUE";
 
   signal full  : boolean;
   signal empty : boolean;

@@ -20,6 +20,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity uart_bridge is
   generic (
@@ -71,7 +72,7 @@ architecture rtl of uart_bridge is
   constant MAX_DIVISOR  : natural := 2 ** DIVISOR_BITS - 1;
 
   signal divisor   : unsigned(DIVISOR_BITS - 1 downto 0) :=
-    to_unsigned((CLK_HZ + DEFAULT_BAUD / 2) / DEFAULT_BAUD, DIVISOR_BITS);
+    to_unsigned(baud_divisor(CLK_HZ, DEFAULT_BAUD), DIVISOR_BITS);
   signal baud_r    : unsigned(31 downto 0) := to_unsigned(DEFAULT_BAUD, 32);
   signal pending   : unsigned(31 downto 0) := (others => '0');   -- 計算中のボーレート
   signal wanted    : unsigned(31 downto 0) := (others => '0');   -- 最後に来たボーレート
@@ -104,7 +105,7 @@ begin
   begin
     if rising_edge(clk) then
       if rst = '1' then
-        divisor    <= to_unsigned((CLK_HZ + DEFAULT_BAUD / 2) / DEFAULT_BAUD, DIVISOR_BITS);
+        divisor    <= to_unsigned(baud_divisor(CLK_HZ, DEFAULT_BAUD), DIVISOR_BITS);
         baud_r     <= to_unsigned(DEFAULT_BAUD, 32);
         ferr_count <= (others => '0');
         orun_count <= (others => '0');

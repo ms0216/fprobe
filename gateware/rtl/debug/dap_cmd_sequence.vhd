@@ -39,7 +39,7 @@ entity dap_cmd_sequence is
 end entity;
 
 architecture rtl of dap_cmd_sequence is
-  constant CYCLES_PER_US : positive := (CLK_HZ + 500_000) / 1_000_000;
+  constant CYCLES_PER_US : positive := us_cycles(CLK_HZ);
 
   type state_t is (S_IDLE, S_DISPATCH, S_WAIT_GET, S_WAIT_PUT, S_WAIT_LINK, S_DONE,
                    S_PINS, S_PINS_WAIT, S_PINS_DONE,
@@ -56,7 +56,7 @@ architecture rtl of dap_cmd_sequence is
   signal data_r     : std_logic_vector(63 downto 0) := (others => '0');
 
   signal nreset_low_r : std_logic := '0';
-  signal nreset_s1, nreset_s : std_logic := '1';
+  signal nreset_s : std_logic;                    -- nreset_in を clk に同期化した値
   signal pins_value  : std_logic_vector(7 downto 0) := (others => '0');
   signal pins_select : std_logic_vector(7 downto 0) := (others => '0');
   signal us_left     : unsigned(31 downto 0) := (others => '0');
@@ -66,7 +66,18 @@ architecture rtl of dap_cmd_sequence is
   signal seq_bits    : natural range 1 to 64 := 1;          -- 今の塊のビット数
   signal seq_count   : natural range 0 to 255 := 0;         -- 残りシーケンス数
   signal seq_input   : std_logic := '0';                    -- SWD_Sequence: 入力 / JTAG_Sequence: TDO を返す
+  -- SWD_Sequence・JTAG_Sequence の info のビット数（bit5-0、0 = 64）
+  function seq_bits_of(info : std_logic_vector(5 downto 0)) return natural is
+  begin
+    if info = "000000" then
+      return 64;
+    end if;
+    return to_integer(unsigned(info));
+  end function;
 begin
+  nreset_sync_i : entity work.sync_bit
+    generic map (INIT => '1')
+    port map (clk => clk, d => nreset_in, q => nreset_s);
   get_req      <= get_req_r;
   get_n        <= get_n_r;
   put_req      <= put_req_r;
@@ -114,8 +125,6 @@ begin
       put_req_r  <= '0';
       link_req_r <= '0';
       done_r     <= '0';
-      nreset_s1  <= nreset_in;
-      nreset_s   <= nreset_s1;
 
       if rst = '1' then
         state        <= S_IDLE;
@@ -132,7 +141,7 @@ begin
               when ID_SWJ_PINS     => get(6, S_PINS);
               when ID_SWJ_SEQUENCE => get(1, S_SEQ_COUNT);
               when ID_SWD_SEQUENCE => get(1, S_SWDSEQ_COUNT);
-              when others          => put(1, x"00000000000000" & DAP_OK, S_JSEQ_COUNT);   -- JTAG_Sequence: 状態
+              when others          => put(1, byte_word(DAP_OK), S_JSEQ_COUNT);   -- JTAG_Sequence: 状態
             end case;
 
           when S_WAIT_GET =>
@@ -180,7 +189,7 @@ begin
             end if;
 
           when S_PINS_DONE =>
-            put(1, x"00000000000000" & nreset_s & "00000" & link_val(1 downto 0), S_DONE);
+            put(1, byte_word(nreset_s & "00000" & link_val(1 downto 0)), S_DONE);
 
           ------------------------------------------------------------------------------
           -- SWJ_Sequence: count（0 = 256）ビットを 64 ビットずつ
@@ -195,7 +204,7 @@ begin
 
           when S_SEQ_CHUNK =>
             if seq_left = 0 then
-              put(1, x"00000000000000" & DAP_OK, S_DONE);
+              put(1, byte_word(DAP_OK), S_DONE);
             elsif seq_left > 64 then
               seq_bits <= 64;
               get(8, S_SEQ_DATA);
@@ -213,7 +222,7 @@ begin
           ------------------------------------------------------------------------------
           when S_SWDSEQ_COUNT =>
             seq_count <= to_integer(unsigned(arg(7 downto 0)));
-            put(1, x"00000000000000" & DAP_OK, S_SWDSEQ_NEXT);       -- 状態 OK
+            put(1, byte_word(DAP_OK), S_SWDSEQ_NEXT);       -- 状態 OK
 
           when S_SWDSEQ_NEXT =>
             if seq_count = 0 then
@@ -224,18 +233,12 @@ begin
             end if;
 
           when S_SWDSEQ_INFO =>
-            if arg(5 downto 0) = "000000" then
-              seq_bits <= 64;
-            else
-              seq_bits <= to_integer(unsigned(arg(5 downto 0)));
-            end if;
+            seq_bits  <= seq_bits_of(arg(5 downto 0));
             seq_input <= arg(7);
             if arg(7) = '1' then
               state <= S_SWDSEQ_RUN;
-            elsif arg(5 downto 0) = "000000" then
-              get(8, S_SWDSEQ_RUN);
             else
-              get(bytes_for(to_integer(unsigned(arg(5 downto 0)))), S_SWDSEQ_RUN);
+              get(bytes_for(seq_bits_of(arg(5 downto 0))), S_SWDSEQ_RUN);
             end if;
 
           when S_SWDSEQ_RUN =>
@@ -267,13 +270,8 @@ begin
             end if;
 
           when S_JSEQ_INFO =>
-            if arg(5 downto 0) = "000000" then
-              seq_bits <= 64;
-              get(8, S_JSEQ_RUN);
-            else
-              seq_bits <= to_integer(unsigned(arg(5 downto 0)));
-              get(bytes_for(to_integer(unsigned(arg(5 downto 0)))), S_JSEQ_RUN);
-            end if;
+            seq_bits <= seq_bits_of(arg(5 downto 0));
+            get(bytes_for(seq_bits_of(arg(5 downto 0))), S_JSEQ_RUN);
             request_r <= "000" & arg(6);                            -- jtag_phy の OP_SEQ_IN: TMS
             seq_input <= arg(7);
 

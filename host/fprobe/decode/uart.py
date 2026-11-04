@@ -5,16 +5,21 @@
 経験則が要るため。CLAUDE.md の「本体にヒューリスティックを入れない」。1 ビットの長さは la.measure 等でパルスの幅を測れる）。"""
 
 import math
+from typing import Literal
 
 from ..la import Transitions
 from .core import Annotation, Channel, ChannelLevels, Decoding
 
 __all__ = ["decode_uart"]
 
-PARITIES = ("none", "even", "odd", "mark", "space")
+Parity = Literal["none", "even", "odd", "mark", "space"]
+DataBits = Literal[5, 6, 7, 8, 9]
+StopBits = Literal[1, 1.5, 2]
+PARITIES = Parity.__args__
 
 
-def decode_uart(tr: Transitions, channel: Channel, *, baud: float, data_bits: int, parity: str, stop_bits: float,
+def decode_uart(tr: Transitions, channel: Channel, *, baud: float, data_bits: DataBits, parity: Parity,
+                stop_bits: StopBits,
                 invert: bool, lsb_first: bool) -> Decoding:
     """1 本の UART の線を、渡したボーレートと枠の設定で解読する。枠の設定（data_bits・parity・stop_bits・invert
     （線の極性）・lsb_first）は既定を持たない（典型の 8N1 で補わない。違えば parity・frame の誤りか化けた値になる）。"""

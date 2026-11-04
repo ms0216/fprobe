@@ -30,7 +30,7 @@ architecture rtl of csr_debug is
   signal start : boolean;
   signal index : natural range 0 to 15;
   signal sample_delay_swd_r : std_logic_vector(2 downto 0) := "001";
-  signal sample_delay_jtag_r : std_logic_vector(2 downto 0) := "000";
+  signal sample_delay_jtag_r : std_logic_vector(2 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -43,7 +43,7 @@ begin
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
         sample_delay_swd_r <= "001";
-        sample_delay_jtag_r <= "000";
+        sample_delay_jtag_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is

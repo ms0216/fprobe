@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   // Linux（JTAG で全コアを止める。API の linux.halt.*。CLI python -m fprobe.linux_halt と一対一）:
   // 開く設定・全コアの停止と再開・プロセスとスレッド・BKPT の回復・後始末・gdb のサーバ。
   // 考えない層: 値はすべて API の応答のまま描く（停止の上限の良し悪し・並べ替えの基準を持たない。比較は API の skew_verdict）
@@ -127,9 +128,13 @@
   }
 
   // つながってから読む（つながる前の読みの失敗の文が、つながった後も残っていた）。つながったとき・つなぎ直したときに読み直す
-  $effect(() => { if ($app.link === "open") void refresh(); });
+  // $app 全体ではなく「開いているか」だけを見る（$app は読み直しの記録のたびに更新され、読み直し → 記録 → $app の更新 →
+  // 読み直し… の循環になった。2026-11-05 実機: attach したままページを読み直すと、毎秒数十回の linux.halt.debug.status）
+  const linkOpen = $derived($app.link === "open");
+  $effect(() => { if (linkOpen) untrack(() => void refresh()); });
   // だれが（AI も）操作しても読み直す
-  // 読み直す自分の読み（status・debug.status）の記録では読み直さない: debug.status は操作の種別で、静かな読みでも記録され、通知
+  // 読み直す自分の読み（status・debug.status）の記録では読み直さない（debug.status は読みの種別で、いまは記録されない。2026-11-05 までは
+  // 操作の種別で、静かな読みでも記録され、通知
   // activity → 読み直し → 記録 → 通知… の循環になる（2026-11-04 実機: attach 中に毎秒 500 回の問い合わせ）。状態を変える操作だけ。
   $effect(() => conn.on("activity", (e: { method: string }) => {
     if (shouldRefreshOn(e.method)) void refresh();

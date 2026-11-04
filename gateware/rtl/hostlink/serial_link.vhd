@@ -69,7 +69,7 @@ end entity;
 
 architecture rtl of serial_link is
   constant DIVISOR_BITS : positive := 16;
-  constant DIVISOR      : unsigned(DIVISOR_BITS - 1 downto 0) := to_unsigned((CLK_HZ + BAUD / 2) / BAUD, DIVISOR_BITS);
+  constant DIVISOR      : unsigned(DIVISOR_BITS - 1 downto 0) := to_unsigned(baud_divisor(CLK_HZ, BAUD), DIVISOR_BITS);
   constant FRAME_MAX    : positive := MAX_PAYLOAD + 3;      -- ch + payload + crc
   constant RAM_BITS     : positive := clog2(FRAME_MAX);
 
@@ -201,9 +201,7 @@ begin
             commit     <= '1';
             commit_len <= rx_len - 2;
           elsif rx_len /= 0 or overflow then
-            if bad_r /= x"FFFF" then
-              bad_r <= bad_r + 1;
-            end if;
+            bad_r <= sat_inc(bad_r);
           end if;
           restart;
         elsif code_left = 0 then                               -- ブロックの頭（コード）

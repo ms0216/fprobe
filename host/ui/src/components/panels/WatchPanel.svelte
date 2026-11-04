@@ -50,6 +50,10 @@
               onclick={() => dbg.removeWatch(node.name)}>×</button>
     {/snippet}
   </VarTree>
+  {#if !$dbg.watches.length}
+    <!-- 空のとき: 何を入れると何が起きるか（見出しだけの表を出さない） -->
+    <div class="empty"><strong>{$i18n("watch.none")}</strong><span>{$i18n("watch.noneHint")}</span></div>
+  {/if}
 </div>
 
 <style>

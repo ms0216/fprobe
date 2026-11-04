@@ -48,16 +48,16 @@ architecture rtl of csr_xtrig is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal route_to_la_r : std_logic_vector(5 downto 0) := "000000";
-  signal route_to_inject_r : std_logic_vector(5 downto 0) := "000000";
+  signal route_to_la_r : std_logic_vector(5 downto 0) := (others => '0');
+  signal route_to_inject_r : std_logic_vector(5 downto 0) := (others => '0');
   signal command_fire_r : std_logic := '0';
-  signal inject_ap_r : std_logic_vector(7 downto 0) := "00000000";
-  signal inject_addr_r : std_logic_vector(31 downto 0) := "11100000000000001110110111110000";
-  signal inject_value_r : std_logic_vector(31 downto 0) := "10100000010111110000000000000011";
-  signal match_addr_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal match_addr_mask_r : std_logic_vector(31 downto 0) := "11111111111111111111111111111111";
-  signal match_data_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
-  signal match_data_mask_r : std_logic_vector(31 downto 0) := "00000000000000000000000000000000";
+  signal inject_ap_r : std_logic_vector(7 downto 0) := (others => '0');
+  signal inject_addr_r : std_logic_vector(31 downto 0) := x"E000EDF0";
+  signal inject_value_r : std_logic_vector(31 downto 0) := x"A05F0003";
+  signal match_addr_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal match_addr_mask_r : std_logic_vector(31 downto 0) := x"FFFFFFFF";
+  signal match_data_r : std_logic_vector(31 downto 0) := (others => '0');
+  signal match_data_mask_r : std_logic_vector(31 downto 0) := (others => '0');
   signal match_mode_on_write_r : std_logic := '0';
   signal match_mode_on_read_r : std_logic := '0';
 begin
@@ -72,15 +72,15 @@ begin
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       command_fire_r <= '0';
       if rst = '1' then
-        route_to_la_r <= "000000";
-        route_to_inject_r <= "000000";
-        inject_ap_r <= "00000000";
-        inject_addr_r <= "11100000000000001110110111110000";
-        inject_value_r <= "10100000010111110000000000000011";
-        match_addr_r <= "00000000000000000000000000000000";
-        match_addr_mask_r <= "11111111111111111111111111111111";
-        match_data_r <= "00000000000000000000000000000000";
-        match_data_mask_r <= "00000000000000000000000000000000";
+        route_to_la_r <= (others => '0');
+        route_to_inject_r <= (others => '0');
+        inject_ap_r <= (others => '0');
+        inject_addr_r <= x"E000EDF0";
+        inject_value_r <= x"A05F0003";
+        match_addr_r <= (others => '0');
+        match_addr_mask_r <= x"FFFFFFFF";
+        match_data_r <= (others => '0');
+        match_data_mask_r <= (others => '0');
         match_mode_on_write_r <= '0';
         match_mode_on_read_r <= '0';
       elsif start then

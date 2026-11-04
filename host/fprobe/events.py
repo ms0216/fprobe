@@ -38,28 +38,28 @@ __all__ = ["Access", "DapEvent", "EventCursor", "EventLog", "KIND_AUX", "KIND_HO
            "decode_events", "decode_records", "packed_record", "resolve"]
 
 EVENT_BYTES = 16
-KIND_HOST = 1            # ホスト（pyOCD 等）の転送
-KIND_INJECT = 2          # クロストリガの割り込み書き込み（旧い回路。転送数は分からない）
-KIND_UART_RX = 3         # UART の受信バイト（ターゲット → PC）
-KIND_UART_TX = 4         # UART の送信バイト（PC → ターゲット）
-KIND_SWO = 5             # SWO のバイト
-KIND_AUX = 6             # 補助マイコンの計測値（data = ch << 16 | mV）
-KIND_SAMPLE = 7          # DAP サンプラ（F4）の 1 語（番地・値。FPGA が自分で周期的に読んだもの）
-KIND_OBS_RECORD = 8      # 対象の FPGA の観測の記録（data = 記録の語、address = スキャンの番号。fprobe.fpga_obs）
-KIND_OBS_SYNC = 9        # 同、時刻合わせ（data = 対象の時刻の下位 32 ビット、address = 上位 16 ビット）
-KIND_SYNC = 10           # ボードの間の時刻の同期の組（時刻 = 子の時刻、address = 親の時刻の下位 32、data = 上位 32。fprobe.timesync）
-KIND_INJECT_TRANSFERS = 11   # 同（R20）: 書き込みまでの SWD の転送数つき（bit 112〜119。WAIT の繰り返しも数える）
-KIND_HOST_UNTRACKED = 12     # ホストの転送のうち DRW で、メモリの番地を追えなかったもの（address = レジスタの番地。
+KIND_HOST = g.EVENT_KIND_HOST  # ホスト（pyOCD 等）の転送
+KIND_INJECT = g.EVENT_KIND_INJECT  # クロストリガの割り込み書き込み（旧い回路。転送数は分からない）
+KIND_UART_RX = g.EVENT_KIND_UART_RX  # UART の受信バイト（ターゲット → PC）
+KIND_UART_TX = g.EVENT_KIND_UART_TX  # UART の送信バイト（PC → ターゲット）
+KIND_SWO = g.EVENT_KIND_SWO  # SWO のバイト
+KIND_AUX = g.EVENT_KIND_AUX  # 補助マイコンの計測値（data = ch << 16 | mV）
+KIND_SAMPLE = g.EVENT_KIND_SAMPLE  # DAP サンプラ（F4）の 1 語（番地・値。FPGA が自分で周期的に読んだもの）
+KIND_OBS_RECORD = g.EVENT_KIND_OBS_RECORD  # 対象の FPGA の観測の記録（data = 記録の語、address = スキャンの番号。fprobe.fpga_obs）
+KIND_OBS_SYNC = g.EVENT_KIND_OBS_SYNC  # 同、時刻合わせ（data = 対象の時刻の下位 32 ビット、address = 上位 16 ビット）
+KIND_SYNC = g.EVENT_KIND_SYNC  # ボードの間の時刻の同期の組（時刻 = 子の時刻、address = 親の時刻の下位 32、data = 上位 32。fprobe.timesync）
+KIND_INJECT_TRANSFERS = g.EVENT_KIND_INJECT_TRANSFERS  # 同（R20）: 書き込みまでの SWD の転送数つき（bit 112〜119。WAIT の繰り返しも数える）
+KIND_HOST_UNTRACKED = g.EVENT_KIND_HOST_UNTRACKED  # ホストの転送のうち DRW で、メモリの番地を追えなかったもの（address = レジスタの番地。
                              # CSW・TAR を同じ AP に書く前・別の AP・packed の増加・1 KB の境界の先。dap_monitor）
-KIND_UART_RX_PACKED = 13     # 種類 3 を詰めた形（1 件に最大 4 バイトと各バイトの時刻）
-KIND_UART_TX_PACKED = 14     # 種類 4 を詰めた形
-KIND_SWO_PACKED = 15         # 種類 5 を詰めた形
-KIND_DAP_CONFIG = 16         # PHY の設定（DAP_LINE_TIME の回路。config）
-KIND_SAMPLE_BOUND = 17       # サンプラの値を返した転送の点（直前の語の窓の後端。address = その語の番地）
-KIND_SAMPLE_GAP = 18         # サンプラの誤りの区間（gap）
+KIND_UART_RX_PACKED = g.EVENT_KIND_UART_RX_PACKED  # 種類 3 を詰めた形（1 件に最大 4 バイトと各バイトの時刻）
+KIND_UART_TX_PACKED = g.EVENT_KIND_UART_TX_PACKED  # 種類 4 を詰めた形
+KIND_SWO_PACKED = g.EVENT_KIND_SWO_PACKED  # 種類 5 を詰めた形
+KIND_DAP_CONFIG = g.EVENT_KIND_DAP_CONFIG  # PHY の設定（DAP_LINE_TIME の回路。config）
+KIND_SAMPLE_BOUND = g.EVENT_KIND_SAMPLE_BOUND  # サンプラの値を返した転送の点（直前の語の窓の後端。address = その語の番地）
+KIND_SAMPLE_GAP = g.EVENT_KIND_SAMPLE_GAP  # サンプラの誤りの区間（gap）
 SAMPLER_KINDS = (KIND_SAMPLE, KIND_SAMPLE_BOUND, KIND_SAMPLE_GAP)
 WAITS_SATURATED = 31         # 種類 7 の WAIT の回数の上限（31 は 31 回以上）
-KIND_LA_GAP = g.EVENT_KIND_LA_GAP   # ロジアナの垂れ流しの欠けの記録（address = 欠けの前の拍の数、data = 捨てたサンプルの数）
+KIND_LA_GAP = g.EVENT_KIND_LA_GAP  # ロジアナの垂れ流しの欠けの記録（address = 欠けの前の拍の数、data = 捨てたサンプルの数）
 PACKED_BYTE_KINDS = {KIND_UART_RX_PACKED: KIND_UART_RX, KIND_UART_TX_PACKED: KIND_UART_TX, KIND_SWO_PACKED: KIND_SWO}
 PACK_DELTA_BITS = 12         # 詰めた形の、前のバイトからの時刻の差のビット数（収まらない差のバイトは回路が次の件にする）
 PACK_MAX_BYTES = 4

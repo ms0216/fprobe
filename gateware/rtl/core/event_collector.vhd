@@ -13,6 +13,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.event_pkg.all;
 
 entity event_collector is
   generic (
@@ -76,28 +77,34 @@ entity event_collector is
 end entity;
 
 architecture rtl of event_collector is
+  -- 源 k（0 = UART 受信、1 = UART 送信、2 = SWO）のバイトの種類（古い形・詰めた形）
+  type kinds_t is array (0 to 2) of event_kind_t;
+  constant BYTE_KIND   : kinds_t := (EVENT_KIND_UART_RX, EVENT_KIND_UART_TX, EVENT_KIND_SWO);
+  constant PACKED_KIND : kinds_t := (EVENT_KIND_UART_RX_PACKED, EVENT_KIND_UART_TX_PACKED, EVENT_KIND_SWO_PACKED);
   type byte_array_t is array (0 to 2) of std_logic_vector(7 downto 0);
   type time_array_t is array (0 to 2) of std_logic_vector(47 downto 0);
-  signal byte_fire, byte_held : std_logic_vector(2 downto 0) := (others => '0');
-  signal byte_in, byte_data : byte_array_t := (others => (others => '0'));
-  signal byte_time : time_array_t := (others => (others => '0'));
+  signal byte_fire : std_logic_vector(2 downto 0) := (others => '0');
+  signal byte_in : byte_array_t := (others => (others => '0'));
   signal byte_src_time : time_array_t := (others => (others => '0'));   -- 受けたバイトの時刻（受信 = 源の時刻、送信 = 受けた周期 + 1）
   signal rx_time_r, swo_time_r : unsigned(47 downto 0) := (others => '0');
   signal lost_r : unsigned(31 downto 0) := (others => '0');
   signal lost_add : natural range 0 to 31 := 0;             -- 前の周期に落ちた数
   signal event_valid_r : std_logic := '0';
   signal event_data_r : std_logic_vector(127 downto 0) := (others => '0');
-  signal aux_held, obs_held, obs_held_sync, sync_held, smp_held, events_enable_prev : std_logic := '0';
-  signal aux_word, obs_word, obs_word_addr : std_logic_vector(31 downto 0) := (others => '0');
-  signal aux_time, obs_word_time, sync_word_time : std_logic_vector(47 downto 0) := (others => '0');
-  signal sync_word : std_logic_vector(63 downto 0) := (others => '0');
-  signal smp_held_kind : std_logic_vector(7 downto 0) := (others => '0');
-  signal smp_held_word : std_logic_vector(119 downto 0) := (others => '0');
-  -- PHY の設定（種類 16）
+  signal events_enable_prev : std_logic := '0';
+  -- 源ごとに 1 件を保持する（受けた周期に件を組んでおき、DAP・割り込みの件が無く、優先順の前の源の件も無い周期に出す）。
+  -- 並びは出す優先順: サンプラ、バイト 3（UART 受信・UART 送信・SWO）、補助、観測、同期、PHY の設定
+  constant SL_SMP  : natural := 0;
+  constant SL_BYTE : natural := 1;                          -- 1〜3（源 k = 0〜2）
+  constant SL_AUX  : natural := 4;
+  constant SL_OBS  : natural := 5;
+  constant SL_SYNC : natural := 6;
+  constant SL_CFG  : natural := 7;
+  type events_t is array (0 to 7) of event_t;
+  signal held      : std_logic_vector(0 to 7) := (others => '0');
+  signal held_word : events_t := (others => (others => '0'));
+  -- PHY の設定（種類 16）: 前の周期の値（変わった周期に件を作る）
   signal cfg_prev : std_logic_vector(71 downto 0) := (others => '0');
-  signal cfg_held : std_logic := '0';
-  signal cfg_held_word : std_logic_vector(71 downto 0) := (others => '0');
-  signal cfg_time : std_logic_vector(47 downto 0) := (others => '0');
   -- 詰めた形（BYTE_PACK）: 源ごとの詰めた件、出す周期（優先順は古い形のバイトと同じ位置: サンプラの後、補助の前）
   type word_array_t is array (0 to 2) of std_logic_vector(119 downto 0);
   type count_array_t is array (0 to 2) of natural range 0 to 8;
@@ -141,9 +148,9 @@ begin
   byte_src_time <= (0 => std_logic_vector(rx_time_r), 1 => std_logic_vector(time_count), 2 => std_logic_vector(swo_time_r));
   pack_g : if BYTE_PACK generate
     -- 出す周期: DAP・割り込み・サンプラの語が無く、優先順の前の源の件も無い周期（下の process の served と同じ順）
-    pk_take(0) <= pk_valid(0) and not ev_valid and not inj_written and not smp_held;
-    pk_take(1) <= pk_valid(1) and not ev_valid and not inj_written and not smp_held and not pk_valid(0);
-    pk_take(2) <= pk_valid(2) and not ev_valid and not inj_written and not smp_held and not pk_valid(0)
+    pk_take(0) <= pk_valid(0) and not ev_valid and not inj_written and not held(SL_SMP);
+    pk_take(1) <= pk_valid(1) and not ev_valid and not inj_written and not held(SL_SMP) and not pk_valid(0);
+    pk_take(2) <= pk_valid(2) and not ev_valid and not inj_written and not held(SL_SMP) and not pk_valid(0)
                   and not pk_valid(1);
     packers : for k in 0 to 2 generate
       pack_i : entity work.event_byte_pack
@@ -161,173 +168,93 @@ begin
 
   process (clk)
     variable served : boolean;
-    variable taken  : std_logic_vector(2 downto 0);
-    variable lost_n : natural range 0 to 31;              -- 同じ周期に落ちた数（サンプラ・補助・観測・同期・バイト 3。詰めた形は
-                                                           -- 源ごとに最大 8 バイト）
-    variable aux_taken : boolean;
-    variable obs_taken : boolean;
-    variable smp_taken : boolean;
-    variable sync_taken : boolean;
-    variable cfg_taken : boolean;
+    variable taken  : std_logic_vector(0 to 7);          -- この周期に出した保持
+    variable fresh  : std_logic_vector(0 to 7);          -- この周期に受けた件
+    variable word   : events_t;                          -- 受けた件（組んだもの）
+    variable lost_n : natural range 0 to 31;             -- 同じ周期に落ちた数（保持 8。詰めた形は源ごとに最大 8 バイト）
   begin
     if rising_edge(clk) then
       event_valid_r <= '0';
       served := false;
-      taken  := "000";
+      taken  := (others => '0');
       lost_n := 0;
+      -- DAP の転送・割り込み書き込み（保持しない: 線の上の転送は続けて来ない）
       if ev_valid = '1' then
         event_valid_r <= '1';
-        event_data_r  <= host_kind & ev_parity & ev_request & ev_ack & ev_data & ev_addr & ev_time;
+        event_data_r  <= make_event(host_kind, ev_parity & ev_request & ev_ack, ev_data, ev_addr, ev_time);
         served := true;
       elsif inj_written = '1' then
         event_valid_r <= '1';
         -- 種類 11（R20）: 要求・ACK の欄の代わりに転送数（書き込みは常に AP の DRW・OK。旧い種類 2 は転送数なし）
-        event_data_r  <= x"0B" & std_logic_vector(inj_transfers) & inj_value & inj_addr & inj_time;
+        event_data_r  <= make_event(EVENT_KIND_INJECT_TRANSFERS, std_logic_vector(inj_transfers), inj_value, inj_addr, inj_time);
         served := true;
       end if;
-      smp_taken := false;
-      if not served and smp_held = '1' then
-        event_valid_r <= '1';
-        event_data_r  <= smp_held_kind & smp_held_word;
-        served    := true;
-        smp_taken := true;
-      end if;
-      if smp_valid = '1' and events_enable = '1' then
-        if smp_held = '1' and not smp_taken then
-          lost_n := lost_n + 1;                                -- 前の件がまだ出ていない（サンプラが線を持つ間は DAP・割り込みの件が
-                                                               -- 無いので、1 周期 1 件で出し続けられる）
-        else
-          smp_held      <= '1';
-          smp_held_kind <= smp_kind;
-          smp_held_word <= smp_word;
+      -- 保持した件を優先順に 1 件（バイトの源は、詰めた形の件をその源の保持と同じ位置で出す）
+      for k in 0 to 7 loop
+        if k >= SL_BYTE and k < SL_BYTE + 3 then
+          if pk_take(k - SL_BYTE) = '1' then               -- 詰めた形（pk_take は served と同じ優先順）
+            event_valid_r <= '1';
+            event_data_r  <= PACKED_KIND(k - SL_BYTE) & pk_word(k - SL_BYTE);
+            served := true;
+          end if;
+          lost_n := lost_n + pk_lost(k - SL_BYTE);
         end if;
-      elsif smp_taken then
-        smp_held <= '0';
-      end if;
-      for k in 0 to 2 loop
-        if pk_take(k) = '1' then                               -- 詰めた形（pk_take は served と同じ優先順）
+        if not served and held(k) = '1' then
           event_valid_r <= '1';
-          event_data_r  <= std_logic_vector(to_unsigned(13 + k, 8)) & pk_word(k);
-          served := true;
-        end if;
-        lost_n := lost_n + pk_lost(k);
-        if not served and byte_held(k) = '1' then
-          event_valid_r <= '1';
-          event_data_r  <= std_logic_vector(to_unsigned(3 + k, 8)) & x"00" & x"000000" & byte_data(k)
-                         & x"00000000" & byte_time(k);
+          event_data_r  <= held_word(k);
           taken(k) := '1';
           served   := true;
         end if;
       end loop;
-      aux_taken := false;
-      if not served and aux_held = '1' then
-        event_valid_r <= '1';
-        event_data_r  <= x"06" & x"00" & aux_word & x"00000000" & aux_time;
-        served    := true;
-        aux_taken := true;
-      end if;
-      if aux_valid = '1' and events_enable = '1' then
-        if aux_held = '1' and not aux_taken then
-          lost_n := lost_n + 1;                                -- 前の計測値がまだ出ていない（間隔 1 ms なので起きない想定）
-        else
-          aux_held <= '1';
-          aux_word <= std_logic_vector(to_unsigned(aux_ch, 16)) & "00" & std_logic_vector(aux_value);
-          aux_time <= std_logic_vector(aux_src_time);      -- 源の時刻（時刻の正しさの B2、段階 S3。前は受けた周期）
-        end if;
-      elsif aux_taken then
-        aux_held <= '0';
-      end if;
-      -- 対象の FPGA の観測（記録 8・時刻合わせ 9。時刻はエンジンが付けたもの）
-      obs_taken := false;
-      if not served and obs_held = '1' then
-        event_valid_r <= '1';
-        if obs_held_sync = '1' then
-          event_data_r <= x"09" & x"00" & obs_word & obs_word_addr & obs_word_time;
-        else
-          event_data_r <= x"08" & x"00" & obs_word & obs_word_addr & obs_word_time;
-        end if;
-        served    := true;
-        obs_taken := true;
-      end if;
-      if obs_valid = '1' and events_enable = '1' then
-        if obs_held = '1' and not obs_taken then
-          lost_n := lost_n + 1;                                -- 前の語がまだ出ていない（語の間隔は TCK の 32 周期）
-        else
-          obs_held      <= '1';
-          obs_held_sync <= obs_sync;
-          obs_word      <= obs_data;
-          obs_word_addr <= obs_addr;
-          obs_word_time <= obs_time;
-        end if;
-      elsif obs_taken then
-        obs_held <= '0';
-      end if;
-      -- ボードの間の時刻の同期の組（10。時刻 = 子の時刻、番地 = 親の時刻の下位 32、データ = 上位 32）
-      sync_taken := false;
-      if not served and sync_held = '1' then
-        event_valid_r <= '1';
-        event_data_r  <= x"0A" & x"00" & sync_word(63 downto 32) & sync_word(31 downto 0) & sync_word_time;
-        served     := true;
-        sync_taken := true;
-      end if;
-      if sync_valid = '1' and events_enable = '1' then
-        if sync_held = '1' and not sync_taken then
-          lost_n := lost_n + 1;                                -- 前の組がまだ出ていない（組の間隔は 730 周期以上）
-        else
-          sync_held      <= '1';
-          sync_word      <= sync_parent;
-          sync_word_time <= sync_local;
-        end if;
-      elsif sync_taken then
-        sync_held <= '0';
-      end if;
-      -- PHY の設定（16。変わった周期と記録を始めた周期の値。いちばん後の優先順）
-      cfg_taken := false;
-      if CONFIG_EVENTS then
-        if not served and cfg_held = '1' then
-          event_valid_r <= '1';
-          event_data_r  <= x"10" & cfg_held_word & cfg_time;
-          served    := true;
-          cfg_taken := true;
-        end if;
-        if events_enable = '1' and (cfg_word /= cfg_prev or events_enable_prev = '0') then
-          if cfg_held = '1' and not cfg_taken then
-            lost_n := lost_n + 1;                              -- 前の設定がまだ出ていない（設定はホストの命令で変わるので起きない想定）
-          else
-            cfg_held      <= '1';
-            cfg_held_word <= cfg_word;
-            cfg_time      <= std_logic_vector(time_count);
+      -- 受けた件を組む
+      fresh := (others => '0');
+      word  := (others => (others => '0'));
+      if events_enable = '1' then
+        fresh(SL_SMP) := smp_valid;
+        word(SL_SMP)  := smp_kind & smp_word;              -- 種類 7・17・18（dap_sampler が組んだ語）
+        for k in 0 to 2 loop
+          if not BYTE_PACK then
+            fresh(SL_BYTE + k) := byte_fire(k);
           end if;
-        elsif cfg_taken then
-          cfg_held <= '0';
+          word(SL_BYTE + k) := make_event(BYTE_KIND(k), x"00", x"000000" & byte_in(k), x"00000000", byte_src_time(k));
+        end loop;
+        fresh(SL_AUX) := aux_valid;                        -- 時刻は源の時刻（時刻の正しさの B2、段階 S3）
+        word(SL_AUX)  := make_event(EVENT_KIND_AUX, x"00", std_logic_vector(to_unsigned(aux_ch, 16)) & "00"
+                                    & std_logic_vector(aux_value), x"00000000", std_logic_vector(aux_src_time));
+        fresh(SL_OBS) := obs_valid;                        -- 記録 8・時刻合わせ 9（時刻はエンジンが付けたもの）
+        if obs_sync = '1' then
+          word(SL_OBS) := make_event(EVENT_KIND_OBS_SYNC, x"00", obs_data, obs_addr, obs_time);
+        else
+          word(SL_OBS) := make_event(EVENT_KIND_OBS_RECORD, x"00", obs_data, obs_addr, obs_time);
         end if;
-        cfg_prev <= cfg_word;
-      else
-        cfg_held      <= '0';
-        cfg_held_word <= (others => '0');
-        cfg_time      <= (others => '0');
-        cfg_prev      <= (others => '0');
+        fresh(SL_SYNC) := sync_valid;                      -- 時刻 = 子の時刻、番地 = 親の時刻の下位 32、データ = 上位 32
+        word(SL_SYNC)  := make_event(EVENT_KIND_SYNC, x"00", sync_parent(63 downto 32), sync_parent(31 downto 0), sync_local);
+        if CONFIG_EVENTS and (cfg_word /= cfg_prev or events_enable_prev = '0') then
+          fresh(SL_CFG) := '1';                            -- 変わった周期と記録を始めた周期の値（時刻は受けた周期）
+        end if;
+        word(SL_CFG) := EVENT_KIND_DAP_CONFIG & cfg_word & std_logic_vector(time_count);
       end if;
-      for k in 0 to 2 loop
-        if byte_fire(k) = '1' and events_enable = '1' and not BYTE_PACK then
-          if byte_held(k) = '1' and taken(k) = '0' then
-            lost_n := lost_n + 1;                               -- 前のバイトがまだ出ていない
+      -- 保持: 前の件がまだ出ていないうちに次が来たら捨てて数える（どの源も間隔は十分長い想定。サンプラが線を持つ間は
+      -- DAP・割り込みの件が無いので 1 周期 1 件で出し続けられる）
+      for k in 0 to 7 loop
+        if fresh(k) = '1' then
+          if held(k) = '1' and taken(k) = '0' then
+            lost_n := lost_n + 1;
           else
-            byte_held(k) <= '1';
-            byte_data(k) <= byte_in(k);
-            byte_time(k) <= byte_src_time(k);
+            held(k)      <= '1';
+            held_word(k) <= word(k);
           end if;
         elsif taken(k) = '1' then
-          byte_held(k) <= '0';
+          held(k) <= '0';
         end if;
       end loop;
+      if CONFIG_EVENTS then
+        cfg_prev <= cfg_word;
+      else
+        cfg_prev <= (others => '0');
+      end if;
       if rst = '1' or events_enable = '0' then
-        byte_held <= (others => '0');
-        aux_held  <= '0';
-        smp_held  <= '0';
-        obs_held  <= '0';
-        sync_held <= '0';
-        cfg_held  <= '0';
+        held <= (others => '0');
       end if;
       -- 同じ周期に落ちた数（lost_n）はいったんレジスタに置き、次の周期に足す（源の数の和と 32 ビットの加算を 1 周期に
       -- 入れると、sys を上げると遅い経路だった。2026-10-29）。数の反映が 1 周期遅れるだけで、数は変わらない

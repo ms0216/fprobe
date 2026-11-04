@@ -31,8 +31,8 @@ architecture rtl of csr_gpio is
   signal rdata : csr_word_t := (others => '0');
   signal start : boolean;
   signal index : natural range 0 to 15;
-  signal drive_r : std_logic_vector(7 downto 0) := "00000000";
-  signal enable_r : std_logic_vector(7 downto 0) := "00000000";
+  signal drive_r : std_logic_vector(7 downto 0) := (others => '0');
+  signal enable_r : std_logic_vector(7 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_addr(3 downto 0));
@@ -44,8 +44,8 @@ begin
       err   <= '0';
       rdata <= (others => '0');                 -- 応答の周期以外は 0（csr_decoder が窓の応答の論理和を取る）
       if rst = '1' then
-        drive_r <= "00000000";
-        enable_r <= "00000000";
+        drive_r <= (others => '0');
+        enable_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is

@@ -5,6 +5,7 @@
   // Memory と同じ解き方）でその場所の命令を見る（走っていても ELF から）。命令ステップ（1 命令）。
   // 命令のバイトはダブルクリックで書ける: デーモンが Flash の外（in_flash = false）と返した命令は target.memory.write。
   // Flash の中は target.flash が要ることを示し、ここでは書かない（分からなければ書かない）
+  import { highlightAsm } from "../../lib/highlight";
   import { tick } from "svelte";
   import { errorText } from "../../lib/api";
   import { command, type CommandState } from "../../lib/commands";
@@ -97,7 +98,7 @@
             <span class="muted">{hex(ins.address)}</span>
             <span class="muted bytes"><EditValue text={ins.bytes ?? ""} via={how === "memory" && connected ? "target.memory.write" : null}
               reason={how === "memory" ? "" : $i18n(reasons[how])} onwrite={(input) => writeBytes(ins.address, ins.bytes ?? "", input)} /></span>
-            <span><b>{ins.mnemonic}</b> {ins.operands}</span>
+            <span class="code">{#each highlightAsm(ins.mnemonic, ins.operands) as tk, k (k)}<span class={tk.t}>{tk.s}</span>{/each}</span>
           </div>
         {/each}
       </div>
@@ -128,5 +129,4 @@
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bad); }
   .can { width: 8px; height: 8px; border-radius: 50%; }
   .gutter:not(:disabled):hover .can { background: color-mix(in srgb, var(--bad) 45%, transparent); }
-  b { font-weight: 600; }
 </style>

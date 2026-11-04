@@ -13,7 +13,9 @@ __all__ = ["CAPABILITIES", "CAPABILITY_JTAG", "CAPABILITY_SWO_MANCHESTER", "PACK
 
 PROTOCOL_VERSION = "2.1.1"
 FIRMWARE_VERSION = "0.1.0"
-CAPABILITIES = 0x45            # 構成に依らない: bit0 SWD, bit2 SWO（UART）, bit6 SWO のストリーム（エンドポイント）
+# 構成に依らない: bit0 SWD, bit2 SWO（UART）, bit5 タイムスタンプの時計（DAP_Transfer のタイムスタンプ。Info 0x08 = clk の周波数）,
+# bit6 SWO のストリーム（エンドポイント）
+CAPABILITIES = 0x65
 CAPABILITY_JTAG = 0x02         # bit1 JTAG（構成で変わる: fprobe_core のジェネリック JTAG）
 CAPABILITY_SWO_MANCHESTER = 0x08   # bit3 SWO（Manchester）（構成で変わる: fprobe_core のジェネリック HAS_SWO_MANCHESTER）
 PACKET_COUNT = 4               # 応答を溜められる数（usb_device の DAP_DEPTH と合わせる）

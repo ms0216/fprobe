@@ -3,7 +3,7 @@ from fprobe_gw.toolchain.sim import run_cocotb
 
 
 def test_mem_test(tmp_path):
-    run_cocotb(toplevel="mem_test", sources=rtl("mem/mem_test.vhd"), test_module="tests.tb.mem_test_tb",
+    run_cocotb(toplevel="mem_test", sources=rtl("common/util_pkg.vhd", "mem/mem_test.vhd"), test_module="tests.tb.mem_test_tb",
                build_dir=tmp_path)
 
 

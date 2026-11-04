@@ -49,6 +49,17 @@ def test_connect_returns_caps(probe):
     assert probe.linux_capabilities(target="pynq") == caps
 
 
+def test_targets_lists_what_is_connected_now_with_its_capabilities(probe):
+    """111: 人の画面の Linux パネルが、AI がつないだターゲットも映すための読み。つなぐ前は空、つなぐと名前と能力、切ると消える。"""
+    assert probe.linux_targets() == {"targets": []}
+    a = probe.linux_connect(target="a", host="h", user="u")
+    _connect(probe, "b")
+    got = probe.linux_targets()["targets"]
+    assert [t["target"] for t in got] == ["a", "b"] and got[0]["capabilities"] == a
+    probe.linux_disconnect(target="a")
+    assert [t["target"] for t in probe.linux_targets()["targets"]] == ["b"]
+
+
 def test_probe_add_ptrace_sends_bp_add(probe):
     _connect(probe)
     r = probe.linux_probe_add(target="pynq", name="tick", binary="/tmp/tick_thumb", symbol="tick", method="ptrace",

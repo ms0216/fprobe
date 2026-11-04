@@ -497,3 +497,61 @@ async def transfer_block_stops_at_the_first_failure_without_touching_the_wire_af
     done, resp, data = await dap.block(AP_DRW_R, 8)
     assert (done, resp, data) == (1, WAIT, [0xA0]), (done, resp, data)
     assert len(model.transactions) == n + 3
+
+
+@cocotb.test()
+async def queued_packets_follow_each_other_on_the_wire(dut):
+    """応答を待たずに続けて送ったパケットは、前の応答を送っている間に処理する（応答バッファ 2 面）: TransferBlock 2 つの間の
+    SWCLK の空きは数十周期（前は前の応答を 1 周期 2 バイトの半分の速さで送り終えるまで待ち、約 1000 周期空いた）。
+    応答は要求の順で、値は正しい。"""
+    dap, model = await setup(dut, seed=13, output_delay_ns=3)
+    dap.port.gap = dap.port.stall = 0.0
+    await dap.connect()
+    await dap.mem_setup()
+    assert await dap.command(bytes([0x11]) + struct.pack("<I", 50_000_000)) == bytes([0x11, 0])
+    base, n = 0x20000400, 120
+    for i in range(2 * n):
+        model.memory[base + 4 * i] = 0x5A000000 + i
+    assert (await dap.transfer((AP_TAR_W, base))) == (1, OK, [])
+    trace = ClockTrace(dut)
+    pkt = bytes([0x06, 0]) + struct.pack("<H", n) + bytes([AP_DRW_R])
+    trace.on = True
+    responses = await dap.port.pipeline([pkt, pkt], timeout=2_000_000)
+    trace.on = False
+    for k, r in enumerate(responses):
+        done, resp = struct.unpack_from("<HB", r, 1)
+        assert (done, resp) == (n, OK)
+        assert list(struct.unpack(f"<{n}I", r[4:])) == [0x5A000000 + k * n + i for i in range(n)]
+    gaps = [run - 1 for v, run in trace.runs() if v == 1 and run > 1]
+    assert gaps and max(gaps) <= 64, sorted(gaps)[-3:]
+
+
+@cocotb.test()
+async def transfer_has_no_gap_between_transfers(dut):
+    """DAP_Transfer も転送の間に SWCLK の空きが無い（先出し）: AP の読みの連鎖（+ 回収の RDBUFF）・書き（+ 確認の RDBUFF）・
+    DP の読みと AP の読みの混ざり（回収の RDBUFF を挟む）、half_period 1・2。値・処理数・応答は参照実装と同じ
+    （差分の試験は dap_transfer_reference_tb）。前は転送の間ごとに 9〜21 周期空いていた。"""
+    dap, model = await setup(dut, seed=14, output_delay_ns=3)
+    await dap.connect()
+    await dap.mem_setup()
+    trace = ClockTrace(dut)
+    base = 0x20000800
+    for hz, hp in ((50_000_000, 1), (25_000_000, 2)):
+        assert await dap.command(bytes([0x11]) + struct.pack("<I", hz)) == bytes([0x11, 0])
+        values = [(hp << 24) + 0x0101 * i for i in range(12)]
+        assert (await dap.transfer((AP_TAR_W, base))) == (1, OK, [])
+        cases = (
+            ("write", [(AP_DRW_W, v) for v in values], []),
+            ("tar", [(AP_TAR_W, base)], []),
+            ("read", [(AP_DRW_R, None)] * len(values), values),
+            ("mixed", [(DP_IDCODE_R, None), (AP_TAR_W, base), (AP_DRW_R, None), (DP_IDCODE_R, None), (AP_DRW_R, None)],
+             [DPIDR, values[0], DPIDR, values[1]]),
+        )
+        for name, requests, expected in cases:
+            trace.levels.clear()
+            trace.on = True
+            result = await dap.transfer(*requests)
+            trace.on = False
+            assert result == (len(requests), OK, expected), (hz, name, result)
+            highs = [n - hp for v, n in trace.runs() if v == 1]
+            assert highs and set(highs) == {0}, (hz, name, sorted(set(highs)))

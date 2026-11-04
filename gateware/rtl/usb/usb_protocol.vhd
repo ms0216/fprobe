@@ -104,13 +104,6 @@ architecture rtl of usb_protocol is
   signal data_empty_r  : std_logic := '0';
   signal send_handshake : boolean := false;
 
-  function bit_mask(n : natural) return ep_mask_t is
-    variable m : ep_mask_t := (others => '0');
-  begin
-    m(n) := '1';
-    return m;
-  end function;
-
   function max_packet(endpoint : natural; hs : std_logic) return natural is
   begin
     if endpoint = 0 then

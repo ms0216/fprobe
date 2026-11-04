@@ -6,6 +6,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.dap_pkg.all;
 
 entity dap_cmd_swo is
@@ -93,9 +94,9 @@ begin
     procedure reply_status(ok : boolean) is
     begin
       if ok then
-        put(1, x"00000000000000" & DAP_OK, S_DONE);
+        put(1, byte_word(DAP_OK), S_DONE);
       else
-        put(1, x"00000000000000" & DAP_ERROR, S_DONE);
+        put(1, byte_word(DAP_ERROR), S_DONE);
       end if;
     end procedure;
   begin
@@ -166,13 +167,7 @@ begin
 
           when S_BAUD_DIVIDE =>
             if div_done = '1' then
-              if div_quot < 4 then
-                div_den <= to_unsigned(4, 32);
-              elsif div_quot > 65535 then
-                div_den <= to_unsigned(65535, 32);
-              else
-                div_den <= div_quot;
-              end if;
+              div_den <= clamp(div_quot, 4, 65535);
               state <= S_BAUD_ACTUAL;
             end if;
 

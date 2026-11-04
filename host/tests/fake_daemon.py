@@ -84,7 +84,7 @@ class FakeProbe:
         return {"volts": 3.3, "over_range": False, "live": True, "samples": 100, "samples_before": 90, "window_s": 0.01,
                 "errors": 0}
 
-    def target_connect(self, target="cortex_m", frequency_hz=4_000_000, connect_mode="halt", jtag_chain=None,
+    def target_connect(self, target, frequency_hz, connect_mode="halt", jtag_chain=None,
                        script=None, core=None):
         for arg, value in (("script", script), ("core", core)):
             if value is not None:

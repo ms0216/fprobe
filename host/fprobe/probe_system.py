@@ -15,8 +15,8 @@ class SystemService:
     API = ("system_status",)
     SHARED = ()
     # ホスト（Probe の核と、ほかの領域）から使う名前
-    NEEDS = ("_caps", "_fpga_latest", "_last_connect", "_linux_attaching", "_linux_view", "_lock", "fpga_obs_read",
-             "fpga_obs_signals_get",
+    NEEDS = ("_caps", "_fpga_latest", "_last_connect", "_linux_attaching", "_linux_halt_opened", "_linux_view", "_lock",
+             "fpga_obs_read", "fpga_obs_signals_get",
              "fpga_obs_status", "session", "target", "target_status")
 
     def __init__(self, host):
@@ -43,6 +43,9 @@ class SystemService:
                 attaching = self._host._linux_attaching()
                 if attaching is not None:                    # Linux のプロセスへの attach が進行中（まだ対象が無い）
                     mcu["linux_attaching"] = attaching
+                opened = self._host._linux_halt_opened()
+                if opened is not None:                       # linux.halt は開いている（attach の前）
+                    mcu["linux_halt_open"] = opened
             except Exception as e:                           # 読めない番地等: 理由を返す
                 mcu = {"connected": True, "error": str(e)}
             mcu["connect"] = self._host._last_connect
