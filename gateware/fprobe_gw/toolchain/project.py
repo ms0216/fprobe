@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-__all__ = ["BuildInfo", "BuildStamp", "ClockConstraint", "GowinIp", "GowinProject", "IoDelay", "Pin", "render_cst",
-           "render_sdc", "render_tcl"]
+__all__ = ["BuildInfo", "BuildStamp", "ClockConstraint", "GowinIp", "GowinProject", "IoDelay", "Pin", "check_pins",
+           "render_cst", "render_sdc", "render_tcl", "tcl_path"]
 
 
 @dataclass(frozen=True)
@@ -153,7 +153,7 @@ class GowinProject:
         missing = [p for p in self.sources if not Path(p).is_file()]
         if missing:
             raise FileNotFoundError(", ".join(map(str, missing)))
-        _check_pins(self.pins)
+        check_pins(self.pins)
         build_dir = Path(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / f"{self.name}.sdc").write_text(render_sdc(self), encoding="utf-8")
@@ -163,15 +163,15 @@ class GowinProject:
         return tcl
 
 
-def _tcl_path(path: Path) -> str:
+def tcl_path(path: Path) -> str:
     # TCL の波括弧で囲み、空白や日本語を含むパスでも 1 引数として渡す
     return "{" + Path(path).resolve().as_posix() + "}"
 
 
 def render_tcl(project: GowinProject, build_dir: Path = Path(".")) -> str:
-    lines = [f"add_file -type vhdl {_tcl_path(src)}" for src in project.build_sources(build_dir)]
+    lines = [f"add_file -type vhdl {tcl_path(src)}" for src in project.build_sources(build_dir)]
     # IP の生成物（ビルドディレクトリからの相対パス。GowinBuilder が先に生成しておく）
-    lines += [f"add_file -type verilog {_tcl_path(ip.source(build_dir))}" for ip in project.ips]
+    lines += [f"add_file -type verilog {tcl_path(ip.source(build_dir))}" for ip in project.ips]
     lines += [
         f"add_file -type cst {project.name}.cst",
         f"add_file -type sdc {project.name}.sdc",
@@ -217,7 +217,7 @@ def render_sdc(project: GowinProject) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _check_pins(pins: tuple[Pin, ...]) -> None:
+def check_pins(pins: tuple[Pin, ...]) -> None:
     for attr in ("port", "location"):
         seen: dict[str, Pin] = {}
         for pin in pins:

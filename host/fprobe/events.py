@@ -58,7 +58,6 @@ KIND_DAP_CONFIG = g.EVENT_KIND_DAP_CONFIG  # PHY の設定（DAP_LINE_TIME の�
 KIND_SAMPLE_BOUND = g.EVENT_KIND_SAMPLE_BOUND  # サンプラの値を返した転送の点（直前の語の窓の後端。address = その語の番地）
 KIND_SAMPLE_GAP = g.EVENT_KIND_SAMPLE_GAP  # サンプラの誤りの区間（gap）
 SAMPLER_KINDS = (KIND_SAMPLE, KIND_SAMPLE_BOUND, KIND_SAMPLE_GAP)
-WAITS_SATURATED = 31         # 種類 7 の WAIT の回数の上限（31 は 31 回以上）
 KIND_LA_GAP = g.EVENT_KIND_LA_GAP  # ロジアナの垂れ流しの欠けの記録（address = 欠けの前の拍の数、data = 捨てたサンプルの数）
 PACKED_BYTE_KINDS = {KIND_UART_RX_PACKED: KIND_UART_RX, KIND_UART_TX_PACKED: KIND_UART_TX, KIND_SWO_PACKED: KIND_SWO}
 PACK_DELTA_BITS = 12         # 詰めた形の、前のバイトからの時刻の差のビット数（収まらない差のバイトは回路が次の件にする）

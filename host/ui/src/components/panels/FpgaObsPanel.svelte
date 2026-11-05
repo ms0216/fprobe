@@ -6,6 +6,8 @@
   // fpga_obs.register_write で書く（記録型だけ。標本型にはレジスタが無い）。
   // 仕様: docs/superpowers/specs/2026-10-20-fpga-observation-ui-design.md §4
   import { errorText } from "../../lib/api";
+  import Req from "./Req.svelte";
+  import { intervalNow } from "../common/interval";
   import { shared } from "../../lib/context";
   import {
     configToFields, editableGroups, FORMATS, openParams, formatBits, formatEnum, OBS_REGISTERS, parseBits, parseEnum,
@@ -69,9 +71,7 @@
   // 状態を周期的に読む（つながっていて、観測の口のある構成のとき）
   $effect(() => {
     if (!linkOpen || !available) return;
-    void readStatus();
-    const timer = setInterval(() => void readStatus(), POLL_MS);
-    return () => clearInterval(timer);
+    return intervalNow(() => readStatus(), POLL_MS);
   });
 
   async function readStatus() {
@@ -225,22 +225,22 @@
       <label>{$i18n("fpgaObs.irAfter")}<input type="number" min="0" max="63" bind:value={irAfter} /></label>
       <label>{$i18n("fpgaObs.drBefore")}<input type="number" min="0" max="7" bind:value={drBefore} /></label>
       <label>{$i18n("fpgaObs.drAfter")}<input type="number" min="0" max="7" bind:value={drAfter} /></label>
-      <label>{$i18n("fpgaObs.userIr")}<span class="req" aria-hidden="true">*</span><input class="mono" aria-required="true"
+      <label>{$i18n("fpgaObs.userIr")}<Req /><input class="mono" aria-required="true"
              bind:value={userIr} /></label>
       {#if sysHz}
-        <label title={$i18n("fpgaObs.tckTip")}>{$i18n("fpgaObs.tck")}<span class="req" aria-hidden="true">*</span>
+        <label title={$i18n("fpgaObs.tckTip")}>{$i18n("fpgaObs.tck")}<Req />
           <input type="number" min="0.001" step="0.5" aria-required="true" bind:value={tckMhz} />
           <!-- 実際の TCK はデーモンが換算した値（fpga_obs.status の tck_hz）だけを描く -->
           <span class="muted">{typeof status?.tck_hz === "number"
             ? $i18n("fpgaObs.tckActual", { mhz: (status.tck_hz / 1e6).toFixed(3) }) : "—"}</span></label>
       {:else}
         <!-- プローブがシステムのクロックを申告しない: MHz に換算できないので、半周期（sys の周期数）を直接 -->
-        <label title={$i18n("fpgaObs.halfPeriodTip")}>{$i18n("fpgaObs.halfPeriod")}<span class="req" aria-hidden="true">*</span>
+        <label title={$i18n("fpgaObs.halfPeriodTip")}>{$i18n("fpgaObs.halfPeriod")}<Req />
           <input type="number" min="2" max="65535" step="1" aria-required="true" bind:value={halfPeriod} /></label>
       {/if}
-      <label>{$i18n("fpgaObs.words")}<span class="req" aria-hidden="true">*</span><input type="number" min="1" max="256"
+      <label>{$i18n("fpgaObs.words")}<Req /><input type="number" min="1" max="256"
              aria-required="true" bind:value={words} /></label>
-      <label>{$i18n("fpgaObs.syncPeriod")}<span class="req" aria-hidden="true">*</span><input type="number" min="0" max="65535"
+      <label>{$i18n("fpgaObs.syncPeriod")}<Req /><input type="number" min="0" max="65535"
              aria-required="true" bind:value={syncPeriod} /></label>
       <label title={$i18n("fpgaObs.idScansTip")}>{$i18n("fpgaObs.idScans")}<input type="number" min="0" max="255"
              placeholder="—" bind:value={idScans} /></label>

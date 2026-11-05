@@ -11,6 +11,7 @@
   import { load, save } from "../../lib/prefs";
   import type { ActivityEntry } from "../../lib/state";
   import { onRecording } from "../../lib/notify";
+  import { readQuiet } from "../../lib/api";
   import { onTimeline } from "../../lib/timeline/events";
   import TimeLink from "./TimeLink.svelte";
 
@@ -35,6 +36,18 @@
   const names = $derived([...new Set($app.activity.map((e) => e.client))].sort());
   const rows = $derived(filterActivity($app.activity, { who, role, errorsOnly }));
   const chosen = $derived($app.activity.find((e) => e.seq === selected) ?? null);
+  // 失敗した操作に付いたヒント（session.hints の応答をそのまま並べる。メソッド名で引くだけで、当てはまるかは見る人・AI が決める）
+  let hints = $state<{ id: string; title: string; symptom: string; recipe: string[]; facts_to_check: { api: string; reads: string }[] }[]>([]);
+  $effect(() => {
+    const method = chosen?.error !== undefined ? chosen.method : null;
+    hints = [];
+    if (method === null || !linked) return;
+    let live = true;
+    void readQuiet(conn, "session.hints", { method }).then(({ result }) => {
+      if (live && result) hints = result.hints;
+    });
+    return () => { live = false; };
+  });
 
   $effect(() => save("activity.role", role));
   $effect(() => save("activity.errorsOnly", errorsOnly ? "1" : "0"));
@@ -192,6 +205,23 @@
           <pre class:error={chosen.error !== undefined}>{chosen.error ?? pretty(chosen.result)}</pre>
         </div>
       </div>
+      {#if hints.length}
+        <div class="hints">
+          <div class="muted">{$i18n("activity.hints")}</div>
+          {#each hints as h (h.id)}
+            <details>
+              <summary>{h.title}</summary>
+              <div class="muted">{h.symptom}</div>
+              {#if h.facts_to_check.length}
+                <div class="muted">{$i18n("activity.hintsFacts")}</div>
+                <ul>{#each h.facts_to_check as c (c.api)}<li><code>{c.api}</code> — {c.reads}</li>{/each}</ul>
+              {/if}
+              <div class="muted">{$i18n("activity.hintsSteps")}</div>
+              <ol>{#each h.recipe as step, i (i)}<li>{step}</li>{/each}</ol>
+            </details>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -218,4 +248,8 @@
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   pre { margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
   pre.error { color: var(--bad); }
+  .hints { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 4px; }
+  .hints details { margin: 2px 0; }
+  .hints summary { cursor: pointer; }
+  .hints ul, .hints ol { margin: 2px 0 4px 18px; padding: 0; }
 </style>

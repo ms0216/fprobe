@@ -98,11 +98,11 @@ class XtrigDemo:
         t = self._sampler_trigger
         if t is None:
             return {"enabled": False, "address": 0, "mask": 0, "value": 0, **self._routed("sampler_match"),
-                    "matched": False, "seen_any": False, "seen": 0, "count": 0, "time": 0, "prev_time": 0}
+                    "matched": False, "seen_any": False, "seen": 0, "count": 0, "time": 0, "time_valid": False, "prev_time": 0}
         seen = int((time.monotonic() - t["since"]) * SAMPLE_HZ)
         return {"enabled": True, "address": t["address"], "mask": t["mask"], "value": t["value"],
                 **self._routed("sampler_match"), "matched": False, "seen_any": seen > 0, "seen": seen,
-                "count": t["count"], "time": t["time"], "prev_time": max(0, t["time"] - 10_000) if t["count"] else 0}
+                "count": t["count"], "time": t["time"], "time_valid": t["count"] > 0, "prev_time": max(0, t["time"] - 10_000) if t["count"] else 0}
 
     def sampler_trigger_clear(self):
         self._sampler_trigger = None

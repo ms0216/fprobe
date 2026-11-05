@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック uart（0x00000300, 64 バイト）: UART ブリッジ（CDC-ACM ⇄ ターゲット）の状態
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_uart is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     baud : in  std_logic_vector(31 downto 0);   -- baud（RO）
     frame_errors : in  std_logic_vector(31 downto 0);   -- frame_errors（RO）
     overruns : in  std_logic_vector(31 downto 0);   -- overruns（RO）
@@ -46,7 +42,7 @@ architecture rtl of csr_uart is
   signal flow_cts_pin_r : std_logic_vector(1 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -75,12 +71,12 @@ begin
             rdata(9 downto 8) <= flow_rts_pin_r;
             rdata(12) <= flow_cts_claim_r;
             rdata(17 downto 16) <= flow_cts_pin_r;
-            if bus_we = '1' then
-              flow_auto_r <= bus_wdata(0);
-              flow_rts_claim_r <= bus_wdata(4);
-              flow_rts_pin_r <= bus_wdata(9 downto 8);
-              flow_cts_claim_r <= bus_wdata(12);
-              flow_cts_pin_r <= bus_wdata(17 downto 16);
+            if bus_cmd.we = '1' then
+              flow_auto_r <= bus_cmd.wdata(0);
+              flow_rts_claim_r <= bus_cmd.wdata(4);
+              flow_rts_pin_r <= bus_cmd.wdata(9 downto 8);
+              flow_cts_claim_r <= bus_cmd.wdata(12);
+              flow_cts_pin_r <= bus_cmd.wdata(17 downto 16);
             end if;
           when 4 =>   -- lines
             rdata(0) <= lines_cts;
@@ -94,9 +90,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   flow_auto <= flow_auto_r;
   flow_rts_claim <= flow_rts_claim_r;
   flow_rts_pin <= flow_rts_pin_r;

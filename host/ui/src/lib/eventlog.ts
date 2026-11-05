@@ -3,6 +3,7 @@
 // Svelte・DOM に依らない。仕様: docs/reports/2026-10-18-gap-analysis.md G07
 import type { IntervalReport, Json, RecordingEvent } from "../../../api/generated/fprobe_api";
 import type { Bar } from "./chart";
+import { hex } from "./hexfmt";
 import { parseCount } from "./system";
 import { formatDuration } from "./time";
 import type { Mark } from "./timeline/state";
@@ -82,7 +83,6 @@ export function describeCondition(c: Condition): string {
   return parts.join("");
 }
 
-const hex = (v: number) => `0x${(v >>> 0).toString(16).toUpperCase()}`;
 
 /** 本文の要約（出来事の stream・kind ごとに読みやすい欄。決めていない stream・kind は本文の JSON）。
  *  表し方は stream・kind で選ぶ（本文のキーの有無で推さない） */
@@ -164,20 +164,15 @@ export function searchMarks(events: RecEvent[]): Mark[] {
 
 // --- 区間の統計（timing.measure） --------------------------------------------------------------------
 
-export interface Histogram { lo: number; hi: number; count: number }
+/** timing.measure の histogram の箱 1 つ（intervals = その箱に入る生の組、has_longest = 長い順の上位が入っているか。API の事実） */
+export type Histogram = NonNullable<IntervalReport["histogram"]>[number];
 /** 長い順の上位（timing.measure の longest。bin = 入る棒の番号） */
 export type Longest = NonNullable<IntervalReport["longest"]>[number];
 
-/** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒（デーモンが示した bin）を目立たせる） */
-export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null, longest: Longest[]): Bar[] {
-  const outlying = new Set(longest.map((o) => o.bin));
+/** 分布図の棒（x は秒。選んだ棒・長い順の上位のある棒（API の has_longest）を目立たせる） */
+export function histogramBars(hist: Histogram[], timebaseHz: number, picked: number | null): Bar[] {
   return hist.map((h, i) => ({ x0: h.lo / timebaseHz, x1: (h.hi > h.lo ? h.hi : h.lo + 1) / timebaseHz, y: h.count,
-                               mark: i === picked || outlying.has(i) }));
-}
-
-/** 棒 i に入る区間（[開始の時刻, 時間]）。棒は timing.measure の interval_bins（intervals と同じ並び）で選ぶ */
-export function intervalsInBin(intervals: [number, number][], bins: number[], i: number): [number, number][] {
-  return intervals.filter((_, k) => bins[k] === i);
+                               mark: i === picked || h.has_longest }));
 }
 
 /** 長い順の上位 → 時間軸の印（区間。普通の色: 異常とは言わない） */

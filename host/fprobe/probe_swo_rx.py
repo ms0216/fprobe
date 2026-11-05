@@ -61,6 +61,6 @@ class SwoReceiveService:
         """SWO の受信を止める。"""
         with self._host._lock:
             if self._host._debug is None:                        # 未接続（スナップショットの読み手だけでは止める SWO が無い）
-                raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
+                raise NotConnected("ターゲット未接続（MCU なら target.connect を先に呼ぶ。MCP の道具名は target_connect。Linux のプロセスなら linux.halt.open → linux.halt.debug.attach）")
             self._host._swo_on = False
             self._host._debug.probe.swo_stop()

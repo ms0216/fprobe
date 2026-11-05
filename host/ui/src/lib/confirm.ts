@@ -1,6 +1,7 @@
 // 画面の中の確認（ブラウザ標準の confirm の代わり。標準の窓は画面の作りから外れ、自動の操作では黙って「いいえ」に
 // なる）。問いは 1 つずつ順に出し、答えで約束を解く。窓は components/shell/ConfirmDialog.svelte。Svelte に依らない
 // （store の約束 subscribe だけを満たす）。
+import { addListener } from "./store";
 
 export interface ConfirmOptions {
   ok?: string;               // はいのボタンの文言（省略で「OK」）
@@ -18,9 +19,7 @@ export class Confirmer {
   private ids = 0;
 
   subscribe(fn: (r: ConfirmRequest | null) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.current);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.current);
   }
 
   /** 聞く。はいなら true */

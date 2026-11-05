@@ -26,8 +26,8 @@ vmode vprop vunit wait when while with xnor xor
 """.split())
 
 # 生成するレジスタバンクの固定の識別子（ポート・内部信号）
-BANK_IDENTIFIERS = frozenset({"clk", "rst", "bus_req", "bus_we", "bus_addr", "bus_wdata", "bus_ack",
-                              "bus_err", "bus_rdata", "ack", "err", "rdata", "start", "index"})
+BANK_IDENTIFIERS = frozenset({"clk", "rst", "bus_req", "bus_cmd", "bus_rsp", "ack", "err", "rdata", "start",
+                              "index"})
 
 # 手書きの CSR 関連 entity / package と衝突するブロック名（csr_<name>）
 RESERVED_BLOCK_NAMES = frozenset({"decoder", "bus_pkg", "map_pkg"})

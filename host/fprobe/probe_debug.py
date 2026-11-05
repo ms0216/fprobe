@@ -14,7 +14,7 @@ class DebugService:
     """Probe が委ねるシンボル・ブレークポイント・実行・変数の道具。"""
 
     API = ("backtrace", "breakpoint_clear", "breakpoint_list", "breakpoint_set", "elf_load", "program_ram",
-           "run_until_halt", "source_list", "source_read", "symbol_info", "variable_read", "variable_write",
+           "run_until_halt", "source_list", "source_read", "symbol_info", "symbol_search", "variable_read", "variable_write",
            "watchpoint_clear", "watchpoint_set")
     # ほかの領域（Probe の委譲）・試験に出す名前
     SHARED = ("_place", "_place_of", "_stop_dict", "_where")
@@ -102,6 +102,16 @@ class DebugService:
                 s = self._host._symbols.symbol(location)
                 out.update(kind=s.kind, size=s.size)
             return out
+
+    def symbol_search(self, query: str, limit: int, kind: str | None = None) -> dict:
+        """ELF の記号（関数・変数）を名前の部分一致で探す（大文字小文字を区別しない。query が空なら全部）。kind = function / object / null
+        （両方）。名前順で先頭 limit 件（件数は使う側が明示）。total = 一致した数、returned = 返した数。"""
+        if (view := self._host._linux_view()) is not None:              # Linux のプロセスに attach している間
+            return view.symbol_search(query=query, kind=kind, limit=limit)
+        with self._host._lock:
+            if self._host._symbols is None:
+                raise RuntimeError("ELF が読み込まれていない（elf_load）")
+            return self._host._symbols.search(query, kind, limit)
 
     def program_ram(self, path: str, vector_table: int | None = None) -> dict:
         """ELF を RAM に読み込み、起動できる状態で止める（Flash には書かない。RAM で動く試験用のプログラム向け）。

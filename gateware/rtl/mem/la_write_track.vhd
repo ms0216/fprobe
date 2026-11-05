@@ -30,7 +30,8 @@ entity la_write_track is
     ev_pos     : in  unsigned(ring_ev_bits(ADDR_BITS) - 1 downto 0);    -- イベントのリングの次の書き位置
     la_safe    : out unsigned(31 downto 0);
     la_ptr_safe : out unsigned(ADDR_BITS - 1 downto 0);
-    ev_safe    : out unsigned(ring_ev_bits(ADDR_BITS) - 1 downto 0)
+    ev_safe    : out unsigned(ring_ev_bits(ADDR_BITS) - 1 downto 0);
+    ev_unacked : out unsigned(3 downto 0)                               -- 応答の来ていないイベントの書きの数（ev_safe = ev_pos - ev_unacked）
   );
 end entity;
 
@@ -84,5 +85,6 @@ begin
     end if;
     la_ptr_safe <= p(ADDR_BITS - 1 downto 0);
     ev_safe <= ev_pos - resize(ev_pending, EV_BITS);
+    ev_unacked <= ev_pending;
   end process;
 end architecture;

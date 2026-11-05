@@ -149,7 +149,7 @@ begin
           end if;
           if v(a).op /= OP_TRANSFER then
             answer(a, RESP_OK, phy_rsp_data, std_logic_vector(phy_rsp_time));
-          elsif phy_rsp_ack = "010" and v(a).retry /= 0 then
+          elsif phy_rsp_ack = ACK_WAIT and v(a).retry /= 0 then
             v(a).retry  := v(a).retry - 1;
             v(a).issued := false;                         -- WAIT: 再試行（次の命令は条件つきなので受けられていない）
           else

@@ -34,13 +34,9 @@ entity core_la is
     cap_clk        : in  std_logic;
     rst            : in  core_resets_t;
     time_count     : in  unsigned(63 downto 0);
-    csr_we         : in  std_logic;
-    csr_addr       : in  csr_addr_t;
-    csr_wdata      : in  csr_word_t;
+    csr_cmd        : in  csr_cmd_t;
     csr_req        : in  std_logic_vector(CSR_WINDOWS'range);
-    csr_ack        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_err        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_rdata      : out csr_word_array_t(CSR_WINDOWS'range);
+    csr_rsp        : out csr_rsp_array_t(CSR_WINDOWS'range);
     -- 入力（fprobe_core のポートと同じ）
     la_pins        : in  std_logic_vector(LA_PIN_COUNT - 1 downto 0);
     la_inputs      : in  std_logic_vector(maximum(LA_INPUT_COUNT, 1) - 1 downto 0);
@@ -118,9 +114,7 @@ architecture rtl of core_la is
 begin
   idle_g : for i in CSR_WINDOWS'range generate
     other_g : if not owns(i) generate
-      csr_ack(i)   <= '0';
-      csr_err(i)   <= '0';
-      csr_rdata(i) <= (others => '0');
+      csr_rsp(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
@@ -192,10 +186,10 @@ begin
 
     la_mem_cap_i : entity work.la_mem_csr
       generic map (WIDTH => LA_WIDTH, ADDR_BITS => LA_ADDR_BITS)
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_MEM), bus_addr => csr_addr,
-                bus_ack => csr_ack(CSR_WIN_LA_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_MEM),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_MEM), bus_addr => csr_cmd.addr,
+                bus_ack => csr_rsp(CSR_WIN_LA_MEM).ack, bus_rdata => csr_rsp(CSR_WIN_LA_MEM).rdata,
                 rd_addr => rd_addr, rd_data => rd_data);
-    csr_err(CSR_WIN_LA_MEM) <= '0';
+    csr_rsp(CSR_WIN_LA_MEM).err <= '0';
   end generate;
   -- 1 周期に LA_LANES サンプル（la_lane_inputs）: 専用の入力はボードの直並列変換のレーン。ピンは LA_FINE_PINS ならレーン、そうでなければ
   -- sys で同期化した値、内部の信号は sys の値を、レーンごとにそのサンプルの細かい辺の前の sys の周期の値にして並べる
@@ -225,22 +219,20 @@ begin
 
     la_lanes_mem_i : entity work.la_mem_csr
       generic map (WIDTH => LANE_WIDTH, ADDR_BITS => LA_LANE_ADDR_BITS, SLICES => LA_LANES / 2)
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_LANES_MEM), bus_addr => csr_addr,
-                bus_ack => csr_ack(CSR_WIN_LA_LANES_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_LANES_MEM),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_LANES_MEM), bus_addr => csr_cmd.addr,
+                bus_ack => csr_rsp(CSR_WIN_LA_LANES_MEM).ack, bus_rdata => csr_rsp(CSR_WIN_LA_LANES_MEM).rdata,
                 rd_addr => lane_rd_addr, rd_data => lane_rd_data);
-    csr_err(CSR_WIN_LA_LANES_MEM) <= '0';
+    csr_rsp(CSR_WIN_LA_LANES_MEM).err <= '0';
 
     -- 1 サンプル 1 ワードの窓 la_mem は無い（読むとエラー。バッファは la_lanes_mem）
     la_mem_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_MEM), bus_ack => csr_ack(CSR_WIN_LA_MEM),
-                bus_err => csr_err(CSR_WIN_LA_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_MEM));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_MEM), bus_rsp => csr_rsp(CSR_WIN_LA_MEM));
   end generate;
   no_lanes_la : if not USE_LANES generate
     lane_rd_addr <= (others => '0');
     lane_rd_data <= (others => '0');
     la_lanes_mem_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_LANES_MEM), bus_ack => csr_ack(CSR_WIN_LA_LANES_MEM),
-                bus_err => csr_err(CSR_WIN_LA_LANES_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_LANES_MEM));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_LANES_MEM), bus_rsp => csr_rsp(CSR_WIN_LA_LANES_MEM));
   end generate;
   no_cap_la : if not USE_CAP and not USE_LANES generate
     phase <= (others => '0');
@@ -260,9 +252,8 @@ begin
   -- 取り込みのクロックの比とトリガの位相（比 1 の構成には無い: 読むとエラー）
   la_cap_info : if CAP_RATIO > 1 or USE_LANES generate
     la_cap_csr_i : entity work.csr_la_cap
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_CAP), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_LA_CAP),
-                bus_err => csr_err(CSR_WIN_LA_CAP), bus_rdata => csr_rdata(CSR_WIN_LA_CAP),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_CAP),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_LA_CAP),
                 info_ratio => std_logic_vector(to_unsigned(LANES_OR_RATIO, 4)),
                 info_lanes => std_logic_vector(to_unsigned(INFO_LANES, 4)),
                 info_trigger_phase => std_logic_vector(phase),
@@ -272,17 +263,15 @@ begin
   no_la_cap_info : if not (CAP_RATIO > 1 or USE_LANES) generate
     selftest <= '0';
     la_cap_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_CAP), bus_ack => csr_ack(CSR_WIN_LA_CAP),
-                bus_err => csr_err(CSR_WIN_LA_CAP), bus_rdata => csr_rdata(CSR_WIN_LA_CAP));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_CAP), bus_rsp => csr_rsp(CSR_WIN_LA_CAP));
   end generate;
 
   -- 試験用の方形波（ケイパビリティ la_testgen）。刻むクロックは、取り込みが速い構成（CAP_RATIO > 1）なら cap_clk、そうでなければ clk。
   -- クロックを式で切り替えず、generate で配線を選ぶ（clk と cap_clk が同じでも la_testgen の受け渡し cdc_value は値を正しく届ける）
   la_testgen_csr : if LA_TESTGEN generate
     la_testgen_csr_i : entity work.csr_la_testgen
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_TESTGEN), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_LA_TESTGEN),
-                bus_err => csr_err(CSR_WIN_LA_TESTGEN), bus_rdata => csr_rdata(CSR_WIN_LA_TESTGEN),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_TESTGEN),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_LA_TESTGEN),
                 control_enable => tg_en, control_edge => tg_edge, period => tg_period, high => tg_high);
   end generate;
   testgen_fast : if LA_TESTGEN and CAP_RATIO > 1 generate
@@ -303,8 +292,7 @@ begin
     tg_period   <= (others => '0');
     tg_high     <= (others => '0');
     la_testgen_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_TESTGEN), bus_ack => csr_ack(CSR_WIN_LA_TESTGEN),
-                bus_err => csr_err(CSR_WIN_LA_TESTGEN), bus_rdata => csr_rdata(CSR_WIN_LA_TESTGEN));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_TESTGEN), bus_rsp => csr_rsp(CSR_WIN_LA_TESTGEN));
   end generate;
 
   internal_la : if LA_INTERNAL and not USE_CAP and not USE_LANES generate
@@ -322,10 +310,10 @@ begin
 
   la_mem_i : entity work.la_mem_csr
     generic map (WIDTH => LA_WIDTH, ADDR_BITS => LA_ADDR_BITS)
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_MEM), bus_addr => csr_addr,
-              bus_ack => csr_ack(CSR_WIN_LA_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_MEM),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_MEM), bus_addr => csr_cmd.addr,
+              bus_ack => csr_rsp(CSR_WIN_LA_MEM).ack, bus_rdata => csr_rsp(CSR_WIN_LA_MEM).rdata,
               rd_addr => rd_addr, rd_data => rd_data);
-  csr_err(CSR_WIN_LA_MEM) <= '0';                          -- バッファの窓は範囲外も 0 で答える（エラーにしない）
+  csr_rsp(CSR_WIN_LA_MEM).err <= '0';                          -- バッファの窓は範囲外も 0 で答える（エラーにしない）
   end generate;
 
   -- 内蔵ロジアナが無い: 状態は 0、バッファの窓は読むとエラー（ケイパビリティの LA_DEPTH = 0）
@@ -337,14 +325,12 @@ begin
     trigger_index <= (others => '0');
     trigger_time  <= (others => '0');
     la_mem_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_MEM), bus_ack => csr_ack(CSR_WIN_LA_MEM),
-                bus_err => csr_err(CSR_WIN_LA_MEM), bus_rdata => csr_rdata(CSR_WIN_LA_MEM));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_LA_MEM), bus_rsp => csr_rsp(CSR_WIN_LA_MEM));
   end generate;
 
   la_csr_i : entity work.csr_la
-    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_LA), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_LA),
-              bus_err => csr_err(CSR_WIN_LA), bus_rdata => csr_rdata(CSR_WIN_LA),
+    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_LA),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_LA),
               control_run => run, rate => rate, pretrigger => pretrigger,
               trig_mask => mask, trig_value => value, trig_rise => rise, trig_fall => fall,
               status_capturing => capturing, status_triggered => triggered, status_done => done,

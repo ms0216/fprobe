@@ -2,6 +2,7 @@
   // ダイアログ: Open ELF（この PC のファイルを選ぶ・デーモンの PC のパス・最近使った項目）、Connect、Load SVD、
   // Settings（表示言語、実行: ステップ中の割り込み・リセットの種類）、Keyboard Shortcuts、About
   import { untrack } from "svelte";
+  import Req from "../panels/Req.svelte";
   import { COMMANDS } from "../../lib/commands";
   import { RESET_KINDS, execution, type ResetKind } from "../../lib/execution";
   import { shared } from "../../lib/context";
@@ -168,12 +169,12 @@
   {:else if kind === "connect"}
     <h2>{$i18n("dialog.connect")}</h2>
     <form class="grid" onsubmit={(e) => { e.preventDefault(); void connect(); }}>
-      <label for="dev">{$i18n("dialog.device")}<span class="req" aria-hidden="true">*</span></label>
+      <label for="dev">{$i18n("dialog.device")}<Req /></label>
       <input id="dev" class="mono" bind:value={device} aria-required="true" title={$i18n("dialog.deviceHint")}
              list="recent-targets" autocomplete="off" />
       <datalist id="recent-targets">{#each recent as r (r)}<option value={r}></option>{/each}</datalist>
       <span></span><span class="muted small">{$i18n("dialog.deviceHint")}</span>
-      <label for="clk">{$i18n("dialog.clock")}<span class="req" aria-hidden="true">*</span></label>
+      <label for="clk">{$i18n("dialog.clock")}<Req /></label>
       <span><input id="clk" class="num" bind:value={mhz} inputmode="decimal" aria-required="true" /> MHz</span>
       <label for="dclk">{$i18n("diagnose.speeds")}</label>
       <span><input id="dclk" class="mono" bind:value={diagMhz} placeholder={mhz} title={$i18n("diagnose.speedsTip")} /> MHz</span>

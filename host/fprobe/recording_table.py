@@ -22,6 +22,7 @@ import heapq
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 __all__ = ["EventTable", "FORMAT_VERSION", "ROW_COLUMNS", "RecordingVersionError", "VERSION", "event_view_sql", "extent",
@@ -168,6 +169,19 @@ class EventTable:
         self._longest.clear()
         self._longest_dirty.clear()
         self.reload()
+
+    @contextmanager
+    def transaction(self, begin: str = "BEGIN") -> Iterator[None]:
+        """insert / delete を包むトランザクション（begin = "BEGIN" か "BEGIN IMMEDIATE"）。途中で失敗したら ROLLBACK して
+        組の辞書の覚えを捨てる（forget。ROLLBACK で消えた組・長さの覚えを残さない）。"""
+        self.db.execute(begin)
+        try:
+            yield
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            self.forget()
+            raise
 
     def _key_of(self, stream: str, kind: str) -> int:
         key = self._key.get((stream, kind))

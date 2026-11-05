@@ -175,7 +175,7 @@ def test_disabled_breakpoint_is_off_the_target_and_keeps_its_place_and_action(pr
     assert BP in cpu.breakpoints
     again = probe.breakpoint_list()["breakpoints"][0]
     assert again["enabled"] is True and again["action"]["condition"] == "1"
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match="にブレークポイントが無い"):
         probe.breakpoint_enable("0x20000400", False)
     probe.breakpoint_enable(hex(BP), False)
     assert probe.breakpoint_clear(hex(BP))["breakpoints"] == []                   # 無効のものも外せる

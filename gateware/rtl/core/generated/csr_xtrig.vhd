@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック xtrig（0x00000500, 64 バイト）: クロストリガ（docs/superpowers/specs/2026-10-16-m9-cross-trigger-design.md）。源: bit0 = ロジアナのトリガ、bit1 = DAP の番地一致、bit2 = ホストの指令（command.fire）、bit3 = 多段トリガ（trigseq）、bit4 = FPGA の観測の値の一致（obs.match）、bit5 = サンプラの値の一致（sampler_match。構成によって無い）
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_xtrig is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     route_to_la : out std_logic_vector(5 downto 0);   -- route.to_la（RW）
     route_to_inject : out std_logic_vector(5 downto 0);   -- route.to_inject（RW）
     command_fire : out std_logic;   -- command.fire（PULSE: 1 を書いた次の周期に 1）
@@ -62,7 +58,7 @@ architecture rtl of csr_xtrig is
   signal match_mode_on_read_r : std_logic := '0';
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -89,28 +85,28 @@ begin
           when 0 =>   -- route
             rdata(5 downto 0) <= route_to_la_r;
             rdata(13 downto 8) <= route_to_inject_r;
-            if bus_we = '1' then
-              route_to_la_r <= bus_wdata(5 downto 0);
-              route_to_inject_r <= bus_wdata(13 downto 8);
+            if bus_cmd.we = '1' then
+              route_to_la_r <= bus_cmd.wdata(5 downto 0);
+              route_to_inject_r <= bus_cmd.wdata(13 downto 8);
             end if;
           when 1 =>   -- command
-            if bus_we = '1' then
-              command_fire_r <= bus_wdata(0);
+            if bus_cmd.we = '1' then
+              command_fire_r <= bus_cmd.wdata(0);
             end if;
           when 2 =>   -- inject_ap
             rdata(7 downto 0) <= inject_ap_r;
-            if bus_we = '1' then
-              inject_ap_r <= bus_wdata(7 downto 0);
+            if bus_cmd.we = '1' then
+              inject_ap_r <= bus_cmd.wdata(7 downto 0);
             end if;
           when 3 =>   -- inject_addr
             rdata(31 downto 0) <= inject_addr_r;
-            if bus_we = '1' then
-              inject_addr_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              inject_addr_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 4 =>   -- inject_value
             rdata(31 downto 0) <= inject_value_r;
-            if bus_we = '1' then
-              inject_value_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              inject_value_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 5 =>   -- inject_status
             rdata(0) <= inject_status_busy;
@@ -123,30 +119,30 @@ begin
             rdata(31 downto 0) <= inject_time_hi;
           when 8 =>   -- match_addr
             rdata(31 downto 0) <= match_addr_r;
-            if bus_we = '1' then
-              match_addr_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              match_addr_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 9 =>   -- match_addr_mask
             rdata(31 downto 0) <= match_addr_mask_r;
-            if bus_we = '1' then
-              match_addr_mask_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              match_addr_mask_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 10 =>   -- match_data
             rdata(31 downto 0) <= match_data_r;
-            if bus_we = '1' then
-              match_data_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              match_data_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 11 =>   -- match_data_mask
             rdata(31 downto 0) <= match_data_mask_r;
-            if bus_we = '1' then
-              match_data_mask_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              match_data_mask_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 12 =>   -- match_mode
             rdata(0) <= match_mode_on_write_r;
             rdata(1) <= match_mode_on_read_r;
-            if bus_we = '1' then
-              match_mode_on_write_r <= bus_wdata(0);
-              match_mode_on_read_r <= bus_wdata(1);
+            if bus_cmd.we = '1' then
+              match_mode_on_write_r <= bus_cmd.wdata(0);
+              match_mode_on_read_r <= bus_cmd.wdata(1);
             end if;
           when 13 =>   -- match_count
             rdata(31 downto 0) <= match_count;
@@ -161,9 +157,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   route_to_la <= route_to_la_r;
   route_to_inject <= route_to_inject_r;
   command_fire <= command_fire_r;

@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック trigseq（0x00000A00, 64 バイト）: 多段トリガ（docs/superpowers/specs/2026-10-16-m9c-trigger-sequencer-design.md）。事象: bit0 = パターン A、bit1 = パターン B、bit2 = DAP の番地一致、bit3 = ホストの指令。発火は xtrig の源 bit3
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_trigseq is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_enable : out std_logic;   -- control.enable（RW）
     control_stages : out std_logic_vector(2 downto 0);   -- control.stages（RW）
     status_stage : in  std_logic_vector(1 downto 0);   -- status.stage（RO）
@@ -75,7 +71,7 @@ architecture rtl of csr_trigseq is
   signal within3_r : std_logic_vector(31 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -111,9 +107,9 @@ begin
           when 0 =>   -- control
             rdata(0) <= control_enable_r;
             rdata(10 downto 8) <= control_stages_r;
-            if bus_we = '1' then
-              control_enable_r <= bus_wdata(0);
-              control_stages_r <= bus_wdata(10 downto 8);
+            if bus_cmd.we = '1' then
+              control_enable_r <= bus_cmd.wdata(0);
+              control_stages_r <= bus_cmd.wdata(10 downto 8);
             end if;
           when 1 =>   -- status
             rdata(1 downto 0) <= status_stage;
@@ -121,73 +117,73 @@ begin
           when 2 =>   -- pattern_a
             rdata(15 downto 0) <= pattern_a_mask_r;
             rdata(31 downto 16) <= pattern_a_value_r;
-            if bus_we = '1' then
-              pattern_a_mask_r <= bus_wdata(15 downto 0);
-              pattern_a_value_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              pattern_a_mask_r <= bus_cmd.wdata(15 downto 0);
+              pattern_a_value_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 3 =>   -- edge_a
             rdata(15 downto 0) <= edge_a_rise_r;
             rdata(31 downto 16) <= edge_a_fall_r;
-            if bus_we = '1' then
-              edge_a_rise_r <= bus_wdata(15 downto 0);
-              edge_a_fall_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              edge_a_rise_r <= bus_cmd.wdata(15 downto 0);
+              edge_a_fall_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 4 =>   -- pattern_b
             rdata(15 downto 0) <= pattern_b_mask_r;
             rdata(31 downto 16) <= pattern_b_value_r;
-            if bus_we = '1' then
-              pattern_b_mask_r <= bus_wdata(15 downto 0);
-              pattern_b_value_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              pattern_b_mask_r <= bus_cmd.wdata(15 downto 0);
+              pattern_b_value_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 5 =>   -- edge_b
             rdata(15 downto 0) <= edge_b_rise_r;
             rdata(31 downto 16) <= edge_b_fall_r;
-            if bus_we = '1' then
-              edge_b_rise_r <= bus_wdata(15 downto 0);
-              edge_b_fall_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              edge_b_rise_r <= bus_cmd.wdata(15 downto 0);
+              edge_b_fall_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 6 =>   -- stage0
             rdata(3 downto 0) <= stage0_cond_r;
             rdata(31 downto 16) <= stage0_count_r;
-            if bus_we = '1' then
-              stage0_cond_r <= bus_wdata(3 downto 0);
-              stage0_count_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              stage0_cond_r <= bus_cmd.wdata(3 downto 0);
+              stage0_count_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 7 =>   -- stage1
             rdata(3 downto 0) <= stage1_cond_r;
             rdata(31 downto 16) <= stage1_count_r;
-            if bus_we = '1' then
-              stage1_cond_r <= bus_wdata(3 downto 0);
-              stage1_count_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              stage1_cond_r <= bus_cmd.wdata(3 downto 0);
+              stage1_count_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 8 =>   -- stage2
             rdata(3 downto 0) <= stage2_cond_r;
             rdata(31 downto 16) <= stage2_count_r;
-            if bus_we = '1' then
-              stage2_cond_r <= bus_wdata(3 downto 0);
-              stage2_count_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              stage2_cond_r <= bus_cmd.wdata(3 downto 0);
+              stage2_count_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 9 =>   -- stage3
             rdata(3 downto 0) <= stage3_cond_r;
             rdata(31 downto 16) <= stage3_count_r;
-            if bus_we = '1' then
-              stage3_cond_r <= bus_wdata(3 downto 0);
-              stage3_count_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              stage3_cond_r <= bus_cmd.wdata(3 downto 0);
+              stage3_count_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 10 =>   -- within1
             rdata(31 downto 0) <= within1_r;
-            if bus_we = '1' then
-              within1_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              within1_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 11 =>   -- within2
             rdata(31 downto 0) <= within2_r;
-            if bus_we = '1' then
-              within2_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              within2_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 12 =>   -- within3
             rdata(31 downto 0) <= within3_r;
-            if bus_we = '1' then
-              within3_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              within3_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 13 =>   -- fire_time_lo
             rdata(31 downto 0) <= fire_time_lo;
@@ -200,9 +196,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_enable <= control_enable_r;
   control_stages <= control_stages_r;
   pattern_a_mask <= pattern_a_mask_r;

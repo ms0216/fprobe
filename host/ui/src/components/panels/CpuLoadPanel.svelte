@@ -3,6 +3,7 @@
   // タスクごとの表（使用率・回数・合計・最長・最短・平均）と負荷の推移（窓ごと。タスク別は積み上げ = 上端が負荷）。
   // 取っていないが記録があれば、記録の rtos の区間から同じ表とグラフを作る。窓のダブルクリック・最大の窓で時間軸へ
   import { onDestroy } from "svelte";
+  import Req from "./Req.svelte";
   import { isNoData } from "../../lib/api";
   import type { Series } from "../../lib/chart";
   import { shared } from "../../lib/context";
@@ -167,7 +168,7 @@
           <option value="itm">{$i18n("cpuLoad.itm")}</option>
         </select></label>
       {#if method === "sampled"}
-        <label>{$i18n("cpuLoad.rate")}<span class="req" aria-hidden="true">*</span>
+        <label>{$i18n("cpuLoad.rate")}<Req />
           <select bind:value={rate} aria-required="true">
             {#if rate === null}<option value={null} disabled></option>{/if}
             {#each [5000, 10000, 20000, 50000] as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
@@ -185,7 +186,7 @@
                                               : $i18n("cpuLoad.fromRecording", { name: recording ?? "" })}</span>
     {/if}
     <span class="spacer"></span>
-    <label>{$i18n("cpuLoad.window")}<span class="req" aria-hidden="true">*</span>
+    <label>{$i18n("cpuLoad.window")}<Req />
       <select bind:value={windowUs} aria-required="true">
         {#if windowUs === null}<option value={null} disabled></option>{/if}
         {#each WINDOWS as w (w)}<option value={w}>{formatDuration(w / 1e6)}</option>{/each}

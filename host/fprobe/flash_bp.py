@@ -27,17 +27,14 @@ BKPT の周りの 32 バイトが記録と同じ（元の中身か、記録し�
 """
 
 import atexit
-import json
 import logging
-import os
 import weakref
-from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
 
 from pyocd.core.target import Target
 
 from .flash import FlashMemory, Image, Segment
+from .flash_bp_journal import Journal, JournalError, WrittenBkpt
 from .thumb_step import NeedsRewrite, OutOfLine, invalidate_icache
 
 __all__ = ["BKPT_CODE", "FlashBreakpoints", "Journal", "JournalError"]
@@ -48,72 +45,6 @@ BKPT_CODE = b"\x00\xbe"                  # BKPT #0（セミホスティングの
 WINDOW = 32                              # 記録で確かめる周りの大きさ
 DFSR, DFSR_BKPT, DFSR_HALTED = 0xE000ED30, 0x2, 0x1
 DORMANT_LIMIT = 3
-
-
-@dataclass(frozen=True)
-class _Written:
-    """Flash に書いた BKPT: 元の中身と、書いたときの周りの元の中身（記録の照合用）。"""
-    address: int
-    original: bytes
-    window: int
-    window_original: bytes
-
-    def as_dict(self) -> dict:
-        return {"address": self.address, "original": self.original.hex(), "window": self.window,
-                "window_original": self.window_original.hex()}
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "_Written":
-        return cls(d["address"], bytes.fromhex(d["original"]), d["window"], bytes.fromhex(d["window_original"]))
-
-
-class JournalError(Exception):
-    """記録（Journal）が読めない・形が違う。"""
-
-
-class Journal:
-    """書き換えの記録（JSON。書き換えの前に書く）。key: どのターゲットのものか（ターゲットの名前等）。"""
-
-    def __init__(self, path: str | Path, key: str):
-        self.path = Path(path)
-        self.key = key
-
-    def save(self, entries) -> None:
-        entries = sorted(entries, key=lambda e: e.address)
-        if not entries:
-            self.clear()
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(json.dumps({"version": 1, "target": self.key,
-                                         "entries": [e.as_dict() for e in entries]}, indent=1), encoding="utf-8")
-        os.replace(temporary, self.path)                       # 途中で落ちても前の記録か新しい記録のどちらか
-
-    def load(self) -> list[_Written] | None:
-        """このターゲットの記録。無い・別のターゲットのものなら None。壊れていれば JournalError。"""
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (ValueError, OSError) as e:                     # JSON が不正・文字コードが不正・読めない
-            raise JournalError(f"記録 {self.path} を読めない: {e}") from e
-        if not isinstance(data, dict):
-            raise JournalError(f"記録 {self.path} の形が違う（JSON のオブジェクトでない）")
-        if data.get("target") != self.key:
-            return None
-        try:
-            return [_Written.from_dict(e) for e in data.get("entries", [])]
-        except (KeyError, TypeError, ValueError, AttributeError) as e:
-            raise JournalError(f"記録 {self.path} の中身が違う: {e!r}") from e
-
-    def set_aside(self) -> Path:
-        """壊れた記録を .bad に改名して退避する（捨てずに残す。次の保存は新しい記録に書く）。退避先を返す。"""
-        bad = self.path.with_suffix(self.path.suffix + ".bad")
-        os.replace(self.path, bad)
-        return bad
-
-    def clear(self) -> None:
-        self.path.unlink(missing_ok=True)
 
 
 class FlashBreakpoints:
@@ -135,7 +66,7 @@ class FlashBreakpoints:
         self._scratch = scratch
         self._hw: set[int] = set()                       # 比較器に置いた（このクラスが置いたもの）
         self._flash: set[int] = set()                    # Flash に置きたいもの（書いた・まだのどちらも）
-        self._written: dict[int, _Written] = {}          # Flash に BKPT を書いてある番地
+        self._written: dict[int, WrittenBkpt] = {}          # Flash に BKPT を書いてある番地
         self._hits: dict[int, int] = {}                  # 休眠中の BKPT に当たった回数
         self._watching = False                           # 再開した後の最初の停止をまだ見ていない
         self._stepped = False                            # 止まった後にステップで PC を動かした（再開の時点の PC は停止の場所でない）
@@ -367,7 +298,7 @@ class FlashBreakpoints:
         for address in insert:
             original = bytes(self.target.read_memory_block8(address, len(BKPT_CODE)))
             window = address & ~(WINDOW - 1)
-            added[address] = _Written(address, original, window, self._read(window, WINDOW))
+            added[address] = WrittenBkpt(address, original, window, self._read(window, WINDOW))
         changes = [(a, BKPT_CODE) for a in insert]
         for address in restore:
             if bytes(self.target.read_memory_block8(address, len(BKPT_CODE))) == BKPT_CODE:

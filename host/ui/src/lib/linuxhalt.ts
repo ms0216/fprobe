@@ -254,7 +254,8 @@ export function attachFormOf(f: DebugAttachForm, o: Record<string, unknown>): De
 /** パネルが状態を読み直す操作か。linux.halt.* のうち、状態を変える操作だけ（パネル自身の読み status・debug.status・threads 等の
  *  読みの記録では読み直さない。読み直しが記録を生み、通知がまた読み直しを呼ぶ循環になる） */
 const HALT_READS = new Set(["linux.halt.status", "linux.halt.debug.status", "linux.halt.debug.threads", "linux.halt.debug.read",
-  "linux.halt.debug.memory", "linux.halt.threads", "linux.halt.processes", "linux.halt.gdb.status"]);
+  "linux.halt.debug.memory", "linux.halt.threads", "linux.halt.processes", "linux.halt.gdb.status",
+  "linux.halt.profile.save", "linux.halt.profile.load"]);
 export function shouldRefreshOn(method: string): boolean {
   return method.startsWith("linux.halt.") && !HALT_READS.has(method);
 }

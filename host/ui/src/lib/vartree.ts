@@ -11,6 +11,7 @@
 //
 // 構造体・配列の中身は値に入っているのでその場で子にする。ポインタの先は展開したときに `*式` を読む（遅延。
 // VS Code・Ozone と同じ）。子の式（`a.b`・`a[2]`・`p->x`）はそのまま debug.evaluate / debug.write_expression に渡せる。
+import { hex } from "./hexfmt";
 import type { Key } from "./i18n";
 
 export interface VarNode {
@@ -47,7 +48,6 @@ export function truncated(v: unknown): boolean {
   return kindOf(v) === "array" && (v as { items: unknown[] }).items.length < (v as { length: number }).length;
 }
 
-const hex = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
 
 /** kind の無い値（古い形）: JSON のまま */
 const raw = (v: unknown) => (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v));

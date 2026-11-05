@@ -238,8 +238,9 @@ class SearchDemo:
         x = self._xtrig
         match = x["match"] or {"address": 0, "address_mask": 0xFFFFFFFF, "data": 0, "data_mask": 0, "on_write": False,
                                 "on_read": False}                    # レジスタのリセットの値
-        return {"inject": {"busy": False, "result": "ok", "ack": 1, "count": 0, "time": 0, **x["inject"]},
-                "match": {"count": x["match_count"], "time": x["match_time"], **match},
+        inject = {"busy": False, "result": "ok", "ack": 1, "count": 0, "time": 0, **x["inject"]}
+        return {"inject": {**inject, "time_valid": inject["count"] > 0},
+                "match": {"count": x["match_count"], "time": x["match_time"], "time_valid": x["match_count"] > 0, **match},
                 "route": {"to_la": list(x["route"]["to_la"]), "to_inject": list(x["route"]["to_inject"])}}
 
 

@@ -2,6 +2,7 @@
 // （debug.step の mask_interrupts。DHCSR.C_MASKINTS）と、リセットの種類（target.reset の kind）。ブラウザに覚える。
 // Svelte に依らない（store の約束 subscribe だけを満たす）。設定の窓（Settings）で変え、コマンドと Debugger が使う。
 import { load, save } from "./prefs";
+import { addListener } from "./store";
 
 /** target.reset の kind: 既定（pyOCD の既定）/ system（AIRCR.SYSRESETREQ）/ core（AIRCR.VECTRESET。ARMv7-M だけ）/
  *  hardware（nRESET の線）/ emulated（デバッガがレジスタを初期値にする） */
@@ -52,9 +53,7 @@ export class ExecutionSettings {
   }
 
   subscribe(fn: (s: ExecSettings) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.value);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.value);
   }
 }
 

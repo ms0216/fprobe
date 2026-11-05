@@ -68,7 +68,8 @@ def test_the_spec_has_every_linux_halt_method_with_the_cli_arguments():
                                                  "recover", "rescue", "gdb.serve", "gdb.status", "gdb.stop",
                                                  "debug.attach", "debug.status", "debug.break.insert",
                                                  "debug.break.remove", "debug.run", "debug.halt", "debug.threads",
-                                                 "debug.read", "debug.memory", "debug.step", "debug.select", "debug.close")}
+                                                 "debug.read", "debug.memory", "debug.step", "debug.select", "debug.close",
+                                                 "profile.save", "profile.load")}
     from fprobe.linux_halt.cli import build_parser
     import dataclasses
     fields = {f.name for f in dataclasses.fields(service.HaltOptions)}
@@ -80,6 +81,27 @@ def test_the_spec_has_every_linux_halt_method_with_the_cli_arguments():
     assert serve == attach - {"verbose"}                                               # -v は端末への表示だけ
     from fprobe.plugins.openocd_boards import BOARDS
     assert spec.methods["linux.halt.open"].params["properties"]["ocd_board"]["enum"] == sorted(BOARDS)
+
+
+def test_the_profile_saves_and_loads_the_open_and_attach_settings_without_the_pid(rig, tmp_path):
+    world, probe, ai, gui, args, opened = rig
+    offsets = tmp_path / "offsets.json"
+    offsets.write_text("{}", encoding="utf-8")
+    args = dict(args, offsets=str(offsets))
+    ai.call("linux.halt.open", **args)
+    path = str(tmp_path / "sub" / "p.json")
+    saved = ai.call("linux.halt.profile.save", path=path)
+    assert saved["open"] == {k: v for k, v in args.items()} and saved["attach"] is None
+    loaded = gui.call("linux.halt.profile.load", path=path)                  # 人の画面も同じ応答を読む
+    assert loaded["open"] == saved["open"] and loaded["offsets_matches"] is True
+    offsets.write_text('{"changed": 1}', encoding="utf-8")                     # offsets が変わった事実
+    assert gui.call("linux.halt.profile.load", path=path)["offsets_matches"] is False
+    offsets.unlink()
+    assert gui.call("linux.halt.profile.load", path=path)["offsets_matches"] is None
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"format": "x", "version": 1}', encoding="utf-8")
+    with pytest.raises(ApiError, match="fprobe.linux_halt.profile"):
+        ai.call("linux.halt.profile.load", path=str(bad))
 
 
 def test_no_option_has_a_default_and_the_required_ones_are_refused_when_missing(rig):

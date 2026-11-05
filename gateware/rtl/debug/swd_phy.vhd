@@ -74,6 +74,10 @@ entity swd_phy is
 end entity;
 
 architecture rtl of swd_phy is
+  -- 相のビット数（SW_DP.c の転送の線上の形）
+  constant HEADER_BITS : natural := 8;                      -- start, APnDP, RnW, A2, A3, parity, stop, park
+  constant ACK_BITS    : natural := 3;
+  constant DATA_BITS   : natural := 33;                     -- データ 32 ビット + パリティ 1 ビット
   -- 相（同じ扱いのビットの並び）
   type phase_t is (P_NONE, P_SEQ_OUT, P_SEQ_IN, P_HEADER, P_TRN_ACK, P_ACK, P_RDATA, P_TRN_AFTER_READ,
                    P_TRN_BEFORE_WRITE, P_WDATA, P_DUMMY_READ, P_TRN_AFTER_FAIL, P_DUMMY_WRITE, P_BACKOFF,
@@ -239,27 +243,17 @@ begin
   swdio_oe         <= sdo_en and enable;
 
   process (clk)
-    -- 半周期の時計: 積み直す（half_period 周期後に expired）・1 つ進める
-    procedure half_restart is
-    begin
-      timer   <= half_period - 1;
-      expired <= hp_one;
-    end procedure;
-    procedure half_tick is
-    begin
-      timer   <= timer - 1;
-      expired <= timer = 1;
-    end procedure;
+    -- 半周期の時計は dap_pkg の half_restart / half_tick（jtag_phy と共通）
 
     impure function length(p : phase_t) return natural is
     begin
       case p is
         when P_TRN_ACK | P_TRN_AFTER_READ | P_TRN_BEFORE_WRITE | P_TRN_AFTER_FAIL => return turnaround;
-        when P_ACK                                                               => return 3;
-        when P_RDATA | P_WDATA | P_DUMMY_READ | P_DUMMY_WRITE                    => return 33;
-        when P_BACKOFF                                                           => return turnaround + 33;
+        when P_ACK                                                               => return ACK_BITS;
+        when P_RDATA | P_WDATA | P_DUMMY_READ | P_DUMMY_WRITE                    => return DATA_BITS;
+        when P_BACKOFF                                                           => return turnaround + DATA_BITS;
         when P_IDLE                                                              => return idle_cycles;
-        when others                                                              => return 8;
+        when others                                                              => return HEADER_BITS;
       end case;
     end function;
 
@@ -275,7 +269,7 @@ begin
       sdo_en    <= drives(p);
       sclk      <= '0';
       half      <= H_LOW;
-      half_restart;
+      half_restart(timer, expired, half_period);
     end procedure;
 
     -- 命令を受けて始める（OP_PINS はこの辺で終える）
@@ -303,7 +297,7 @@ begin
         when OP_TRANSFER =>
           reading <= cmd_request(1);
           wdata   <= cmd_data(31 downto 0);
-          begin_phase(P_HEADER, 8, (63 downto 8 => '0') & header(cmd_request));
+          begin_phase(P_HEADER, HEADER_BITS, (63 downto 8 => '0') & header(cmd_request));
         when OP_SEQ_IN =>
           count <= cmd_count;
           begin_phase(P_SEQ_IN, cmd_count, (others => '1'));
@@ -350,7 +344,7 @@ begin
 
           when H_LOW =>
             if not expired then
-              half_tick;
+              half_tick(timer, expired);
             else
               -- Low 相の終わり: 取り込みを予約して立ち上げる
               index := 0;
@@ -365,12 +359,12 @@ begin
               end if;
               sclk    <= '1';
               half    <= H_HIGH;
-              half_restart;
+              half_restart(timer, expired, half_period);
             end if;
 
           when H_HIGH =>
             if not expired then
-              half_tick;
+              half_tick(timer, expired);
             elsif bits_left > 1 then
               bits_left <= bits_left - 1;
               tx        <= '1' & tx(63 downto 1);
@@ -379,7 +373,7 @@ begin
               end if;
               sclk    <= '0';
               half    <= H_LOW;
-              half_restart;
+              half_restart(timer, expired, half_period);
             elsif not drained and (phase = P_ACK or following = P_NONE or drives(following) = '1') then
               -- 次を決める値（ACK・命令の結果）の取り込みを待つ。自分が線を駆動する相（読みの後の idle 等）の前も待つ: 遅れた
               -- 取り込みが自分の駆動とぶつかった線を読まないように（前は idle_cycles > 0 で読みのパリティを駆動の後に取った。
@@ -414,7 +408,7 @@ begin
                     sdo_en <= '1';
                   end if;
                 when P_WDATA =>
-                  begin_phase(P_WDATA, 33, (63 downto 33 => '1') & (xor wdata) & wdata);
+                  begin_phase(P_WDATA, DATA_BITS, (63 downto 33 => '1') & (xor wdata) & wdata);
                 when P_DUMMY_WRITE | P_IDLE =>
                   begin_phase(following, length(following), (others => '0'));
                 when others =>

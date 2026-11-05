@@ -5,18 +5,16 @@
 - 駆動されない配線の警告・タイミング未達のビットストリームは残さない。成功の印 inputs.sha256 を隣に置く。
 """
 
-import hashlib
-import shutil
 import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .build import INPUTS_STAMP, BuildError, BuildResult, _force_remove, git_state
-from .project import BuildInfo
+from .build_support import (INPUTS_STAMP, BuildError, BuildResult, force_remove, git_state, inputs_digest,
+                            is_reusable, publish_files, run_tool, write_build_stamp)
 from .timing import TimingReportError
-from .vivado import VivadoProject, VivadoToolchain, module_constraints, parse_vivado_timing, vivado_undriven, \
-    vivado_unmatched_constraints
+from .vivado import VivadoProject, VivadoToolchain, module_constraints
+from .vivado_report import parse_vivado_timing, vivado_undriven, vivado_unmatched_constraints
 
 __all__ = ["VivadoBuilder"]
 
@@ -40,36 +38,23 @@ class VivadoBuilder:
         tcl = project.prepare(build_dir, directive)
         digest = _inputs_digest(project, build_dir, tcl)
         stamp = build_dir / INPUTS_STAMP
-        reuse = (bitstream.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8") == digest
-                 and (project.stamp is None or project.stamp.target(build_dir).is_file()))
-        if not reuse:
+        if not is_reusable(bitstream, build_dir, digest, project.stamp):
             stamp.unlink(missing_ok=True)
-            _force_remove(bitstream)
+            force_remove(bitstream)
             (build_dir / "timing.rpt").unlink(missing_ok=True)
             if project.stamp is not None:
-                commit, dirty = self._git(project.stamp.repo)
-                info = BuildInfo(digest=digest, time=int(self._now()), git=commit, dirty=dirty)
-                project.stamp.target(build_dir).write_text(project.stamp.render(info), encoding="utf-8",
-                                                           newline="\n")
-            try:
-                result = self._run([str(self._toolchain.vivado), "-mode", "batch", "-nojournal", "-nolog",
-                                    "-notrace", "-source", tcl.name], cwd=build_dir, capture_output=True, text=True,
-                                   timeout=self.timeout_s)
-            except subprocess.TimeoutExpired as e:
-                log.write_text(str(e.stdout or "") + str(e.stderr or ""), encoding="utf-8")
-                raise BuildError(f"Vivado が {self.timeout_s} 秒で終わらない（{log}）") from e
-            out = (result.stdout or "") + (result.stderr or "")
-            log.write_text(out, encoding="utf-8")
-            if result.returncode != 0:
-                raise BuildError(f"Vivado が終了コード {result.returncode} で失敗（{log}）")
+                write_build_stamp(project.stamp, build_dir, digest, self._git, self._now)
+            out = run_tool(self._run, [str(self._toolchain.vivado), "-mode", "batch", "-nojournal", "-nolog",
+                                       "-notrace", "-source", tcl.name], cwd=build_dir,
+                           timeout_s=self.timeout_s, log=log, tool="Vivado")
             undriven = vivado_undriven(out)
             if undriven:
-                _force_remove(bitstream)
+                force_remove(bitstream)
                 raise BuildError("駆動されない配線がある（実機では値が定まらない）。すべて明示的に駆動すること"
                                  f"（{log}）:\n  " + "\n  ".join(undriven))
             unmatched = vivado_unmatched_constraints(out)
             if unmatched:
-                _force_remove(bitstream)
+                force_remove(bitstream)
                 raise BuildError("対象の見つからない制約がある（効いていない。名前を確かめること）"
                                  f"（{log}）:\n  " + "\n  ".join(unmatched))
             if not bitstream.is_file():
@@ -78,12 +63,12 @@ class VivadoBuilder:
         try:
             timing = parse_vivado_timing(report.read_text(encoding="utf-8", errors="replace"))
         except (OSError, TimingReportError) as e:
-            _force_remove(bitstream)
+            force_remove(bitstream)
             raise BuildError(f"タイミングの報告 {report} を解析できない: {e}") from e
         reported = {c.name for c in timing.clocks}
         missing = [c.name for c in project.clocks if c.name not in reported]
         if missing or not timing.met:
-            _force_remove(bitstream)
+            force_remove(bitstream)
             raise BuildError(f"タイミング制約未達（{report}）:\n" + timing.describe() +
                              (f"\n報告に無いクロック: {', '.join(missing)}" if missing else ""))
         stamp.write_text(digest, encoding="utf-8")
@@ -101,22 +86,15 @@ class VivadoBuilder:
             except BuildError as e:
                 errors.append(f"{d}: {str(e).splitlines()[0]}")
                 continue
-            for source in (result.bitstream, result.bitstream.parent / INPUTS_STAMP):
-                target = build_dir / source.name
-                _force_remove(target)
-                shutil.copyfile(source, target)
+            publish_files(result, build_dir)
             return BuildResult(bitstream=build_dir / result.bitstream.name, log=result.log, timing=result.timing)
         raise BuildError("どの directive でもタイミングを満たさない:\n" + "\n".join(errors))
 
 
 def _inputs_digest(project: VivadoProject, build_dir: Path, tcl: Path) -> str:
-    h = hashlib.sha256()
     stamped = project.stamp.source if project.stamp is not None else None
     # ブロック設計の TCL は同じ場所の TCL を source しうる（ps7_hp_bd.tcl → ps7_bd.tcl）ので、隣の TCL も入力に含める
     siblings = sorted({t for bd in project.block_designs for t in Path(bd).parent.glob("*.tcl")})
-    files = [tcl, build_dir / f"{project.name}.xdc", *siblings,
-             *sorted(Path(s) for s in project.sources if s != stamped),
-             *module_constraints(project.sources)]                  # モジュールの制約（ソースの隣の .xdc）
-    for path in files:
-        h.update(str(path).encode() + b"\0" + Path(path).read_bytes().replace(b"\r\n", b"\n") + b"\0")
-    return h.hexdigest()
+    return inputs_digest([tcl, build_dir / f"{project.name}.xdc", *siblings,
+                          *sorted(Path(s) for s in project.sources if s != stamped),
+                          *module_constraints(project.sources)])    # モジュールの制約（ソースの隣の .xdc）

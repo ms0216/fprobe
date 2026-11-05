@@ -12,7 +12,7 @@
 出す数: 変化点/秒・入力（線の拍）の MB/s・VCD の出力の MB/s・実時間比（その時間で処理できた記録の長さ ÷ 経過時間。
 800 MS/s として。1 以上なら流しに追いつく）。
 
---python: numpy を使わない道（fprobe.la_wave._np = None）で測る。
+--python: numpy を使わない道（`_np = None` を la・la_stream・la_wave・la_vcd のあるものに）で測る。
 """
 
 import argparse
@@ -34,7 +34,23 @@ try:                                                           # 取り込みと
 except ImportError:
     raw_module = None
 
-PERIOD_S = 1.25e-9                     # 800 MS/s（PYNQ の fprobe_pynq_deep_fast の細かいサンプル）
+# numpy を読む側のモジュール（分割の前後で置き場所が違うので、あるものだけ差し替える）
+_NP_MODULES = ("fprobe.la", "fprobe.la_stream", "fprobe.la_wave", "fprobe.la_vcd")
+
+
+def disable_numpy() -> None:
+    """numpy を使わない道にする: `_np` を持つ fprobe の各モジュールで `_np = None` にする。"""
+    import importlib
+    for name in _NP_MODULES:
+        try:
+            module = sys.modules.get(name) or importlib.import_module(name)
+        except ImportError:
+            continue
+        if hasattr(module, "_np"):
+            module._np = None
+
+
+PERIOD_S = 1.25e-9                    # 800 MS/s（PYNQ の fprobe_pynq_deep_fast の細かいサンプル）
 LINE_MB_S = 117.7                      # 線の理論値（D）
 WRITER: dict = {}                      # VcdWriter の引数（--workers）
 
@@ -175,10 +191,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=None, help="VcdWriter の workers（既定 = その実装の既定）")
     args = ap.parse_args()
     if args.python:
-        la_wave._np = None
-        la._np = None
-        if hasattr(la_vcd, "_np"):
-            la_vcd._np = None
+        disable_numpy()
     if args.workers is not None:
         WRITER["workers"] = args.workers
     total = int(args.mb * 1e6) // 16 * 16

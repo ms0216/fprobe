@@ -74,12 +74,19 @@
 -- 種類 18: [47:0] 値を出さなかった最初の読みの点、[95:48] それが分かった転送の点（線を失ったときは最後の転送の点）、
 --   [102:96] 最初の読みの番号（か所 × 16 + 語）、[111:103] 読みの数、[114:112] 分かった転送の ACK（線を失ったときは 000）、
 --   [115] CTRL/STAT の STICKYERR で分かった、[116] 線を失った（切断・接続の方式の切り替え）、[119:117] 0。
+--
+-- 構成: この entity は手順（借りる・読む・確かめる・戻す）だけを持ち、次の部品を使う。
+--   dap_sampler_timer : 周期の時計とゆらぎ（巡回を始める due）
+--   dap_sampler_out   : 確認を待つ語の溜め（buf）と件・標本の出力（種類 7・17・18、quiet = 標本の一致が届いた後）
+--   dap_phy_borrow    : PHY の命令の切り替え・上流の命令の残り・WAIT の再試行の比べ
+--   dap_sampler_pkg   : 確認を待つ語の記録（entry_t）
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 use work.event_pkg.all;
 use work.util_pkg.all;
 use work.dap_pkg.all;
+use work.dap_sampler_pkg.all;
 
 entity dap_sampler is
   generic (
@@ -193,40 +200,7 @@ architecture rtl of dap_sampler is
   signal p_time      : std_logic_vector(47 downto 0) := (others => '0');
   signal to_idle     : boolean := false;               -- 回収の後: 巡回の終わり（でなければ か所の境界に戻る）
   signal collecting  : boolean := false;               -- JTAG の回収: CTRL/STAT を読んだら次は RDBUFF
-  -- 確認を待つ語（値を受け取った語の件。確認が通ったら順に出す）
-  -- 確認を待つ語の記録（buf の 1 語。分散 RAM に置くので、buf にはビット列で入れる: to_bits / to_entry）
-  type entry_t is record
-    index    : std_logic_vector(6 downto 0);     -- 標本の番号
-    addr     : std_logic_vector(31 downto 0);
-    value    : std_logic_vector(31 downto 0);
-    stamp    : std_logic_vector(47 downto 0);    -- 標本の時刻（読みに行った転送の線上の点）
-    waits    : std_logic_vector(4 downto 0);     -- WAIT の回数（31 で止める）
-    bound    : std_logic;                        -- 値を返した転送が読みに行った転送と別（種類 17 の件も出す）
-    rsp_time : std_logic_vector(47 downto 0);    -- 値を返した転送の線上の点
-    req      : std_logic_vector(3 downto 0);     -- 値を返した転送の要求
-  end record;
-  constant ENTRY_BITS : natural := 7 + 32 + 32 + 48 + 5 + 1 + 48 + 4;
-
-  function to_bits(e : entry_t) return std_logic_vector is
-  begin
-    return e.index & e.addr & e.value & e.stamp & e.waits & e.bound & e.rsp_time & e.req;
-  end function;
-
-  function to_entry(v : std_logic_vector(ENTRY_BITS - 1 downto 0)) return entry_t is
-    variable e : entry_t;
-  begin
-    e.req      := v(3 downto 0);
-    e.rsp_time := v(51 downto 4);
-    e.bound    := v(52);
-    e.waits    := v(57 downto 53);
-    e.stamp    := v(105 downto 58);
-    e.value    := v(137 downto 106);
-    e.addr     := v(169 downto 138);
-    e.index    := v(176 downto 170);
-    return e;
-  end function;
-  type buf_t is array (0 to CHECK_MAX - 1) of std_logic_vector(ENTRY_BITS - 1 downto 0);
-  signal buf         : buf_t;
+  -- 確認を待つ語（値を受け取った語の記録。dap_sampler_out の buf に溜め、確認が通ったら順に件にして出す）
   signal buf_we      : std_logic := '0';
   signal buf_wa      : natural range 0 to CHECK_MAX - 1 := 0;
   signal buf_wd      : std_logic_vector(ENTRY_BITS - 1 downto 0) := (others => '0');
@@ -239,21 +213,16 @@ architecture rtl of dap_sampler is
   signal u_index     : unsigned(6 downto 0) := (others => '0');
   signal u_here      : boolean := false;               -- 確認を待つ読みに、今のか所の読みがある
   signal last_time   : std_logic_vector(47 downto 0) := (others => '0');   -- 最後の転送の点（線を失ったときの区間の終わり）
-  -- 件を出す（確認が通った語を順に。誤りの区間は 1 件）
-  signal draining    : boolean := false;
-  signal dr_idx      : natural range 0 to CHECK_MAX - 1 := 0;
-  signal dr_cnt      : natural range 0 to CHECK_MAX := 0;
-  signal dr_second   : boolean := false;               -- 今の語の件を出した。次はその種類 17
-  signal dr_wait     : boolean := false;               -- 確認した周期に積んだ語が buf に書かれるのを 1 周期待つ
-  signal gap_pend    : boolean := false;
+  -- 件の出力（dap_sampler_out）への指示（どれも登録して次の周期に届ける）と、その状態
+  signal dr_start    : std_logic := '0';               -- 確認が通った: 溜めた dr_n 語を出す
+  signal dr_n        : natural range 1 to CHECK_MAX := 1;
+  signal gap_go      : std_logic := '0';               -- 誤りの区間の件 gap_word を出す
   signal gap_word    : std_logic_vector(119 downto 0) := (others => '0');
-  signal r_valid     : std_logic := '0';
-  signal r_kind      : std_logic_vector(7 downto 0) := (others => '0');
-  signal r_word      : std_logic_vector(119 downto 0) := (others => '0');
+  signal out_draining, out_gap, out_quiet : std_logic;
+  signal draining    : boolean;                        -- 確認した語を出している
+  signal gap_pend    : boolean;                        -- 誤りの区間の件をまだ出していない
+  signal quiet       : boolean;                        -- 最後に出した標本の一致が up_busy に届いた後（か所を始めてよい）
   signal settle      : natural range 0 to 1 := 0;
-  -- 最後に出した標本からの周期（2 で止める）。か所を始めるのは 2 以上（その標本の値の一致が up_busy に届いた後: 一致は標本の
-  -- 2 周期後に発火し、同じ周期に up_busy に入る）。§3.2: 一致した標本のか所の次を読まずに線を渡す
-  signal since_emit  : natural range 0 to 2 := 2;
   signal tries       : unsigned(15 downto 0) := (others => '0');
   signal retry_more  : std_logic;                        -- tries < wait_retry（dap_phy_borrow）
   signal csw, tar    : std_logic_vector(31 downto 0) := (others => '0');
@@ -267,76 +236,34 @@ architecture rtl of dap_sampler is
   signal handoffs_r  : unsigned(15 downto 0) := (others => '0');
   signal handed_r    : boolean := false;               -- line_handed
   signal single      : boolean := false;               -- 有効なか所がちょうど 1 つ
-  signal timer       : unsigned(31 downto 0) := (others => '0');
-  signal due         : boolean := false;               -- 周期が満ちた（次の周期に巡回を始める）
-  signal reload      : unsigned(31 downto 0) := (others => '0');   -- 次の周期（ゆらぎを足した period）
-  -- ゆらぎの計算は 3 段に分ける（1 段だと シフト → マスク → 32 ビットの加減算 が sys_clk に入らなかった）
-  signal jit_mask    : unsigned(31 downto 0) := (others => '0');   -- 2^jitter − 1
-  signal jit_base    : unsigned(31 downto 0) := (others => '0');   -- period − 2^(jitter−1)
-  signal jit_on      : boolean := false;
-  signal jit_masked  : unsigned(31 downto 0) := (others => '0');   -- 乱数 & jit_mask
-  signal lfsr        : std_logic_vector(15 downto 0) := x"ACE1";
+  signal due_sl      : std_logic;
+  signal due         : boolean;                        -- 周期が満ちた（dap_sampler_timer。次の周期に巡回を始める）
   signal req_r       : std_logic_vector(3 downto 0) := (others => '0');
   signal count_r     : natural range 1 to 64 := 1;
   signal data_r      : std_logic_vector(31 downto 0) := (others => '0');
   signal valid_r     : std_logic := '0';
-  signal s_valid     : std_logic := '0';
-  signal s_addr, s_data : std_logic_vector(31 downto 0) := (others => '0');
-  signal s_ack, ack_r : std_logic_vector(2 downto 0) := (others => '0');
-  signal s_index     : unsigned(6 downto 0) := (others => '0');
-  signal s_time      : unsigned(47 downto 0) := (others => '0');
+  signal ack_r       : std_logic_vector(2 downto 0) := (others => '0');
   signal rounds_r, errors_r, overruns_r : unsigned(31 downto 0) := (others => '0');
   signal restores_r  : unsigned(15 downto 0) := (others => '0');
 begin
 
-  -- 確認を待つ語（分散 RAM に推論させるため、リセットの無い別のプロセス）
-  buf_i : process (clk)
-  begin
-    if rising_edge(clk) then
-      if buf_we = '1' then
-        buf(buf_wa) <= buf_wd;
-      end if;
-    end if;
-  end process;
-
   -- 周期の時計とゆらぎ（巡回の始まりの due だけを本体へ）
-  period_timer : process (clk)
-  begin
-    if rising_edge(clk) then
-      -- ゆらぎ: LFSR（x^16 + x^14 + x^13 + x^11 + 1）を毎周期進め、次の周期 = period + 乱数 − 2^(jitter−1)
-      lfsr <= lfsr(14 downto 0) & (lfsr(15) xor lfsr(13) xor lfsr(12) xor lfsr(10));
-      jit_on     <= jitter /= 0 and period > shift_left(to_unsigned(1, 32), jitter);
-      jit_mask   <= shift_left(to_unsigned(1, 32), jitter) - 1;
-      if jitter = 0 then
-        jit_base <= period;
-      else
-        jit_base <= period - shift_left(to_unsigned(1, 32), jitter - 1);
-      end if;
-      jit_masked <= resize(unsigned(lfsr), 32) and jit_mask;
-      if jit_on then
-        reload <= jit_base + jit_masked;
-      else
-        reload <= period;
-      end if;
+  timer_i : entity work.dap_sampler_timer
+    port map (clk => clk, rst => rst, run => run, period => period, jitter => jitter, due => due_sl);
+  due <= due_sl = '1';
 
-      -- 周期の時計（下り。period を積んで 1 まで数える = period 周期ごと）。満了は due に登録し、巡回を始めるのは
-      -- 次の周期（31 ビットの 0 の検出から slot・state 等への経路を切る。周期の長さは変わらない）
-      due <= false;
-      if run = '0' or period = 0 then
-        timer   <= period;
-      elsif timer(31 downto 1) = 0 then
-        timer <= reload;
-        due   <= true;
-      else
-        timer <= timer - 1;
-      end if;
-      if rst = '1' then
-        timer <= (others => '0');
-        due   <= false;
-        lfsr  <= x"ACE1";
-      end if;
-    end if;
-  end process;
+  -- 確認を待つ語の溜めと件の出力
+  out_i : entity work.dap_sampler_out
+    generic map (CHECK_MAX => CHECK_MAX)
+    port map (clk => clk, rst => rst, wr_valid => buf_we, wr_index => buf_wa, wr_data => buf_wd,
+              start_valid => dr_start, start_count => dr_n, gap_valid => gap_go, gap_data => gap_word,
+              draining => out_draining, gap_pending => out_gap, quiet => out_quiet,
+              sample_valid => sample_valid, sample_addr => sample_addr, sample_data => sample_data,
+              sample_ack => sample_ack, sample_index => sample_index, sample_time => sample_time,
+              rec_valid => rec_valid, rec_kind => rec_kind, rec_word => rec_word);
+  draining <= out_draining = '1';
+  gap_pend <= out_gap = '1';
+  quiet    <= out_quiet = '1';
 
   -- PHY の命令の切り替え（mine は境界でしか変わらない）・上流の命令の残り・WAIT の再試行の比べ
   mine_sl <= to_sl(mine);
@@ -365,9 +292,9 @@ begin
         when P_CSW            =>                                               -- 32 ビット・増加 single（same: なし）
           req_r <= AP_W_CSW;
           if same then
-            data_r <= csw(31 downto 6) & "00" & csw(3) & "010";
+            data_r <= csw_word32(csw, CSW_ADDRINC_OFF);
           else
-            data_r <= csw(31 downto 6) & "01" & csw(3) & "010";
+            data_r <= csw_word32(csw, CSW_ADDRINC_SINGLE);
           end if;
         when P_TAR            => req_r <= AP_W_TAR; data_r <= std_logic_vector(base);
         when P_DRW            => req_r <= AP_R_DRW;
@@ -455,7 +382,7 @@ begin
       mine <= false;
       forget;
       if u_count /= 0 then
-        gap_pend <= true;
+        gap_go   <= '1';
         gap_word <= "000" & '1' & '0' & "000" & std_logic_vector(to_unsigned(u_count, 9)) & std_logic_vector(u_index)
                     & last_time & u_time;
       end if;
@@ -494,7 +421,7 @@ begin
         end if;
       end if;
       if n /= 0 then
-        gap_pend <= true;
+        gap_go   <= '1';
         gap_word <= "000" & '0' & to_sl(sticky) & phy_rsp_ack & std_logic_vector(to_unsigned(n, 9))
                     & std_logic_vector(first_i) & std_logic_vector(phy_rsp_time(47 downto 0)) & first_t;
       end if;
@@ -548,11 +475,8 @@ begin
     procedure confirm(n : natural) is
     begin
       if n /= 0 then
-        draining  <= true;
-        dr_wait   <= true;                                   -- buf の書き込み（buf_we）は次の周期
-        dr_idx    <= 0;
-        dr_cnt    <= n;
-        dr_second <= false;
+        dr_start <= '1';                                     -- buf の書き込み（buf_we）が終わる次の周期に届く
+        dr_n     <= n;
       end if;
       nbuf   <= 0;
       u_here <= false;
@@ -560,19 +484,15 @@ begin
 
     variable k : natural range 0 to SLOTS;
     variable bad, shown : boolean;
-    variable e : entry_t;
     variable ucount : natural range 0 to CHECK_MAX + 1;
     variable nb : natural range 0 to CHECK_MAX;
   begin
     if rising_edge(clk) then
-      s_valid <= '0';
-      r_valid <= '0';
-      buf_we  <= '0';
+      buf_we   <= '0';
+      dr_start <= '0';
+      gap_go   <= '0';
       if phy_cmd_ready = '1' then
         valid_r <= '0';
-      end if;
-      if since_emit /= 2 then
-        since_emit <= since_emit + 1;
       end if;
       if check_words = 0 then
         kmax <= 1;
@@ -584,43 +504,6 @@ begin
       if phy_rsp_valid = '1' then
         last_time <= std_logic_vector(phy_rsp_time(47 downto 0));
       end if;
-      -- 件を出す（1 周期 1 件）: 確認が通った語（とその種類 17）を順に。誤りの区間は、出し終えてから
-      if draining and dr_wait then
-        dr_wait <= false;
-      elsif draining then
-        e := to_entry(buf(dr_idx));
-        r_valid <= '1';
-        if not dr_second then
-          r_kind  <= EVENT_KIND_SAMPLE;
-          r_word  <= e.waits & ACK_OK & e.value & e.addr & e.stamp;
-          s_valid <= '1';
-          s_addr  <= e.addr;
-          s_data  <= e.value;
-          s_ack   <= ACK_OK;
-          s_index <= unsigned(e.index);
-          s_time  <= unsigned(e.stamp);
-          since_emit <= 0;
-        else
-          r_kind  <= EVENT_KIND_SAMPLE_BOUND;
-          r_word  <= x"0" & e.req & x"00000000" & e.addr & e.rsp_time;
-        end if;
-        if not dr_second and e.bound = '1' then
-          dr_second <= true;
-        else
-          dr_second <= false;
-          if dr_idx + 1 = dr_cnt then
-            draining <= false;
-          else
-            dr_idx <= dr_idx + 1;
-          end if;
-        end if;
-      elsif gap_pend then
-        r_valid  <= '1';
-        r_kind   <= EVENT_KIND_SAMPLE_GAP;
-        r_word   <= gap_word;
-        gap_pend <= false;
-      end if;
-
       if not mine and up_cmd_valid = '1' and phy_cmd_ready = '1' then
         handed_r   <= false;                                 -- 上流が線を使った: 渡した SELECT・CSW はもう分からない
       end if;
@@ -630,7 +513,7 @@ begin
                    up_injector_ap = ap and shadow_valid = '1' and shadow_ap = ap;
       single  <= unsigned(enables) /= 0 and (unsigned(enables) and (unsigned(enables) - 1)) = 0;
 
-      -- 止まっている間（周期の時計は period を積み直す。period_timer）は、待っている巡回も無い
+      -- 止まっている間（周期の時計は period を積み直す。dap_sampler_timer）は、待っている巡回も無い
       if run = '0' or period = 0 then
         pending <= false;
       end if;
@@ -657,11 +540,6 @@ begin
         stale      <= false;
         give_back  <= false;
         forget;
-        draining   <= false;
-        dr_wait    <= false;
-        gap_pend   <= false;
-        r_valid    <= '0';
-        s_valid    <= '0';
         handed_r   <= false;
         rounds_r   <= (others => '0');
         errors_r   <= (others => '0');
@@ -725,7 +603,7 @@ begin
                 elsif not draining and not gap_pend then
                   give_line;
                 end if;
-              elsif up_busy = '0' and not draining and since_emit = 2 then   -- 出した標本の一致が届いてから
+              elsif up_busy = '0' and not draining and quiet then   -- 出した標本の一致が届いてから
                 tries <= (others => '0');
                 word  <= 0;
                 state <= S_ISSUE;
@@ -772,7 +650,7 @@ begin
               if not draining and not gap_pend then
                 give_line;
               end if;
-            elsif up_busy = '0' and not draining and since_emit = 2 then
+            elsif up_busy = '0' and not draining and quiet then
               state <= S_ISSUE;                                  -- step = P_DRW、word = 0
             end if;
 
@@ -789,7 +667,8 @@ begin
 
           when S_RESPONSE =>
             -- 確認した件を出し終える（最大 2 × CHECK_MAX + 1 周期）より前に次の応答は来ない: 1 転送は最短でも SWD 46 ビット・
-            -- JTAG 40 TCK × 2 × half_period（half_period ≥ 2）= 160 周期 > 129。buf に積む前に出し終えている
+            -- JTAG 40 TCK × 2 × half_period（half_period = 1 でも）= 80 周期、SWD は 46 ビット × 2 × 1 = 92 周期。したがって
+            -- CHECK_MAX ≤ 39（2 × CHECK_MAX + 1 ≤ 79）なら間に合う（sampler_check_max は designs.py で 16）。buf に積む前に出し終えている
             assert not (phy_rsp_valid = '1' and (draining or gap_pend))
               report "dap_sampler: a response arrived before the confirmed records were out" severity failure;
             if lost then                                         -- 転送の途中で切断・方式の切り替え（PHY は応答しない）
@@ -954,15 +833,6 @@ begin
   held         <= '1' when mine else '0';
   line_handed  <= '1' when handed_r else '0';
   handoffs     <= handoffs_r;
-  sample_valid <= s_valid;
-  sample_addr  <= s_addr;
-  sample_data  <= s_data;
-  sample_ack   <= s_ack;
-  sample_index <= s_index;
-  sample_time  <= s_time;
-  rec_valid    <= r_valid;
-  rec_kind     <= r_kind;
-  rec_word     <= r_word;
   rounds       <= rounds_r;
   errors       <= errors_r;
   overruns     <= overruns_r;

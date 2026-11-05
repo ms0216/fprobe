@@ -2,6 +2,8 @@
 
 INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
 - まず `probe_info` でケイパビリティ（ロジアナのチャンネル数・深さ等）を確認する。
+- 呼び出しが失敗した・使い方に迷ったら `session_hints`（method に失敗した API 名。例 `linux.halt.open`）。使い方の落とし穴の記録で、
+  確かめる事実とそれを読む API と手順が返る（診断ではない。当てはまるかは自分で判断する）。失敗の応答の data.hint_ids にも、そのメソッドに付いたヒントの id が出る。
 - PC のファイルを実行する・書く引数（`la_decoder_load` の path、`linux_memap_connect` の xsdb、`la_export`・
   `recording_export` 等の書き出しの path）は、利用者が決めた許可の表にあるものだけ通る。表は `session_permissions`
   （読むだけ。AI からは変えられない）。断られたら（E_NOT_ALLOWED、data.reason = path_not_permitted）表にある場所を使うか、
@@ -223,6 +225,9 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   当たったら `linux_halt_debug_threads`（variables=true・expressions で、全スレッドの行・引数・局所変数・式を同じ時点で 1 回で読む）/
   `linux_halt_debug_read`・`linux_halt_debug_memory`・`linux_halt_debug_step` → `linux_halt_debug_run`（wait_s=0 で再開）→
   `linux_halt_debug_close`（BKPT を全部外し、全コアを走らせる）→ `linux_halt_close`。
+  設定の保存・読み込み: `linux_halt_profile_save`（開いている口の open の引数・attach 中なら attach の引数から pid を除いたものをファイルへ）/
+  `linux_halt_profile_load`（ファイルを読んで返すだけ。返った open を `linux_halt_open`、attach に pid を足して `linux_halt_debug_attach` へ渡す。
+  offsets_matches は保存時と今の offsets のファイルの SHA-256 の一致。人の画面は「設定ファイル」の保存・読み込みで同じことをする）。
   attach の間は、人の画面（ソース・ブレークポイント・止まった場所・レジスタ・呼び出し履歴・変数・逆アセンブル）がそのプロセスを
   描く（target_status の linux 欄。debug_* の道具もそのプロセスで答える）。止まった Pi は ssh に答えないので、PC に無いソースは
   attach の fetch_from_target のとき（止める前）に取り寄せる。人の画面の道（行のクリック・ステップのボタン）は attach の

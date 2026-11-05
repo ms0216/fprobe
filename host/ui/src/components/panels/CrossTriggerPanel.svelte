@@ -1,5 +1,6 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import { intervalNow } from "../common/interval";
   // クロストリガー: fprobe のクロストリガの全体（何が起きたら = 源、何をする = 行き先、どの源をどの行き先へ = 経路）を
   // 1 か所で見て設定する（docs/superpowers/specs/2026-10-23-ui-rebuild-design.md §3.3 の作る順の 2 番目、
   // docs/reports/2026-10-24-fprobe-value-analysis.md §5.7-2）。
@@ -16,16 +17,19 @@
   import type { FieldError, FieldValues } from "../../lib/apiform";
   import { shared } from "../../lib/context";
   import {
-    SOURCES, UNREADABLE, actionAvailability, cellBlock, formCall, formValues, hexText, injectFacts, methodFields,
+    SOURCES, actionAvailability, formCall, formValues, hexText, injectFacts, methodFields,
     outputColumns, outputSourcesCall, routeChanged, routeOf, routeParams, sourceAvailability, sourceFacts, toggleRoute,
-    type Action, type Avail, type Block, type Fact, type LaTriggerStatus, type ObsTriggerStatus, type OutputPin, type Route, type RouteColumn,
+    type Avail, type Fact, type LaTriggerStatus, type ObsTriggerStatus, type OutputPin, type Route, type RouteColumn,
     type SamplerTriggerStatus, type TriggerSource, type XtrigStatus,
   } from "../../lib/crosstrigger";
   import { allowed } from "../../lib/guard";
   import { i18n, type Key } from "../../lib/i18n";
   import type { SequenceStatus } from "../../lib/logic";
+  import { EVENT_SHORT, ROUTE_COLUMNS, STATE_MARK, capText, hex32 } from "../../lib/xtlabels";
   import ApiFields from "./ApiFields.svelte";
-  import TimeLink from "./TimeLink.svelte";
+  import XtFact from "./crosstrigger/XtFact.svelte";
+  import XtOutputsCard from "./crosstrigger/XtOutputsCard.svelte";
+  import XtRouteTable from "./crosstrigger/XtRouteTable.svelte";
 
   const POLL_MS = 1000;
   const { app, conn, dock } = shared();
@@ -47,9 +51,7 @@
 
   $effect(() => {
     if (!linked) return;
-    void read();
-    const timer = setInterval(() => void read(), POLL_MS);
-    return () => clearInterval(timer);
+    return intervalNow(() => read(), POLL_MS);
   });
 
   async function one<M extends keyof Methods>(method: M, on: boolean, errs: Record<string, string>): Promise<Result<M> | null> {
@@ -83,8 +85,7 @@
 
   // --- 経路の表 -----------------------------------------------------------------------------------
 
-  const RouteColumns: RouteColumn[] = ["to_la", "to_inject"];
-  const facts = $derived(routeOf(xtrig));
+    const facts = $derived(routeOf(xtrig));
   const columns = $derived(outputColumns(outputs?.outputs));
   let draft = $state<Route>({ to_la: [], to_inject: [] });
   let outDraft = $state<Record<number, TriggerSource[]>>({});
@@ -112,7 +113,7 @@
     const col = columns.find((c) => c.channel === channel);
     return !!col && col.sources.includes(s) !== (outDraft[channel] ?? []).includes(s);
   };
-  const routeDirty = $derived(!!facts && RouteColumns.some((c) => SOURCES.some((s) => routeChanged(facts, draft, c, s))));
+  const routeDirty = $derived(!!facts && ROUTE_COLUMNS.some((c) => SOURCES.some((s) => routeChanged(facts, draft, c, s))));
 
   async function applyRoute() {
     if (!(await allowed(app))) return;
@@ -177,40 +178,16 @@
 
   // --- 表示 ---------------------------------------------------------------------------------------
 
-  const SOURCE_LABEL: Record<TriggerSource, Key> = {
-    la_trigger: "logic.srcTrigger", dap_match: "logic.dapMatch", host: "logic.host", sequence: "logic.srcSequence",
-    obs_match: "logic.srcObsMatch", sampler_match: "logic.srcSamplerMatch",
-  };
-  const SOURCE_API: Record<TriggerSource, string> = {
-    la_trigger: "la.arm", dap_match: "xtrig.set_match", host: "xtrig.fire", sequence: "xtrig.set_sequence",
-    obs_match: "fpga_obs.trigger_set", sampler_match: "sampler.trigger_set",
-  };
-  const ACTION_LABEL: Record<Action, Key> = { la: "xt.actLa", inject: "xt.actInject", outputs: "xt.actOutputs" };
-  const COLUMN_ACTION: Record<RouteColumn, Action> = { to_la: "la", to_inject: "inject" };
   const statuses = $derived({ xtrig, la, sequence, obs, sampler });
-  // 時刻 0 もタイムベースの事実の時刻（起きたかは回数・fired で決まる。0 を「無い」とみなさない）
-  const recordingTo = (t: number | null) => (t !== null ? { source: "recording" as const, t } : null);
-  const capText = (a: { cap: string; value: unknown }) => `${a.cap} = ${a.value === undefined ? "—" : JSON.stringify(a.value)}`;
   const absent = (a: Avail) => (a.ok ? null : $i18n("xt.absent", { cap: capText(a) }));
-  const blockText = (b: Block) => (b.kind === "self" ? $i18n("xt.self")
-    : $i18n(b.kind === "source" ? "xt.absentSource" : "xt.absentAction", { cap: capText(b) }));
-  const EVENT_SHORT: Record<string, string> = { pattern_a: "A", pattern_b: "B", dap_match: "Match", host: "Host" };
   const patText = (p: { mask: number; value: number; rise: number; fall: number }) =>
     `mask=${hexText(p.mask)} value=${hexText(p.value)} rise=${hexText(p.rise)} fall=${hexText(p.fall)}`;
   const inject = $derived(injectFacts(xtrig));
-  const hex = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
-  const STATE_MARK: Record<string, string> = { done: "✓", current: "●", waiting: "○", idle: "–" };
 </script>
 
-{#snippet when(t: Fact)}
-  {#if t === UNREADABLE}<span class="muted small" title={$i18n("xt.unreadableTip")}>{$i18n("xt.unreadable")}</span>
-  {:else if t !== null}<TimeLink to={recordingTo(t)} />{:else}<span class="muted">—</span>{/if}
-{/snippet}
+{#snippet when(t: Fact)}<XtFact kind="time" value={t} />{/snippet}
 
-{#snippet count(n: Fact)}
-  {#if n === UNREADABLE}<span class="muted small" title={$i18n("xt.unreadableTip")}>{$i18n("xt.unreadable")}</span>
-  {:else}<span class="mono">{n ?? "—"}</span>{/if}
-{/snippet}
+{#snippet count(n: Fact)}<XtFact kind="count" value={n} />{/snippet}
 
 {#snippet capState(name: string, c: { capturing: boolean; triggered: boolean; done: boolean; trigger_time: number | null })}
   <span>{name}: {c.capturing ? $i18n("xt.capturing") : c.done ? $i18n("xt.done") : $i18n("xt.idle")}{c.triggered
@@ -238,75 +215,9 @@
       <p class="gone">{$i18n("xt.noXtrig", { cap: capText(srcOk.host as { cap: string; value: unknown }) })}</p>
     {/if}
 
-    <!-- 経路の表 -->
-    <section>
-      <h3>{$i18n("xt.route")} <Hint text={$i18n("xt.routeTip")} /></h3>
-      <div class="scroll">
-        <table class="grid route">
-          <thead>
-            <tr>
-              <th class="left">{$i18n("xt.source")}</th>
-              {#each RouteColumns as c (c)}
-                {@const a = actOk[COLUMN_ACTION[c]]}
-                <th class:gone={!a.ok} title={absent(a) ?? (c === "to_la" ? $i18n("xt.toLaTip") : $i18n("logic.toInjectTip"))}>
-                  {$i18n(ACTION_LABEL[COLUMN_ACTION[c]])}<div class="mono small muted">{c}</div></th>
-              {/each}
-              {#each columns as col (col.channel)}
-                <th title={col.editable ? $i18n("xt.outTip") : $i18n("xt.outErr.pulse", { ch: col.channel })}>
-                  {$i18n("xt.outCh", { ch: col.channel })}</th>
-              {/each}
-              <th>{$i18n("xt.count")}</th>
-              <th>{$i18n("xt.lastTime")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each SOURCES as s (s)}
-              {@const ok = srcOk[s]}
-              {@const f = sourceFacts(s, statuses)}
-              <tr class:gone={!ok.ok}>
-                <td class="left" title={ok.ok ? `${s} (${SOURCE_API[s]})` : `${s} (${SOURCE_API[s]}) — ${absent(ok)}`}>
-                  {$i18n(SOURCE_LABEL[s])}
-                  {#if !ok.ok}<span class="small reason" aria-hidden="true"> ⓘ</span>{/if}
-                </td>
-                {#each RouteColumns as c (c)}
-                  {@const b = cellBlock(s, c, srcOk, actOk)}
-                  <td class:changed={routeChanged(facts, draft, c, s)} title={b ? blockText(b) : ""}>
-                    {#if b?.kind === "self"}<span class="muted">·</span>{:else}
-                    <input type="checkbox" checked={draft[c].includes(s)} disabled={!!b || !facts}
-                           onchange={() => toggle(c, s)} aria-label="{c} {s}" />{/if}
-                  </td>
-                {/each}
-                {#each columns as col (col.channel)}
-                  <td class:changed={outChanged(col.channel, s)}>
-                    <input type="checkbox" checked={(outDraft[col.channel] ?? []).includes(s)}
-                           disabled={!col.editable || !ok.ok} onchange={() => toggleOut(col.channel, s)}
-                           aria-label="ch{col.channel} {s}" />
-                  </td>
-                {/each}
-                <td>{@render count(f.count)}</td>
-                <td>{#if f.laTimes}
-                  {#if f.laTimes.internal === null && f.laTimes.deep === null}<span class="muted">—</span>{/if}
-                  {#if f.laTimes.internal !== null}<span class="small muted">{$i18n("xt.internal")}</span>
-                    {@render when(f.laTimes.internal)}{/if}
-                  {#if f.laTimes.deep !== null}<span class="small muted">{$i18n("xt.deep")}</span>
-                    {@render when(f.laTimes.deep)}{/if}
-                {:else}{@render when(f.time)}{/if}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-      {#if xtrig && !facts}<div class="muted small">{$i18n("xt.noRouteFacts")}</div>{/if}
-      {#if facts?.unknown.length}<div class="muted small">{$i18n("xt.unknownSources", { names: facts.unknown.join(", ") })}</div>{/if}
-      {#if actOk.outputs.ok && outputs && !columns.length}<div class="muted small">{$i18n("xt.noOutputColumns")}</div>{/if}
-      <div class="bar">
-        <button class="primary" disabled={!edited} onclick={() => void applyRoute()}>{$i18n("logic.apply")}</button>
-        <button disabled={!edited} onclick={revert}>{$i18n("xt.revert")}</button>
-        {#if edited}<span class="muted small">{$i18n("xt.editing")}</span>{/if}
-        {#if routeError}<span class="error">{routeError}</span>{/if}
-        {#if readErrors["xtrig.status"]}<span class="error">{readErrors["xtrig.status"]}</span>{/if}
-      </div>
-    </section>
+    <XtRouteTable {srcOk} {actOk} {columns} {facts} xtrigRead={!!xtrig} outputsRead={!!outputs} {draft} {outDraft} {statuses}
+                  {edited} {routeError} readError={readErrors["xtrig.status"]} {outChanged} ontoggle={toggle}
+                  ontoggleOut={toggleOut} onapply={() => void applyRoute()} onrevert={revert} />
 
     <div class="cols">
       <!-- 源 -->
@@ -416,7 +327,7 @@
             {#if sampler}
               <div class="facts">
                 {#if sampler.enabled}
-                  <span class="mono">({$i18n("xt.word")} ^ {hex(sampler.value)}) & {hex(sampler.mask)} = 0 @ {hex(sampler.address)}</span>
+                  <span class="mono">({$i18n("xt.word")} ^ {hex32(sampler.value)}) & {hex32(sampler.mask)} = 0 @ {hex32(sampler.address)}</span>
                   <span>halt={String(sampler.halt)} la={String(sampler.la)}</span>
                   <span>{$i18n("xt.countIs", { n: sampler.count })}</span>
                   <span>{$i18n("xt.seen", { n: sampler.seen })}</span>
@@ -466,37 +377,8 @@
           {/if}
         </div>
 
-        <div class="card" class:gone={!actOk.outputs.ok}>
-          <h4>{$i18n("xt.actOutputs")} <span class="mono small muted">xtrig.output_*</span>
-            {#if outputs}<span class="muted small">{$i18n("lowLevel.outputsFree", { free: outputs.free, actions: outputs.actions })}</span>{/if}</h4>
-          {#if !actOk.outputs.ok}<div class="reason small">{absent(actOk.outputs)}</div>{:else}
-            {#if outputs}
-              <table class="grid">
-                <thead><tr><th>ch</th><th>{$i18n("xt.state")}</th><th>mode</th><th>level</th><th>{$i18n("xt.condition")}</th><th></th></tr></thead>
-                <tbody>
-                  {#each outputs.outputs as o (o.channel)}
-                    <tr>
-                      <td class="mono">ch{o.channel}{#if o.pull_up}<span class="muted small gap" title={$i18n("xt.pullUpTip")}>pull-up</span>{/if}</td>
-                      <td>{!o.configured ? $i18n("xt.outFree") : o.active ? $i18n("xt.outActive") : o.enabled ? $i18n("xt.outEnabled")
-                           : $i18n("xt.outDisabled")}</td>
-                      <td class="mono">{[o.mode ?? "", o.pulse_us ? `${o.pulse_us.min.toPrecision(3)}–${o.pulse_us.max.toPrecision(3)} µs` : ""].join(" ")}</td>
-                      <td class="mono">{o.level ?? ""}</td>
-                      <td class="mono small">{#if o.configured}{(o.sources ?? []).join(" | ")}{#if o.pattern?.mask}
-                        {(o.sources ?? []).length ? " | " : ""}pins {hex(o.pattern.value)}/{hex(o.pattern.mask)}{o.pattern.any ? " any" : ""}{/if}{/if}</td>
-                      <td class="nw">{#if o.configured}
-                        <button class="small" onclick={() => void press(o.enabled ? "xtrig.output_disable" : "xtrig.output_enable", { channel: o.channel })}>
-                          {o.enabled ? $i18n("lowLevel.disable") : $i18n("lowLevel.enable")}</button>
-                        <button class="small" title={$i18n("lowLevel.releaseTip")}
-                                onclick={() => void press("xtrig.output_release", { channel: o.channel })}>{$i18n("lowLevel.release")}</button>
-                      {/if}</td>
-                    </tr>
-                  {/each}
-                </tbody>
-              </table>
-            {:else if readErrors["xtrig.output_status"]}<div class="error">{readErrors["xtrig.output_status"]}</div>{/if}
-            <div class="bar"><button class="small" onclick={() => dock.show("lowLevel")}>{$i18n("xt.openLowLevel")}</button></div>
-          {/if}
-        </div>
+        <XtOutputsCard avail={actOk.outputs} {outputs} readError={readErrors["xtrig.output_status"]}
+                       onpress={(m, p) => void press(m, p)} onopen={() => dock.show("lowLevel")} />
       </section>
     </div>
   </div>
@@ -511,11 +393,6 @@
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
   @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } }
   .card { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
-  .scroll { overflow-x: auto; }
-  .route { width: auto; }
-  .route td, .route th { text-align: center; }
-  .route .left { text-align: left; }
-  td.changed { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .gone { opacity: 0.55; }
   .gone .reason, .reason { color: var(--muted); font-style: italic; }
   p.gone { margin: 0; color: var(--muted); }
@@ -527,6 +404,4 @@
   .stage { margin-right: 6px; }
   .stage.done { color: var(--ok); }
   .stage.current { color: var(--accent); font-weight: 600; }
-  .nw { white-space: nowrap; }
-  .gap { margin-left: 4px; }
 </style>

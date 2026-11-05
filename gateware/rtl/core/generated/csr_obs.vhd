@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック obs（0x00000E00, 64 バイト）: 対象の FPGA の観測（docs/superpowers/specs/2026-10-20-fpga-observation-v2-design.md）。対象の JTAG のユーザーの DR の観測の回路（target_ip/fprobe_obs）をスキャンし続け、記録をイベント 8、時刻合わせをイベント 9 にする
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_obs is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_enable : out std_logic;   -- control.enable（RW）
     control_release : out std_logic;   -- control.release（RW）
     half_period : out std_logic_vector(15 downto 0);   -- half_period（RW）
@@ -78,7 +74,7 @@ architecture rtl of csr_obs is
   signal match_change_enable_r : std_logic := '0';
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -111,14 +107,14 @@ begin
           when 0 =>   -- control
             rdata(0) <= control_enable_r;
             rdata(1) <= control_release_r;
-            if bus_we = '1' then
-              control_enable_r <= bus_wdata(0);
-              control_release_r <= bus_wdata(1);
+            if bus_cmd.we = '1' then
+              control_enable_r <= bus_cmd.wdata(0);
+              control_release_r <= bus_cmd.wdata(1);
             end if;
           when 1 =>   -- half_period
             rdata(15 downto 0) <= half_period_r;
-            if bus_we = '1' then
-              half_period_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              half_period_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 2 =>   -- chain
             rdata(5 downto 0) <= chain_ir_len_r;
@@ -126,41 +122,41 @@ begin
             rdata(17 downto 12) <= chain_ir_after_r;
             rdata(20 downto 18) <= chain_dr_before_r;
             rdata(23 downto 21) <= chain_dr_after_r;
-            if bus_we = '1' then
-              chain_ir_len_r <= bus_wdata(5 downto 0);
-              chain_ir_before_r <= bus_wdata(11 downto 6);
-              chain_ir_after_r <= bus_wdata(17 downto 12);
-              chain_dr_before_r <= bus_wdata(20 downto 18);
-              chain_dr_after_r <= bus_wdata(23 downto 21);
+            if bus_cmd.we = '1' then
+              chain_ir_len_r <= bus_cmd.wdata(5 downto 0);
+              chain_ir_before_r <= bus_cmd.wdata(11 downto 6);
+              chain_ir_after_r <= bus_cmd.wdata(17 downto 12);
+              chain_dr_before_r <= bus_cmd.wdata(20 downto 18);
+              chain_dr_after_r <= bus_cmd.wdata(23 downto 21);
             end if;
           when 3 =>   -- user_ir
             rdata(31 downto 0) <= user_ir_r;
-            if bus_we = '1' then
-              user_ir_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              user_ir_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 4 =>   -- words
             rdata(8 downto 0) <= words_r;
-            if bus_we = '1' then
-              words_r <= bus_wdata(8 downto 0);
+            if bus_cmd.we = '1' then
+              words_r <= bus_cmd.wdata(8 downto 0);
             end if;
           when 5 =>   -- sync_period
             rdata(15 downto 0) <= sync_period_r;
-            if bus_we = '1' then
-              sync_period_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              sync_period_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 6 =>   -- cmd
             rdata(15 downto 0) <= cmd_r;
-            if bus_we = '1' then
-              cmd_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              cmd_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 7 =>   -- id_scans
             rdata(7 downto 0) <= id_scans_r;
-            if bus_we = '1' then
-              id_scans_r <= bus_wdata(7 downto 0);
+            if bus_cmd.we = '1' then
+              id_scans_r <= bus_cmd.wdata(7 downto 0);
             end if;
           when 8 =>   -- cmd_push
-            if bus_we = '1' then
-              cmd_push_r <= bus_wdata(0);
+            if bus_cmd.we = '1' then
+              cmd_push_r <= bus_cmd.wdata(0);
             end if;
           when 9 =>   -- status
             rdata(0) <= status_running;
@@ -181,16 +177,16 @@ begin
           when 13 =>   -- match
             rdata(15 downto 0) <= match_mask_r;
             rdata(31 downto 16) <= match_value_r;
-            if bus_we = '1' then
-              match_mask_r <= bus_wdata(15 downto 0);
-              match_value_r <= bus_wdata(31 downto 16);
+            if bus_cmd.we = '1' then
+              match_mask_r <= bus_cmd.wdata(15 downto 0);
+              match_value_r <= bus_cmd.wdata(31 downto 16);
             end if;
           when 14 =>   -- match_change
             rdata(15 downto 0) <= match_change_change_r;
             rdata(16) <= match_change_enable_r;
-            if bus_we = '1' then
-              match_change_change_r <= bus_wdata(15 downto 0);
-              match_change_enable_r <= bus_wdata(16);
+            if bus_cmd.we = '1' then
+              match_change_change_r <= bus_cmd.wdata(15 downto 0);
+              match_change_enable_r <= bus_cmd.wdata(16);
             end if;
           when 15 =>   -- match_count
             rdata(31 downto 0) <= match_count;
@@ -201,9 +197,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_enable <= control_enable_r;
   control_release <= control_release_r;
   half_period <= half_period_r;

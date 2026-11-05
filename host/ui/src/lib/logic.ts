@@ -133,13 +133,6 @@ export function settingsOf(form: DecoderForm, decoders: DecoderInfo[]): Record<s
 /** 解読の注釈（la.decode の annotations の 1 件） */
 export type Annotation = Result<"la.decode">["annotations"][number];
 
-/** 絞った種類（la.decode の kinds。既定の種類）の外で表に出ない件数と種類。counts は絞る前の種類ごとの件数 */
-export function hiddenKinds(r: { kinds?: string[] | null; counts?: Record<string, number> }): { n: number; kinds: string[] } {
-  if (!r.kinds) return { n: 0, kinds: [] };
-  const out = Object.entries(r.counts ?? {}).filter(([k]) => !r.kinds!.includes(k));
-  return { n: out.reduce((sum, [, n]) => sum + n, 0), kinds: out.map(([k]) => k).sort() };
-}
-
 /** 注釈 → 時間軸の印（区間・ラベル = 本文・誤りは tone 1） */
 export function decodeMarks(annotations: Annotation[]): Mark[] {
   return annotations.map((a) => ({ t: a.start, ...(a.end > a.start ? { tEnd: a.end } : {}), label: a.text,

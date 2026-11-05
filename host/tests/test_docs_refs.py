@@ -26,6 +26,7 @@ NOT_TOOLS = {
     "dr_before", "dr_after", "user_ir", "id_ok", "id_timeout", "time_us", "time_basis", "target_cycles", "previous_ratio",
     "nominal_ratio", "window_s", "gap_s", "post_s", "rate_hz", "frequencies_hz", "design_switch", "causes_total",
     "fpga_hidden", "fpga_lost", "reads_missing", "read_failed", "pins_missing", "events_error", "recording_dropped",
+    "hint_ids",                                            # 失敗の応答の data の項目名（session.hints の id の一覧。道具名ではない）
     "watch_running", "events_errors", "lost_lines", "lost_frames", "ONE_CLOCK", "FIFO_DEPTH", "CLOCK_HZ", "LOST_BITS",
     "SYNC_DELAY", "SAMPLE_DELAY", "EVENTS_WRITTEN", "written_hi", "FPROBE_GOWIN_HOME", "FPROBE_VIVADO_HOME", "FPROBE_GHDL_HOME",
     "FPROBE_PYNQ_HOST", "FPROBE_PYNQ_SUDO_PASSWORD", "user_ir", "tdo_oe", "tck_ce", "value_untimed", "gap_untimed",

@@ -44,6 +44,11 @@ end entity;
 
 architecture rtl of la_run_cdc is
   constant W : natural := 16 + 4 + POST_BITS;
+  -- 受け渡しの語 x_src の並び（上位から）: 流れの番号 16 | run | gaps | ps_read | stream | post_beats（POST_BITS）
+  constant X_RUN    : natural := POST_BITS + 3;
+  constant X_GAPS   : natural := POST_BITS + 2;
+  constant X_PSREAD : natural := POST_BITS + 1;
+  constant X_STREAM : natural := POST_BITS;
   signal run_prev, run_r : std_logic := '0';
   signal epoch_r : unsigned(15 downto 0) := (others => '0');
   signal c_stream, c_ps_read, c_gaps : std_logic := '0';
@@ -93,7 +98,7 @@ begin
   begin
     if rising_edge(mem_clk) then
       rx_epoch := unsigned(x_dst(W - 1 downto W - 16));
-      rx_run   := x_dst(POST_BITS + 3);
+      rx_run   := x_dst(X_RUN);
       r_start   <= '0';
       r_stop    <= stop_next;
       stop_next <= '0';
@@ -119,8 +124,8 @@ begin
   m_start   <= r_start;
   m_stop    <= r_stop;
   m_epoch   <= r_epoch;
-  m_gaps    <= r_cfg(POST_BITS + 2);
-  m_ps_read <= r_cfg(POST_BITS + 1);
-  m_stream  <= r_cfg(POST_BITS);
+  m_gaps    <= r_cfg(X_GAPS);
+  m_ps_read <= r_cfg(X_PSREAD);
+  m_stream  <= r_cfg(X_STREAM);
   m_post    <= unsigned(r_cfg(POST_BITS - 1 downto 0));
 end architecture;

@@ -5,6 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from .locate import ToolchainNotFound, first_usable
+
+# ToolchainNotFound は locate が定義元。従来の import 先として再公開する
 __all__ = ["DEFAULT_GOWIN_HOMES", "ENV_VAR", "GowinToolchain", "ToolchainNotFound"]
 
 ENV_VAR = "FPROBE_GOWIN_HOME"
@@ -12,10 +15,6 @@ ENV_VAR = "FPROBE_GOWIN_HOME"
 DEFAULT_GOWIN_HOMES: tuple[Path, ...] = (
     Path(r"C:\Gowin\Gowin_V1.9.11.03_Education_x64"),
 )
-
-
-class ToolchainNotFound(RuntimeError):
-    """必要な Gowin ツールが見つからない。"""
 
 
 @dataclass(frozen=True)
@@ -37,12 +36,4 @@ class GowinToolchain:
     def locate(cls, env: Mapping[str, str] = os.environ) -> "GowinToolchain":
         # 既定値はモジュール属性を実行時に参照する（テストや利用側で差し替え可能にするため）
         candidates = (Path(env[ENV_VAR]),) if ENV_VAR in env else DEFAULT_GOWIN_HOMES
-        problems = []
-        for home in candidates:
-            toolchain = cls(home)
-            missing = toolchain.missing_tools()
-            if not missing:
-                return toolchain
-            problems.append(f"{home}: " + ", ".join(p.name for p in missing) + " が無い")
-        raise ToolchainNotFound(
-            f"Gowin EDA が見つからない（{ENV_VAR} で指定可能）: " + "; ".join(problems))
+        return first_usable(candidates, cls, cls.missing_tools, what="Gowin EDA", env_var=ENV_VAR)

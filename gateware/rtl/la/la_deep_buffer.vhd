@@ -206,6 +206,18 @@ architecture rtl of la_deep_buffer is
   constant RD_W   : natural := 1 + ADDR_BITS + ADDR_BITS + 1;      -- 領域・先頭・拍数
   constant RET_W  : natural := 16 + 32 + EV_BITS;                  -- PS の位置の流れの番号・ロジアナ・イベント
   constant CNT_W  : natural := 32 * 4 + 64;                        -- 総数・未読・最大・stream_beats・イベントの総数
+  -- 数えの組 cnt_src / cnt_dst の並び（上位から: 総数・未読・最大・stream_beats・イベントの総数）の各欄の下端
+  constant C_EVW  : natural := 0;
+  constant C_SB   : natural := C_EVW + 64;
+  constant C_PEAK : natural := C_SB + 32;
+  constant C_UNR  : natural := C_PEAK + 32;
+  constant C_TOT  : natural := C_UNR + 32;
+  -- mem への FIFO の語 m_in / q_data の並び: [127:0] 拍またはイベント、[131:128] トリガの印と拍の中の位置（イベントは 0）、
+  -- [132] 種類（'1' = イベント）、[136:133] 流れの番号の下位 4 ビット
+  constant M_IN_W    : natural := 137;
+  constant M_KIND    : natural := 132;
+  constant M_TRIG    : natural := 131;
+  constant M_EPOCH_L : natural := 133;
   -- 状態の組（mem → sys。同じ周期の値の組）。並びは下の O_*（to_bits と to_status が同じ表を使う）
   type status_t is record
     rd_no    : unsigned(7 downto 0);                               -- 受けた読み出しの要求の通し番号
@@ -310,7 +322,7 @@ architecture rtl of la_deep_buffer is
   -- イベントの合流
   signal evq_valid, evq_ready, m_in_valid, m_in_ready : std_logic;
   signal evq_data : std_logic_vector(127 downto 0);
-  signal m_in : std_logic_vector(136 downto 0);                                -- 流れの番号の下位 4 | 種類 | 印 | 拍
+  signal m_in : std_logic_vector(M_IN_W - 1 downto 0);                                -- 流れの番号の下位 4 | 種類 | 印 | 拍
   signal ev_en_m : std_logic;
   signal m_ev_written : unsigned(63 downto 0);
   signal beat_valid, beat_ready : std_logic;
@@ -328,11 +340,11 @@ architecture rtl of la_deep_buffer is
   signal region_base : unsigned(ADDR_BITS - 1 downto 0);
   signal region_size : unsigned(ADDR_BITS downto 0);
   signal f_valid, f_ready : std_logic;
-  signal f_data : std_logic_vector(136 downto 0);
+  signal f_data : std_logic_vector(M_IN_W - 1 downto 0);
   -- FIFO（ブロック RAM の読み出し）と書き込みの間の受け渡しの段（mem の頭打ちの経路: ブロック RAM の出力から書き込みの
   -- 選択を通って DDR3 の受け渡しまでを、レジスタで切る）
   signal q_valid, q_ready : std_logic;
-  signal q_data : std_logic_vector(136 downto 0);
+  signal q_data : std_logic_vector(M_IN_W - 1 downto 0);
   -- 拍の流れの番号の関所: ロジアナの拍は、書き込み器が同じ番号の流れを始めてから渡す（先の流れの拍は待たせ、前の流れの拍は捨てる）
   signal g_gen_d : unsigned(3 downto 0);                                        -- 拍の番号と、mem の流れの番号の差（mod 16）
   signal w_in_valid, w_in_ready, beat_old : std_logic;
@@ -362,6 +374,7 @@ architecture rtl of la_deep_buffer is
   signal stream_epoch : unsigned(15 downto 0);
   signal unread_r, unread_total, peak_now, o_total, sb_src : unsigned(31 downto 0);
   signal ev_wpos, ev_safe, ev_pub, ev_start : unsigned(EV_BITS - 1 downto 0);
+  signal ev_unacked : unsigned(3 downto 0);
   signal la_safe : unsigned(31 downto 0);                                       -- 応答の来た書きまでのロジアナの拍の総数
   signal la_wptr_safe : unsigned(ADDR_BITS - 1 downto 0);                      -- 同じ時点のロジアナのリングの書き位置
   signal ts_valid, ts_ready : std_logic;
@@ -468,12 +481,12 @@ begin
   evq_ready  <= m_in_ready and not g_valid;
 
   to_mem_i : entity work.async_fifo
-    generic map (WIDTH => 137, DEPTH => 512)
+    generic map (WIDTH => M_IN_W, DEPTH => 512)
     port map (in_clk => clk, in_rst => rst, in_valid => m_in_valid, in_ready => m_in_ready, in_data => m_in,
               in_below_half => fifo_room,
               out_clk => mem_clk, out_rst => mem_rst, out_valid => f_valid, out_ready => f_ready, out_data => f_data);
   to_mem_slice_i : entity work.stream_slice
-    generic map (WIDTH => 137)
+    generic map (WIDTH => M_IN_W)
     port map (clk => mem_clk, rst => mem_rst, in_valid => f_valid, in_ready => f_ready, in_data => f_data,
               out_valid => q_valid, out_ready => q_ready, out_data => q_data);
 
@@ -485,8 +498,8 @@ begin
                  TOTAL_START_BELOW_4G => TOTAL_START_BELOW_4G)
     port map (clk => mem_clk, rst => mem_rst, start => m_start, stop => m_stop or m_full_stop,
               post_beats => m_post, stream => m_stream, ev_enable => ev_en_m, ev_keep => ev_keep_m,
-              in_valid => w_in_valid, in_ready => w_in_ready, in_data => q_data(127 downto 0), in_kind => q_data(132),
-              in_trig => q_data(131), in_slot => unsigned(q_data(130 downto 128)),
+              in_valid => w_in_valid, in_ready => w_in_ready, in_data => q_data(127 downto 0), in_kind => q_data(M_KIND),
+              in_trig => q_data(M_TRIG), in_slot => unsigned(q_data(M_TRIG - 1 downto 128)),
               running => w_running, triggered => open, done => w_done, trigger_beat => w_beat,   -- triggered は sys の符号器の値を使う
               trigger_slot => w_slot, written => w_written, total => w_total, la_pos => w_ptr, ev_written => m_ev_written,
               ev_pos => ev_wpos,
@@ -495,10 +508,10 @@ begin
   -- 流れの番号の関所（ロジアナの拍だけ）: 差 0 = いまの流れ（書き込み器へ。止まっていれば書き込み器が捨てる）、1〜7 = 先の流れ
   -- （書き込み器がその流れを始めるまで待たせる）、8〜15 = 前の流れ（捨てる）。mem の番号は書き込み器の開始と同じ辺で変わる
   -- stream_epoch。sys が mem より先に進むのは高々数個（開始の受け渡しの間）
-  g_gen_d  <= unsigned(q_data(136 downto 133)) - stream_epoch(3 downto 0);
-  beat_old <= '1' when q_data(132) = '0' and g_gen_d(3) = '1' else '0';
-  w_in_valid <= q_valid when q_data(132) = '1' or g_gen_d = 0 else '0';
-  q_ready    <= w_in_ready when q_data(132) = '1' or g_gen_d = 0 else beat_old;
+  g_gen_d  <= unsigned(q_data(M_IN_W - 1 downto M_EPOCH_L)) - stream_epoch(3 downto 0);
+  beat_old <= '1' when q_data(M_KIND) = '0' and g_gen_d(3) = '1' else '0';
+  w_in_valid <= q_valid when q_data(M_KIND) = '1' or g_gen_d = 0 else '0';
+  q_ready    <= w_in_ready when q_data(M_KIND) = '1' or g_gen_d = 0 else beat_old;
 
   ev_en_i : entity work.sync_bit
     generic map (SAME_CLOCK => SAME_CLOCK)
@@ -507,9 +520,9 @@ begin
   -- 応答の来た書きまでの位置（PS に公開する）
   track_i : entity work.la_write_track
     generic map (ADDR_BITS => ADDR_BITS)
-    port map (clk => mem_clk, rst => mem_rst, start => m_start, wr_fire => w_valid and w_ready, wr_event => q_data(132),
+    port map (clk => mem_clk, rst => mem_rst, start => m_start, wr_fire => w_valid and w_ready, wr_event => q_data(M_KIND),
               wr_pending => wr_pending, la_total => w_total, la_ptr => w_ptr, ev_pos => ev_wpos,
-              la_safe => la_safe, la_ptr_safe => la_wptr_safe, ev_safe => ev_safe);
+              la_safe => la_safe, la_ptr_safe => la_wptr_safe, ev_safe => ev_safe, ev_unacked => ev_unacked);
 
   ---------------------------------------------------------------------------------------------
   -- mem: ストリームの段取りと読み出し
@@ -518,7 +531,7 @@ begin
     generic map (ADDR_BITS => ADDR_BITS, STREAM_EVENTS => STREAM_EVENTS, TOTAL_START_BELOW_4G => TOTAL_START_BELOW_4G)
     port map (clk => mem_clk, rst => mem_rst, start => m_start, epoch => m_epoch, stream => m_stream, gaps => m_gaps,
               ps_read => m_ps_read, ev_first => m_post(EV_BITS - 1 downto 0),
-              w_total => w_total, w_running => w_running, ev_wpos => ev_wpos, ev_safe => ev_safe, full_stop => m_full_stop,
+              w_total => w_total, w_running => w_running, ev_wpos => ev_wpos, ev_unacked => ev_unacked, ev_safe => ev_safe, full_stop => m_full_stop,
               ret_epoch => unsigned(ret_dst(RET_W - 1 downto RET_W - 16)),
               ret_la => unsigned(ret_dst(31 + EV_BITS downto EV_BITS)), ret_ev => unsigned(ret_dst(EV_BITS - 1 downto 0)),
               rd_busy => r_busy, rd_start => s_start, rd_region => s_region, rd_first => s_first, rd_count => s_count,
@@ -617,11 +630,11 @@ begin
     generic map (WIDTH => CNT_W, SAME_CLOCK => SAME_CLOCK)
     port map (src_clk => mem_clk, src_rst => mem_rst, src_load => '1', src_value => cnt_src, src_ready => open,
               dst_clk => clk, dst_rst => rst, dst_value => cnt_dst, dst_changed => open);
-  stat_written <= unsigned(cnt_dst(191 downto 160));
-  stat_unread  <= unsigned(cnt_dst(159 downto 128));
-  stat_peak    <= unsigned(cnt_dst(127 downto 96));
-  stream_beats <= ps_out_beats when ps_last = '1' else unsigned(cnt_dst(95 downto 64));
-  ev_written   <= unsigned(cnt_dst(63 downto 0));
+  stat_written <= unsigned(cnt_dst(C_TOT + 31 downto C_TOT));
+  stat_unread  <= unsigned(cnt_dst(C_UNR + 31 downto C_UNR));
+  stat_peak    <= unsigned(cnt_dst(C_PEAK + 31 downto C_PEAK));
+  stream_beats <= ps_out_beats when ps_last = '1' else unsigned(cnt_dst(C_SB + 31 downto C_SB));
+  ev_written   <= unsigned(cnt_dst(C_EVW + 63 downto C_EVW));
 
   -- PS に公開する組（どれも st.epoch の流れのもの）
   ps_pub_epoch  <= st.epoch;

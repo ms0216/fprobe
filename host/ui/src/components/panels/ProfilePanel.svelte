@@ -4,6 +4,7 @@
   // とカバレッジ（近似）、関数を開くと行ごと。時間軸の基準と選択のカーソルの間だけの集計（IAR の Timeline → Function
   // Profiler）。ソースの行番号に当たりの割合とカバレッジの色を出す（lib/profile.ts の sourceHeat を Source が読む）
   import { onDestroy } from "svelte";
+  import Req from "./Req.svelte";
   import { isNoData } from "../../lib/api";
   import { shared } from "../../lib/context";
   import SamplerNotice from "./SamplerNotice.svelte";
@@ -189,14 +190,14 @@
           <option value="itm">{$i18n("profile.itm")}</option>
           <option value="pcsr">{$i18n("profile.pcsr")}</option>
         </select></label>
-      <label>{$i18n("profile.rate")}<span class="req" aria-hidden="true">*</span>
+      <label>{$i18n("profile.rate")}<Req />
         <select bind:value={rate} aria-required="true">
           {#if rate === null}<option value={null} disabled></option>{/if}
           {#each RATES as r (r)}<option value={r}>{r / 1000} kHz</option>{/each}
         </select></label>
       {#if method === "itm"}
         <label title={clockAuto === "SystemCoreClock" ? $i18n("profile.clockFromElf") : ""}>
-          {$i18n("profile.coreClock")}<span class="req" aria-hidden="true">*</span><input class="num" type="number" min="1"
+          {$i18n("profile.coreClock")}<Req /><input class="num" type="number" min="1"
             aria-required="true" value={clockMhz ?? ""} onchange={(e) => setClock(Number(e.currentTarget.value))} /></label>
       {/if}
       <button class="primary" disabled={!connected || !$poller.loaded || rate === null || (method === "itm" && !clockMhz)}

@@ -309,8 +309,8 @@ begin
             tx_state <= T_SUM;
 
           when T_SUM =>                                -- IP ヘッダのチェックサム（宛先と長さ以外は定数）
-            sum_t <= resize(unsigned'(x"4500"), 20) + resize(ip_len_t, 20) + resize(unsigned'(x"4000"), 20)
-                     + resize(unsigned(std_logic_vector'(x"40" & proto_t)), 20)
+            sum_t <= resize(unsigned(std_logic_vector'(IP_VER_IHL_V4 & x"00")), 20) + resize(ip_len_t, 20) + resize(unsigned(std_logic_vector'(IP_FLAGS_DF & x"00")), 20)
+                     + resize(unsigned(std_logic_vector'(IP_TTL_DEFAULT & proto_t)), 20)
                      + resize(unsigned(IP(31 downto 16)), 20) + resize(unsigned(IP(15 downto 0)), 20)
                      + resize(unsigned(dst_ip_t(31 downto 16)), 20) + resize(unsigned(dst_ip_t(15 downto 0)), 20);
             tx_state <= T_HDR;
@@ -340,11 +340,11 @@ begin
               else
                 h(ETH_TYPE_POS)     := ETHERTYPE_IPV4(15 downto 8);
                 h(ETH_TYPE_POS + 1) := ETHERTYPE_IPV4(7 downto 0);
-                h(IP_VER_IHL_POS)   := x"45";
+                h(IP_VER_IHL_POS)   := IP_VER_IHL_V4;
                 h(IP_TOTAL_LEN_POS)     := std_logic_vector(ip_len_t(15 downto 8));
                 h(IP_TOTAL_LEN_POS + 1) := std_logic_vector(ip_len_t(7 downto 0));
-                h(IP_FLAGS_POS)     := x"40";                -- DF
-                h(IP_TTL_POS)       := x"40";                -- TTL 64
+                h(IP_FLAGS_POS)     := IP_FLAGS_DF;            -- DF
+                h(IP_TTL_POS)       := IP_TTL_DEFAULT;       -- TTL 64
                 h(IP_PROTO_POS)     := proto_t;
                 h(IP_CHECKSUM_POS)     := std_logic_vector(s(15 downto 8));
                 h(IP_CHECKSUM_POS + 1) := std_logic_vector(s(7 downto 0));
@@ -354,7 +354,7 @@ begin
                 end loop;
                 if kind = K_ICMP then
                   -- 型 8 → 0（エコー応答）: チェックサムに 0x0800 を足す（1 の補数の和）。ICMP の残りは本体から
-                  c := resize(unsigned(icmp_sum_r), 17) + to_unsigned(16#0800#, 17);
+                  c := resize(unsigned(icmp_sum_r), 17) + to_unsigned(ICMP_ECHO_CSUM_ADD, 17);
                   c := resize(c(15 downto 0), 17) + resize(c(16 downto 16), 17);
                   h(ICMP_CHECKSUM_POS)     := std_logic_vector(c(15 downto 8));
                   h(ICMP_CHECKSUM_POS + 1) := std_logic_vector(c(7 downto 0));

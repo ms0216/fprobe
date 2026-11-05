@@ -201,7 +201,7 @@ begin
         when P_READ_CSW       => req_r <= AP_R_CSW;                      -- 読みは 1 つ後で返る
         when P_READ_TAR       => req_r <= AP_R_TAR;                      -- CSW が返る
         when P_RDBUFF_TAR     => req_r <= DP_R_RDBUFF;                   -- TAR が返る
-        when P_CSW            => req_r <= AP_W_CSW; data_r <= csw(31 downto 6) & "00" & csw(3) & "010";   -- 32 ビット、増加なし
+        when P_CSW            => req_r <= AP_W_CSW; data_r <= csw_word32(csw, CSW_ADDRINC_OFF);   -- 32 ビット、増加なし
         when P_TAR            => req_r <= AP_W_TAR; data_r <= cur_addr;
         when P_DRW            => req_r <= AP_W_DRW; data_r <= cur_value;
         when P_CHECK          => req_r <= DP_R_CTRL;

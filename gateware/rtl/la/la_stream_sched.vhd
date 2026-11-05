@@ -50,6 +50,7 @@ entity la_stream_sched is
     w_total      : in  unsigned(31 downto 0);
     w_running    : in  std_logic;
     ev_wpos      : in  unsigned(ring_ev_bits(ADDR_BITS) - 1 downto 0);
+    ev_unacked   : in  unsigned(3 downto 0);                             -- 応答の来ていないイベントの書きの数（ev_safe = ev_wpos - ev_unacked）
     ev_safe      : in  unsigned(ring_ev_bits(ADDR_BITS) - 1 downto 0);   -- 応答の来た書きまでのイベントの書き位置
     full_stop    : out std_logic;                                        -- 1 周期: 書き込みを止める
     -- PS の読み終えた位置
@@ -281,7 +282,7 @@ begin
 
   -- PS に公開するイベントの書き位置（状態の組と同じ時点の値）。止めた後の PS の流れでは、読み位置からの距離が ev_lim より
   -- 遠ければ ev_lim にする
-  ev_pub <= ev_lim when ps_m = '1' and s_on = '1' and w_running = '0' and ev_safe - ev_rpos > ev_lim - ev_rpos else ev_safe;
+  ev_pub <= ev_lim when ps_m = '1' and s_on = '1' and w_running = '0' and (ev_wpos - ev_rpos) - resize(ev_unacked, EV_BITS) > ev_lim - ev_rpos else ev_safe;   -- (wpos - k) - rpos = (wpos - rpos) - k（法 2^n で同値。wr_out からの桁上げ連鎖を 1 つ減らす）
 
   full_stop    <= stop_r;
   rd_start     <= start_r;

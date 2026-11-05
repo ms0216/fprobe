@@ -2,14 +2,13 @@
 -- 機能の有無はケイパビリティでも申告する）。
 library ieee;
 use ieee.std_logic_1164.all;
+use work.csr_bus_pkg.all;
 
 entity csr_absent is
   port (
-    clk       : in  std_logic;
-    bus_req   : in  std_logic;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out std_logic_vector(31 downto 0)
+    clk     : in  std_logic;
+    bus_req : in  std_logic;
+    bus_rsp : out csr_rsp_t
   );
 end entity;
 
@@ -22,7 +21,7 @@ begin
       ack <= bus_req and not ack;
     end if;
   end process;
-  bus_ack   <= ack;
-  bus_err   <= ack;                            -- 応答の周期だけ（csr_bus_pkg の約束）
-  bus_rdata <= (others => '0');
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= ack;                        -- 応答の周期だけ（csr_bus_pkg の約束）
+  bus_rsp.rdata <= (others => '0');
 end architecture;

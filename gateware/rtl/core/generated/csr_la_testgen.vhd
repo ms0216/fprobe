@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック la_testgen（0x00000CC0, 64 バイト）: 外部ピン入力の限界を測る・流れる中身を確かめる試験用の方形波（ケイパビリティ la_testgen のある構成だけ。無い構成では読むとエラー。docs/superpowers/specs/2026-11-01-la-testgen-deep-design.md）。刻むクロックは、取り込みが速い構成（比 > 1）なら cap_clk、そうでなければ sys
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_la_testgen is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_enable : out std_logic;   -- control.enable（RW）
     control_edge : out std_logic;   -- control.edge（RW）
     period : out std_logic_vector(31 downto 0);   -- period（RW）
@@ -37,7 +33,7 @@ architecture rtl of csr_la_testgen is
   signal high_r : std_logic_vector(31 downto 0) := x"00000001";
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -56,19 +52,19 @@ begin
           when 0 =>   -- control
             rdata(0) <= control_enable_r;
             rdata(1) <= control_edge_r;
-            if bus_we = '1' then
-              control_enable_r <= bus_wdata(0);
-              control_edge_r <= bus_wdata(1);
+            if bus_cmd.we = '1' then
+              control_enable_r <= bus_cmd.wdata(0);
+              control_edge_r <= bus_cmd.wdata(1);
             end if;
           when 1 =>   -- period
             rdata(31 downto 0) <= period_r;
-            if bus_we = '1' then
-              period_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              period_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 2 =>   -- high
             rdata(31 downto 0) <= high_r;
-            if bus_we = '1' then
-              high_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              high_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when others =>
             err <= '1';
@@ -77,9 +73,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_enable <= control_enable_r;
   control_edge <= control_edge_r;
   period <= period_r;

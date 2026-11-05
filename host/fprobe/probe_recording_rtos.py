@@ -14,17 +14,13 @@ Probe（fprobe.probe）が API の名前を委ねるサービス（fprobe.probe_
 from .profile.exceptions import Activation, ExceptionProfile
 from .profile.stats import Distribution
 from .rtos.analysis import load_series
-from .rtos.timeline import Gap, Run, Timeline
+from .rtos.timeline import STREAM, Gap, Run, Timeline
+from .probe_rtos_run import DURATIONS, _us
 from .probe_service import HostView
 
 __all__ = ["RecordingRtosService", "isr_activations_of", "timeline_of"]
 
-STREAM = "rtos"
 WINDOWS_LIMIT = 1000                     # recording_cpu_load が返す窓の数の既定の上限
-
-
-def _us(ticks: float | None, hz: float) -> float | None:
-    return None if ticks is None else ticks * 1e6 / hz
 
 
 def timeline_of(events) -> tuple[Timeline, set[int], list[tuple[int, int]]] | None:
@@ -143,7 +139,7 @@ class RecordingRtosService:
         tl, idle, isr = built
         stats = tl.stats()
         for row in stats["tasks"].values():
-            row.update({f"{k}_us": _us(row[k], hz) for k in ("total", "max_run", "min_run", "mean_run", "max_cut_run")})
+            row.update({f"{k}_us": _us(row[k], hz) for k in DURATIONS})
         out = {"recording": view.directory.name, "method": tl.method, "timebase_hz": hz, "t0": tl.t0, "t1": tl.t1,
                "lower_bound": tl.lower_bound, "stats": stats,
                "gaps_not_recorded": sum(1 for g in tl.gaps if g.reason == "not_recorded")}

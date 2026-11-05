@@ -20,6 +20,7 @@ from typing import Protocol
 __all__ = ["CAUSES", "CSR", "DebugModule", "Dmi", "DmError", "GPR_NAMES"]
 
 # DM のレジスタ（DMI の番号）
+WORD_MASK = 0xFFFFFFFF                                 # 32 ビットの語
 DATA0, DMCONTROL, DMSTATUS, HARTINFO, ABSTRACTCS, COMMAND = 0x04, 0x10, 0x11, 0x12, 0x16, 0x17
 PROGBUF0, SBCS, SBADDRESS0, SBDATA0 = 0x20, 0x38, 0x39, 0x3C
 
@@ -230,7 +231,7 @@ class DebugModule:
         return self.dmi.read(DATA0)
 
     def write_gpr(self, n: int, value: int) -> None:
-        self.dmi.write(DATA0, value & 0xFFFFFFFF)
+        self.dmi.write(DATA0, value & WORD_MASK)
         self._command(AARSIZE_32 | TRANSFER | WRITE | (REGNO_GPR + n), f"x{n} の書き込み")
 
     def _program(self, instruction: int) -> None:
@@ -261,7 +262,7 @@ class DebugModule:
     def write_csr(self, csr: int, value: int) -> None:
         if self._csr_abstract is not False:
             try:
-                self.dmi.write(DATA0, value & 0xFFFFFFFF)
+                self.dmi.write(DATA0, value & WORD_MASK)
                 self._command(AARSIZE_32 | TRANSFER | WRITE | csr, f"CSR 0x{csr:03X} の書き込み")
                 self._csr_abstract = True
                 return
@@ -272,7 +273,7 @@ class DebugModule:
         saved = self.read_gpr(S0)
         try:
             self._program(_csrw(csr, S0))
-            self.dmi.write(DATA0, value & 0xFFFFFFFF)
+            self.dmi.write(DATA0, value & WORD_MASK)
             self._command(AARSIZE_32 | TRANSFER | WRITE | POSTEXEC | (REGNO_GPR + S0),
                           f"CSR 0x{csr:03X} の書き込み（プログラムバッファ）")
         finally:

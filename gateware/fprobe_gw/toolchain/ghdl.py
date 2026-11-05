@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .gowin import ToolchainNotFound
+from .locate import first_usable
 
 __all__ = ["DEFAULT_GHDL_HOMES", "ENV_VAR", "WINDOWS", "GhdlToolchain", "ghdl_name", "vpi_name"]
 
@@ -115,12 +115,4 @@ class GhdlToolchain:
             on_path = shutil.which("ghdl", path=env.get("PATH", ""))
             if on_path:
                 candidates.append(Path(on_path).resolve().parent.parent)
-        problems = []
-        for home in candidates:
-            toolchain = cls.at(home)
-            missing = toolchain.missing_files()
-            if not missing:
-                return toolchain
-            problems.append(f"{home}: " + ", ".join(p.name for p in missing) + " が無い")
-        detail = "; ".join(problems) if problems else "候補なし"
-        raise ToolchainNotFound(f"GHDL が見つからない（{ENV_VAR} で指定可能）: {detail}")
+        return first_usable(candidates, cls.at, cls.missing_files, what="GHDL", env_var=ENV_VAR)

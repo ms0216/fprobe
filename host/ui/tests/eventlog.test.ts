@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { Json } from "../../api/generated/fprobe_api";
 import {
-  emptyCondition, eventsCsv, histogramBars, intervalsInBin, kindRows, longestMarks, notesOf,
+  emptyCondition, eventsCsv, histogramBars, kindRows, longestMarks, notesOf,
   fieldText, measureParams, parseNumber, searchMarks, summary, toQuery, type RecEvent,
 } from "../src/lib/eventlog";
 import { venum, vint } from "./value-kinds";
@@ -85,18 +85,12 @@ describe("結果の表示", () => {
 });
 
 describe("区間の統計", () => {
-  const hist = [{ lo: 0, hi: 10, count: 3 }, { lo: 10, hi: 20, count: 1 }];
-  it("棒 → その区間（生データ）は timing.measure の interval_bins で選ぶ（画面で棒を求めない。b21）", () => {
-    // 時間と棒の範囲が食い違う interval_bins を渡し、画面がデーモンの棒の番号だけを見ていることを確かめる
-    const intervals: [number, number][] = [[100, 3], [200, 12], [300, 20]];
-    expect(intervalsInBin(intervals, [1, 0, 1], 1)).toEqual([[100, 3], [300, 20]]);
-    expect(intervalsInBin(intervals, [1, 0, 1], 0)).toEqual([[200, 12]]);
-  });
-
-  it("長い順の上位のある棒（longest の bin）・選んだ棒を目立たせる（外れ値の経験則は使わない。b21）", () => {
-    const bars = histogramBars(hist, 10, null, [{ t: 300, t_end: 320, duration: 20, bin: 0 }]);
+  const hist = [{ lo: 0, hi: 10, count: 3, intervals: [[100, 3]] as [number, number][], has_longest: true },
+                { lo: 10, hi: 20, count: 1, intervals: [[200, 12]] as [number, number][], has_longest: false }];
+  it("長い順の上位のある棒（API の has_longest）・選んだ棒を目立たせる（外れ値の経験則は使わない。b21）", () => {
+    const bars = histogramBars(hist, 10, null);
     expect(bars.map((b) => [b.x0, b.x1, b.y, b.mark])).toEqual([[0, 1, 3, true], [1, 2, 1, false]]);
-    expect(histogramBars(hist, 10, 1, [])[1].mark).toBe(true);
+    expect(histogramBars(hist, 10, 1)[1].mark).toBe(true);
   });
 
   it("長い順の上位は区間の印（普通の色。異常とは言わない）", () => {

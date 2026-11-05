@@ -12,3 +12,6 @@ impl/
 # リポジトリの直下にできる道具の副産物（試験の道具のキャッシュ・Vivado の実行時間の記録）
 /node_modules/
 /dfx_runtime.txt
+
+# 合成の A/B ビルドの作業ディレクトリ（成果物。履歴に入れない）
+gateware/build_*/

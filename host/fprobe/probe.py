@@ -56,20 +56,24 @@ from .probe_profile import ProfileService
 from .probe_profile_export import ProfileExportService
 from .probe_recording import RecordingService
 from .probe_recording_rtos import RecordingRtosService
+from .probe_rtt import RttService
 from .probe_rtos import RtosService
 from .probe_rtos_analysis import RtosAnalysisService
 from .probe_rules import RulesService, inject_host
 from .probe_safety import SafetyService
+from .probe_semihosting import SemihostingService
 from .probe_snapshot import SnapshotService
 from .probe_stack import StackService
 from .probe_streams import StreamService
 from .probe_swo import SwoService
+from .probe_swo_itm import SwoDecodeService
 from .probe_swo_rx import SwoReceiveService
 from .probe_system import SystemService
 from .probe_target import TargetService
 from .probe_terminal import TerminalService
 from .probe_testpoint import TestpointService
 from .probe_timeline import TimelineService
+from .probe_trace import TraceService
 from .probe_uart import UartService
 from .probe_ui_state import UiStateService
 from .probe_user import UserService
@@ -111,6 +115,7 @@ __all__ = ["Probe", "SOURCE_LIMIT"]
 @expose("_svc_terminal", TerminalService)
 @expose("_svc_streams", StreamService)
 @expose("_svc_formats", FormatService)
+@expose("_svc_trace", TraceService)
 @expose("_svc_elf_watch", ElfWatchService)
 @expose("_svc_elf_files", ElfFileService)
 @expose("_svc_device", DeviceService)
@@ -135,6 +140,9 @@ __all__ = ["Probe", "SOURCE_LIMIT"]
 @expose("_svc_execution", ExecutionService)
 @expose("_svc_inspect", InspectService)
 @expose("_svc_observe", ObserveService)
+@expose("_svc_rtt", RttService)
+@expose("_svc_semihosting", SemihostingService)
+@expose("_svc_swo_itm", SwoDecodeService)
 @expose("_svc_breakpoints", BreakpointService)
 @expose("_svc_flash", FlashService)
 @expose("_svc_snapshot", SnapshotService)
@@ -196,6 +204,9 @@ class Probe:
         self._svc_gdb_trace = GdbTraceService(self)
         self._svc_hooks = HookService(self)
         self._svc_observe = ObserveService(self)
+        self._svc_rtt = RttService(self)
+        self._svc_semihosting = SemihostingService(self)
+        self._svc_swo_itm = SwoDecodeService(self)
         self._svc_profile = ProfileService(self)
         self._svc_rtos = RtosService(self)
         self._svc_snapshot = SnapshotService(self)
@@ -212,6 +223,7 @@ class Probe:
         self._svc_terminal = TerminalService(self)
         self._svc_ui_state = UiStateService(self)
         self._svc_formats = FormatService(self)
+        self._svc_trace = TraceService(self)
         self._svc_stack = StackService(self)
         self._svc_design = DesignService(self, bitstreams)                     # Primer の構成の書き替え（ビットストリームの置き場所）
         self._svc_monitor = MonitorModeService(self)
@@ -262,7 +274,7 @@ class Probe:
             offline = self._offline_target()
             if offline is not None:
                 return offline
-            raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
+            raise NotConnected("ターゲット未接続（MCU なら target.connect を先に呼ぶ。MCP の道具名は target_connect。Linux のプロセスなら linux.halt.open → linux.halt.debug.attach）")
         # Flash を持てば Flash のブレークポイントで包み、モニタ方式ならモニタの包み（fprobe.monitor）で包む
         return self._monitor_wrap(self._flash_bp_wrap(self._debug.target))
 

@@ -9,7 +9,7 @@ from array import array
 
 import pytest
 
-from fprobe import la, la_wave
+from fprobe import la, la_stream, la_wave
 from fprobe.la import StreamChunk
 
 
@@ -17,7 +17,7 @@ from fprobe.la import StreamChunk
 def numpy_mode(request, monkeypatch):
     if request.param == "python":
         monkeypatch.setattr(la_wave, "_np", None)
-        monkeypatch.setattr(la, "_np", None)
+        monkeypatch.setattr(la_stream, "_np", None)
     return request.param
 
 

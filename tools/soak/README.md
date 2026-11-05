@@ -54,7 +54,7 @@ obs_long + obs_reopen = 50%、観測全体で 78%（ロジアナ系は la 4 + la
 
 ## 実機で確かめてほしい点（手本の試験と違うところ）
 
-- `RealRig` は `Probe(eth=HOST)`（API の実装）を使う。条件の数え・条件からの停止は手本と同じ Probe の呼び出し。それ以外は手本どおり Session/FpgaObs/EventLog/Sampler/DeepAnalyzer。
+- `RealRig`（`soak_rig.py`）は `Probe(eth=HOST)`（API の実装）を使う。条件の数え・条件からの停止は手本と同じ Probe の呼び出し。それ以外は手本どおり Session/FpgaObs/EventLog/Sampler/DeepAnalyzer。
 - obs_long は 60 秒ぶんのイベント（約 40 万件）を一度に読む。リングの容量とイベント読みの時間（長いと 1 回が 60 秒よりかなり長い）。件数が合わなければ lost に出る。
 - obs_quiet が組 1 を `obs.select(1)` で見る。組 1 の値が 2^28 サイクルごとに 1 増えるという前提（Primer のカウンタの 43〜28 ビット）。違えば `--quiet-interval`。
 - obs_halt は Nucleo に attach して走っている前提（走っていなければ resume する）。Nucleo のファームがその間止まっても構わないこと。

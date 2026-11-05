@@ -6,8 +6,8 @@ PL の書き込みは JTAG（Vivado の hw_server。シリアル 1234-TUL・IDCO
 SSH で有効にする（fprobe_gw/toolchain/pynq_loader.py）。PC とのリンクは PS の Linux の中継（UDP 63920、Ethernet 版と同じ形式）。
 """
 
+from ..toolchain.pll import MmcmSolution
 from ..toolchain.project import Pin
-from ..toolchain.vivado import MmcmSolution
 from . import Board, Ethernet
 
 __all__ = ["PYNQ_Z2"]

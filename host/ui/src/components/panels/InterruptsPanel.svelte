@@ -1,5 +1,6 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import Req from "./Req.svelte";
   // Interrupts（SystemView の Context / Runtime・IAR の Interrupt Log Summary・MCUXpresso の SWO Interrupt Trace の型）:
   // 割り込みごとの回数・合計・排他（自分）・最小・最大・平均・負荷と最大の回の時刻。源は記録の割り込みの区間（時刻が
   // タイムベース = 時間軸へ飛べる）か、Code Profile の SWO 例外トレース（profile.exceptions）。選んだ割り込みの時間の
@@ -162,7 +163,7 @@
           <span>{$i18n("interrupts.distribution", { name: chosen.name })}</span>
           {#if active === "recording"}
             <label>{$i18n("interrupts.bins")}<input class="num" bind:value={binsText} inputmode="numeric" size="4"
-              aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
+              aria-required="true" /><Req /></label>
             <label title={$i18n("interrupts.longestTip")}>{$i18n("interrupts.longest")}<input class="num"
               bind:value={longestText} inputmode="numeric" size="4" aria-required="true" /><span class="req"
               aria-hidden="true">*</span></label>

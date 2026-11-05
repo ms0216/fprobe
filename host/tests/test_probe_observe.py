@@ -391,10 +391,10 @@ class CountingCpu(FakeCpu):
 
 @pytest.fixture
 def sampled(tmp_path, monkeypatch):
-    from fprobe import probe_observe
+    from fprobe import probe_rtt
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
-    monkeypatch.setattr(probe_observe, "EventLog", FakeEventLog)
-    monkeypatch.setattr(probe_observe, "RTT_RESYNC_S", 30.0)
+    monkeypatch.setattr(probe_rtt, "EventLog", FakeEventLog)
+    monkeypatch.setattr(probe_rtt, "RTT_RESYNC_S", 30.0)
     FakeEventLog.events = []
     dev = SamplerDevice()
     p = Probe("unused")

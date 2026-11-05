@@ -54,6 +54,9 @@ claude mcp add fprobe -- <venv>\Scripts\fprobe-mcp.exe --serial <fprobe の USB 
 
 - 道具の名前は API のメソッド名の `.` を `_` にしたものです（`fpga_obs.open` → `fpga_obs_open`、`recording.la_stream.start` → `recording_la_stream_start`）。
 - 名前と引数の一覧は [../api.md](../api.md)（生成物）で、仕様の正は `host/api/fprobe_api.json` です。
+- **API（WebSocket の JSON-RPC）の利用者は、API 自身に聞けます: `session.methods`。** `prefix`（名前の先頭。`"target."`）で絞った一覧
+  （name・kind。`with_summary = true` で summary も）、`name` で 1 つのメソッドの全部（summary・引数と応答の JSON Schema）。名前を当てずっぽうで
+  試さない。無いメソッドを呼ぶと、同じ前半のメソッドを挙げて断る。MCP では全メソッドがもともと道具として並ぶ。
 - 例外: セミホスティングのファイル操作（`debug.semihosting.configure` の `file_root`）は API からだけ指定でき、AI の道具には出ません。
 - AI が最初に読む案内は `host/fprobe/mcp_instructions.py` の `INSTRUCTIONS` です。道具の使い方の流れだけを書いてあり、名前・引数の正は仕様です
   （`INSTRUCTIONS` に書かれた `名前` がすべて実在する道具であることは試験 `host/tests/test_api_mcp.py` が確かめます）。

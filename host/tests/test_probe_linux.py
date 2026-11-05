@@ -458,7 +458,7 @@ def test_batch_timeout_returns_partial_output(probe, monkeypatch):
     """時間切れでも例外にせず、途中までの出力と timed_out を返す（ターゲットの側も timeout で gdb を終わらせる）"""
     monkeypatch.setenv("FPROBE_FAKE_SSH_REPLIES", json.dumps({"gdb -batch": "#0  main ()\n"}))
     monkeypatch.setenv("FPROBE_FAKE_SSH_DELAY", "30")
-    monkeypatch.setattr("fprobe.probe_linux.BATCH_BACKSTOP_S", 0.5)
+    monkeypatch.setattr("fprobe.probe_linux_tools.BATCH_BACKSTOP_S", 0.5)
     probe.linux_connect(target="pynq", host="h", user="u")
     r = probe.linux_gdb_batch(target="pynq", commands=["continue"], pid=5, timeout_s=0.5)
     assert r["timed_out"] is True and "main ()" in r["stdout"] and r["command"].startswith("timeout -s TERM 0.5 gdb")

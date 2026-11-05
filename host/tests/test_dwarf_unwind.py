@@ -63,6 +63,8 @@ def test_o0_deep_recursion_unwinds_to_reset():
         assert inner.cfa == outer.registers.read(13)                 # CFA = 呼び出し元の sp
     with pytest.raises(NotAvailable):
         frames[1].registers.read(0)                                  # caller-saved は呼び出し元では分からない
+    # 戻り番地の bit 0 は事実として残す（最内のフレームは None。Cortex-M の Thumb は 1）
+    assert frames[0].thumb is None and all(f.thumb is True for f in frames[1:])
 
 
 def test_o1_restores_callee_saved_core_and_fp_registers():

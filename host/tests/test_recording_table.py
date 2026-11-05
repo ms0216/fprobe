@@ -9,7 +9,8 @@ import sqlite3
 
 import pytest
 
-from fprobe.recording import Event, Recorder, Recording, _events
+from fprobe.recording import Event, Recorder, Recording
+from fprobe.recording_model import events_of as _events
 from fprobe.recording_sql import query
 from fprobe.recording_table import VERSION, EventTable, version_of
 

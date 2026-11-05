@@ -7,6 +7,7 @@ import { errorText, type DaemonConnection } from "./api";
 import { EN, type Key, type Translate } from "./i18n";
 import { load, save } from "./prefs";
 import type { TimelineSnapshot } from "./timeline/state";
+import { addListener } from "./store";
 
 /** PC のサンプル（DWT_PCSR の読み 1 つ）。引けない欄は null */
 export interface CodeAtSample {
@@ -164,9 +165,7 @@ export class CodeAtLink {
   }
 
   subscribe(fn: (s: CodeAtSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   /** 窓が連動を使い始める（やめる関数を返す）。使う窓が現れたら、今のカーソルで問い合わせる */

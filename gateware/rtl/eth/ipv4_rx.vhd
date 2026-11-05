@@ -46,7 +46,7 @@ begin
       if valid = '1' then
         n := to_integer(pos);
         if n = IP_VER_IHL_POS then
-          form_ok <= data = x"45";                     -- 版 4・オプションなし
+          form_ok <= data = IP_VER_IHL_V4;                     -- 版 4・オプションなし
         elsif n = IP_TOTAL_LEN_POS then
           total_r(15 downto 8) <= unsigned(data);
         elsif n = IP_TOTAL_LEN_POS + 1 then

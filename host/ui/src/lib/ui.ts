@@ -1,6 +1,7 @@
 // 画面の共有の状態（パネルどうし・メニュー・ツールバーが使う）: ソースで選んだ行、最近開いた ELF、開いている
 // ダイアログ、ほかのビューからの「その場所を見せて」（ソースの行・メモリの番地）。Svelte に依らない（store の約束 subscribe だけを満たす）。
 import { load, save } from "./prefs";
+import { addListener } from "./store";
 
 export type Dialog = "openElf" | "connect" | "settings" | "shortcuts" | "about" | "loadSvd" | null;
 
@@ -33,9 +34,7 @@ export class UiState {
   private listeners = new Set<(s: UiSnapshot) => void>();
 
   subscribe(fn: (s: UiSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   get snapshot(): UiSnapshot {

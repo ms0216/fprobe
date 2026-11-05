@@ -1,6 +1,7 @@
 // 画面の状態: デーモンの応答と通知から組み立てる。Svelte に依らない（store の約束 subscribe だけを満たす）。
 import { errorText, type CallOptions, type DaemonConnection, type LinkState, type Methods, type Result } from "./api";
 import { setChannelLayout } from "./waveform";
+import { addListener } from "./store";
 
 export interface ActivityEntry {
   seq: number;
@@ -66,9 +67,7 @@ export class AppState {
   }
 
   subscribe(fn: (s: Snapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   /** AI の利用者がつながっていて、一時停止していない（2 つの事実の組。AI が作業中かは判定しない: つながっているだけで

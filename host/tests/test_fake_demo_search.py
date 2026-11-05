@@ -80,3 +80,15 @@ def test_cross_trigger_settings_are_remembered_and_the_sequence_advances(demo, m
     assert status["armed"] and status["stage_states"] == ["done", "done"]
     with pytest.raises(KeyError):
         demo.xtrig_set_sequence([{"when": ["nope"]}])
+
+
+def test_an_api_method_the_demo_does_not_implement_says_so_instead_of_leaking_the_fake_s_internal_name():
+    """偽の機器が実装しない API のメソッドは『デモに無い』と断る（AttributeError: 'FakeProbe' object has no attribute ... を出さない。
+    新規利用者の役の Haiku が内部の名前を見て混乱した 2026-11-05）。"""
+    import pytest
+    from fake_daemon import FakeProbe
+    from fake_probe_contract import NotInDemo
+    with pytest.raises(NotInDemo):
+        FakeProbe().read_memory(0x20000000, 16)
+    with pytest.raises(AttributeError):
+        FakeProbe().no_such_thing_at_all

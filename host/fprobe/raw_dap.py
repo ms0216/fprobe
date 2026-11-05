@@ -20,6 +20,7 @@ __all__ = ["Ack", "DP_ABORT", "DP_CTRL_STAT", "DP_DPIDR", "DP_DLPIDR", "DP_NAMES
            "DP_TARGETID", "DapError", "DpPort", "RawDap", "ack_of", "dp_address"]
 
 DP_DPIDR, DP_ABORT, DP_CTRL_STAT, DP_SELECT, DP_RDBUFF = 0x0, 0x0, 0x4, 0x8, 0xC
+WORD_MASK = 0xFFFFFFFF                                 # 32 ビットの語
 DP_TARGETID, DP_DLPIDR, DP_EVENTSTAT = 0x24, 0x34, 0x44
 DP_BASEPTR0 = 0x20                                     # ADIv6（DPv3）
 DP_NAMES = {"DPIDR": DP_DPIDR, "ABORT": DP_ABORT, "CTRL/STAT": DP_CTRL_STAT, "CTRL_STAT": DP_CTRL_STAT,
@@ -173,8 +174,8 @@ class RawDap:
 
     def targetsel(self, value: int) -> None:
         """複数ドロップの SWD（DPv2）で DP を選ぶ: 線のリセットの後の TARGETSEL の書き込み（応答は無い）。"""
-        parity = bin(value & 0xFFFFFFFF).count("1") & 1
-        self.link.swd_sequence([(8, 0x99), (5,), (33, (value & 0xFFFFFFFF) | parity << 32), (2, 0)])
+        parity = bin(value & WORD_MASK).count("1") & 1
+        self.link.swd_sequence([(8, 0x99), (5,), (33, (value & WORD_MASK) | parity << 32), (2, 0)])
         self._forget()
 
     def select_drop(self, targetsel: int) -> int:
@@ -234,7 +235,7 @@ class RawDap:
             return
         reg = address if address == DP_ABORT else self._dp_bank(address)
         self._xfer(f"DP 0x{address:02X} の書き込み",
-                   lambda: self.link.write_reg(_DP_REG[reg >> 2], value & 0xFFFFFFFF, dap_index=self.dap_index))
+                   lambda: self.link.write_reg(_DP_REG[reg >> 2], value & WORD_MASK, dap_index=self.dap_index))
 
     def clear_errors(self) -> None:
         """誤りの印（STICKYERR 等）を消す。SWD は ABORT、JTAG は CTRL/STAT に 1 を書く。"""
@@ -300,7 +301,7 @@ class RawDap:
     def write_ap(self, ap: int, register: int, value: int) -> None:
         reg = self._select_ap(ap, register)
         self._xfer(f"AP 0x{ap:X} の 0x{register:02X} の書き込み",
-                   lambda: self.link.write_reg(_AP_REG[reg], value & 0xFFFFFFFF, dap_index=self.dap_index))
+                   lambda: self.link.write_reg(_AP_REG[reg], value & WORD_MASK, dap_index=self.dap_index))
 
     # --- MEM-AP -----------------------------------------------------------------------------------
 
@@ -350,7 +351,7 @@ class RawDap:
         def queue():
             for a, v in writes:
                 self.link.write_reg(tar, a, dap_index=self.dap_index)
-                self.link.write_reg(drw, v & 0xFFFFFFFF, dap_index=self.dap_index)
+                self.link.write_reg(drw, v & WORD_MASK, dap_index=self.dap_index)
             self.link.write_reg(tar, address, dap_index=self.dap_index)
             return self.link.reg_read_repeat(count, drw, dap_index=self.dap_index, now=False)
         return list(self._jtag_checked(f"AP 0x{ap:X} の {len(writes)} 語の書きと DRW の {count} 回の読み出し", queue))
@@ -379,7 +380,7 @@ class RawDap:
 
         def each(tar, drw, w):
             self.link.write_reg(tar, w[0], dap_index=self.dap_index)
-            self.link.write_reg(drw, w[1] & 0xFFFFFFFF, dap_index=self.dap_index)
+            self.link.write_reg(drw, w[1] & WORD_MASK, dap_index=self.dap_index)
         self._many(ap, f"AP 0x{ap:X} の {len(writes)} 語の書き込み", each, writes)
         return None
 
@@ -392,7 +393,7 @@ class RawDap:
         def each(tar, drw, op):
             self.link.write_reg(tar, op[1], dap_index=self.dap_index)
             if op[0] == "w":
-                self.link.write_reg(drw, op[2] & 0xFFFFFFFF, dap_index=self.dap_index)
+                self.link.write_reg(drw, op[2] & WORD_MASK, dap_index=self.dap_index)
                 return None
             return self.link.read_reg(drw, dap_index=self.dap_index, now=False)
         return self._many(ap, f"AP 0x{ap:X} の {len(ops)} 個の読み書き", each, ops)

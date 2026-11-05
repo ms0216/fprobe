@@ -4,6 +4,7 @@
   // 値のダブルクリックで書く（Enter で書き、Tab で書いて次へ、Esc でやめる）。右の文字の列もダブルクリックで文字で書ける
   // （変えた文字のバイトだけ）。時間軸・ほかのビューから番地を頼まれたらそこを開く
   import { errorText } from "../../lib/api";
+  import Req from "./Req.svelte";
   import { tick, untrack } from "svelte";
   import { shared } from "../../lib/context";
   import { onCalls } from "../../lib/notify";
@@ -187,7 +188,7 @@
 <div class="pane">
   <form class="pane-bar" onsubmit={(e) => { e.preventDefault(); void go(); }}>
     <label>{$i18n("memory.address")} <input class="mono addr" bind:value={input} title={$i18n("memory.addressHint")}
-      aria-required="true" /><span class="req" aria-hidden="true">*</span></label>
+      aria-required="true" /><Req /></label>
     <button disabled={!connected}>{$i18n("common.go")}</button>
     <button type="button" class="small" disabled={base === null || !connected} title={$i18n("memory.previous")}
             aria-label={$i18n("memory.previous")} onclick={() => page(-1)}>‹</button>

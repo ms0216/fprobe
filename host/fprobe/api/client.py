@@ -16,24 +16,26 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
 from . import API_VERSION
+from .auth import TOKEN_FILE
 from .binary import decode_frame
 
 __all__ = ["ApiError", "DaemonClient", "saved_token"]
 
 
 def saved_token() -> str | None:
-    """この利用者のデーモンの合言葉（<FPROBE_HOME>/daemon_token。fprobe.api.daemon.daemon_token が作る）。無ければ None。"""
+    """この利用者のデーモンの合言葉（<FPROBE_HOME>/daemon_token。fprobe.api.auth.daemon_token が作る）。無ければ None。"""
     from ..home import fprobe_home
     try:
-        return (fprobe_home() / "daemon_token").read_text(encoding="ascii").strip() or None
+        return (fprobe_home() / TOKEN_FILE).read_text(encoding="ascii").strip() or None
     except (OSError, UnicodeDecodeError):
         return None
 
 
 class ApiError(Exception):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, data: dict | None = None):
         super().__init__(message)
         self.code = code
+        self.data = data or {}          # 誤りの構造の欄（exception・detail・hint_ids・reason・candidates 等。デーモンの事実）
 
 
 class DaemonClient:
@@ -99,7 +101,7 @@ class DaemonClient:
     def call(self, method: str, /, **params: Any) -> Any:          # /: 引数の名前 method（rtos.timeline.start 等）とぶつからない
         reply = self.request(method, params)
         if "error" in reply:
-            raise ApiError(reply["error"]["code"], reply["error"]["message"])
+            raise ApiError(reply["error"]["code"], reply["error"]["message"], reply["error"].get("data"))
         return reply["result"]
 
     def call_quiet(self, method: str, /, **params: Any) -> Any:
@@ -107,7 +109,7 @@ class DaemonClient:
         アクティビティを埋めないため）。"""
         reply = self.request_with(method, params, source=self.source, quiet=True)
         if "error" in reply:
-            raise ApiError(reply["error"]["code"], reply["error"]["message"])
+            raise ApiError(reply["error"]["code"], reply["error"]["message"], reply["error"].get("data"))
         return reply["result"]
 
     def subscribe(self, topics: list[str], callback: Callable[[str, dict], None]) -> None:

@@ -6,6 +6,7 @@ import type { BreakpointAction } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection } from "./api";
 import type { Mark } from "./timeline/state";
 import { kindOf } from "./vartree";
+import { addListener } from "./store";
 
 /** debug.breakpoint.list の action（fprobe.probe_breakpoints._Action.describe） */
 export type { BreakpointAction };
@@ -108,9 +109,7 @@ export class BreakpointLog {
   constructor(private call: Call) {}
 
   subscribe(fn: (e: LogEntry[]) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.entries);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.entries);
   }
 
   async poll(): Promise<void> {

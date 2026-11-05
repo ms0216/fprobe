@@ -2,7 +2,7 @@
   // ツールバーのアイコン（16 × 16 の線画。VS Code のデバッグのアイコンの形に倣う）
   import type { IconName } from "../lib/commands";
 
-  let { name, size = 16 }: { name: IconName; size?: number } = $props();
+  let { name }: { name: IconName } = $props();
 
   const PATHS: Record<IconName, string> = {
     open: "M2 4h4l1.5 1.5H14v7.5H2z",
@@ -25,7 +25,7 @@
   const filled: Partial<Record<IconName, boolean>> = { continue: true, breakpoint: true };
 </script>
 
-<svg width={size} height={size} viewBox="0 0 16 16" aria-hidden="true" class:filled={filled[name]}>
+<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" class:filled={filled[name]}>
   <path d={PATHS[name]} />
 </svg>
 

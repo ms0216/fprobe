@@ -1,7 +1,7 @@
 """プラグイン: 本体の汎用の API の上に載る、取り外せる層（特定の機器・用途のための処理）。
 
 約束（docs/superpowers/specs/2026-10-18-u41-xtrig-pin-output-design.md §6.1）:
-- 1 つのプラグインは `fprobe.plugins.<名前>`（1 つのモジュール）。本体（mcp_server・デーモン・API）からは import しない。
+- 1 つのプラグインは `fprobe.plugins.<名前>`（1 つのモジュール。大きいものは heuristics のようにパッケージにして、__init__ で公開する名前をそろえる）。本体（mcp_server・デーモン・API）からは import しない。
   利用者・AI が明示して import して使う。
 - プラグインが呼ぶのは本体の公開 API（host/api/fprobe_api.json の名前と引数）だけ。呼び先は `call(method, **params)` を
   持つもの: デーモンにつないだ `fprobe.api.client.DaemonClient`、またはプロセス内の Probe を包む `ProbeCaller`。

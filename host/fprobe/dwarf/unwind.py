@@ -29,6 +29,7 @@ FPCCR = 0xE000EF34
 FPCCR_LSPACT = 1 << 0
 XPSR_ALIGNED = 1 << 9             # 例外の入口で SP を 8 バイトに揃えるため 4 バイト詰めた
 MAX_FRAMES = 64
+WORD_MASK = 0xFFFFFFFF            # 32 ビットのターゲット（Cortex-M）の語
 
 
 def is_exc_return(value: int) -> bool:
@@ -104,6 +105,8 @@ class FrameState:
     note: str = ""                # "exception" = 例外の入口で積まれたフレームから復元した、"lr_without_cfi" = 最内の
                                   # 関数に CFI が無く、葉と仮定して LR から呼び出し元を出した（assume_leaf のときだけ）
     stop: dict | None = None      # 最後のフレームだけ: その先へ巻き戻さなかった理由（Unwinder.unwind の説明）
+    thumb: bool | None = None     # 呼び出し元のフレームだけ: 戻り番地の bit0（1 = Thumb で戻る。BX / POP {pc} が使う値そのもの）。
+                                  # 例外のフレーム・最内のフレームは None（bit0 に命令セットの意味が無い）
 
 
 @dataclass(frozen=True)
@@ -243,7 +246,7 @@ class Unwinder:
             return_address = restored.read(return_register)
         except NotAvailable as e:
             return None, {"reason": "not_available", "detail": str(e)}
-        if return_address == 0xFFFFFFFF or return_address == 0:
+        if return_address == WORD_MASK or return_address == 0:
             return None, {"reason": "return_address", "value": return_address}
         if is_exc_return(return_address):
             return self._exception(frame, restored, cfa, return_address, access)
@@ -252,7 +255,7 @@ class Unwinder:
             return None, {"reason": "cfa_below_sp", "cfa": cfa, "sp": sp}
         pc = return_address & ~1
         restored.known[PC] = pc
-        return FrameState(frame.index + 1, pc, pc - 1, None, restored, note), None
+        return FrameState(frame.index + 1, pc, pc - 1, None, restored, note, thumb=bool(return_address & 1)), None
 
     @staticmethod
     def _context(regs: RegisterFile, access: TargetAccess, cfa: int | None = None) -> EvalContext:
@@ -263,7 +266,7 @@ class Unwinder:
             return evaluate_value(parser.parse_expr(bytes(rule.expr)), self._context(regs, access))
         if rule.reg is None:
             raise NotAvailable("CFA の規則が無い")
-        return (regs.read(rule.reg) + rule.offset) & 0xFFFFFFFF
+        return (regs.read(rule.reg) + rule.offset) & WORD_MASK
 
     def _restore(self, row: dict, regs: RegisterFile, cfa: int, access: TargetAccess, parser) -> RegisterFile:
         known: dict[int, int] = {SP: cfa}
@@ -283,7 +286,7 @@ class Unwinder:
             if rule.type == RegisterRule.OFFSET:
                 value = int.from_bytes(self._memory(access, cfa + rule.arg, width), "little")
             elif rule.type == RegisterRule.VAL_OFFSET:
-                value = (cfa + rule.arg) & 0xFFFFFFFF
+                value = (cfa + rule.arg) & WORD_MASK
             elif rule.type == RegisterRule.REGISTER:
                 value = regs.read(rule.arg)
             elif rule.type in (RegisterRule.EXPRESSION, RegisterRule.VAL_EXPRESSION):
@@ -295,7 +298,7 @@ class Unwinder:
                 continue
             if width == 8:                                # d レジスタの退避（vpush）は s の 2 つ
                 k = number - 256
-                known[S0 + 2 * k], known[S0 + 2 * k + 1] = value & 0xFFFFFFFF, value >> 32
+                known[S0 + 2 * k], known[S0 + 2 * k + 1] = value & WORD_MASK, value >> 32
             else:
                 known[number] = value
         return RegisterFile(known, parent=regs, inherit=CALLEE_SAVED - lost)
@@ -303,9 +306,9 @@ class Unwinder:
     @staticmethod
     def _memory(access: TargetAccess, address: int, length: int) -> bytes:
         try:
-            return access.read_memory(address & 0xFFFFFFFF, length)
+            return access.read_memory(address & WORD_MASK, length)
         except AccessError as e:
-            raise NotAvailable(f"スタック 0x{address & 0xFFFFFFFF:08X} が読めない（{e}）") from None
+            raise NotAvailable(f"スタック 0x{address & WORD_MASK:08X} が読めない（{e}）") from None
 
     def _exception(self, frame: FrameState, restored: RegisterFile, cfa: int, exc_return: int,
                    access: TargetAccess) -> tuple[FrameState | None, dict | None]:
@@ -327,7 +330,7 @@ class Unwinder:
             known.update(self._stacked_fp(access, stack))
         if xpsr & XPSR_ALIGNED:
             size += 4
-        known[SP] = (stack + size) & 0xFFFFFFFF
+        known[SP] = (stack + size) & WORD_MASK
         special = {"msp": cfa if on_psp else known[SP], "psp": known[SP] if on_psp else specials["psp"],
                    "xpsr": xpsr}
         registers = RegisterFile(known, parent=restored, inherit=CALLEE_SAVED - {SP, LR}, special=special)

@@ -15,6 +15,10 @@ _swo_baud・swo_start・_keep_capture と、ObserveService（RTT の受信 `rtt_
 - rtt: RTT の上りのチャンネル。時刻はターゲットの CYCCNT（core_clock_hz）。タイムベースへの写しは、最初に受けた
   かたまりの最後の記録をホストの時計で受けた時刻に合わせる（不確かさ = RTT の読みの周期程度）。
 
+領域ごとの分け方: ここには挿入・始める・止める（gpio）・背景の受け取りを置く。itm は probe_testpoint_itm.py、rtt は
+probe_testpoint_rtt.py、結果を読む API は probe_testpoint_read.py、受け取り 1 回分の状態（_Run）は probe_testpoint_run.py
+（いずれも TestpointService に混ぜ込む部品）。
+
 解析は fprobe.testpoint.live.LiveAnalysis（逐次・メモリ一定）。記録中に始めたら stream "testpoint"（call / hit /
 anomaly）に書く。
 
@@ -23,18 +27,18 @@ anomaly）に書く。
 
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from .la import DeepAnalyzer, LaStream, Transitions
+from .la import DeepAnalyzer, Transitions
 from .recording_stream import anchor_stream
-from . import probe_window
-from .probe_window import EventWindow, write_registers
-from .profile.dwt import ITM_TER, RegisterWrite, itm_port_writes, plan_swo
-from .testpoint import (Hit, ItmDecoder, LiveAnalysis, Options, ParallelDecoder, ProbeTable, RttDecoder,
-                        SerialDecoder, TimedSwo, TimeMap, WatchVar, instrument_tree)
-from .testpoint.live import calls_dict, coverage_dict, report_dict
+from .testpoint import (LiveAnalysis, Options, ParallelDecoder, ProbeTable, SerialDecoder, TimeMap, WatchVar,
+                        instrument_tree)
+from .testpoint.live import report_dict
 from .probe_service import HostView
+from .probe_testpoint_itm import TestpointItmMixin
+from .probe_testpoint_read import TestpointReadMixin
+from .probe_testpoint_rtt import TestpointRttMixin
+from .probe_testpoint_run import _Run  # noqa: F401  (旧名を保つ。試験が読む)
 
 __all__ = ["DEEP_AFTER_BEATS", "METHODS", "TestpointService"]
 
@@ -44,47 +48,8 @@ DEEP_AFTER_BEATS = 1 << 18               # 深いバッファでトリガの後�
 ITM_PULL_S = 0.25                        # itm: 背景で窓の新しい SWO のバイトを解析へ渡す周期
 
 
-@dataclass
-class _Run:
-    """動いている（止めた）テストポイントの受け取り。"""
-    method: str
-    capture: str | None                  # gpio: deep / stream
-    live: LiveAnalysis
-    map_path: str
-    decoder: SerialDecoder | ParallelDecoder | ItmDecoder | RttDecoder
-    settings: dict
-    started: float                       # ホストの単調時計
-    duration_s: float | None = None
-    warnings: list[str] = field(default_factory=list)
-    stopped: float | None = None
-    # gpio deep / stream
-    deep: DeepAnalyzer | None = None
-    stream: LaStream | None = None
-    pump: threading.Thread | None = None  # 背景のスレッド（stream: 受け取り、itm: 窓の読み）
-    halt: threading.Event = field(default_factory=threading.Event)     # itm: 背景の読みを止める
-    error: str | None = None             # 背景のスレッドの誤り
-    # itm
-    window: EventWindow | None = None
-    swo: TimedSwo | None = None
-    last_t: int | None = None            # 解析に渡した最後の SWO のバイトの時刻
-    at_last: int = 0                     # その時刻のバイトのうち渡した数
-    ring_seen: int = 0                   # 記録していないとき: 前回までに読んだイベント記録の総数
-    restore: dict[int, int] = field(default_factory=dict)
-    pulling: threading.Lock = field(default_factory=threading.Lock)
-    # rtt
-    rtt_channel: int | None = None
-    rtt_listener: object = None
-    started_rtt: bool = False
-    synced: bool = False                 # rtt: 最初の正しい記録を見た（受け始めの途中の記録は数えない）
-    skipped_before_sync: int = 0         # rtt: 最初の正しい記録より前に捨てた解読の項目の数
-    host_clock: tuple[float, int, float] | None = None     # (ホストの時刻, タイムベース, 不確かさ) 記録していないとき
 
-    @property
-    def running(self) -> bool:
-        return self.stopped is None
-
-
-class TestpointService:
+class TestpointService(TestpointItmMixin, TestpointRttMixin, TestpointReadMixin):
     """テストポイント（Probe のサービス）。"""
 
     API = ("testpoint_calls", "testpoint_coverage", "testpoint_instrument", "testpoint_report", "testpoint_start",
@@ -266,46 +231,6 @@ class TestpointService:
             with self._host._lock:
                 chunks.close()
 
-    def _tp_start_itm(self, table, table_path, options, port, swo_baud, core_clock_hz) -> _Run:
-        target = self._host.target
-        if not 0 <= port < 32:
-            raise ValueError("port は 0〜31")
-        if swo_baud is None and self._host._swo_baud is None:
-            raise RuntimeError("SWO の受信の速度が分からない（swo_baud を渡すか swo_start を先に）")
-        warnings: list[str] = []
-        enable = itm_port_writes(port)                           # DEMCR・LAR・TCR・TER（port のビット）
-        setup = enable[:-1]
-        baud = swo_baud
-        if swo_baud is not None and core_clock_hz is not None:
-            swo = plan_swo(core_clock_hz, swo_baud)
-            setup += list(swo.writes)
-            warnings += swo.warnings
-            baud = round(swo.baud)
-        # 受信を始めてから出力を有効にする: ITM の全ポートを止めて（他のポートの printf もパケットの途中で窓が
-        # 始まらないように）受信と窓を始め、元のポートと port を有効にする
-        before = write_registers(target, setup + [RegisterWrite(ITM_TER, 0, note="ITM: 全ポートを止める")])
-        try:
-            if baud is not None:
-                self._host.swo_start(baud)
-            baud = baud or self._host._swo_baud
-            window = self._host._open_window()
-            seen = 0 if window.recorded else window.seen
-            target.write_memory(ITM_TER, before[ITM_TER] | 1 << port)
-        except Exception:
-            target.write_memory(ITM_TER, before[ITM_TER])        # 止めたポートを戻す
-            raise
-        hz = self._host.session.device.capabilities().timebase_hz
-        run = _Run("itm", None, self._tp_analysis(table, hz, options), str(table_path), ItmDecoder(port),
-                   {"port": port, "swo_baud": baud, "core_clock_hz": core_clock_hz}, time.monotonic(),
-                   warnings=warnings, window=window, swo=TimedSwo(), restore={ITM_TER: before[ITM_TER]},
-                   ring_seen=seen)
-        # 時刻は記録の先頭のバイトを FPGA が受けた時刻（出来事の上限）。端子の辺からの遅れは SWO の方式・分周で決まり
-        # （UART 方式と Manchester で違う。8N1 の 10 ビットを仮定しない）、対象の FIFO の遅れは分からない: 幅は None
-        run.live.anchor(TimeMap(hz, hz, 0, None, bound="upper"))
-        run.pump = threading.Thread(target=self._tp_itm_puller, args=(run,), name="fprobe-testpoint-itm",
-                                    daemon=True)
-        return run
-
     def _tp_itm_puller(self, run: _Run) -> None:
         """背景: 窓の新しい SWO のバイトを周期的に解析へ渡す（イベント記録のリングが一周する前に。長時間でも取りこぼさない）。"""
         while not run.halt.wait(ITM_PULL_S):
@@ -314,75 +239,6 @@ class TestpointService:
             except Exception as e:                                # 切断等: 理由を残して止める（stop が最後に読む）
                 run.error = f"{type(e).__name__}: {e}"
                 return
-
-    def _tp_start_rtt(self, table, table_path, options, rtt_channel, core_clock_hz) -> _Run:
-        if core_clock_hz is None or core_clock_hz <= 0:
-            raise ValueError("method rtt には core_clock_hz（CYCCNT の速さ = コアのクロック）が要る")
-        started_rtt = self._host._rtt is None
-        if started_rtt:
-            self._host.rtt_start()
-        try:
-            up = {c.index for c in self._host._rtt.control_block.up}
-            if rtt_channel not in up:
-                raise ValueError(f"RTT の上りのチャンネル {rtt_channel} が無い（{sorted(up)}）")
-            device = self._host.session.device
-            h0 = time.monotonic()
-            ticks = device.time()
-            h1 = time.monotonic()
-            hz_tb = device.capabilities().timebase_hz
-        except Exception:
-            if started_rtt:
-                self._host.rtt_stop()
-            raise
-        run = _Run("rtt", None, self._tp_analysis(table, core_clock_hz, options), str(table_path), RttDecoder(),
-                   {"rtt_channel": rtt_channel, "core_clock_hz": core_clock_hz}, time.monotonic(),
-                   rtt_channel=rtt_channel, started_rtt=started_rtt,
-                   host_clock=((h0 + h1) / 2, ticks, (h1 - h0) / 2 * hz_tb))
-        run.warnings.append("rtt: 時刻はターゲットの CYCCNT。タイムベースへの写しはホストの時計で受けた時刻に合わせる"
-                            "（不確かさ付き。ターゲットとプローブのクロックのずれは補正しない）")
-
-        def listener(channel, data: bytes, host_s: float, run=run) -> None:
-            if channel == run.rtt_channel and run.running:
-                self._tp_rtt_received(run, data, host_s)
-        run.rtt_listener = listener
-        self._host._rtt_listen(listener)
-        return run
-
-    def _tp_rtt_received(self, run: _Run, data: bytes, host_s: float) -> None:
-        """RTT の受信（ObserveService の背景のスレッドから、_lock の中で）。"""
-        items = run.decoder.feed(data)
-        if not run.synced:                                        # 受け始めの途中の記録は取りこぼしではない
-            first = next((k for k, i in enumerate(items) if isinstance(i, Hit)), None)
-            if first is None:
-                run.skipped_before_sync += len(items)
-                return
-            run.skipped_before_sync += first
-            items, run.synced = items[first:], True
-        if run.live.time_map is None:
-            # かたまりの最後の記録は、この読みより前に書かれた: 読んだ PC の時刻は上限（どれだけ前かは分からない。
-            # 設定の読みの周期 poll_s を幅として足さない: 実際の間隔は周期と限らない）。幅は PC の時計の写しの分だけ
-            last = max(i.t for i in items if isinstance(i, Hit))
-            hz_tb = self._tp_timebase_hz()
-            ticks, uncertainty = self._tp_host_ticks(run, host_s)
-            run.live.anchor(TimeMap(run.live.hz, hz_tb, ticks - round(last * hz_tb / run.live.hz),
-                                    uncertainty, bound="upper"))
-        run.live.feed(items)
-
-    def _tp_timebase_hz(self) -> float:
-        return self._host.session.device.capabilities().timebase_hz
-
-    def _tp_host_ticks(self, run: _Run, host_s: float) -> tuple[int, float]:
-        """ホストの単調時計 → タイムベース（記録中なら記録の時計の対応付け、そうでなければ始めたときの 1 点と公称の速さ。
-        1 点では速さが分からないので、不確かさに点からの経過時間をそのまま足す: fprobe.recording.ClockMap と同じ）。"""
-        rec = run.live.recorder
-        if rec is not None:
-            try:
-                return rec.clock.to_ticks(host_s)
-            except RuntimeError:
-                pass                                              # 記録を始めた直後で対応付けの点が無い
-        h, ticks, uncertainty = run.host_clock
-        hz = self._tp_timebase_hz()
-        return ticks + round((host_s - h) * hz), uncertainty + abs(host_s - h) * hz
 
     def testpoint_stop(self, timeout_s: float = 10.0, top: int = 10) -> dict:
         """受け取りを止めて解析を終える（開いたままの入口に open_s を超えれば no_exit）。duration_s を渡して始めたなら
@@ -443,27 +299,6 @@ class TestpointService:
         run.live.anchor(TimeMap(run.live.hz, hz_tb, offset))
         run.live.feed(run.decoder.feed(tr) + run.decoder.flush())
 
-    def _tp_stop_itm(self, run: _Run) -> None:
-        run.halt.set()
-        run.pump.join()
-        with self._host._lock:
-            if self._host._debug is not None:
-                for address, value in run.restore.items():
-                    self._host.target.write_memory(address, value)
-            self._host._close_window(run.window)
-        self._tp_pull_itm(run)
-        run.live.feed(run.decoder.flush())
-
-    def _tp_stop_rtt(self, run: _Run) -> None:
-        self._host._rtt_unlisten(run.rtt_listener)
-        with self._host._lock:
-            run.stopped = time.monotonic()                        # 背景の受信が以後は渡さない
-            if self._host._rtt is not None and run.started_rtt:
-                self._host.rtt_stop()
-        items = run.decoder.flush()
-        if run.synced:
-            run.live.feed(items)
-
     def _close_testpoint(self) -> None:
         """Probe.close から: 背景のスレッドを止める（解析は終えない）。"""
         run = self._tp_run
@@ -472,121 +307,3 @@ class TestpointService:
             if run.stream is not None:
                 run.stream.stop()
             run.pump.join(timeout=5)
-
-    # --- ITM: 窓から届いた分を解析へ --------------------------------------------------------------
-
-    def _tp_pull_itm(self, run: _Run) -> None:
-        """窓の SWO のバイトのうち、まだ解析に渡していないものを渡す（_lock の外で。背景と道具の呼び出しの両方から）。
-        記録からは前回の最後の時刻から後を、イベント記録からは前回までに読んだ数より後を読む（同じ時刻のバイトは
-        渡した数で見分ける）。"""
-        with run.pulling:
-            events = self._tp_new_swo(run)
-            fresh = []
-            seen_at_last = 0
-            for t, b in events:
-                if run.last_t is not None and t < run.last_t:
-                    continue
-                if run.last_t is not None and t == run.last_t:
-                    seen_at_last += 1
-                    if seen_at_last <= run.at_last:
-                        continue
-                fresh.append((t, b))
-            if not fresh:
-                return
-            last = fresh[-1][0]
-            run.at_last = sum(1 for t, _ in fresh if t == last) + (run.at_last if last == run.last_t else 0)
-            run.last_t = last
-            run.live.feed(run.decoder.feed(run.swo.feed(fresh)))
-
-    def _tp_new_swo(self, run: _Run) -> list[tuple[int, int]]:
-        window = run.window
-        if window.recorded:
-            if run.last_t is not None:
-                window = EventWindow(run.last_t, True, t1=run.window.t1)
-            return [(t, b) for t, _, b in self._host._window_events(window, "swo")]
-        with self._host._lock:
-            written = probe_window.EventLog(self._host.session.device).counts()[0]
-        part = EventWindow(window.t0, False, run.ring_seen, window.t1)
-        events = self._host._window_events(part, "swo")
-        run.ring_seen = written                                   # 間に増えた分は次も読む（時刻で重複を除く）
-        window.lost += part.lost
-        window.notes += [n for n in part.notes if n not in window.notes]
-        return [(t, b) for t, _, b in events]
-
-    def _tp_refresh(self, run: _Run) -> None:
-        if run.running and run.method == "itm":
-            self._tp_pull_itm(run)
-
-    # --- 読む --------------------------------------------------------------------------------------
-
-    def _tp_current(self) -> _Run:
-        run = self._tp_run or self._tp_last
-        if run is None:
-            raise RuntimeError("テストポイントの結果が無い（testpoint_start）")
-        self._tp_refresh(run)
-        return run
-
-    def _tp_state(self, run: _Run) -> dict:
-        out = {"running": run.running, "method": run.method, "map": run.map_path, "hz": run.live.hz,
-               "settings": dict(run.settings), "hits": run.live.hits, "losses": run.live.losses,
-               "elapsed_s": (run.stopped or time.monotonic()) - run.started, "recorded": run.live.recorder is not None,
-               "warnings": list(run.warnings)}
-        if run.method == "rtt":
-            out["skipped_before_sync"] = run.skipped_before_sync      # 受け始めの途中で捨てた項目（取りこぼしとは数えない）
-        if run.capture is not None:
-            out["capture"] = run.capture
-        if run.duration_s is not None:
-            out["duration_s"] = run.duration_s
-        if run.error is not None:
-            out["error"] = run.error
-        if isinstance(run.decoder, ParallelDecoder) and run.decoder.unsynced:
-            out["unsynced_symbols"] = run.decoder.unsynced
-        if isinstance(run.decoder, RttDecoder):           # 記録の間が 2^32 クロックより短い前提で戻した回数
-            out["cyccnt_wraps"] = run.decoder.wraps
-        if run.stream is not None:
-            stats = run.stream.stats()
-            out["stream"] = {"samples": stats.samples, "duration_s": stats.duration_s, "mb_per_s": stats.mb_per_s,
-                             "overrun": stats.overrun, "link_buffer": stats.link_buffer_dict}
-        if run.window is not None:
-            out["window"] = self._host._window_info(run.window, run.live.hz)
-        if run.live.time_map is not None:
-            out["time_map"] = run.live.time_map.to_dict()
-        return out
-
-    def testpoint_status(self) -> dict:
-        """受け取りの様子（方式・設定・受けた印の数・取りこぼし・経過・流し続ける捕捉の速さ・警告）。"""
-        run = self._tp_run or self._tp_last
-        if run is None:
-            return {"running": False}
-        self._tp_refresh(run)
-        return self._tp_state(run)
-
-    def testpoint_report(self, top: int = 20, anomalies: int = 100, buckets: int = 120, tree_depth: int = 8) -> dict:
-        """解析の要約（受け取っている最中ならいままでの分）: 関数ごとの回数・子を含む／自分だけの時間（合計・最小・
-        最大・平均・σ）を多い順に top、カバレッジの割合、異常（long_call / missing_exit / exit_without_entry /
-        unknown_id / silence / no_exit / loss）の種類ごとの数と先頭 anomalies 件、時間の区切り（bucket_s ごとの件数）
-        の最後の buckets 個、変数（最新・最小・最大）、開いたままの呼び出し、呼び出しの木（深さ tree_depth まで）。
-        t_s は最初の印からの秒、t はタイムベース（記録・`recording_events` の時刻）。"""
-        run = self._tp_current()
-        report = run.live.report(final=False)
-        return {"running": run.running, "method": run.method,
-                **report_dict(report, run.live.time_map, top=top, anomalies=anomalies, buckets=buckets,
-                              tree_depth=tree_depth)}
-
-    def testpoint_calls(self, t0_s: float | None = None, t1_s: float | None = None, function: str | None = None,
-                        limit: int = 200) -> dict:
-        """関数の遷移の時間軸: 呼び出しを始まりの順に（関数・始まり・時間・自分だけの時間・深さ・出口を見たか）と、
-        深さで字下げした文字列 text。t0_s ≤ 始まり < t1_s（最初の印からの秒）・function で絞る。持っているのは最近の
-        65536 件（dropped はそれより前に捨てた数。全部は記録の stream "testpoint" の call）。"""
-        run = self._tp_current()
-        calls, dropped = run.live.calls()
-        return calls_dict(calls, dropped, run.live.report(final=False), run.live.time_map, t0_s=t0_s, t1_s=t1_s,
-                          function=function, limit=limit)
-
-    def testpoint_coverage(self, file: str | None = None, function: str | None = None, limit: int = 500) -> dict:
-        """カバレッジ: 関数（入った / 入れた）・C0（ソースにある塊の印）・C1（分岐の組の結果。足した else・default を
-        含む）の割合と、通らなかった印（ファイル・行・関数・種類。試験を足す手がかり）、分岐の組ごとの結果の回数。
-        file（対応表の相対パス）・function で絞る。"""
-        run = self._tp_current()
-        return {"running": run.running,
-                **coverage_dict(run.live.report(final=False).coverage, file=file, function=function, limit=limit)}

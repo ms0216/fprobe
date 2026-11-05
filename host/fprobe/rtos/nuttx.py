@@ -117,17 +117,6 @@ class NuttX(KernelAwareness):
     def _field(self, handle: int, path: str, signed: bool = False) -> int:
         return self.mem.uint(handle + self.tcb.offset(path), self.tcb.member_size(path), signed)
 
-    def _variable(self, name: str, signed: bool = False) -> int | None:
-        """カーネルの変数の値（大きさは DWARF の型）。無ければ None。"""
-        try:
-            var = self.info.global_variable(name)
-        except KeyError:
-            return None
-        address = self.optional_address(name)
-        if address is None:
-            return None
-        return self.mem.uint(address, var.type.size or 4, signed)
-
     def symbol_name(self, address: int) -> str | None:
         """その番地から始まる変数の名前（無ければ None）。"""
         if self.symbols is not None:
@@ -368,9 +357,6 @@ class NuttX(KernelAwareness):
     def mutex_words(self, obj: KernelObject) -> tuple[int, int, int] | None:
         return None                       # 持ち主は val.mholder の TID で、TCB の番地ではない（サンプラでは辿れない）
 
-    def snapshot(self) -> dict:
-        tasks = self.tasks()
-        current = self.current()
-        return {"rtos": self.name, "version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
-                "tick": self.tick_count(), "current": self._names.get(current) if current else None,
-                "tasks": [t.to_dict() for t in tasks], "warnings": list(self.warnings)}
+    def snapshot_header(self) -> dict:
+        return {"version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
+                "tick": self.tick_count()}

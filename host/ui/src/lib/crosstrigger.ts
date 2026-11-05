@@ -9,6 +9,7 @@
 import type { Result } from "./api";
 import { buildParams, fieldsOf, type Field, type FieldError, type FieldValues } from "./apiform";
 import { METHODS } from "./apispec";
+import { hex } from "./hexfmt";
 import { SOURCES, type SequenceStatus, type TriggerSource } from "./logic";
 
 export { SOURCES, type TriggerSource };
@@ -172,8 +173,10 @@ export interface LaTimes { internal: number | null; deep: number | null }
 export interface Facts { count: Fact; time: Fact; laTimes?: LaTimes }
 
 const NONE: Facts = { count: null, time: null };
-const counted = (count: number | undefined, time: number | undefined): Facts =>
-  count === undefined ? NONE : { count, time: count > 0 && time !== undefined ? time : null };
+// 時刻が意味を持つか（回数が 1 以上か）は API の time_valid（画面は規則を持たない）。
+// 古いデーモンで time_valid が無ければ時刻は出さない（null）
+const counted = (r: { count: number; time: number; time_valid?: boolean } | null | undefined): Facts =>
+  r === undefined || r === null ? NONE : { count: r.count, time: r.time_valid === true ? r.time : null };
 
 /** ロジアナのトリガの時刻: 内蔵・深いバッファのそれぞれ（両方トリガしていれば両方） */
 function laTriggerTimes(la: LaTriggerStatus | null | undefined): LaTimes {
@@ -189,13 +192,13 @@ export function sourceFacts(s: TriggerSource, st: Statuses): Facts {
     case "host":                // 発火の回数・時刻のレジスタは無い
       return { count: UNREADABLE, time: UNREADABLE };
     case "dap_match":
-      return counted(st.xtrig?.match?.count, st.xtrig?.match?.time);
+      return counted(st.xtrig?.match);
     case "sequence":            // 単発: 発火したか・その時刻だけ（回数のレジスタは無い）
       return { count: UNREADABLE, time: st.sequence?.fired ? st.sequence.time : null };
     case "obs_match":           // 成り立った時刻のレジスタは無い
       return { count: st.obs && "count" in st.obs ? st.obs.count : null, time: UNREADABLE };   // 仕掛けていなければ回数は無い
     case "sampler_match":
-      return counted(st.sampler?.count, st.sampler?.time);
+      return counted(st.sampler);
   }
 }
 
@@ -203,7 +206,7 @@ export function injectFacts(x: XtrigStatus | null | undefined):
   { result: string; busy: boolean; count: number; time: number | null } | null {
   const i = x?.inject;
   if (!i) return null;
-  return { result: i.result, busy: i.busy, count: i.count, time: i.count > 0 ? i.time : null };
+  return { result: i.result, busy: i.busy, count: i.count, time: i.time_valid === true ? i.time : null };
 }
 
 // --- 条件の欄（API の仕様の引数） --------------------------------------------------------------------
@@ -220,7 +223,7 @@ export function formCall(method: string, values: FieldValues): Call | { errors: 
   return "errors" in built ? built : { method, params: built.params };
 }
 
-export const hexText = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
+export const hexText = hex;
 
 /** 欄の値の表示: 0 以上の整数は大きさによらず 16 進（この窓の欄は番地・マスク・バスの語。大きさで意味を推さない。
  *  欄は 16 進のまま formCall で同じ数に戻る）。負の数・ほかはそのまま */

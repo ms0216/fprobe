@@ -78,12 +78,13 @@ end entity;
 
 architecture rtl of event_collector is
   -- 源 k（0 = UART 受信、1 = UART 送信、2 = SWO）のバイトの種類（古い形・詰めた形）
-  type kinds_t is array (0 to 2) of event_kind_t;
+  constant BYTE_SOURCES : natural := 3;                     -- バイトの源の数（UART 受信・UART 送信・SWO）
+  type kinds_t is array (0 to BYTE_SOURCES - 1) of event_kind_t;
   constant BYTE_KIND   : kinds_t := (EVENT_KIND_UART_RX, EVENT_KIND_UART_TX, EVENT_KIND_SWO);
   constant PACKED_KIND : kinds_t := (EVENT_KIND_UART_RX_PACKED, EVENT_KIND_UART_TX_PACKED, EVENT_KIND_SWO_PACKED);
-  type byte_array_t is array (0 to 2) of std_logic_vector(7 downto 0);
-  type time_array_t is array (0 to 2) of std_logic_vector(47 downto 0);
-  signal byte_fire : std_logic_vector(2 downto 0) := (others => '0');
+  type byte_array_t is array (0 to BYTE_SOURCES - 1) of std_logic_vector(7 downto 0);
+  type time_array_t is array (0 to BYTE_SOURCES - 1) of std_logic_vector(47 downto 0);
+  signal byte_fire : std_logic_vector(BYTE_SOURCES - 1 downto 0) := (others => '0');
   signal byte_in : byte_array_t := (others => (others => '0'));
   signal byte_src_time : time_array_t := (others => (others => '0'));   -- 受けたバイトの時刻（受信 = 源の時刻、送信 = 受けた周期 + 1）
   signal rx_time_r, swo_time_r : unsigned(47 downto 0) := (others => '0');
@@ -100,15 +101,16 @@ architecture rtl of event_collector is
   constant SL_OBS  : natural := 5;
   constant SL_SYNC : natural := 6;
   constant SL_CFG  : natural := 7;
-  type events_t is array (0 to 7) of event_t;
-  signal held      : std_logic_vector(0 to 7) := (others => '0');
+  constant SLOTS   : natural := 8;                          -- 保持の数（上の SL_*。バイトは 3 つ）
+  type events_t is array (0 to SLOTS - 1) of event_t;
+  signal held      : std_logic_vector(0 to SLOTS - 1) := (others => '0');
   signal held_word : events_t := (others => (others => '0'));
   -- PHY の設定（種類 16）: 前の周期の値（変わった周期に件を作る）
   signal cfg_prev : std_logic_vector(71 downto 0) := (others => '0');
   -- 詰めた形（BYTE_PACK）: 源ごとの詰めた件、出す周期（優先順は古い形のバイトと同じ位置: サンプラの後、補助の前）
-  type word_array_t is array (0 to 2) of std_logic_vector(119 downto 0);
-  type count_array_t is array (0 to 2) of natural range 0 to 8;
-  signal pk_valid, pk_take : std_logic_vector(2 downto 0) := (others => '0');
+  type word_array_t is array (0 to BYTE_SOURCES - 1) of std_logic_vector(119 downto 0);
+  type count_array_t is array (0 to BYTE_SOURCES - 1) of natural range 0 to 8;
+  signal pk_valid, pk_take : std_logic_vector(BYTE_SOURCES - 1 downto 0) := (others => '0');
   signal pk_word : word_array_t := (others => (others => '0'));
   signal pk_lost : count_array_t := (others => 0);
 begin
@@ -152,7 +154,7 @@ begin
     pk_take(1) <= pk_valid(1) and not ev_valid and not inj_written and not held(SL_SMP) and not pk_valid(0);
     pk_take(2) <= pk_valid(2) and not ev_valid and not inj_written and not held(SL_SMP) and not pk_valid(0)
                   and not pk_valid(1);
-    packers : for k in 0 to 2 generate
+    packers : for k in 0 to BYTE_SOURCES - 1 generate
       pack_i : entity work.event_byte_pack
         port map (clk => clk, rst => rst, enable => events_enable, in_fire => byte_fire(k), in_data => byte_in(k),
                   in_time => unsigned(byte_src_time(k)), out_valid => pk_valid(k), out_taken => pk_take(k), out_word => pk_word(k),
@@ -168,8 +170,8 @@ begin
 
   process (clk)
     variable served : boolean;
-    variable taken  : std_logic_vector(0 to 7);          -- この周期に出した保持
-    variable fresh  : std_logic_vector(0 to 7);          -- この周期に受けた件
+    variable taken  : std_logic_vector(0 to SLOTS - 1);          -- この周期に出した保持
+    variable fresh  : std_logic_vector(0 to SLOTS - 1);          -- この周期に受けた件
     variable word   : events_t;                          -- 受けた件（組んだもの）
     variable lost_n : natural range 0 to 31;             -- 同じ周期に落ちた数（保持 8。詰めた形は源ごとに最大 8 バイト）
   begin
@@ -190,8 +192,8 @@ begin
         served := true;
       end if;
       -- 保持した件を優先順に 1 件（バイトの源は、詰めた形の件をその源の保持と同じ位置で出す）
-      for k in 0 to 7 loop
-        if k >= SL_BYTE and k < SL_BYTE + 3 then
+      for k in 0 to SLOTS - 1 loop
+        if k >= SL_BYTE and k < SL_BYTE + BYTE_SOURCES then
           if pk_take(k - SL_BYTE) = '1' then               -- 詰めた形（pk_take は served と同じ優先順）
             event_valid_r <= '1';
             event_data_r  <= PACKED_KIND(k - SL_BYTE) & pk_word(k - SL_BYTE);
@@ -212,7 +214,7 @@ begin
       if events_enable = '1' then
         fresh(SL_SMP) := smp_valid;
         word(SL_SMP)  := smp_kind & smp_word;              -- 種類 7・17・18（dap_sampler が組んだ語）
-        for k in 0 to 2 loop
+        for k in 0 to BYTE_SOURCES - 1 loop
           if not BYTE_PACK then
             fresh(SL_BYTE + k) := byte_fire(k);
           end if;
@@ -236,7 +238,7 @@ begin
       end if;
       -- 保持: 前の件がまだ出ていないうちに次が来たら捨てて数える（どの源も間隔は十分長い想定。サンプラが線を持つ間は
       -- DAP・割り込みの件が無いので 1 周期 1 件で出し続けられる）
-      for k in 0 to 7 loop
+      for k in 0 to SLOTS - 1 loop
         if fresh(k) = '1' then
           if held(k) = '1' and taken(k) = '0' then
             lost_n := lost_n + 1;

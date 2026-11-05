@@ -9,13 +9,14 @@
 --   * ストリーム（EP6）: usb ドメインの連番生成（IN スループット計測用、常に送出可能）
 --   LED（アクティブロー）: led(0)=PHY 準備完了, led(1)=High-Speed, led(2)=構成済み, led(3)=サスペンド,
 --                          led(4)=sys 心拍, led(5)=消灯
---   診断: 0.5 秒ごとに BL702 の仮想 COM（115200 baud）へ状態を 1 行報告する（sys ドメイン）。
+--   診断: 2^25 sys 周期（約 0.33 秒）ごとに BL702 の仮想 COM（115200 baud）へ状態を 1 行報告する（sys ドメイン）。
 --     "usb clk=01 rdy=01 vbus=01 ls=01 hs=01 cfg=01 sus=00 adr=07"
 --     clk は ULPI クロックが動いているか。各値は 2 段 FF で同期化した表示用の値（多ビットの adr は
 --     変化の瞬間に崩れうるが、診断表示なので許容する）。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.primer20k_pkg.all;
 use work.text_report_pkg.all;
 
@@ -34,6 +35,9 @@ entity primer20k_usbtest_top is
 end entity;
 
 architecture rtl of primer20k_usbtest_top is
+  constant MSG_WIDTH      : positive := 9;      -- 制御チャンネルのメッセージ: データ 8 ビット + メッセージ終わり（last）
+  constant MSG_FIFO_DEPTH : positive := 512;    -- 制御チャンネルの往復の FIFO（2 の冪）
+  constant DIAG_BAUD      : positive := 115_200;   -- 診断の UART（BL702 の仮想 COM）
   signal usb_clk, usb_rst, phy_released : std_logic;
   signal sys_clk, sys_rst, pll_lock     : std_logic;
   signal data_o  : std_logic_vector(7 downto 0);
@@ -46,8 +50,8 @@ architecture rtl of primer20k_usbtest_top is
   signal c_out_valid, c_out_ready, c_out_last, c_in_valid, c_in_ready, c_in_last : std_logic;
   signal c_out_data, c_in_data : std_logic_vector(7 downto 0);
   signal s_valid, s_ready, r_valid, r_ready : std_logic;
-  signal s_data, r_data : std_logic_vector(8 downto 0);
-  signal back_data : std_logic_vector(8 downto 0);
+  signal s_data, r_data : std_logic_vector(MSG_WIDTH - 1 downto 0);
+  signal back_data : std_logic_vector(MSG_WIDTH - 1 downto 0);
   -- CMSIS-DAP の EP（usb ドメインで折り返し）
   signal d_valid, d_ready, d_last : std_logic;
   signal d_data : std_logic_vector(7 downto 0);
@@ -57,7 +61,7 @@ architecture rtl of primer20k_usbtest_top is
   -- ストリーム
   signal stream_ready : std_logic;
   signal counter      : unsigned(7 downto 0) := (others => '0');
-  signal heartbeat    : unsigned(25 downto 0) := (others => '0');
+  signal heartbeat    : unsigned(HEARTBEAT_BITS - 1 downto 0) := (others => '0');
   -- 診断報告（sys ドメイン）
   constant STATUS : template_t :=
     lit("usb clk=") & hex(0) & lit(" rdy=") & hex(1) & lit(" vbus=") & hex(2) & lit(" ls=") & hex(3) &
@@ -117,7 +121,7 @@ begin
 
   -- 制御チャンネルを sys ドメインまで往復させる（データ 8 ビット + last）
   to_sys_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
+    generic map (WIDTH => MSG_WIDTH, DEPTH => MSG_FIFO_DEPTH)
     port map (in_clk => usb_clk, in_rst => usb_rst, in_valid => c_out_valid,
               in_ready => c_out_ready, in_data => c_out_last & c_out_data,
               out_clk => sys_clk, out_rst => sys_rst, out_valid => s_valid, out_ready => s_ready,
@@ -128,7 +132,7 @@ begin
               in_data => s_data, out_valid => r_valid, out_ready => r_ready, out_data => r_data);
 
   to_usb_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
+    generic map (WIDTH => MSG_WIDTH, DEPTH => MSG_FIFO_DEPTH)
     port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => r_valid, in_ready => r_ready,
               in_data => r_data,
               out_clk => usb_clk, out_rst => usb_rst, out_valid => c_in_valid,
@@ -149,7 +153,7 @@ begin
   status_usb <= usb_alive & phy_ready & vbus_present & line_state & high_speed & configured
                 & suspended & address;
 
-  -- 診断報告: 状態を sys ドメインへ 2 段 FF で取り込み、0.5 秒ごとに報告する
+  -- 診断報告: 状態を sys ドメインへ 2 段 FF で取り込み、2^25 sys 周期（約 0.33 秒）ごとに報告する
   process (sys_clk)
   begin
     if rising_edge(sys_clk) then
@@ -161,7 +165,7 @@ begin
       if status_sys(14) /= alive_prev then
         alive_seen <= '1';
       end if;
-      if heartbeat(24 downto 0) = 0 then
+      if heartbeat(HEARTBEAT_BITS - 2 downto 0) = 0 then
         clk_ok     <= alive_seen;
         alive_seen <= '0';
         report_start <= '1';
@@ -190,7 +194,7 @@ begin
 
   uart_i : entity work.uart_tx
     port map (clk => sys_clk, rst => sys_rst,
-              divisor => to_unsigned((SYS_CLK_HZ + 57_600) / 115_200, 16),
+              divisor => to_unsigned(baud_divisor(SYS_CLK_HZ, DIAG_BAUD), 16),
               in_valid => tx_valid, in_ready => tx_ready, in_data => tx_byte, tx => uart_tx,
               busy => open);
 

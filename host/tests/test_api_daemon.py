@@ -880,3 +880,34 @@ def test_a_malformed_source_is_refused(daemon):
         reply = c.request_with("target.status", {}, source=bad)
         assert reply["error"]["code"] == -32600
     c.close()
+
+
+def test_the_api_describes_itself(daemon):
+    """session.methods: 名前を当てずっぽうで試さずに、一覧と 1 つの全部（引数・応答の JSON Schema）が取れる。"""
+    url, _ = daemon
+    ai = DaemonClient(url, "claude", "ai")
+    everything = ai.call("session.methods")
+    names = [m["name"] for m in everything["methods"]]
+    assert everything["total"] == len(names) > 300 and "target.registers.read" in names and "session.methods" in names
+    assert all(set(m) == {"name", "kind"} for m in everything["methods"])              # 一覧は名前と種類だけ（長い説明を付けない）
+    targets = ai.call("session.methods", prefix="target.", with_summary=True)["methods"]
+    assert targets and all(m["name"].startswith("target.") and m["summary"] for m in targets)
+    one = ai.call("session.methods", name="target.registers.read")["methods"][0]
+    assert one["params"]["type"] == "object" and one["result"] and one["summary"] and one["kind"] in ("read", "control")
+    with pytest.raises(ApiError) as unknown:
+        ai.call("session.methods", name="target.registers")
+    assert unknown.value.code == E_INVALID_PARAMS and "target.registers.read" in str(unknown.value)   # 先頭が合うものを挙げて断る
+    ai.close()
+
+
+def test_an_unknown_method_points_to_session_methods(daemon):
+    """無いメソッドは、メソッドの一覧の取り方（session.methods）と、同じ前半のメソッドを挙げて断る。"""
+    url, _ = daemon
+    ai = DaemonClient(url, "claude", "ai")
+    with pytest.raises(ApiError) as unknown:
+        ai.call("target.registers")
+    assert "session.methods" in str(unknown.value) and "target.registers.read" in str(unknown.value) or "target.halt" in str(unknown.value)
+    with pytest.raises(ApiError) as bare:
+        ai.call("help")
+    assert "session.methods" in str(bare.value)
+    ai.close()

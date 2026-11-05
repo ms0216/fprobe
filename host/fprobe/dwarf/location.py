@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from .access import AccessError, register_name
 
 __all__ = ["EvalContext", "MemoryPlace", "NotAvailable", "PiecesPlace", "Place", "RegisterPlace", "Unavailable",
-           "ValuePlace", "evaluate_location", "evaluate_value", "read_place", "register_width"]
+           "ValuePlace", "evaluate_location", "evaluate_value", "no_register", "read_place", "register_width"]
 
 ADDRESS_BITS = 32
 MASK = (1 << ADDRESS_BITS) - 1
@@ -73,6 +73,13 @@ class EvalContext:
 
 def register_width(number: int) -> int:
     return 8 if 256 <= number < 288 else 4
+
+
+def no_register(message: str):
+    """レジスタを引けない所（フレームが無い）で、フレームのレジスタの読み手の代わりに渡す関数: 呼ばれたら message で NotAvailable。"""
+    def read_register(number: int) -> int:
+        raise NotAvailable(message)
+    return read_register
 
 
 def _signed(value: int, bits: int = ADDRESS_BITS) -> int:

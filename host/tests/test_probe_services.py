@@ -219,10 +219,12 @@ def test_every_host_name_a_service_uses_is_declared_in_its_needs():
     for cls, _svc in services.values():
         if not hasattr(cls, "NEEDS"):
             continue
-        tree = ast.parse(inspect.getsource(inspect.getmodule(cls)))
-        node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == cls.__name__)
-        used = {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Attribute)
-                and n.value.attr == "_host" and isinstance(n.value.value, ast.Name) and n.value.value.id == "self"}
+        used = set()
+        for part in cls.__mro__[:-1]:                   # サービスに混ぜ込む部品（mixin）の中の使い方も数える
+            tree = ast.parse(inspect.getsource(inspect.getmodule(part)))
+            node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == part.__name__)
+            used |= {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Attribute)
+                     and n.value.attr == "_host" and isinstance(n.value.value, ast.Name) and n.value.value.id == "self"}
         assert used <= set(cls.NEEDS), (cls.__name__, sorted(used - set(cls.NEEDS)))
         assert set(cls.NEEDS) <= used, (cls.__name__, "使わない名前が NEEDS にある", sorted(set(cls.NEEDS) - used))
 

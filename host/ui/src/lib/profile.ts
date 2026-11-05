@@ -3,6 +3,7 @@
 import type { ProfileFunctionRow, ProfileLineRow, ProfileRow } from "../../../api/generated/fprobe_api";
 import type { DaemonConnection, Result } from "./api";
 import type { TimelineSnapshot } from "./timeline/state";
+import { addListener } from "./store";
 
 type Conn = Pick<DaemonConnection, "call">;
 
@@ -85,9 +86,7 @@ export class SourceHeat {
   private listeners = new Set<(s: HeatSnapshot) => void>();
 
   subscribe(fn: (s: HeatSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   set(snap: HeatSnapshot): void {

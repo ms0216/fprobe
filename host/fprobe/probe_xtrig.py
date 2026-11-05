@@ -160,8 +160,10 @@ class XtrigService:
             def names(field) -> list[str]:
                 bits = route >> field[0] & (1 << field[1]) - 1
                 return [s.name.lower() for s in Source if bits & int(s)]
-            return {"inject": {**vars(xt.inject_status()), "ap": ap, "address": address, "value": value},
-                    "match": {"count": count, "time": time_, **match},
+            inject = xt.inject_status()
+            # time_valid: time が意味を持つか（回数 1 以上。0 のとき time はレジスタの初期値）。画面は規則を持たずこれを描く
+            return {"inject": {**vars(inject), "time_valid": inject.count > 0, "ap": ap, "address": address, "value": value},
+                    "match": {"count": count, "time": time_, "time_valid": count > 0, **match},
                     "route": {"to_la": names(g.XTRIG_ROUTE_TO_LA), "to_inject": names(g.XTRIG_ROUTE_TO_INJECT)}}
 
     @staticmethod

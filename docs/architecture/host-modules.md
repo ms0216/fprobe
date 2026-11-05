@@ -76,10 +76,10 @@
 | ターゲット接続・低レベル | `probe_target`（target_*・registers・memory）、`probe_connect`（接続手順の上書き・ロック解除）、`probe_lowlevel`（診断・DP/AP・JTAG・ピン）、`probe_multicore`、`probe_monitor`（停止方式/モニタ方式） |
 | デバッグ操作 | `probe_debug`（シンボル・ブレークポイント・実行）、`probe_execution`、`probe_breakpoints`、`probe_inspect`（止めて調べる）、`probe_gdb` / `probe_gdb_trace`、`probe_safety` |
 | メモリ・Flash | `probe_flash`、`probe_flash_bp`、`probe_stack`、`probe_heap`、`probe_snapshot` |
-| 観測（走らせたまま） | `probe_observe`（RTT・セミホスティング）、`probe_swo` / `probe_swo_rx`、`probe_etm`、`probe_cycles`、`probe_watch`（変数のライブ観測）、`probe_user`、`probe_testpoint`、`probe_window`（共通部品） |
+| 観測（走らせたまま） | `probe_observe`（受信の核）、`probe_rtt`、`probe_semihosting`、`probe_swo_itm`、`probe_swo` / `probe_swo_rx`、`probe_etm`、`probe_cycles`、`probe_watch`（変数のライブ観測）、`probe_user`、`probe_testpoint`、`probe_window`（共通部品） |
 | ロジアナ・クロストリガ | `probe_la`、`probe_decode`（通信の解読・ファイル入出力）、`probe_xtrig`、`probe_xtrig_out`、`probe_gpio`、`probe_uart` |
 | FPGA 観測 | `probe_fpga_obs`（fpga_obs_*）、`probe_match_trigger`（fpga_obs_trigger_*・sampler_trigger_*） |
-| 記録と解析 | `probe_recording`、`probe_recording_rtos`、`probe_longrec`、`probe_analysis`、`probe_rules`、`probe_profile` / `probe_profile_export`、`probe_rtos` / `probe_rtos_analysis`、`probe_timeline`、`probe_formats`（既存のログ・トレース形式の取り込み）、`probe_streams`、`probe_hooks` |
+| 記録と解析 | `probe_recording`、`probe_recording_rtos`、`probe_longrec`、`probe_analysis`、`probe_rules`、`probe_profile` / `probe_profile_export`、`probe_rtos` / `probe_rtos_analysis`、`probe_timeline`、`probe_formats`（ログ形式の取り込み・受け口）、`probe_trace`（トレース形式・SCVD）、`probe_streams`、`probe_hooks` |
 | 画面の補助 | `probe_ui_state`、`probe_terminal`、`probe_elf_files`、`probe_elf_watch` |
 | その他 | `probe_linux`（組み込み Linux のアプリのデバッグ） |
 
@@ -131,3 +131,13 @@ MCP の道具は、実装のメソッドを手で登録するのでなく、**AP
 5. AI への使い方の流れを書く必要があれば `mcp_instructions.py` の `INSTRUCTIONS`（道具の名前・引数の正は仕様）。
 
 デーモンは受けたメソッドの `impl` 名で `getattr(backend, impl)` し、`fn(**params)` を調停の作業スレッドで実行する（`api/daemon.py` の `_call`）。
+
+## 7. 大きいモジュールを分けるときの流儀（2026-11-05 夜に 60 本ほど分けた。純粋な移し替え）
+
+- **状態を共有する大きなクラスは mixin に分ける**。元のクラスが mixin を継ぐ（例: `probe_linux.py` の `LinuxService` が `probe_linux_tools.py`・`probe_linux_ring.py`・
+  `probe_linux_events.py` の mixin を継ぐ。`linux_halt/` の `HaltDebugger`・`Engine`・`ArmACores` も `debugger_*.py`・`engine_*.py`・`arma_*.py` の mixin）。
+  状態（辞書・錠・ssh の口）を共有するので、別の `@expose` サービスにはしない。独立した責務（状態を共有しないもの）は別サービス（`probe_rtt.py`・`probe_trace.py`・`probe_semihosting.py`）。
+- **旧名は元のモジュールから再公開する**（試験の monkeypatch や外部の import が変わらないように）。monkeypatch の差し替え先は、その名前を**使う側**のモジュール（移した先）にする。
+- **公開 API（名前・引数・応答）と `SHARED` / `NEEDS` の契約は変えない**。新しい部品の先頭に責務を日本語で書く。
+- 「移しただけ」の確認: 全関数の本体を AST で比べる（`self._host.x` のような呼び出し経路は同じとみなす）。移した後に本体が変わった関数は、意図した修正（git log で分かる）だけであること。
+- 画面（`host/ui`）も同じ: 見せ方だけのまとまりを `panels/<名前>/` の子コンポーネントに、純粋な整形を `lib/` の関数に。**画面に計算・検出・判定を置かない**（置きたくなったらホストの API に）。

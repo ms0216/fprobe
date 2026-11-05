@@ -8,7 +8,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from fprobe import la_vcd, la_wave
+from fprobe import la_vcd, la_vcd_render, la_wave
 from fprobe.la_vcd import VcdWriter
 from fprobe.la_wave import stream_transitions
 
@@ -136,7 +136,7 @@ def test_vcdwriter_matches_the_naive_one(seed, tmp_path, monkeypatch):
             previous = v
         ops.append(("w", values, starts))
     monkeypatch.setattr(la_vcd, "_PIECE", rng.choice([1, 7, 1 << 16]))
-    monkeypatch.setattr(la_vcd, "_UNIFORM_MIN", rng.choice([1, 2, 64]))
+    monkeypatch.setattr(la_vcd_render, "_UNIFORM_MIN", rng.choice([1, 2, 64]))
     with VcdWriter(tmp_path / "fast.vcd", channels, period, workers=rng.choice([1, 2, 5])) as vcd:
         for op in ops:
             vcd.gap(op[1]) if op[0] == "gap" else vcd.write(op[1], op[2])

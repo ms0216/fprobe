@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .gowin import ToolchainNotFound
+from .locate import ToolchainNotFound
 
 __all__ = ["SHRIKE_LITE", "Board", "BuildResult", "ForgeFpgaToolchain", "Resources", "io_spec", "mcu_image",
            "pack_arguments", "parse_axi", "parse_resources", "placer_arguments"]

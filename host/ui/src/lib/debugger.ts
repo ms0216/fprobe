@@ -2,101 +2,24 @@
 // Svelte に依らない（store の約束 subscribe だけを満たす）。ターゲットの状態は AppState（target.state の通知）から受ける。
 // ウォッチは止まったら読み直し、走っている間はウォッチのパネルが開いていれば周期的に走らせたまま読み（ライブ ウォッチ。
 // debug.evaluate の live = 大域・静的とメモリ）、つないでいなければ ELF だけで式と型を調べる（debug.expression.check）。
-import { errorText, type DaemonConnection, type Params } from "./api";
-import type { BreakpointAction } from "./breakpoints";
+import type { DaemonConnection, Params } from "./api";
 import { isRunning } from "./commands";
 import { execution, stepParams } from "./execution";
 import { allowed } from "./guard";
-import { load, save } from "./prefs";
 import type { AppState, Snapshot } from "./state";
 import type { UiState } from "./ui";
 import { exprWriteCall } from "./valuewrite";
+import type { Breakpoint, DebugSnapshot, Frame, Instruction, Place, SourceFile, StepInfo, Watch, WatchMode } from "./debugtypes";
+import { base64, breakpointOnLine, frameLine, markedLines, placeOf, saveWatches, savedWatches } from "./debughelpers";
+import { addListener } from "./store";
+import { LiveReader, readWatchList } from "./debugwatch";
 
-export interface SourceFile {
-  name: string;
-  path: string;
-  exists: boolean;
-  // Linux のプロセス: この PC に無く、attach のときに対象から取り寄せた写し（debug.source.read が読む）
-  fetched?: { target: string; path: string; local_path: string; bytes: number; sha256: string };
-  fetch_error?: { target: string; path: string; error: string };
-}
+// 型と純関数は debugtypes.ts・debughelpers.ts へ分けた。ここから再び公開する（import 元は変えない）
+export type { Breakpoint, DebugSnapshot, Frame, FrameVariables, Instruction, Place, Source, SourceFile, StepInfo, Variable, Watch,
+              Watchpoint, WatchMode } from "./debugtypes";
+export { base64, frameLine, markedAddresses, markedLines, placeOf } from "./debughelpers";
 
-export interface Source {
-  name: string;
-  path: string;
-  text: string;
-  lines: number[];          // 命令のある行（ブレークポイントを置ける行）
-}
-
-export interface Place {
-  pc?: number;
-  where: string;
-  function?: string;
-  file?: string;
-  line?: number;
-  run?: number;             // デーモンがコアを動かし得る操作を数えた番号（同じ場所で止まり直しても変わる）
-}
-
-export interface Breakpoint extends Place {
-  address: number;
-  location: string;
-  kind?: "hw" | "flash" | "sw";        // 接続中: 比較器 / Flash の BKPT / RAM の BKPT
-  action?: BreakpointAction;           // 条件・ヒット カウント・ログ（lib/breakpoints.ts）
-  tool?: string;                       // 道具（heap.trace 等）が置いたもの
-  enabled?: boolean;                   // false = 無効にしたもの（debug.breakpoint.enable。機器には置いていない）
-  at?: { file: string; path: string; line: number };   // "ファイル:行" で置いた場所（デーモンが解いた事実）
-}
-
-export interface Watchpoint {
-  address: number;
-  size: number;
-  kind: string;
-}
-
-export interface Watch {
-  name: string;               // C の式
-  type?: string;
-  value?: unknown;
-  error?: string;
-}
-
-/** ウォッチの値の出どころ: 止まったときの値 / 走らせたまま読んだ値 / ELF だけで調べた（値なし） */
-export type WatchMode = "stopped" | "live" | "elf";
-export const LIVE_MS = 1000;            // ライブ ウォッチの周期
-
-export interface Variable {
-  name: string;
-  type?: string;
-  value: unknown;
-  address?: number;
-}
-
-export interface FrameVariables {
-  function?: string;
-  arguments: Variable[];
-  locals: Variable[];
-}
-
-export interface Frame {
-  index?: number;
-  pc: number;
-  where: string;
-  note: string;
-  function?: string | null;
-  file?: string | null;
-  line?: number | null;
-}
-
-/** デーモンの欄 file・line → ソースの場所（file は行表のファイルの名前のまま）。欄が無ければ null（where の文字は解釈しない） */
-export function placeOf(p: { file?: string | null; line?: number | null } | null | undefined)
-  : { file: string; line: number } | null {
-  return p?.file && typeof p.line === "number" ? { file: p.file, line: p.line } : null;
-}
-
-/** フレームのソースの場所（デーモンが返す file・line） */
-export function frameLine(f: Frame | undefined): { file: string; line: number } | null {
-  return placeOf(f);
-}
+export const LIVE_MS = 1000;            // ライブ ウォッチの周期（ms）
 
 /** 呼び出し履歴のフレームに移る: そのフレームの変数・逆アセンブルを読み、Source のその行を選ぶ（Call Stack の
  *  クリック、ほかの窓・AI が ui.state で選んだとき） */
@@ -104,52 +27,6 @@ export async function focusFrame(dbg: Debugger, ui: UiState, index: number): Pro
   await dbg.selectFrame(index);
   const at = frameLine(dbg.snapshot.backtrace[index]);
   if (at) ui.select(at.file, at.line);
-}
-
-export interface Instruction {
-  address: number;
-  mnemonic: string;
-  operands: string;
-  function?: string | null;
-  offset?: number;
-  file?: string | null;
-  line?: number | null;
-  new_line?: boolean;
-  bytes?: string;
-  in_flash?: boolean | null;     // その番地が Flash の領域か（デーモンの事実。null = 分からない。書く道は lib/valuewrite）
-}
-
-export interface DebugSnapshot {
-  elf: string | null;        // 読み込んだ ELF（デーモンの PC のパス）
-  files: SourceFile[];
-  open: string | null;
-  source: Source | null;
-  stop: Place | null;        // 止まっているときの場所（実行中は null）
-  stale: boolean;            // 実行中: レジスタ・変数・呼び出し履歴は最後に止まったときの値
-  breakpoints: Breakpoint[];
-  watchpoints: Watchpoint[];
-  registers: Record<string, number> | null;
-  backtrace: Frame[];
-  frame: number;             // 選んだフレーム（呼び出し履歴の index。0 = 止まった関数）。Locals・Watch・Source が従う
-  watches: Watch[];
-  watchMode: WatchMode;
-  locals: FrameVariables | null;
-  disasm: Instruction[];     // 止まった PC の前後（showAddress の後はその番地の前後）
-  focus: number | null;      // showAddress で見せた番地（Disassembly が強調する。止まり直すと null）
-  gen: number;               // 変数を読み直した回数（木の展開したポインタの先を読み直す合図）
-  stops: number;             // 止まって読み直した回数（変わった値の印は、前に止まったときの値と比べる）
-  lastStep: StepInfo | null; // 最後のステップ操作の結果（デーモンが返した値。走り出したら null）
-  filesRead: boolean;        // つないでから、ソースの一覧を一度は読み終えた（読み終わる前に「プログラムが無い」と出さない。backlog 69 番）
-}
-
-/** ステップ操作の結果（debug.step の応答のまま）。steps・runs はデーモンが測った数（古いデーモンは無い = null）。
- *  踏み越えた呼び出しから同じ行に戻っても、これで進んだと分かる */
-export interface StepInfo {
-  mode: "over" | "into" | "out";
-  steps: number | null;      // ホストが発行した 1 命令ステップの数
-  runs: number | null;       // 踏み台・ブレークポイントまで走らせた回数
-  elapsedS: number;
-  where: string;
 }
 
 // ELF・ブレークポイントを変える操作。誰か（AI も）が行ったら読み直す
@@ -168,29 +45,6 @@ const BREAK_METHODS = new Set(["debug.breakpoint.set", "debug.breakpoint.clear",
                                "target.flash", ...LINUX_ATTACH, "linux.halt.debug.break.insert",
                                "linux.halt.debug.break.remove"]);
 
-/** 開いているファイルの、ブレークポイントの印を付ける行。置いた「ファイル:行」（デーモンが解いた at）を優先する（同じ番地に
- *  複数の行があると、番地から引き直した行は押した行とずれる）。場所の文字は画面で解釈しない */
-export function markedLines(d: DebugSnapshot, only?: (b: Breakpoint) => boolean): Set<number> {
-  const out = new Set<number>();
-  for (const b of only ? d.breakpoints.filter(only) : d.breakpoints) {
-    if (b.at) {
-      if (b.at.file === d.open) out.add(b.at.line);
-    } else if (b.file === d.open && b.line !== undefined) out.add(b.line);
-  }
-  return out;
-}
-
-/** 行に置いたブレークポイント（置いた場所の at が先、無ければ番地から引いた行） */
-function breakpointOnLine(bps: Breakpoint[], file: string, line: number): Breakpoint | undefined {
-  return bps.find((b) => b.at?.file === file && b.at.line === line)
-    ?? bps.find((b) => !b.at && b.file === file && b.line === line);
-}
-
-/** ブレークポイントのある命令の番地（逆アセンブルの印） */
-export function markedAddresses(d: Pick<DebugSnapshot, "breakpoints">): Set<number> {
-  return new Set(d.breakpoints.map((b) => b.address));
-}
-
 type Conn = Pick<DaemonConnection, "call" | "on" | "onLink">;
 
 export class Debugger {
@@ -199,9 +53,8 @@ export class Debugger {
     registers: null, backtrace: [], watches: savedWatches(), watchMode: "elf", locals: null, disasm: [], gen: 0, stops: 0,
     frame: 0, focus: null, lastStep: null, filesRead: false,
   };
-  private liveUsers = 0;                     // ウォッチを走らせたまま読む利用者（開いているパネル）の数
-  private liveTimer: ReturnType<typeof setInterval> | null = null;
-  private liveMs = LIVE_MS;
+  private live = new LiveReader({ running: () => isRunning(this.target?.state), halted: () => !!this.snap.stop,
+                                   read: () => this.refreshWatches() }, LIVE_MS);
   private liveBusy = false;
   private target: Record<string, any> | null = null;
   private members = new Map<string, Promise<Record<string, string>>>();   // 型の名前 → メンバーの型
@@ -228,28 +81,7 @@ export class Debugger {
 
   /** ウォッチを走らせたまま読む（ウォッチのパネルが開いている間）。止めるときは返った関数を呼ぶ */
   startLive(ms = LIVE_MS): () => void {
-    this.liveUsers++;
-    this.liveMs = ms;
-    this.syncLive();
-    let stopped = false;
-    return () => {
-      if (stopped) return;
-      stopped = true;
-      this.liveUsers--;
-      this.syncLive();
-    };
-  }
-
-  /** 状態に合わせて周期の読みを始める・止める（走っていて利用者がいるときだけ）。止まっていない間はすぐ 1 回読む */
-  private syncLive(): void {
-    const want = this.liveUsers > 0 && isRunning(this.target?.state);
-    if (want && !this.liveTimer) {
-      this.liveTimer = setInterval(() => void this.refreshWatches(), this.liveMs);
-    } else if (!want && this.liveTimer) {
-      clearInterval(this.liveTimer);
-      this.liveTimer = null;
-    }
-    if (this.liveUsers > 0 && !this.snap.stop) void this.refreshWatches();
+    return this.live.start(ms);
   }
 
   /** 止まっていないときのウォッチ: 走っていれば走らせたまま読み、つないでいなければ ELF だけで調べる */
@@ -266,9 +98,7 @@ export class Debugger {
   }
 
   subscribe(fn: (s: DebugSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   get snapshot(): DebugSnapshot {
@@ -400,7 +230,7 @@ export class Debugger {
     this.set({ watches: [...this.snap.watches, { name }] });
     saveWatches(this.snap.watches);
     if (this.snap.stop) this.set({ watches: await this.readWatches(this.snap.watches) });
-    else if (this.liveUsers > 0) await this.refreshWatches();
+    else if (this.live.active) await this.refreshWatches();
   }
 
   removeWatch(name: string): void {
@@ -511,7 +341,7 @@ export class Debugger {
       if (this.snap.stop !== null || !this.snap.stale) this.set({ stop: null, stale: this.snap.registers !== null });
       if (this.snap.lastStep !== null) this.set({ lastStep: null });
     }
-    if (target?.state !== was) this.syncLive();            // 走り出した・止まった・切れた: ウォッチの読み方を変える
+    if (target?.state !== was) this.live.sync();            // 走り出した・止まった・切れた: ウォッチの読み方を変える
   }
 
   /** 止まったとき: 止まったファイルを開き、レジスタ・呼び出し履歴・変数を読み直す（確認なしの自動の読み） */
@@ -531,25 +361,8 @@ export class Debugger {
     }
   }
 
-  /** ウォッチを読む: stopped = 選んだフレームで、live = 走らせたまま（大域・静的）、elf = ELF だけで式と型を調べる
-   *  （値は無い）。変数ごとの誤りはその行に出す */
-  private async readWatches(watches: Watch[], mode: WatchMode = "stopped"): Promise<Watch[]> {
-    const out: Watch[] = [];
-    for (const w of watches) {
-      try {
-        if (mode === "elf") {
-          const r = await this.conn.call("debug.expression.check", { expression: w.name }, { quiet: true });
-          out.push({ name: w.name, type: r.type ?? undefined });
-          continue;
-        }
-        const where = mode === "live" ? { live: true } : { frame: this.snap.frame };
-        const r = await this.conn.call("debug.evaluate", { expression: w.name, ...where }, { quiet: true });
-        out.push({ name: w.name, type: r.type, value: r.value });
-      } catch (e) {
-        out.push({ name: w.name, error: errorText(e) });
-      }
-    }
-    return out;
+  private readWatches(watches: Watch[], mode: WatchMode = "stopped"): Promise<Watch[]> {
+    return readWatchList((m, p, o) => this.conn.call(m, p, o), watches, mode, this.snap.frame);
   }
 
   private async reloadAll(): Promise<void> {
@@ -595,26 +408,4 @@ export class Debugger {
     this.snap = { ...this.snap, ...patch };
     this.listeners.forEach((fn) => fn(this.snap));
   }
-}
-
-/** ファイルの中身 → base64（debug.elf.upload・target.flash.upload） */
-export function base64(data: ArrayBuffer): string {
-  const bytes = new Uint8Array(data);
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(out);
-}
-
-/** ウォッチの式は画面に覚える（VS Code と同じく、開き直しても残る） */
-function savedWatches(): Watch[] {
-  try {
-    const names = JSON.parse(load("watches", "[]"));
-    return Array.isArray(names) ? names.filter((n) => typeof n === "string").map((name) => ({ name })) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveWatches(watches: Watch[]): void {
-  save("watches", JSON.stringify(watches.map((w) => w.name)));
 }

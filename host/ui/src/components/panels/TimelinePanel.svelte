@@ -1,5 +1,6 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import Req from "./Req.svelte";
   import type { LaChannel } from "../../lib/waveform";
   // Timeline: 共通タイムライン（ロジアナの波形・記録の段。WebGL2 の部品 Timeline.svelte）と捕捉の設定、縮図、
   // 段の名前の列（折りたたみ・並べ替え・隠す）、段の一覧のメニュー、カーソル（選択・基準・差）の表示、時刻へ移動
@@ -86,10 +87,10 @@
       </select>
     </label>
     {#if t.source === "capture"}
-      <label>{$i18n("timeline.rate")}<span class="req" aria-hidden="true">*</span> <select bind:value={rate} aria-required="true"><option
+      <label>{$i18n("timeline.rate")}<Req /> <select bind:value={rate} aria-required="true"><option
         value=""></option>{#each rates as r (r)}<option value={String(r)}>{frequency(r)}</option>{/each}</select></label>
       {#if !deep}
-        <label>{$i18n("timeline.pretrigger")}<span class="req" aria-hidden="true">*</span> <input class="num" bind:value={pretrigger}
+        <label>{$i18n("timeline.pretrigger")}<Req /> <input class="num" bind:value={pretrigger}
                inputmode="numeric" aria-required="true" /></label>
       {/if}
       <label>{$i18n("timeline.trigger")}
@@ -104,18 +105,18 @@
       {#if caps.mem_bytes}
         <label title={$i18n("timeline.deepTip")}><input type="checkbox" bind:checked={deep} /> {$i18n("timeline.deep")}</label>
         {#if deep}
-          <label title={$i18n("timeline.rleTip")}>{$i18n("timeline.rle")}<span class="req" aria-hidden="true">*</span>
+          <label title={$i18n("timeline.rleTip")}>{$i18n("timeline.rle")}<Req />
             <select bind:value={rle} aria-required="true">
               <option value=""></option><option value="rle">RLE</option><option value="raw">RAW</option>
             </select>
           </label>
-          <label>{$i18n("timeline.before")}<span class="req" aria-hidden="true">*</span>
+          <label>{$i18n("timeline.before")}<Req />
             <select bind:value={beforeBeats} aria-required="true">
               <option value=""></option>
               {#each ["4096", "65536", "1048576"] as b (b)}<option value={b}>{$i18n("timeline.beats", { n: Number(b).toLocaleString() })}</option>{/each}
             </select>
           </label>
-          <label title={$i18n("timeline.afterTip")}>{$i18n("timeline.after")}<span class="req" aria-hidden="true">*</span>
+          <label title={$i18n("timeline.afterTip")}>{$i18n("timeline.after")}<Req />
             <select bind:value={afterBeats} aria-required="true">
               <option value=""></option>
               {#each ["4096", "65536", "1048576"] as b (b)}<option value={b}>{$i18n("timeline.beats", { n: Number(b).toLocaleString() })}</option>{/each}

@@ -49,6 +49,12 @@ package eth_pkg is
   constant ICMP_TYPE_POS     : natural := IP_PAYLOAD_POS;
   constant ICMP_CHECKSUM_POS : natural := IP_PAYLOAD_POS + 2;
   constant ICMP_ECHO_REQUEST : byte_t := x"08";
+  -- IPv4 見出しの定数の語（自分が作る見出しと、受信の形の検査の両方で使う）
+  constant IP_VER_IHL_V4     : byte_t := x"45";                 -- 版 4・見出し 20 バイト（オプションなし）
+  constant IP_FLAGS_DF       : byte_t := x"40";                 -- DF（分割しない）・位置 0
+  constant IP_TTL_DEFAULT    : byte_t := x"40";                 -- TTL 64
+  -- 型 8（要求）→ 0（応答）にしたときの ICMP チェックサムの増分（0x0800。1 の補数の和で足す）
+  constant ICMP_ECHO_CSUM_ADD : natural := 16#0800#;
 
   -- 受信したフレームの中のバイトの位置（eth_rx_header が数える。FRAME_POS_MAX で止まる）
   constant FRAME_POS_BITS : positive := 11;

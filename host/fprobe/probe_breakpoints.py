@@ -100,13 +100,13 @@ class BreakpointService:
                         self._actions[address] = action
                         self._host._watch_stops(self._host.target.get_state().name != "HALTED")
                 elif address not in self._host.dbg.breakpoints:
-                    raise KeyError(f"{location!r} にブレークポイントが無い")
+                    raise ValueError(f"{location} にブレークポイントが無い")
             elif address in self._host.dbg.breakpoints:
                 name = self._host.dbg.breakpoints[address]
                 self._host.dbg.remove_breakpoint(address)
                 self._disabled[address] = (name, self._actions.pop(address, None))
             elif address not in self._disabled:
-                raise KeyError(f"{location!r} にブレークポイントが無い")
+                raise ValueError(f"{location} にブレークポイントが無い")
             return self._host.breakpoint_list()
 
     def _break_action(self) -> bool:

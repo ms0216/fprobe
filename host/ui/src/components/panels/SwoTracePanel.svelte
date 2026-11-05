@@ -3,6 +3,8 @@
   // 設定し（例外トレース・タイムスタンプ・データトレース = 変数へのアクセスを値・PC・時刻つきで）、結果を一覧にする。
   // 時刻はタイムベース: 時刻のリンク・行のダブルクリックで時間軸へ、時間軸の選択で近い行を選ぶ、アクセスを時間軸に印
   import { tick, untrack } from "svelte";
+  import Req from "./Req.svelte";
+  import { interval } from "../common/interval";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
@@ -47,8 +49,7 @@
   // 取っている間は周期的に読み直す
   $effect(() => {
     if (!running || !connected) return;
-    const timer = setInterval(() => void read(), POLL_MS);
-    return () => clearInterval(timer);
+    return interval(() => read(), POLL_MS);
   });
   // 前の設定の結果があれば最初に読む（ほかの窓・AI が設定したものも）
   $effect(() => {
@@ -131,7 +132,7 @@
       <!-- 比較器の数はターゲットの DWT で決まる（画面は決め打ちしない。足りなければ swo.configure の誤りに数が出る） -->
       <button type="button" class="small" title={$i18n("swoTrace.addTip")}
               onclick={() => (settings.variables = [...settings.variables, { expression: "", access: "write" }])}>+</button>
-      <label>{$i18n("terminal.swoBaud")}<span class="req" aria-hidden="true">*</span>
+      <label>{$i18n("terminal.swoBaud")}<Req />
         <select bind:value={settings.swoBaud} aria-required="true">
           {#if settings.swoBaud === null}<option value={null} disabled></option>{/if}
           {#each SWO_BAUDS as b (b)}<option value={b}>{b.toLocaleString()}</option>{/each}</select>

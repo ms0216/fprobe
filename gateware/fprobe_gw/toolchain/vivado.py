@@ -1,4 +1,5 @@
-"""Vivado（AMD/Xilinx）の場所・プロジェクト記述・TCL / XDC の生成・タイミング報告の解析。
+"""Vivado（AMD/Xilinx）の場所・プロジェクト記述・TCL / XDC の生成。ログ・タイミング報告の解析は vivado_report、
+MMCM の分周は pll。
 
 Gowin の流れ（project.py・build.py）と同じ考え: 制約（.xdc）はデザインが使うピンだけからビルド時に生成し、
 ビルドは vivado -mode batch で 1 本の TCL を流す。ブロック設計（PS7 等）は、それを作る TCL をプロジェクトに渡し、
@@ -6,17 +7,18 @@ Gowin の流れ（project.py・build.py）と同じ考え: 制約（.xdc）は�
 """
 
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .gowin import ToolchainNotFound
-from .project import BuildStamp, ClockConstraint, Pin, _check_pins, _tcl_path
-from .timing import ClockTiming, TimingReportError, TimingSummary
+from .locate import ToolchainNotFound
+from .pll import MmcmSolution
+from .project import BuildStamp, ClockConstraint, Pin, check_pins, tcl_path
+from .vivado_report import parse_vivado_timing, vivado_undriven, vivado_unmatched_constraints
 
-__all__ = ["DEFAULT_VIVADO_HOME", "ENV_VAR", "MmcmSolution", "module_constraints", "VivadoProject", "VivadoToolchain", "parse_vivado_timing",
-           "render_vivado_tcl", "render_xdc", "vivado_undriven", "vivado_unmatched_constraints"]
+# MmcmSolution・解析の関数は従来の import 先として再公開する
+__all__ = ["DEFAULT_VIVADO_HOME", "ENV_VAR", "MmcmSolution", "VivadoProject", "VivadoToolchain", "module_constraints",
+           "parse_vivado_timing", "render_vivado_tcl", "render_xdc", "vivado_undriven", "vivado_unmatched_constraints"]
 
 ENV_VAR = "FPROBE_VIVADO_HOME"
 DEFAULT_VIVADO_HOME = Path(r"C:\AMDDesignTools\2025.2\Vivado")
@@ -36,44 +38,6 @@ class VivadoToolchain:
         if not toolchain.vivado.is_file():
             raise ToolchainNotFound(f"Vivado が見つからない（{ENV_VAR} で指定可能）: {toolchain.vivado} が無い")
         return toolchain
-
-
-@dataclass(frozen=True)
-class MmcmSolution:
-    """7 系の MMCME2 の分周: fvco = fin * mult / divclk、fout = fvco / out_div（UG472。VCO は 600〜1200 MHz、-1 品）。
-
-    2 本目の出力（CLKOUT1。取り込みのクロック cap_clk）は構成ごとに sys の整数倍 ratio を選ぶ: 分周 = out_div / ratio
-    （同じ VCO から割るので sys と立ち上がりがそろう。cap_div）。BUFG の上限（DS187 -1: 464 MHz）を超える比は作れない。"""
-    fin_mhz: float
-    mult: float
-    divclk: int
-    out_div: float
-
-    BUFG_MAX_MHZ = 464.0            # DS187 v1.21（-1）の BUFG の上限（docs/superpowers/specs/2026-10-29-performance-limits-study.md §0.1）
-
-    def __post_init__(self):
-        if not 600.0 <= self.vco_mhz <= 1200.0:
-            raise ValueError(f"MMCM の VCO {self.vco_mhz} MHz が範囲外（600〜1200）")
-
-    @property
-    def vco_mhz(self) -> float:
-        return self.fin_mhz * self.mult / self.divclk
-
-    @property
-    def fout_hz(self) -> int:
-        return round(self.vco_mhz / self.out_div * 1e6)
-
-    def cap_div(self, ratio: int) -> int:
-        """cap_clk = sys × ratio を作る CLKOUT1 の分周（整数）。作れない比は ValueError。"""
-        if ratio < 2 or self.out_div % ratio:
-            raise ValueError(f"cap_clk は sys の 2 以上の整数倍（sys の分周 {self.out_div} が比 {ratio} で割り切れない）")
-        div = round(self.out_div) // ratio
-        if self.vco_mhz / div > self.BUFG_MAX_MHZ:
-            raise ValueError(f"cap_clk {self.vco_mhz / div} MHz が BUFG の上限 {self.BUFG_MAX_MHZ} MHz を超える")
-        return div
-
-    def cap_hz(self, ratio: int) -> int:
-        return round(self.vco_mhz / self.cap_div(ratio) * 1e6)
 
 
 @dataclass(frozen=True)
@@ -101,7 +65,7 @@ class VivadoProject:
         missing = [p for p in (*self.sources, *self.block_designs) if not Path(p).is_file()]
         if missing:
             raise FileNotFoundError(", ".join(map(str, missing)))
-        _check_pins(self.pins)
+        check_pins(self.pins)
         build_dir = Path(build_dir)
         build_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / f"{self.name}.xdc").write_text(render_xdc(self), encoding="utf-8")
@@ -148,14 +112,14 @@ def render_vivado_tcl(project: VivadoProject, build_dir: Path, directive: str) -
              "set_property target_language VHDL [current_project]"]
     for bd in project.block_designs:
         name = Path(bd).stem
-        lines += [f"source {_tcl_path(bd)}",
+        lines += [f"source {tcl_path(bd)}",
                   f"set bdf [get_files {name}.bd]",
                   "generate_target all $bdf",
                   "read_vhdl [make_wrapper -files $bdf -top]"]
-    lines += [f"read_vhdl -vhdl2008 {_tcl_path(src)}" for src in project.build_sources(build_dir)]
+    lines += [f"read_vhdl -vhdl2008 {tcl_path(src)}" for src in project.build_sources(build_dir)]
     # モジュールの制約: ソースの隣の <entity>.xdc（ファイル名の幹 = entity 名）を、そのモジュールの全部の実体に効かせる（UG903 の -ref）。
     # -unmanaged: Tcl として読む（generic で FF が無い実体を if で飛ばし、当たらない制約を正当な場合でも出さない）
-    lines += [f"read_xdc -unmanaged -ref {xdc.stem} {_tcl_path(xdc)}" for xdc in module_constraints(project.sources)]
+    lines += [f"read_xdc -unmanaged -ref {xdc.stem} {tcl_path(xdc)}" for xdc in module_constraints(project.sources)]
     lines += [f"read_xdc {project.name}.xdc",
               f"synth_design -top {project.top} -part {project.part}",
               "opt_design",
@@ -170,61 +134,3 @@ def render_vivado_tcl(project: VivadoProject, build_dir: Path, directive: str) -
               "write_checkpoint -force routed.dcp",
               f"write_bitstream -force {project.name}.bit"]
     return "\n".join(lines) + "\n"
-
-
-_UNDRIVEN = re.compile(r"^WARNING: \[Synth 8-\d+\].*(?:does not have driver|undriven pin).*$", re.M)
-
-
-def vivado_undriven(log: str) -> list[str]:
-    """駆動されない配線の警告の行（重複を除いて出た順に）。"""
-    return list(dict.fromkeys(m.group(0).strip() for m in _UNDRIVEN.finditer(log)))
-
-
-# 制約の対象が見つからない（12-4739）。Vivado が生成した IP の制約（.gen/ の下。PS7 の PJTAG など使わない端子）は除く
-_UNMATCHED = re.compile(r"^CRITICAL WARNING: \[Vivado 12-4739\].*$", re.M)
-
-
-def vivado_unmatched_constraints(log: str) -> list[str]:
-    """自分の制約（モジュールの xdc・トップの xdc）のうち、対象が見つからず効いていないものの警告の行（重複を除いて出た順に）。"""
-    lines = (m.group(0).strip() for m in _UNMATCHED.finditer(log))
-    return list(dict.fromkeys(line for line in lines if "/.gen/" not in line.replace("\\", "/")))
-
-
-def _section(report: str, title: str) -> list[str]:
-    m = re.search(r"\| " + re.escape(title) + r"\n.*?\n-+\n(.*?)(?:\n-{20,}\n|\Z)", report, re.S)
-    if not m:
-        raise TimingReportError(f"'{title}' 節が見つからない")
-    return [line for line in m.group(1).splitlines() if line.strip()]
-
-
-def parse_vivado_timing(report: str) -> TimingSummary:
-    """report_timing_summary の報告から、クロックごとの制約・Fmax（1000 / (周期 - WNS)）・TNS を読む。
-    クロック間の経路（Inter Clock Table）の違反は、全体の要約（Design Timing Summary）で拾う。"""
-    periods: dict[str, float] = {}
-    for line in _section(report, "Clock Summary")[2:]:
-        cells = line.split()
-        if len(cells) >= 5:
-            periods[cells[0]] = float(cells[-2])
-    clocks = []
-    for line in _section(report, "Intra Clock Table")[2:]:
-        cells = line.split()
-        if cells and cells[0] in periods and len(cells) == 5:
-            # 経路が無くパルス幅の列だけのクロック（MMCM の入力など）
-            clocks.append(ClockTiming(name=cells[0], constraint_mhz=1000.0 / periods[cells[0]], fmax_mhz=None,
-                                      setup_tns=0.0, hold_tns=0.0))
-            continue
-        if len(cells) < 7 or cells[0] not in periods:
-            continue
-        name, wns, tns, whs_tns = cells[0], cells[1], cells[2], cells[6]
-        period = periods[name]
-        wns_v = None if wns == "inf" else float(wns)
-        clocks.append(ClockTiming(name=name, constraint_mhz=1000.0 / period,
-                                  fmax_mhz=None if wns_v is None else 1000.0 / (period - wns_v),
-                                  setup_tns=float(tns), hold_tns=float(whs_tns)))
-    total = _section(report, "Design Timing Summary")[2].split()
-    if float(total[1]) < 0 or float(total[5]) < 0:
-        clocks.append(ClockTiming(name="(design)", constraint_mhz=None, fmax_mhz=None,
-                                  setup_tns=float(total[1]), hold_tns=float(total[5])))
-    if not clocks:
-        raise TimingReportError("クロックが 1 つも報告されていない")
-    return TimingSummary(tuple(clocks))

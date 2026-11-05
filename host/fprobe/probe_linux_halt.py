@@ -13,12 +13,18 @@ DesignService）、止めずに読む口の Linux のターゲット（linux_tar
 from __future__ import annotations
 
 
+import hashlib
+import json
+import os
 import time
 
 from .api import NotConnected
 from .linux_halt.service import FileLog, HaltOptions, HaltSession, journal_facts
 from .linux_halt.view import LinuxDebugView, prefetch_libraries, prefetch_sources
 from .probe_service import HostView
+
+PROFILE_FORMAT = "fprobe.linux_halt.profile"
+PROFILE_VERSION = 1
 
 __all__ = ["DapOccupied", "LinuxHaltService", "OWNER"]
 
@@ -38,7 +44,7 @@ class LinuxHaltService:
            "linux_halt_debug_attach", "linux_halt_debug_status", "linux_halt_debug_break_insert",
            "linux_halt_debug_break_remove", "linux_halt_debug_run", "linux_halt_debug_halt", "linux_halt_debug_threads",
            "linux_halt_debug_read", "linux_halt_debug_memory", "linux_halt_debug_step", "linux_halt_debug_select",
-           "linux_halt_debug_close")
+           "linux_halt_debug_close", "linux_halt_profile_save", "linux_halt_profile_load")
 
     # ほかの領域（Probe の委譲）に出す名前: DAP の占有の確かめ（ターゲット・低レベル・構成）と、後始末の段 linux_halt
     # _linux_view: attach している間、マイコンのデバッガの API を Linux のデバッグで答える層（各サービスの入口が使う）
@@ -343,3 +349,47 @@ class LinuxHaltService:
 
     def linux_halt_debug_close(self) -> dict:
         return self._halt().debug_close()
+
+    # --- linux.halt.profile.*（open と attach の設定の保存・読み込み。仕様 2026-11-05-linux-halt-profile-design.md）---
+
+    @staticmethod
+    def _sha256_of(path: str) -> str | None:
+        try:
+            with open(path, "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            return None
+
+    def linux_halt_profile_save(self, path: str) -> dict:
+        """いま開いている linux.halt の設定（open に渡した引数、attach 中ならその引数から pid を除いたもの）をファイルに書く。
+        pid は実行のたびに変わるので書かない。offsets のファイルは中身の SHA-256 だけを書く（読み込みで変わったかを事実として返す）。"""
+        session = self._halt()
+        options = session.options.as_dict()
+        attach = None
+        if self._attach_options is not None:
+            attach = {k: v for k, v in self._attach_options.items() if k != "pid"}
+        doc = {"format": PROFILE_FORMAT, "version": PROFILE_VERSION, "saved_at_unix_s": time.time(),
+               "open": options, "offsets_sha256": self._sha256_of(options["offsets"]), "attach": attach}
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        return {"path": path, **doc}
+
+    def linux_halt_profile_load(self, path: str) -> dict:
+        """保存した設定のファイルを読んで、中身を返す。何も開かない・動かさない（open・attach は返った引数で呼ぶ。attach には pid を足す）。
+        offsets_matches は、保存したときの offsets の SHA-256 と今のファイルの比（ファイルが読めなければ None）。"""
+        try:
+            with open(path, encoding="utf-8") as f:
+                doc = json.load(f)
+        except FileNotFoundError:
+            raise ValueError(f"{path}: 設定のファイルが無い（linux.halt.profile.save で作ったファイルを指定する）") from None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError(f"{path}: 設定のファイルとして読めない（{type(e).__name__}: {e}）") from None
+        head = doc if isinstance(doc, dict) else {}
+        if head.get("format") != PROFILE_FORMAT or head.get("version") != PROFILE_VERSION:
+            raise ValueError(f"{path}: {PROFILE_FORMAT} の版 {PROFILE_VERSION} ではない"
+                             f"（format={head.get('format')!r}, version={head.get('version')!r}）")
+        now = self._sha256_of(doc["open"]["offsets"])
+        return {"path": path, **doc, "offsets_sha256_now": now,
+                "offsets_matches": None if now is None else now == doc["offsets_sha256"]}

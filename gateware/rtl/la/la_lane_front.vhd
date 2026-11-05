@@ -63,7 +63,7 @@ architecture rtl of la_lane_front is
 
   function lane(w : word_t; k : natural) return ch_t is
   begin
-    return w((k + 1) * WIDTH - 1 downto k * WIDTH);
+    return lane_slice(w, WIDTH, k);
   end function;
 begin
   assert LANES <= 16 report "la_lane_front: LANES must be at most 16" severity failure;

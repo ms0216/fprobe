@@ -33,13 +33,9 @@ entity core_storage is
     clk              : in  std_logic;
     rst              : in  core_resets_t;
     time_count       : in  unsigned(63 downto 0);
-    csr_we           : in  std_logic;
-    csr_addr         : in  csr_addr_t;
-    csr_wdata        : in  csr_word_t;
+    csr_cmd          : in  csr_cmd_t;
     csr_req          : in  std_logic_vector(CSR_WINDOWS'range);
-    csr_ack          : out std_logic_vector(CSR_WINDOWS'range);
-    csr_err          : out std_logic_vector(CSR_WINDOWS'range);
-    csr_rdata        : out csr_word_array_t(CSR_WINDOWS'range);
+    csr_rsp          : out csr_rsp_array_t(CSR_WINDOWS'range);
     -- ロジアナ（core_la）とクロストリガ
     la_probes        : in  std_logic_vector(LA_WIDTH - 1 downto 0);
     la_lane_data     : in  std_logic_vector(LA_LANES * LA_WIDTH - 1 downto 0);
@@ -133,25 +129,22 @@ architecture rtl of core_storage is
   signal event_valid : std_logic := '0';
   signal event_data : std_logic_vector(127 downto 0) := (others => '0');
   signal byte_lost : unsigned(31 downto 0) := (others => '0');
-  signal events_ack : std_logic;
+  signal events_rsp : csr_rsp_t;
 begin
   idle_g : for i in CSR_WINDOWS'range generate
     other_g : if not owns(i) generate
-      csr_ack(i)   <= '0';
-      csr_err(i)   <= '0';
-      csr_rdata(i) <= (others => '0');
+      csr_rsp(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
   deep_triggered <= deep_triggered_i;
-  csr_ack(CSR_WIN_EVENTS) <= events_ack;
+  csr_rsp(CSR_WIN_EVENTS) <= events_rsp;
   deep_latency   <= deep_latency_i;
 
   -- 外部メモリ: 状態とメモリ試験
   mem_csr_i : entity work.csr_mem
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_MEM), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_MEM),
-              bus_err => csr_err(CSR_WIN_MEM), bus_rdata => csr_rdata(CSR_WIN_MEM),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_MEM),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_MEM),
               status_ready => mem_ready_s, status_busy => mem_busy, status_done => mem_done,
               status_in_reset => mem_in_reset, status_clock_tick => mem_tick,
               command_test => mem_test_start, test_base => mem_base, test_count => mem_count,
@@ -159,9 +152,8 @@ begin
               write_cycles => mem_wc, read_cycles => mem_rc);
 
   deep_csr_i : entity work.csr_la_deep
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_DEEP), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_LA_DEEP),
-              bus_err => csr_err(CSR_WIN_LA_DEEP), bus_rdata => csr_rdata(CSR_WIN_LA_DEEP),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_LA_DEEP),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_LA_DEEP),
               control_run => deep_run, control_rle => deep_rle, control_stream => deep_stream,
               control_ps_read => deep_ps_read, control_pack => deep_pack, control_step => deep_step,
               control_first => deep_first_ch, control_gaps => deep_gaps,
@@ -181,21 +173,20 @@ begin
               info_start_valid => deep_start_valid, gap_last_beat => deep_gap_last, gaps => deep_gap_count);
 
   events_csr_i : entity work.csr_events
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_EVENTS), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => events_ack,
-              bus_err => csr_err(CSR_WIN_EVENTS), bus_rdata => csr_rdata(CSR_WIN_EVENTS),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_EVENTS), bus_cmd => csr_cmd,
+              bus_rsp => events_rsp,
               control_enable => events_enable, written => events_written(31 downto 0), lost => events_lost,
               capacity => events_capacity, written_hi => events_written_hi);
 
   -- written_hi は written（下位）を読んだ周期の上位を保持する。written を読む直後（同じ連続読み出しの中）に written_hi を読めば、
   -- 下位と上位は同じ時点の値で、桁上がりをまたいで化けない（二つのワードを別の時点に読むと、2**32 の境で下位だけ 0 に戻る）。
   -- 保持は 1 つの連続読み出しのあいだ他の読み手に割り込まれない前提（CSR の読みは 1 要求ずつ順に処理される）。
-  -- 窓への要求の間、csr_addr・csr_we はマスタの値と同じ（csr_decoder の写し）
+  -- 窓への要求の間、csr_cmd.addr・csr_cmd.we はマスタの値と同じ（csr_decoder の写し）
   process (clk)
   begin
     if rising_edge(clk) then
-      if csr_req(CSR_WIN_EVENTS) = '1' and events_ack = '0' and csr_we = '0'
-         and to_integer(csr_addr(3 downto 0)) = 1 then
+      if csr_req(CSR_WIN_EVENTS) = '1' and events_rsp.ack = '0' and csr_cmd.we = '0'
+         and to_integer(csr_cmd.addr(3 downto 0)) = 1 then
         events_written_hi <= events_written(63 downto 32);
       end if;
       if rst(RST_BUS) = '1' then

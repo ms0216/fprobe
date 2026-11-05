@@ -11,7 +11,7 @@ from test_probe_observe import FakeCpu, connect, wait_for
 from value_kinds import ints, varray, vbool, venum, vfloat, vint, vstruct
 
 from fprobe import generated as g
-from fprobe import probe_watch
+from fprobe import probe_watch, probe_watch_series, probe_watch_trigger
 from fprobe.events import KIND_INJECT, KIND_SAMPLE, DapEvent
 from fprobe.mcp_server import Probe
 from fprobe.symbols import Symbols
@@ -55,7 +55,8 @@ class WatchDevice(FakeDevice, FakeDeviceBase):
 
 @pytest.fixture
 def probe(monkeypatch):
-    monkeypatch.setattr(probe_watch, "EventLog", FakeEventLog)
+    for module in (probe_watch, probe_watch_series, probe_watch_trigger):   # EventLog を使う各部品に差す
+        monkeypatch.setattr(module, "EventLog", FakeEventLog)
     FakeEventLog.events, FakeEventLog.started = [], 0
     dev = WatchDevice()
     p = Probe("unused")
@@ -133,6 +134,11 @@ def test_series_says_where_the_read_starts_when_older_values_were_not_read(probe
     assert probe.watch_series("0x20000000", last=10)["from_us"] is None
     cut = probe.watch_series("0x20000000", last=2)
     assert [s["value"] for s in cut["samples"]] == ints(3, 4) and cut["from_us"] == pytest.approx(3000)
+    # after_us（呼び出し側が持っている最後の値の時刻）が from_us より前なら、その間の区間を gap で返す（画面は検出しない）
+    assert cut["gap"] is None
+    assert probe.watch_series("0x20000000", last=2, after_us=1000)["gap"] == [1000, pytest.approx(3000)]
+    assert probe.watch_series("0x20000000", last=2, after_us=3000)["gap"] is None
+    assert probe.watch_series("0x20000000", last=10, after_us=-5)["gap"] is None          # 全部読めた（from_us が無い）
 
 
 def test_xy_pairs_each_x_with_the_latest_earlier_y_and_keeps_both_times(probe):
@@ -272,7 +278,8 @@ class ClockDevice(WatchDevice):
 @pytest.fixture
 def live(monkeypatch, tmp_path):
     monkeypatch.setenv("FPROBE_HOME", str(tmp_path))
-    monkeypatch.setattr(probe_watch, "EventLog", RingLog)
+    for module in (probe_watch, probe_watch_series, probe_watch_trigger):   # EventLog を使う各部品に差す
+        monkeypatch.setattr(module, "EventLog", RingLog)
     RingLog.events = []
     p = Probe("unused")
     p._session = SimpleNamespace(device=ClockDevice())
@@ -466,7 +473,8 @@ def test_measure_gives_the_held_value_with_its_own_time_and_the_stats_between():
     assert m["dt_us"] == -23
     assert speed["a"] == {"time_us": 30, "value": vint(8)} and speed["b"] == {"time_us": 10, "value": vint(2)}
     assert speed["delta"] == -6 and speed["stats"]["count"] == 2 and speed["stats"]["mean"] == 6
-    assert speed["first_us"] == 10
+    assert speed["first_us"] == 10 and speed["covers_range_start"] is True          # 範囲の始まり 12 より前に値を持っている
+    assert flag["covers_range_start"] is False and none["covers_range_start"] is False   # flag は 15 から、none は値が無い
     assert flag["a"]["value"] == vstruct(x=vint(1)) and flag["b"] is None and flag["delta"] is None
     assert flag["stats"]["not_numeric"] == 1
     assert none["a"] is None and none["first_us"] is None
@@ -510,3 +518,14 @@ def test_trigger_drain_does_not_drop_events_after_the_48_bit_wrap(live):
     probe.watch_capture(wait_s=0.3)
     got = [s["value"] for s in probe.watch_capture()["samples"]["0x20000400"]]
     assert got == ints(0, 1, 2, 3)
+
+
+def test_expression_facts_are_the_set_differences_the_ui_used_to_take():
+    # 画面が持っていた集合の差を API の事実に（watch_status の expressions）
+    from fprobe.watch_stats import expression_facts
+    watches = [{"name": "x"}, {"name": "ai"}]
+    assert expression_facts(None, watches, []) is None
+    got = expression_facts(["x", "bad", "gone"], watches, [{"expression": "bad", "error": "e"}])
+    assert got == {"observed": ["x"], "missing": ["gone"], "others": ["ai"], "all_observed": False}
+    assert expression_facts(["x", "ai"], watches, [])["all_observed"] is True
+    assert expression_facts([], watches, [])["all_observed"] is False

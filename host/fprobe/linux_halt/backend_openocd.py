@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
+from .bases import SEQ_BASIS
 from .core_access import CoreState, OutsideLinearMap
 from .skew import NotHaltedBefore, stop_report
 
@@ -23,7 +24,6 @@ LINE = 32                                   # キャッシュ保守の単位（A
 REGS = ["r%d" % i for i in range(13)] + ["sp", "lr", "pc", "cpsr"]
 _CP15 = {"ttbr0": "2 0 0", "ttbr1": "2 0 1", "ttbcr": "2 0 2", "contextidr": "13 0 1", "sctlr": "1 0 0"}
 _WATCH_KIND = {"w": "w", "r": "r", "rw": "a"}
-_SEQ_BASIS = "host-timed: from the last instant each core was known not to have halted until all were seen halted"
 
 
 @dataclass(frozen=True)
@@ -270,7 +270,7 @@ class OpenOcdCores:
         t_end = self._clock()
         halted = [n for n, h in enumerate(self.halted()) if h]
         explained = set(wait["hit"]) | set(wait["requested"]) if wait else set()
-        return stop_report(self._ledger, self.n_cores, "sequential", halted, t_end, _SEQ_BASIS, running, explained, self.parked)
+        return stop_report(self._ledger, self.n_cores, "sequential", halted, t_end, SEQ_BASIS, running, explained, self.parked)
 
     def wait_event(self, timeout_s: float) -> tuple[int, ...]:
         """コアが自分で（ブレークポイント・ウォッチポイント等で）止まるのを timeout_s まで待つ。止まったコア（タイムアウトなら空）。

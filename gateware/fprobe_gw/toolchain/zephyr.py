@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .gowin import ToolchainNotFound
+from .locate import ToolchainNotFound
 
 _HOME = Path.home() / "zmk"
 DEFAULTS = {"FPROBE_ZEPHYR_WS": _HOME / "ws", "FPROBE_ZEPHYR_SDK": _HOME / "sdk" / "zephyr-sdk-0.17.0",

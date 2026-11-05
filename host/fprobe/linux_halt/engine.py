@@ -16,49 +16,22 @@ import collections
 import struct
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 
-from .bp import BreakpointTable
-from .core_access import (CoreAccess, MOE_BKPT_EVT, MOE_BKPT_INSN, MOE_EXT, MOE_HALT, MOE_WATCH_SYNC, StopReport,
-                          WATCH_MOES)
+from .bp import BreakpointTable, NoFreeSlot
+from .core_access import CoreAccess, MOE_EXT, MOE_HALT, StopReport, WATCH_MOES
 from .kernel import Kernel
 from .mmu import Unmapped, translate
 from .process import Process, ProcessExited
 from .watch import WatchTable
+from .engine_classify import EngineClassifyMixin
+from .engine_types import SIGINT, SIGKILL, SIGTRAP, EngineError, EngineStats, Stop, StopResult
 
-SIGINT, SIGTRAP, SIGKILL = 2, 5, 9
-
-
-class EngineError(RuntimeError):
-    """操作を完了できなかった。メッセージが理由（デバッガの利用者に見せる）。"""
-
-
-@dataclass
-class Stop:
-    kind: str           # trap（ステップ/run-to 完了）| swbreak | hwbreak | watch | int | exit | signal
-    #                     | timeout（run() の待つ上限を過ぎた。全コアは走っている）
-    tid: int = 0
-    addr: int = 0       # watch: 当たった（であろう）範囲の先頭
-    access: str = ""    # watch: "w" 書き込み | "r" 読み出し | "a" 両方（登録した種類）
-    candidates: int = 0  # watch: 当たりうる登録の数（1 = 一意）
-    code: int = 0        # exit/signal: カーネルの終了コード（(status << 8) | 終了させるシグナル）
-    signal: int = 0      # signal: プロセスを終わらせるシグナル
+# 型は `engine_types`、停止の分類は `engine_classify` に分けた（旧来の `fprobe.linux_halt.engine.<名前>` を保つ）
+__all__ = ["SIGINT", "SIGKILL", "SIGTRAP", "Engine", "EngineError", "EngineStats", "Stop", "StopResult"]
 
 
-@dataclass
-class StopResult:
-    report: StopReport
-    skew_verdict: str   # "within"（上限が基準以下）| "exceeded"（超えた）| "unknown"（上限が分からない）
-
-
-@dataclass
-class EngineStats:
-    counters: dict
-    skew: dict          # 種類（"event" / "interrupt" / "request"）→ {"stops", "max_ns"(None=測れた回なし), "unknown", "exceeded"}
-    resumes_cut_short: int
-
-
-class Engine:
+class Engine(EngineClassifyMixin):
     def __init__(self, cores: CoreAccess, kernel: Kernel, proc: Process, bps: BreakpointTable, *, skew_limit_ns: int,
                  thread_id: str, kernel_thumb: bool, max_step_retries: int, interrupted=lambda: False, sleep=time.sleep,
                  watches: WatchTable | None = None):
@@ -215,7 +188,8 @@ class Engine:
     def _ptregs_addr(self, tid: int) -> int:
         t = self.p.task(tid)
         if t is None:
-            raise KeyError(tid)
+            raise EngineError("tid %d is not a thread of pid %d now (it exited, or the thread list is stale; threads: %s)"
+                              % (tid, self.p.tgid, sorted(self.p.tids())))
         return self.k.pt_regs_addr(t)
 
     def _ptregs(self, tid: int) -> bytes:
@@ -394,150 +368,21 @@ class Engine:
             if deadline is not None and clock() >= deadline:
                 return Stop("timeout")                    # 全コアは走ったまま（running は立ったまま）
 
-    def _classify(self, halted):
-        """自分で止まったコアのうち、対象のプロセスの停止を返す。無ければ None。他人のイベントは `stats` に数える（隠さない）。
-        複数のスレッドが同じ瞬間に止まりうる。1 つを今報告し、他は止まったまま `pending` に残して、次に走らせる前に報告する
-        （gdbserver の保留状態と同じ）。踏み越えると当たりを黙って失う。"""
-        events = []                                      # (種類, コア, pc)
-        for n in halted:
-            s = self.core[n]
-            if s.pc == self.exit_pc and not s.user:
-                ev = self._exit_event(n, s)
-                if ev is not None:
-                    events.append(ev)
-                continue
-            if s.tid not in self.p.tids() and (s.user or s.moe in WATCH_MOES):
-                self.p.refresh_threads()                  # 前の停止の後で作られたスレッドか
-                self._identify()
-                s = self.core[n]
-            ours = s.tid in self.p.tids()
-            if s.moe in WATCH_MOES:
-                if not ours:
-                    self.stats_counters["foreign_watch_hits"] += 1
-                elif not s.user:
-                    self.stats_counters["kernel_mode_watch_hits"] += 1   # カーネルがスレッドのために触っている
-                else:
-                    events.append(("watch", n, s.pc))
-                continue
-            if not s.user:
-                continue
-            if not ours:
-                pa = self._foreign_pa(n, s.pc)
-                if (pa is not None and self.bps.sw_at_pa(pa) is not None) or self.bps.get_hw(s.pc) is not None:
-                    self.stats_counters["foreign_bp_hits"] += 1
-                    self.foreign_hit_seq += 1
-                    self.foreign_hits.append({"seq": self.foreign_hit_seq, "core": n, "tid": s.tid, "address": s.pc,
-                                              "moe": s.moe})
-                continue
-            bp = self.bps.lookup(self.pid, s.pc)
-            if bp is not None and s.moe in (MOE_BKPT_INSN, MOE_BKPT_EVT, -1):
-                if bp.tmp and not bp.user:
-                    if self._want is not None and self._want == (s.pc, s.tid):
-                        events.append(("trap", n, s.pc))
-                    continue                              # （他の内部ブレークポイントは無視）
-                events.append(("bp", n, s.pc))
-            elif s.moe in (MOE_BKPT_INSN, MOE_BKPT_EVT):
-                # 対象のスレッドがブレークポイントで止まったのに、表に無い番地（または入った理由が合わない）: 数える（隠さない）
-                self.stats_counters["own_stops_without_breakpoint"] += 1
-        if not events:
-            return None
-        for e in events:
-            if e[0] in ("exit", "signal"):               # プロセスが死ぬ: 他は関係ない
-                return self._deliver(e)
-        self.pending.extend(e for e in events[1:] if e[0] != "trap")
-        return self._deliver(events[0])
-
-    def _exit_event(self, n: int, s):
-        """スレッドが do_exit に入った。
-        * スレッドグループが終了中（SIGNAL_GROUP_EXIT。do_group_exit が最初の do_exit の前に立てる）: プロセスの終了で、
-          最初のスレッドで見える。signal->group_exit_code が最終コード。コードにシグナル番号があれば、そのシグナルで死ぬ:
-          まず**停止**として報告し（pt_regs はシグナルが配送された瞬間のもの。SIGSEGV なら落ちた命令）、死は次の再開で。
-          SIGKILL は横取りできない。
-        * そうでなければ、1 スレッドが抜けるだけ。最後の 1 つなら終了。
-        * 別のプロセスの終了は関係ない（再開して数える）。"""
-        task = self.p.task(s.tid)
-        if task is None:
-            self.stats_counters["foreign_exit_hits"] += 1
-            return None
-        o = self.k.o
-        sig = self.k.u32(task.addr + o["signal"])
-        if self.k.u32(sig + o["signal_flags"]) & o["signal_group_exit"]:
-            code = self.k.u32(sig + o["group_exit_code"])
-            signo = code & 0x7F
-            if signo and signo != SIGKILL:
-                return ("signal", n, code)
-            return ("exit", n, code)
-        if self.k.u32(sig + o["live"]) > 1:
-            self.stats_counters["thread_exits"] += 1
-            return None
-        return ("exit", n, self.c.regs(n)[0])            # r0 = do_exit() に渡されたコード
-
-    def _deliver(self, ev):
-        kind, n, pc = ev
-        s = self.core[n]
-        if kind == "exit":
-            return Stop("exit", s.tid, code=pc)           # （ここでは 3 つ目が終了コード）
-        if kind == "signal":
-            self.dying = (s.tid, pc)                      # 死は次の再開で報告する
-            return Stop("signal", s.tid, signal=pc & 0x7F, code=pc)
-        if kind == "watch":
-            return self._finish_watch(n)
-        if kind == "trap":
-            return Stop("trap", s.tid, pc)
-        bp = self.bps.lookup(self.pid, pc)
-        self.reported[s.tid] = pc                      # このスレッドは、報告済みのブレークポイントの上にいる
-        return Stop("hwbreak" if bp.hw else "swbreak", s.tid, pc)
-
-    def _take_pending(self):
-        """まだ有効な保留イベントの次の 1 つを、何も走らせずに Stop として返す。無ければ None。止まっている間にスレッドが
-        動いた・死んだ・ブレークポイントが外された、イベントは古い。"""
-        while self.pending:
-            kind, n, pc = self.pending.pop(0)
-            s = self.core.get(n)
-            if s is None or not s.halted or not s.user or s.pc != pc or s.tid not in self.p.tids():
-                continue
-            if kind == "bp" and self.bps.lookup(self.pid, pc) is None:
-                continue
-            return self._deliver((kind, n, pc))
-        return None
-
-    # --------------------------------------------------------------- watch
-    def _watch_values(self):
-        out = {}
-        for w in self.watches or ():
-            try:
-                out[w] = self.mem.read(w.addr, w.length)
-            except Unmapped:
-                out[w] = None
-        return out
-
-    def _finish_watch(self, n: int) -> Stop:
-        """コア n（対象のスレッド、ユーザモード）がウォッチポイントで止まった。同期のウォッチポイントは当たった命令が完了する
-        **前**に止まるが、デバッガは完了後の状態を期待する。そのコアのウォッチを外して 1 命令進めてから報告する。
-        どのウォッチかはハードウェアが記録しない（DFAR/WFAR にデータのアドレスは入らない）。前後の値で書き込みの範囲を
-        特定する。そうでなければ登録の全部が候補で、`Stop.candidates` がその数（最初のものを報告）。"""
-        s = self.core[n]
-        tid = s.tid
-        before = self._watch_values()
-        if s.moe == MOE_WATCH_SYNC and self.watches is not None:
-            self.watches.suspend(n)
-            try:
-                self._step_core(n)
-            finally:
-                self.watches.restore(n)
-        after = self._watch_values()
-        watches = list(self.watches or ())
-        changed = [w for w in watches if before[w] is not None and after[w] is not None and before[w] != after[w]]
-        picked = changed or watches
-        if not picked:
-            return Stop("watch", tid)
-        w = picked[0]
-        return Stop("watch", tid, w.addr, w.kind, len(picked))
-
     # ----------------------------------------------------------- run-to
-    def _run_to(self, addr: int, width: int, tid: int, deadline=None, clock=time.monotonic):
-        """内部: スレッド tid がユーザアドレス addr に戻るまで全コアを走らせる（deadline は run_to）。"""
-        self.bps.insert(self.pid, addr, kind="sw", width=width, tmp=True)
+    def _run_to(self, addr: int, width: int, tid: int, deadline=None, clock=time.monotonic, prefer_hw: bool = False):
+        """内部: スレッド tid がユーザアドレス addr に戻るまで全コアを走らせる（deadline は run_to）。
+        prefer_hw: 命令のメモリを書き換えないハードウェアのブレークポイントを使う（空きが無ければソフトウェア）。ステップで例外に入った
+        命令（VFP の初回使用の未定義命令など）に戻るのを待つとき、カーネルが例外の処理でその命令をメモリから読み直すので、BKPT に
+        書き換えていると SIGILL になる（実機 2026-11-05: data_types の step）。"""
+        kind = "sw"
+        if prefer_hw:
+            try:
+                self.bps.insert(self.pid, addr, kind="hw", width=width, tmp=True)
+                kind = "hw"
+            except NoFreeSlot:
+                pass
+        if kind == "sw":
+            kind = self.bps.insert(self.pid, addr, kind="sw", width=width, tmp=True)   # 置けなくて hw に切り替わったら、その方式で外す
         try:
             stop, reached = self._cont_until((addr, tid), deadline, clock)
             if stop.kind == "timeout":                   # 走らせたまま: 止めてから一時的なブレークポイントを外す
@@ -546,7 +391,7 @@ class Engine:
                     stop = Stop("timeout", tid)
             return stop, reached
         finally:
-            self.bps.remove(self.pid, addr, kind="sw", tmp=True)
+            self.bps.remove(self.pid, addr, kind=kind, tmp=True)
 
     # ----------------------------------------------------------------- step
     def step(self, tid: int, deadline: float | None = None, clock=time.monotonic) -> Stop:
@@ -565,7 +410,7 @@ class Engine:
             # 眠っている／カーネルの中: pt_regs.pc でユーザモードに戻る。まずそこへ行く。
             regs = self.get_regs(tid)
             pc, cpsr = regs[15], regs[16]
-            stop, reached = self._run_to(pc & ~1, 2 if cpsr & 0x20 else 4, tid, deadline, clock)
+            stop, reached = self._run_to(pc & ~1, 2 if cpsr & 0x20 else 4, tid, deadline, clock, prefer_hw=True)
             if not reached:
                 return stop
             n = self.live(tid)
@@ -585,7 +430,7 @@ class Engine:
             if s.user and s.tid == tid:
                 return Stop("trap", tid, s.pc)
             # ユーザモードを抜けた（データ/プリフェッチアボート、デマンドページング…）: pc0 で再開されるまで待つ。
-            stop, reached = self._run_to(pc0, width, tid, deadline, clock)
+            stop, reached = self._run_to(pc0, width, tid, deadline, clock, prefer_hw=True)
             if not reached:
                 return stop
             n = self.live(tid)

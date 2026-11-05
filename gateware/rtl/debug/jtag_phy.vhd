@@ -52,6 +52,12 @@
 -- cmd_cond（条件つきの命令）: '1' の命令は、直前の命令が OK の転送（ACK が OK/FAULT。IDCODE・ABORT は OK）か転送でない命令の
 --   ときだけ受ける（swd_phy と同じ。dap_link が前の転送の結果を待たずに次を出しておくため）。
 --
+-- 構成（3 つのクロックのプロセス。信号はそれぞれ 1 つのプロセスだけが駆動する）:
+--   p_wire     線を作る側。TAP の区間の並び（IR / DR スキャン・シーケンス）、TCK の相（半周期の時計は dap_pkg の
+--              half_restart / half_tick。swd_phy と共通）、TMS / TDI、線上の点（point）、取り込みの予約（take_base）
+--   p_capture  TDO の取り込み。予約を遅延線で sample_delay 周期遅らせ、シーケンス / DR の本体 / ACK に入れる（resp_go）
+--   p_response 応答。結果を控え、命令のビットを出し終えた（wire_end）順に返す。受けて未応答の数（owed）、OP_PINS の応答
+--
 -- 線上の点の時刻（rsp_time。docs/superpowers/specs/2026-11-01-time-accuracy-design.md R5）: OP_TRANSFER はその転送の DR スキャン
 --   （DP の読みで続けて RDBUFF をスキャンするときは最初のスキャン）の Update-DR を出る TCK の立ち上がり（tck が 1 になった
 --   最初の周期）の now。JTAG-DP はここで AP / DP のアクセスを始める。IR を省いたか・続く RDBUFF のスキャンに依らない。
@@ -104,6 +110,12 @@ architecture rtl of jtag_phy is
   constant IR_APACC    : std_logic_vector(3 downto 0) := x"B";
   constant IR_IDCODE   : std_logic_vector(3 downto 0) := x"E";
   constant RDBUFF_READ : std_logic_vector(34 downto 0) := x"00000000" & "111";   -- DPACC、A = 0xC、読み
+  -- 区間のビット数（TAP のステート遷移の TMS 列の長さと、DR の本体の長さ）
+  constant IR_HEAD_BITS : natural := 4;                      -- Select-DR, Select-IR, Capture-IR, Shift-IR
+  constant DR_HEAD_BITS : natural := 3;                      -- Select-DR, Capture-DR, Shift-DR
+  constant TAIL_BITS    : natural := 2;                      -- Exit1 → Update → Run-Test/Idle
+  constant IDCODE_BITS  : natural := 32;                     -- IDCODE の DR（ヘッダなし）
+  constant DR_BODY_BITS : natural := 35;                     -- DPACC / APACC の DR: RnW + A[3:2]（3 ビット。ACK が返る）+ データ 32 ビット
 
   -- ビット列は区間の並びとして 1 ビットずつ作る（ビット列全体を組み立てない）:
   --   IR スキャン: G_IR_HEAD（TMS 1,1,0,0）→ G_IR_BEFORE（1）→ G_IR_VALUE → G_IR_AFTER（1）→ G_IR_TAIL（TMS 1,0）
@@ -189,9 +201,9 @@ architecture rtl of jtag_phy is
   function map_ack(a : std_logic_vector(2 downto 0)) return std_logic_vector is
   begin
     case a is
-      when "010"  => return "001";                                       -- OK / FAULT
-      when "001"  => return "010";                                       -- WAIT
-      when others => return "111";
+      when "010"  => return ACK_OK;                                      -- JTAG の OK / FAULT
+      when "001"  => return ACK_WAIT;                                    -- JTAG の WAIT
+      when others => return ACK_NONE;
     end case;
   end function;
 
@@ -214,14 +226,16 @@ architecture rtl of jtag_phy is
   signal ack_ready : boolean;                                        -- 今のスキャンの ACK を取り込み終えた
   signal ok_cur    : boolean;                                        -- 直前（か今終わる）命令が OK（cmd_cond）
   signal ending    : boolean;                                        -- この周期の辺で命令の最後のビットの High 相が終わる
+  signal wire_end  : boolean;                                        -- この辺で命令のビットを出し終える（p_response が数える）
   signal accept    : boolean;                                        -- この周期の辺で命令を受ける
   signal ir_need   : boolean;                                        -- 受ける転送は IR のスキャンから
   signal cmd_ir    : std_logic_vector(3 downto 0);                   -- 受ける転送の IR
 begin
   hp_one    <= half_period = 1;
   ack_ready <= cap_spar = scan_par and cap_count = 3;
-  ok_cur    <= not xfer or short_dr or ir = IR_ABORT or (ack_ready and map_ack(ack_cap) = "001");
+  ok_cur    <= not xfer or short_dr or ir = IR_ABORT or (ack_ready and map_ack(ack_cap) = ACK_OK);
   ending    <= half = H_HIGH and expired and seg = G_END;
+  wire_end  <= ending and rst = '0' and enable = '1';
   accept    <= enable = '1' and rst = '0' and cmd_valid = '1' and (cmd_cond = '0' or ok_cur) and owed <= 1 and
                ((half = H_IDLE and (cmd_op /= OP_PINS or owed = 0)) or (ending and cmd_op /= OP_PINS));
 
@@ -249,35 +263,26 @@ begin
   tms_lead  <= tms_prev when hp_one else tms_r;
   tdi       <= tdi_r;
 
-  process (clk)
-    -- 半周期の時計: 積み直す（half_period 周期後に expired）・1 つ進める
-    procedure half_restart is
-    begin
-      timer   <= half_period - 1;
-      expired <= hp_one;
-    end procedure;
-    procedure half_tick is
-    begin
-      timer   <= timer - 1;
-      expired <= timer = 1;
-    end procedure;
+  -- ===== 線を作る側（p_wire）: TAP の区間の並び・TCK / TMS / TDI・線上の点・取り込みの予約 =====
+  p_wire : process (clk)
+    -- 半周期の時計は dap_pkg の half_restart / half_tick（swd_phy と共通）
 
     -- 区間 s の長さ
     impure function length_of(s : seg_t) return natural is
     begin
       case s is
-        when G_IR_HEAD   => return 4;
+        when G_IR_HEAD   => return IR_HEAD_BITS;
         when G_IR_BEFORE => return ir_before;
         when G_IR_VALUE  => return ir_len;
         when G_IR_AFTER  => return ir_after;
-        when G_IR_TAIL | G_DR_TAIL => return 2;
-        when G_DR_HEAD   => return 3;
+        when G_IR_TAIL | G_DR_TAIL => return TAIL_BITS;
+        when G_DR_HEAD   => return DR_HEAD_BITS;
         when G_DR_BEFORE => return dr_before;
         when G_DR_BODY   =>
           if short_dr then
-            return 32;
+            return IDCODE_BITS;
           end if;
-          return 35;
+          return DR_BODY_BITS;
         when G_DR_AFTER  => return dr_after;
         when G_IDLE      => return idle_cycles;
         when G_NONE | G_END => return 0;
@@ -317,7 +322,7 @@ begin
     begin
       tck_r   <= '0';
       half    <= H_LOW;
-      half_restart;
+      half_restart(timer, expired, half_period);
     end procedure;
 
     -- 区間 s の i ビット目の TDI を出し、TCK を下げる（TMS は put_tms）
@@ -375,10 +380,7 @@ begin
       marked  <= false;
       xfer    <= cmd_op = OP_TRANSFER;
       case cmd_op is
-        when OP_PINS =>
-          r_data <= (63 downto 4 => '0') & din & tdi_r & tms_r & tck_r;
-          r_ack  <= (others => '0');
-          r_time <= now;
+        when OP_PINS =>                                               -- 応答は p_response が受けた辺で返す
           if cmd_data(8) = '1' then
             tck_r <= cmd_data(0);
           end if;
@@ -389,7 +391,6 @@ begin
             tdi_r <= cmd_data(2);
           end if;
           ir_valid <= false;
-          done     <= '1';
           seg      <= G_NONE;
           half     <= H_IDLE;
         when OP_SEQ_OUT | OP_SEQ_IN =>
@@ -423,30 +424,26 @@ begin
             cur_len    <= ir_len;
             ir_valid   <= true;
             seg        <= G_IR_HEAD;
-            seg_len    <= 4;
+            seg_len    <= IR_HEAD_BITS;
             tdi_r      <= '1';
           else
             seg        <= G_DR_HEAD;
-            seg_len    <= 3;
+            seg_len    <= DR_HEAD_BITS;
             tdi_r      <= '0';
           end if;
           fall;
       end case;
     end procedure;
 
-    variable now_take, take : take_t;
-    variable final, reply, wire_end : boolean;
+    variable now_take : take_t;
   begin
     if rising_edge(clk) then
-      din      <= tdo;
-      done     <= '0';
       tms_prev <= tms_r;
       mark     <= '0';
       if mark = '1' then
         point(to_integer(unsigned'('0' & mark_par))) <= now;            -- TCK が 1 になった最初の周期
       end if;
       now_take := TAKE_NONE;                                            -- この辺で予約するビット（下で決める）
-      wire_end := false;
 
       if rst = '1' or enable = '0' then
         half     <= H_IDLE;
@@ -468,7 +465,7 @@ begin
               tms_r <= tms_next;                                      -- Low 相の中ほど（half_period = 2 なら立ち下がりの 1 周期後）
             end if;
             if not expired then
-              half_tick;
+              half_tick(timer, expired);
             elsif seg = G_DR_TAIL and index + 1 = seg_len and dp_read and not ack_ready then
               -- RDBUFF を続けるかを決める ACK がまだ取り込めていない（本体の後に 2 ビット以上あるので実際には起きない
               -- 保険）: 立ち上げずに待つ（TMS = 0 の Low 相が延びるだけ）
@@ -477,7 +474,7 @@ begin
               -- Low 相の終わり: TCK を上げる。このビットの取り込みを決め、次のビットを決める
               tck_r   <= '1';
               half    <= H_HIGH;
-              half_restart;
+              half_restart(timer, expired, half_period);
               if seg = G_SEQ then
                 now_take := ('1', '1', to_sl(index = 0), to_sl(index + 1 = seg_len), '0', '0', '0', cmd_par, scan_par);
                 seq_out <= '1' & seq_out(63 downto 1);
@@ -507,7 +504,7 @@ begin
                   when G_SEQ | G_IDLE =>
                     enter(G_END);
                   when G_DR_TAIL =>
-                    if dp_read and ack_ready and map_ack(ack_cap) = "001" then
+                    if dp_read and ack_ready and map_ack(ack_cap) = ACK_OK then
                       dp_read   <= false;                             -- DPACC RDBUFF の読みで値を受け取る
                       dr_shift  <= RDBUFF_READ;
                       scan_par  <= not scan_par;
@@ -522,9 +519,9 @@ begin
                     enter(next_seg(seg));
                   when G_DR_HEAD =>
                     if short_dr then
-                      shifting <= dr_before + 32 + dr_after;
+                      shifting <= dr_before + IDCODE_BITS + dr_after;
                     else
-                      shifting <= dr_before + 35 + dr_after;
+                      shifting <= dr_before + DR_BODY_BITS + dr_after;
                     end if;
                     enter(next_seg(seg));
                   when G_IR_TAIL =>
@@ -538,12 +535,11 @@ begin
 
           when H_HIGH =>
             if not expired then
-              half_tick;
+              half_tick(timer, expired);
               if timer = 1 then
                 now_take := cur_take;                                 -- High 相の最後の周期の頭の辺で予約する
               end if;
-            elsif seg = G_END then
-              wire_end := true;                                       -- この命令のビットを出し終えた
+            elsif seg = G_END then                                    -- この命令のビットを出し終えた（wire_end）
               if accept then
                 start_command;
               else
@@ -562,8 +558,24 @@ begin
         scan_par <= not scan_par;
       end if;
 
-      -- 取り込み: din は 1 周期前のピン。sample_delay = 0 は前の周期の辺で予約したビット（この周期の終わりに TCK が下がる
-      -- = 立ち下がりの直前）、k > 0 はさらに k 周期後
+      -- 取り込みの予約（遅延線の入口。遅延線は p_capture）
+      take_base <= now_take;
+      if rst = '1' or enable = '0' then
+        take_base <= TAKE_NONE;
+        cur_take  <= TAKE_NONE;
+      end if;
+    end if;
+  end process;
+
+  -- ===== TDO の取り込み（p_capture）=====
+  -- 線を作る側（上のプロセス）が立ち上がりの辺で決めたビットの取り込み（take_base）を遅延線で sample_delay 周期遅らせ、
+  -- din（1 周期前のピン）を取る。sample_delay = 0 は前の周期の辺で予約したビット（この周期の終わりに TCK が下がる
+  -- = 立ち下がりの直前）、k > 0 はさらに k 周期後。命令の最後の取り込みの次の周期に resp_go
+  p_capture : process (clk)
+    variable take : take_t;
+  begin
+    if rising_edge(clk) then
+      din <= tdo;
       if sample_delay = 0 then
         take := take_base;
       else
@@ -601,10 +613,36 @@ begin
         end if;
       end if;
 
-      -- 命令の結果（最後の取り込みの次の周期に作って控える）。RDBUFF が続く DP の読みの最初のスキャンは、ACK が OK なら
-      -- 結果にしない（続くスキャンの結果を待つ）
+      -- 遅延線を進める（遅れは命令の実行中に変えない）
+      take_line(0) <= take_base;
+      for k in 1 to 6 loop
+        take_line(k) <= take_line(k - 1);
+      end loop;
+      if rst = '1' or enable = '0' then
+        take_line <= (others => TAKE_NONE);
+        resp_go   <= false;
+      end if;
+    end if;
+  end process;
+
+  -- ===== 応答（p_response）=====
+  -- 命令の結果を最後の取り込みの次の周期に作って控え、その命令のビットを出し終えた（wire_end を数えた wire_cnt）ときに
+  -- 返す。OP_PINS は受けた辺で返す
+  p_response : process (clk)
+    variable final, reply : boolean;
+  begin
+    if rising_edge(clk) then
+      done <= '0';
+      if accept and cmd_op = OP_PINS then
+        r_data <= (63 downto 4 => '0') & din & tdi_r & tms_r & tck_r;
+        r_ack  <= (others => '0');
+        r_time <= now;
+        done   <= '1';
+      end if;
+
+      -- 命令の結果。RDBUFF が続く DP の読みの最初のスキャンは、ACK が OK なら結果にしない（続くスキャンの結果を待つ）
       final := resp_go;
-      if resp_go and resp_take.seq = '0' and resp_take.dpfirst = '1' and map_ack(ack_cap) = "001" then
+      if resp_go and resp_take.seq = '0' and resp_take.dpfirst = '1' and map_ack(ack_cap) = ACK_OK then
         final := false;
       end if;
       if final then
@@ -614,10 +652,10 @@ begin
           p_ack  <= (others => '0');
           p_data <= seq_in;
         elsif resp_take.short = '1' then
-          p_ack  <= "001";                                            -- IDCODE: ACK は無い（32 ビットずらし入れた）
+          p_ack  <= ACK_OK;                                            -- IDCODE: ACK は無い（32 ビットずらし入れた）
           p_data <= x"00000000" & dr_in(34 downto 3);
         elsif resp_take.abort = '1' then
-          p_ack  <= "001";                                            -- ABORT の取り込み値は不定（見ない）
+          p_ack  <= ACK_OK;                                            -- ABORT の取り込み値は不定（見ない）
           p_data <= (others => '0');
         else
           p_ack  <= map_ack(ack_cap);
@@ -650,21 +688,11 @@ begin
         owed <= owed - 1;
       end if;
 
-      -- 遅延線を進める（遅れは命令の実行中に変えない）
-      take_base    <= now_take;
-      take_line(0) <= take_base;
-      for k in 1 to 6 loop
-        take_line(k) <= take_line(k - 1);
-      end loop;
       if rst = '1' or enable = '0' then
-        take_base <= TAKE_NONE;
-        take_line <= (others => TAKE_NONE);
-        cur_take  <= TAKE_NONE;
-        resp_go   <= false;
-        done      <= '0';
-        owed      <= 0;
-        cap_pend  <= false;
-        wire_cnt  <= 0;
+        done     <= '0';
+        owed     <= 0;
+        cap_pend <= false;
+        wire_cnt <= 0;
       end if;
     end if;
   end process;

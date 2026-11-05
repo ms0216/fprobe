@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック la（0x00000400, 64 バイト）: ロジックアナライザの設定と状態（docs/superpowers/specs/2026-10-16-m7-logic-analyzer-design.md）
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_la is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_run : out std_logic;   -- control.run（RW）
     rate : out std_logic_vector(15 downto 0);   -- rate（RW）
     pretrigger : out std_logic_vector(31 downto 0);   -- pretrigger（RW）
@@ -64,7 +60,7 @@ architecture rtl of csr_la is
   signal pulse_max_r : std_logic_vector(31 downto 0) := x"FFFFFFFF";
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -92,38 +88,38 @@ begin
         case index is
           when 0 =>   -- control
             rdata(0) <= control_run_r;
-            if bus_we = '1' then
-              control_run_r <= bus_wdata(0);
+            if bus_cmd.we = '1' then
+              control_run_r <= bus_cmd.wdata(0);
             end if;
           when 1 =>   -- rate
             rdata(15 downto 0) <= rate_r;
-            if bus_we = '1' then
-              rate_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              rate_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 2 =>   -- pretrigger
             rdata(31 downto 0) <= pretrigger_r;
-            if bus_we = '1' then
-              pretrigger_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              pretrigger_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 3 =>   -- trig_mask
             rdata(15 downto 0) <= trig_mask_r;
-            if bus_we = '1' then
-              trig_mask_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              trig_mask_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 4 =>   -- trig_value
             rdata(15 downto 0) <= trig_value_r;
-            if bus_we = '1' then
-              trig_value_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              trig_value_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 5 =>   -- trig_rise
             rdata(15 downto 0) <= trig_rise_r;
-            if bus_we = '1' then
-              trig_rise_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              trig_rise_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 6 =>   -- trig_fall
             rdata(15 downto 0) <= trig_fall_r;
-            if bus_we = '1' then
-              trig_fall_r <= bus_wdata(15 downto 0);
+            if bus_cmd.we = '1' then
+              trig_fall_r <= bus_cmd.wdata(15 downto 0);
             end if;
           when 7 =>   -- status
             rdata(0) <= status_capturing;
@@ -140,28 +136,28 @@ begin
           when 12 =>   -- filter
             rdata(15 downto 0) <= filter_channels_r;
             rdata(23 downto 16) <= filter_cycles_r;
-            if bus_we = '1' then
-              filter_channels_r <= bus_wdata(15 downto 0);
-              filter_cycles_r <= bus_wdata(23 downto 16);
+            if bus_cmd.we = '1' then
+              filter_channels_r <= bus_cmd.wdata(15 downto 0);
+              filter_cycles_r <= bus_cmd.wdata(23 downto 16);
             end if;
           when 13 =>   -- pulse
             rdata(1 downto 0) <= pulse_mode_r;
             rdata(4) <= pulse_level_r;
             rdata(11 downto 8) <= pulse_channel_r;
-            if bus_we = '1' then
-              pulse_mode_r <= bus_wdata(1 downto 0);
-              pulse_level_r <= bus_wdata(4);
-              pulse_channel_r <= bus_wdata(11 downto 8);
+            if bus_cmd.we = '1' then
+              pulse_mode_r <= bus_cmd.wdata(1 downto 0);
+              pulse_level_r <= bus_cmd.wdata(4);
+              pulse_channel_r <= bus_cmd.wdata(11 downto 8);
             end if;
           when 14 =>   -- pulse_min
             rdata(31 downto 0) <= pulse_min_r;
-            if bus_we = '1' then
-              pulse_min_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              pulse_min_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 15 =>   -- pulse_max
             rdata(31 downto 0) <= pulse_max_r;
-            if bus_we = '1' then
-              pulse_max_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              pulse_max_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when others =>
             err <= '1';
@@ -170,9 +166,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_run <= control_run_r;
   rate <= rate_r;
   pretrigger <= pretrigger_r;

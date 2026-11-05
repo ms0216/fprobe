@@ -2,6 +2,7 @@
 // 人が自分で並べる。その人の画面のブラウザに覚える（人によって違うので、デーモンで全員と共有しない）。Svelte に依らない
 import { buildParams, fieldsOf, valuesOf, type ApiMethod } from "./apiform";
 import { load, save } from "./prefs";
+import { addListener } from "./store";
 
 export interface Favorite {
   id: string;
@@ -37,9 +38,7 @@ export class Favorites {
   }
 
   subscribe(fn: (list: Favorite[]) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.items);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.items);
   }
 
   get list(): Favorite[] {

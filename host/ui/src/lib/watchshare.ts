@@ -34,21 +34,26 @@ export function planStop(running: string[], mine: string[], keep: Set<string>): 
   return running.filter((e) => !mine.includes(e) || keep.has(e));
 }
 
-/** 自分の式のうち、いま取っていないもの（ほかの利用者が組を置き換えた）。watch.set が誤りで外した式（rejected）は除く */
-export function missing(running: string[], mine: string[], rejected: string[] = []): string[] {
-  return mine.filter((e) => !running.includes(e) && !rejected.includes(e));
+/** 自分の式と観測の組の関係（watch.status の expressions。集合の差は API が出す: 画面は計算しない） */
+export interface ExpressionFacts {
+  observed: string[];                // 自分の式のうち、いま取っているもの
+  missing: string[];                 // 自分の式のうち、いま取っていないもの（ほかの利用者が組を置き換えた。watch.set が外した式は除く）
+  others: string[];                  // いま取っている式のうち、自分の式に無いもの
+  all_observed: boolean;             // 自分の式が 1 つ以上あり、全部取っている
 }
 
 export interface WatchState {
   names: string[];                   // いま取っている式（watch.status の watches）
   rate: number;
   status: any;
+  facts: ExpressionFacts | null;     // 自分の式を渡したときの関係（渡さなければ null）
 }
 
-export async function readWatch(call: Call): Promise<WatchState> {
-  const status = await call("watch.status", {}, { quiet: true });
+/** watch.status を読む。mine（自分の式）を渡すと、API が組との関係を facts に返す */
+export async function readWatch(call: Call, mine?: string[]): Promise<WatchState> {
+  const status = await call("watch.status", mine === undefined ? {} : { expressions: mine }, { quiet: true });
   const names = Array.isArray(status?.watches) ? status.watches.map((w: any) => String(w.name)) : [];
-  return { names, rate: Number(status?.rate_hz) || 0, status };
+  return { names, rate: Number(status?.rate_hz) || 0, status, facts: status?.expressions ?? null };
 }
 
 /** 自分の式を足して取る（いまの組を消さない）。rate は組全体の周期（ほかの式の周期も変わる） */

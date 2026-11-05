@@ -50,7 +50,7 @@ def render_bank(block: Block) -> str:
         reads, writes = [], []
         if reg.write_to:                                  # 書いた語は書き先のレジスタへ（読みはこのレジスタ）
             target = registers[reg.write_to]
-            writes += [f"              {target.port_name(f)}_r <= {_slice('bus_wdata', f)};"
+            writes += [f"              {target.port_name(f)}_r <= {_slice('bus_cmd.wdata', f)};"
                        for f in target.fields if f.access in ("RW", "PULSE")]
         for f in reg.fields:
             port = reg.port_name(f)
@@ -61,13 +61,13 @@ def render_bank(block: Block) -> str:
                 resets.append(f"        {port}_r <= {_literal(f.value, f.width)};")
                 outputs.append(f"  {port} <= {port}_r;")
                 reads.append(f"            {_slice('rdata', f)} <= {port}_r;")
-                writes.append(f"              {port}_r <= {_slice('bus_wdata', f)};")
+                writes.append(f"              {port}_r <= {_slice('bus_cmd.wdata', f)};")
             elif f.access == "PULSE":
                 ports.append((f"{port} : out {_type(f.width)}", f"{label}（PULSE: 1 を書いた次の周期に 1）"))
                 signals.append(f"  signal {port}_r : {_type(f.width)} := {_literal(0, f.width)};")
                 clears.append(f"      {port}_r <= {_literal(0, f.width)};")
                 outputs.append(f"  {port} <= {port}_r;")
-                writes.append(f"              {port}_r <= {_slice('bus_wdata', f)};")
+                writes.append(f"              {port}_r <= {_slice('bus_cmd.wdata', f)};")
             elif f.access == "RO":
                 ports.append((f"{port} : in  {_type(f.width)}", f"{label}（RO）"))
                 reads.append(f"            {_slice('rdata', f)} <= {port};")
@@ -75,23 +75,23 @@ def render_bank(block: Block) -> str:
                 reads.append(f"            {_slice('rdata', f)} <= {_literal(f.value, f.width)};")
         if reg.read_strobe:
             ports.append((f"{reg.name}_read : out std_logic", f"{reg.name} を読んだ周期に 1"))
-            strobes.append(f"  {reg.name}_read <= '1' when start and bus_we = '0' and index = {index} else '0';")
+            strobes.append(f"  {reg.name}_read <= '1' when start and bus_cmd.we = '0' and index = {index} else '0';")
         cases.append(f"          when {index} =>   -- {reg.name}")
         cases += reads
         if writes:
-            cases.append("            if bus_we = '1' then")
+            cases.append("            if bus_cmd.we = '1' then")
             cases += writes
             cases.append("            end if;")
 
-    index_expr = f"to_integer(bus_addr({bits - 1} downto 0))" if bits else "0"
-    decls = [("bus_rdata : out csr_word_t", "")] + ports
+    index_expr = f"to_integer(bus_cmd.addr({bits - 1} downto 0))" if bits else "0"
+    decls = [("bus_rsp : out csr_rsp_t", "")] + ports
     port_block = [f"    {decl}{';' if i + 1 < len(decls) else ''}" + (f"   -- {note}" if note else "")
                   for i, (decl, note) in enumerate(decls)]
     lines = [
         HEADER,
         f"-- CSR ブロック {block.name}（0x{block.base:08X}, {block.size} バイト）: {block.doc}",
         "-- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、",
-        "-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。",
+        "-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。",
         "library ieee;",
         "use ieee.std_logic_1164.all;",
         "use ieee.numeric_std.all;",
@@ -102,11 +102,7 @@ def render_bank(block: Block) -> str:
         "    clk       : in  std_logic;",
         "    rst       : in  std_logic;",
         "    bus_req   : in  std_logic;",
-        "    bus_we    : in  std_logic;",
-        "    bus_addr  : in  csr_addr_t;",
-        "    bus_wdata : in  csr_word_t;",
-        "    bus_ack   : out std_logic;",
-        "    bus_err   : out std_logic;",
+        "    bus_cmd   : in  csr_cmd_t;",
         *port_block,
         "  );",
         "end entity;",
@@ -143,9 +139,9 @@ def render_bank(block: Block) -> str:
         "    end if;",
         "  end process;",
         "",
-        "  bus_ack   <= ack;",
-        "  bus_err   <= err;",
-        "  bus_rdata <= rdata;",
+        "  bus_rsp.ack   <= ack;",
+        "  bus_rsp.err   <= err;",
+        "  bus_rsp.rdata <= rdata;",
         *outputs,
         "end architecture;",
         "",

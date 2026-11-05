@@ -6,10 +6,12 @@ import { describe, expect, it } from "vitest";
 
 const SRC = resolve(import.meta.dirname, "../src");
 const source = (path: string) => readFileSync(resolve(SRC, path), "utf8");
+// 大きいパネルは部品に分けてある: 検査はパネルと部品の全部を対象にする
+const sources = (...paths: string[]) => paths.map((p) => source(p)).join("\n");
 
 describe("対象の品種に偏った既定の値を欄に入れない（?9）", () => {
   it("Flash の消去の範囲は空から（STM32 の 0x08000000・16K を入れない）", () => {
-    const s = source("components/panels/FlashPanel.svelte");
+    const s = sources("components/panels/FlashPanel.svelte", "components/panels/flash/FlashBench.svelte");
     expect(s).not.toMatch(/eraseAddress = \$state\("0x08000000"\)/);
     expect(s).not.toMatch(/eraseLength = \$state\("16K"\)/);
     expect(s).toMatch(/eraseAddress = \$state\(""\)/);
@@ -29,7 +31,7 @@ describe("対象の品種に偏った既定の値を欄に入れない（?9）",
 
 describe("画面で率を作らない（?13）", () => {
   it("System の FPGA のスキャン: 2 回の読みの差から毎秒を計算せず（32 ビットの巻き戻りを仮定しない）、API の数をそのまま出す", () => {
-    const s = source("components/panels/SystemPanel.svelte");
+    const s = sources("components/panels/SystemPanel.svelte", "components/panels/system/SystemFpga.svelte");
     expect(s).not.toMatch(/scansPerSecond/);
     expect(s).not.toMatch(/2 \*\* 32/);
   });
@@ -49,7 +51,7 @@ describe("観測・取得の条件を画面の暗黙の既定で決めない（3
     expect(s).toMatch(/load\("dashboard\.rate", ""\)/);
   });
   it("Data Sampling の周期・条件での取得の前後の時間は空から（1000 Hz・10 ms・500 ms を入れない）", () => {
-    const s = source("components/panels/DataSamplingPanel.svelte");
+    const s = sources("components/panels/DataSamplingPanel.svelte", "components/panels/sampling/SamplingCaptureForm.svelte");
     expect(s).toMatch(/load\("dataSampling\.rate", ""\)/);
     expect(s).not.toMatch(/\|\| 1000\)/);
     expect(s).not.toMatch(/preMs: 10/);
@@ -68,13 +70,13 @@ describe("観測・取得の条件を画面の暗黙の既定で決めない（3
     expect(source("components/panels/FaultPanel.svelte")).toMatch(/load\("fault\.etmCount", ""\)/);
   });
   it("Logic Analyzer の番地一致は API の仕様の欄（マスク・値を画面で埋めない）、段の事象・回数は空から", () => {
-    const s = source("components/panels/LogicAnalyzerPanel.svelte");
+    const s = sources("components/panels/LogicAnalyzerPanel.svelte", "components/panels/logic/LaTrigger.svelte");
     expect(s).not.toMatch(/0xFFFFFFFF/);
     expect(s).toMatch(/methodFields\("xtrig\.set_match"\)/);
     expect(s).not.toMatch(/count: 1/);
   });
   it("System は RLE / RAW を画面で決めず（使う人が選んだ形式）、止めるまでの秒も空から（1 秒を入れない）", () => {
-    const s = source("components/panels/SystemPanel.svelte");
+    const s = sources("components/panels/SystemPanel.svelte", "components/panels/system/SystemTriggerBar.svelte");
     expect(s).not.toMatch(/rle: (true|false)/);
     expect(s).toMatch(/load\("system\.triggerPost", ""\)/);
   });
@@ -83,7 +85,7 @@ describe("観測・取得の条件を画面の暗黙の既定で決めない（3
 describe("時刻 0 を「無い」とみなさない（3 回目の点検 ?5）", () => {
   it("Cross Trigger・Logic Analyzer のレジスタの時刻は回数・fired で起きたかを決め、0 を捨てない", () => {
     expect(source("components/panels/CrossTriggerPanel.svelte")).not.toMatch(/t > 0/);
-    expect(source("components/panels/LogicAnalyzerPanel.svelte")).not.toMatch(/t > 0/);
+    expect(sources("components/panels/LogicAnalyzerPanel.svelte", "components/panels/logic/LaTrigger.svelte")).not.toMatch(/t > 0/);
   });
 });
 

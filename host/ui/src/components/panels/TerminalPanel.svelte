@@ -8,6 +8,8 @@
   // 仮想端末（SEGGER RTT Viewer の Terminal 0〜F）: ファームが SEGGER_RTT_SetTerminal で切り替えたら、その源に
   // 「すべて」と端末ごとのタブを出す（デーモンが切り替えを文字から除いて位置を返す。lib/terminal の splitTerminals）
   import { tick, untrack } from "svelte";
+  import Req from "./Req.svelte";
+  import { interval } from "../common/interval";
   import { errorText } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
@@ -82,8 +84,7 @@
   $effect(() => save("terminal.time", timeMode));
   $effect(() => {
     if (!online || !current) return;
-    const timer = setInterval(() => void poll(), POLL_MS);
-    return () => clearInterval(timer);
+    return interval(() => poll(), POLL_MS);
   });
   // 時間軸で選んだ時刻（記録）の行を選んで見せる
   $effect(() => onTimeline({
@@ -322,7 +323,7 @@
         <label title={$i18n("terminal.swoSetupTip")}><input type="checkbox" bind:checked={swoSetup} /> {$i18n("terminal.swoSetup")}</label>
         {#if swoSetup}
           <label title={$i18n("terminal.swoPortsTip")}>{$i18n("terminal.swoPorts")} <input class="num mono" bind:value={swoPorts}
-            aria-required="true" spellcheck="false" /><span class="req" aria-hidden="true">*</span></label>
+            aria-required="true" spellcheck="false" /><Req /></label>
           <label>{$i18n("terminal.coreClock")} <input class="num mono" bind:value={coreClock} inputmode="numeric" /></label>
         {/if}
         <button class="primary small" disabled={swoSetup ? !swoConfigureParams(swoPorts, swoBaud, coreClock) : !(Number(swoBaud) > 0)}>

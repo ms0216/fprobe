@@ -1,7 +1,7 @@
 // Logic Analyzer: 解読器の欄 → settings、注釈 → 印、トリガの欄 ↔ xtrig の引数、段の図、測定の範囲
 import { describe, expect, it } from "vitest";
 import {
-  choicesOf, decodeMarks, hiddenKinds, invalidSettings, isChannelParam, measureCall, measureRange, measuredChannels, missingSettings, newForm,
+  choicesOf, decodeMarks, invalidSettings, isChannelParam, measureCall, measureRange, measuredChannels, missingSettings, newForm,
   patternForm, patternOf, settingValue, settingsOf,
   stageForms, stageLabel, stageState, stagesOf, type DecoderInfo, type StageState,
 } from "../src/lib/logic";
@@ -140,16 +140,6 @@ describe("測定", () => {
     const ch = (n: number) => ({ rises: n, falls: n, high_ratio: 0.5 });
     // 変化の無いチャンネルを返すかはデーモンが決める（channels を指定すれば返る）。画面は返ったものを全部描く
     expect(measuredChannels({ "2": ch(3), "4": ch(0), "10": ch(1) }).map(([n]) => n)).toEqual([2, 4, 10]);
-  });
-});
-
-describe("解読の件数と表", () => {
-  it("既定の種類の外で表に出ない件数と種類（件数と表の食い違いを説明する）", () => {
-    expect(hiddenKinds({ kinds: ["transfer"], counts: { line_reset: 1 } })).toEqual({ n: 1, kinds: ["line_reset"] });
-    expect(hiddenKinds({ kinds: ["transfer"], counts: { transfer: 3, line_reset: 2, idle: 1 } }))
-      .toEqual({ n: 3, kinds: ["idle", "line_reset"] });
-    expect(hiddenKinds({ kinds: null, counts: { frame: 2 } })).toEqual({ n: 0, kinds: [] });
-    expect(hiddenKinds({ counts: { frame: 2 } })).toEqual({ n: 0, kinds: [] });              // 古いデーモン
   });
 });
 

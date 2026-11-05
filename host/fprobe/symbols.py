@@ -123,7 +123,7 @@ class Symbols:
         with open(self.path, "rb") as f:
             elf = ELFFile(f)
             self.entry = elf["e_entry"] & ~1
-            self._symbols, self._same_named = self._read_symbols(elf)
+            self._symbols, self._same_named, self._imported = self._read_symbols(elf)
             self._overloads: dict[str, list[str]] = {}
             dwarf = elf.get_dwarf_info() if elf.has_dwarf_info() else None     # 1 つを共有（DIE の読みを 2 度しない）
             linked = self._name_from_source(dwarf, elf.elfclass // 8)
@@ -160,10 +160,11 @@ class Symbols:
     # --- 読み込み ------------------------------------------------------------------
 
     @staticmethod
-    def _read_symbols(elf: ELFFile) -> tuple[dict[str, Symbol], dict[str, list[Symbol]]]:
+    def _read_symbols(elf: ELFFile) -> tuple[dict[str, Symbol], dict[str, list[Symbol]], set[str]]:
         """名前 → 最初のシンボル と、同じ名前で別の番地・大きさのもの（別ファイルの static 等。名前 → 2 つ目以降）。"""
         out: dict[str, Symbol] = {}
         extra: dict[str, list[Symbol]] = {}
+        imported: set[str] = set()
         for section in elf.iter_sections():
             if not isinstance(section, SymbolTableSection):
                 continue
@@ -171,12 +172,15 @@ class Symbols:
                 kind = {"STT_FUNC": "function", "STT_OBJECT": "object"}.get(s["st_info"]["type"])
                 if kind is None or not s.name:
                     continue
+                if s["st_shndx"] == "SHN_UNDEF":                 # この ELF では定義されない（共有ライブラリから取り込む）。番地 0 の記号にしない
+                    imported.add(s.name)
+                    continue
                 address = s["st_value"] & ~1 if kind == "function" else s["st_value"]
                 symbol = Symbol(s.name, address, s["st_size"], kind)
                 first = out.setdefault(s.name, symbol)
                 if first != symbol and symbol not in extra.setdefault(s.name, []):
                     extra[s.name].append(symbol)
-        return out, {name: v for name, v in extra.items() if v}
+        return out, {name: v for name, v in extra.items() if v}, imported - out.keys()
 
     def _name_from_source(self, dwarf, address_size: int) -> set[str]:
         """C++・Rust: ELF のシンボルはマングルされた名前（リンク名）。DWARF の関数（DW_AT_linkage_name と、名前空間・
@@ -325,6 +329,19 @@ class Symbols:
         """すべての関数・変数のシンボル（ELF の名前。C++・Rust はソースの名前も）。"""
         return [*self._symbols.values(), *(x for v in self._same_named.values() for x in v)]
 
+    def search(self, query: str, kind: str | None, limit: int) -> dict:
+        """記号（関数・変数）を名前の部分一致（大文字小文字を区別しない。query が空なら全部）で探す。kind = "function" / "object" / None（両方）。
+        名前順で先頭 limit 件。total = 一致した数、returned = 返した数（total > returned なら limit で切れた）。並べ替えの基準は名前だけ。"""
+        if kind not in (None, "function", "object"):
+            raise ValueError("kind は function / object / null")
+        if limit < 0:
+            raise ValueError("limit は 0 以上")
+        needle = query.lower()
+        found = sorted((x for x in self.names() if (kind is None or x.kind == kind) and needle in x.name.lower()),
+                       key=lambda x: (x.name, x.address))
+        return {"total": len(found), "returned": min(len(found), limit),
+                "symbols": [{"name": x.name, "address": x.address, "size": x.size, "kind": x.kind} for x in found[:limit]]}
+
     def symbol(self, name: str) -> Symbol:
         if name in self._same_named:
             found = [self._symbols[name], *self._same_named[name]]
@@ -334,7 +351,15 @@ class Symbols:
         except KeyError:
             if name in self._overloads:
                 raise KeyError(f"{name!r} は多重定義: {', '.join(self._overloads[name])} のどれか") from None
-            raise KeyError(f"シンボル {name!r} が {self.path.name} に無い") from None
+            if name in self._imported:
+                raise KeyError(f"{name!r} はこの ELF では定義されない（共有ライブラリから取り込む記号）。名前でのブレークポイントは "
+                               "ELF の記号だけ。ライブラリの中は番地（0x…）で指定する") from None
+            found_like = sorted(n for n in self._symbols if name and name.lower() in n.lower())
+            like = found_like[:8]
+            more = f"（ほか {len(found_like) - len(like)} 件）" if len(found_like) > len(like) else ""
+            raise KeyError(f"シンボル {name!r} が {self.path.name} に無い（記号は全 {len(self._symbols)} 個。"
+                           + (f"名前に {name!r} を含むもの: {', '.join(like)}{more}。" if like else "名前に含むものも無い。")
+                           + "debug.symbol.search で名前の一部から探せる）") from None
 
     def variable(self, name: str) -> Symbol:
         s = self.symbol(name)
@@ -365,7 +390,14 @@ class Symbols:
             self._line_index = index
         address = self._line_index.get((path, line))
         if address is None:
-            raise KeyError(f"{file}:{line} に対応する命令が無い（最適化で消えたか、行が違う）")
+            lines = sorted(n for (p, n) in self._line_index if p == path)
+            before = [n for n in lines if n < line]
+            after = [n for n in lines if n > line]
+            near = ", ".join(f"{n}" for n in ([before[-1]] if before else []) + ([after[0]] if after else []))
+            raise KeyError(f"{file}:{line} に対応する命令が、この ELF の行表に無い（{file} で命令のある行: " +
+                           (f"{line} の前後は {near}。" if near else "") +
+                           f"全 {len(lines)} 行、{lines[0]}〜{lines[-1]}）" if lines else
+                           f"{file}:{line} に対応する命令が、この ELF の行表に無い（{file} の行は 1 つも行表に無い）")
         return address
 
     def after_prologue(self, address: int) -> int:

@@ -7,6 +7,7 @@
   // 中身の欄は、API の結果が読んだ場所（locations の欄 → {address, size}）を返したものだけ target.memory.write で書ける。
   // 場所の無い欄（いまの rtos.objects はどれも返さない）は書けないと示す（番地を推さない）
   import { errorText } from "../../lib/api";
+  import { intervalNow } from "../common/interval";
   import { isRunning } from "../../lib/commands";
   import { shared } from "../../lib/context";
   import { i18n, type Key } from "../../lib/i18n";
@@ -39,9 +40,7 @@
   // 走っている間は 1 秒ごとに走らせたまま読む
   $effect(() => {
     if (!running) return;
-    void read();
-    const timer = setInterval(() => void read(), 1000);
-    return () => clearInterval(timer);
+    return intervalNow(() => read(), 1000);
   });
 
   async function read() {

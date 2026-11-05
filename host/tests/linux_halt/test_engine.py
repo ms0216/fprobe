@@ -345,3 +345,29 @@ def test_the_registers_of_a_thread_that_is_not_on_a_core_are_read_and_written_th
     w.eng.set_regs(101, new)
     assert struct.unpack("<18I", w.cores.read_phys(regs_at - BASE, 72))[:17] == tuple(new)
     assert struct.unpack("<18I", w.cores.read_phys(regs_at - BASE, 72))[17] == 117     # orig_r0 untouched
+
+
+def test_waiting_for_an_instruction_that_trapped_uses_a_hardware_breakpoint_so_the_kernel_reads_the_original_instruction(tmp_path):
+    """ステップで例外に入った命令（VFP の初回使用の未定義命令など）に戻るのを待つ間、カーネルは例外の処理でその命令をメモリから読み直す。
+    BKPT に書き換えていると SIGILL になる（実機 2026-11-05: data_types の step）。メモリを書き換えないハードウェアのブレークポイントを使い、
+    空きが無ければソフトウェアに戻り、どちらでも終わりに必ず外す。"""
+    from fprobe.linux_halt.engine_types import Stop
+    w = World(tmp_path)
+    seen = {}
+
+    def cont(want, deadline=None, clock=None):
+        seen["hw"] = w.bps.get_hw(0x10000) is not None
+        seen["sw"] = w.bps.sw_at_pa(PA) is not None
+        return Stop("trap", 101, 0x10000), True
+
+    w.eng._cont_until = cont
+    w.eng._run_to(0x10000, 4, 101, prefer_hw=True)
+    assert seen == {"hw": True, "sw": False}                       # メモリは書き換えない
+    assert w.bps.get_hw(0x10000) is None and w.bps.sw_at_pa(PA) is None   # 終わりに外す
+    w.eng._run_to(0x10000, 4, 101)                                  # 既定は従来どおりソフトウェア
+    assert seen == {"hw": False, "sw": True}
+    w.bps.insert(100, 0x10100, kind="hw", width=4)                  # ハードウェアの空きを使い切る（2 本）
+    w.bps.insert(100, 0x10200, kind="hw", width=4)
+    w.eng._run_to(0x10000, 4, 101, prefer_hw=True)
+    assert seen == {"hw": False, "sw": True}                       # 空きが無ければソフトウェアに戻る
+    assert w.bps.sw_at_pa(PA) is None

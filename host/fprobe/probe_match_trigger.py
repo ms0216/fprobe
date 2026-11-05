@@ -186,7 +186,8 @@ class MatchTriggerService:
                     "halt": bool(route >> g.XTRIG_ROUTE_TO_INJECT[0] & bit), "la": bool(route >> g.XTRIG_ROUTE_TO_LA[0] & bit),
                     "matched": bool(ctrl >> g.SAMPLER_MATCH_CONTROL_MATCHED[0] & 1),
                     "seen_any": bool(ctrl >> g.SAMPLER_MATCH_CONTROL_SEEN_ANY[0] & 1),
-                    "seen": seen, "count": count, "time": time_, "prev_time": prev_time}
+                    "seen": seen, "count": count, "time": time_, "time_valid": count > 0,
+                    "prev_time": prev_time}
 
     def sampler_trigger_clear(self) -> dict:
         """サンプラの値の一致のトリガをやめる（比べるのを止め、経路の sampler_match を外す。ほかの源の経路は触らない）。"""

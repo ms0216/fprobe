@@ -12,7 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import soak  # noqa: E402
-from soak import ObsCapture, ObsOpenFailure, Params, Runner  # noqa: E402
+from soak_rig import ObsCapture, ObsOpenFailure  # noqa: E402
+from soak import Params, Runner  # noqa: E402
 
 FAST = Params(obs_seconds=1.0, reopen_count=5, idcode_reads=20, sampler_seconds=0.5, ping_count=20,
               eventlog_reads=10, quiet_seconds=30.0, groups_seconds=0.1, count_seconds=1.0, chaos_ops=300, seed=1234)

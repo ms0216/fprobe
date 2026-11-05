@@ -142,3 +142,31 @@ def test_type_schema_follows_the_jsonable_shape():
     assert type_schema(Capabilities, defs) == {"$ref": "#/$defs/Capabilities"} and "LaChannel" in defs
     with pytest.raises(TypeError):
         type_schema(object, defs)
+
+
+@pytest.mark.parametrize("method, params, expected", [
+    ("target.halt", {"force": True}, "未知の引数: force"),
+    ("debug.breakpoint.set", {}, "必須の引数が無い"),
+    ("debug.run_until_halt", {"timeout_s": "soon"}, "型が違う"),
+])
+def test_param_errors_say_what_is_wrong_in_japanese(spec, method, params, expected):
+    """引数の誤りは、jsonschema の英文でなく、どの引数がどう違うかの日本語の文で返す（人にも AI にも読める）。"""
+    with pytest.raises(InvalidParams) as raised:
+        spec.validate_params(method, params)
+    text = str(raised.value)
+    assert expected in text and "is a required property" not in text and "Additional properties" not in text
+
+
+def test_a_hex_string_for_an_integer_says_to_send_a_json_number(spec):
+    """整数の引数に '0x20000000' を渡したら、JSON の数で渡すことと、その 10 進の値を言う。"""
+    with pytest.raises(InvalidParams) as raised:
+        spec.validate_params("target.memory.read", {"address": "0x20000000", "length": 16})
+    assert "536870912" in str(raised.value) and "JSON の数" in str(raised.value)
+
+
+def test_a_huge_bad_value_does_not_blow_up_the_error_message(spec):
+    """誤りの文に載せる値は先頭だけにして、全体の長さを言う（独立のレビュー: 500KB の値が 500KB の誤りの文になった）。"""
+    with pytest.raises(InvalidParams) as raised:
+        spec.validate_params("target.connect", {"target": "x", "frequency_hz": "9" * 100_000})
+    text = str(raised.value)
+    assert len(text) < 600 and "全体 100002 文字" in text

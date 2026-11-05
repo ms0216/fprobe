@@ -14,6 +14,11 @@
 | 中継 `fprobe-relay` が止まる | 終了コード 2 = 印が無い、3 = PL の ID・版が違う、4 = 動作中に ID が読めなくなった | `python -m fprobe_gw pynq status`。回路を書き直したら `build --program` / `program --relay` で中継を起動し直す。2 と 3 は systemd が起動し直さない |
 | UDP のデータが欠ける | UDP は落ちうる | `s.link.lost_frames`（FPGA → PC の通し番号の欠けを数える）。バイト列のチャンネルの欠けは黙って見逃さない設計 |
 
+## 使い方の落とし穴（ヒント）
+
+呼び出しが失敗した・迷ったときは [hints.md](hints.md)（API は `session.hints`、MCP は `session_hints`、画面は Activity パネルでエラーの行を選ぶ）。
+実機・アクティビティの失敗の事実から足している記録で、診断ではない（確かめる事実とそれを読む API と手順を並べる）。
+
 ## ターゲットに（SWD / JTAG で）つながらない
 
 1. 未接続のまま `target_diagnose`（MCP）を呼ぶ。電圧 → ピン → SWD → JTAG のチェーン → DP → AP・ROM テーブル → コア → 部品の判別 → 保護を

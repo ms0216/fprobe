@@ -1,7 +1,13 @@
 // Flash のパネル（J-Flash Lite の型）の計算（Svelte に依らない）: 書き込みの設定と target.flash の引数と
 // 番地、進捗の通知（flash.progress）、結果の段ごとの時間・速度の表、Flash の領域のセクタの並び。
 import { formatDuration } from "./time";
-import type { Params } from "./api";
+import type { Methods, Params, Result } from "./api";
+
+/** 子の部品が親の「実行中の表示・進捗の消去」つきで API を呼ぶための関数の型（FlashPanel の run） */
+export type FlashRun = <M extends keyof Methods>(kind: string, method: M, params: Params<M>) => Promise<Result<M> | undefined>;
+
+/** 結果の欄に出す直近の操作（kind ごとに応答の形が違う） */
+export type FlashResultState = { kind: "program" | "verify" | "erase" | "read"; data: any };
 
 export type EraseMode = "auto" | "sector" | "chip";
 

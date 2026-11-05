@@ -27,13 +27,9 @@ entity core_debug is
     rst            : in  core_resets_t;
     time_count     : in  unsigned(63 downto 0);
     -- CSR（csr_decoder の窓の側。この部分の窓以外は応答しない）
-    csr_we         : in  std_logic;
-    csr_addr       : in  csr_addr_t;
-    csr_wdata      : in  csr_word_t;
+    csr_cmd        : in  csr_cmd_t;
     csr_req        : in  std_logic_vector(CSR_WINDOWS'range);
-    csr_ack        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_err        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_rdata      : out csr_word_array_t(CSR_WINDOWS'range);
+    csr_rsp        : out csr_rsp_array_t(CSR_WINDOWS'range);
     -- CMSIS-DAP
     packet_size    : in  natural range 64 to 512;
     dap_in_valid   : in  std_logic;
@@ -163,9 +159,7 @@ architecture rtl of core_debug is
 begin
   idle_g : for i in CSR_WINDOWS'range generate
     other_g : if not owns(i) generate
-      csr_ack(i)   <= '0';
-      csr_err(i)   <= '0';
-      csr_rdata(i) <= (others => '0');
+      csr_rsp(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
@@ -233,9 +227,8 @@ begin
               phy_rsp_valid => up_rsp_valid, phy_rsp_ack => swd_rsp_ack,
               phy_rsp_data => swd_rsp_data(31 downto 0), phy_rsp_par => swd_rsp_parity, phy_rsp_time => swd_rsp_time);
   inject_csr_i : entity work.csr_inject
-    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_INJECT), bus_we => csr_we, bus_addr => csr_addr,
-              bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_INJECT), bus_err => csr_err(CSR_WIN_INJECT),
-              bus_rdata => csr_rdata(CSR_WIN_INJECT),
+    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_INJECT),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_INJECT),
               control_extra => extra_f, entry => index_f, addr => tbl_addr, value => tbl_value, entry_write => tbl_write,
               status_written_words => std_logic_vector(inj_words),
               first_time_lo => std_logic_vector(inject_first_time(31 downto 0)),
@@ -294,8 +287,7 @@ begin
     inj_kind_start  <= '0';
     inj_done        <= '0';
     inject_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_INJECT), bus_ack => csr_ack(CSR_WIN_INJECT),
-                bus_err => csr_err(CSR_WIN_INJECT), bus_rdata => csr_rdata(CSR_WIN_INJECT));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_INJECT), bus_rsp => csr_rsp(CSR_WIN_INJECT));
   end generate;
 
   -- 語の時刻: クロストリガの要求は inject_time・inject_first_time、始動の列は start_*_time（見張りの停止要求の時刻を
@@ -362,9 +354,8 @@ begin
                 phy_rsp_valid => swd_rsp_valid, phy_rsp_ack => swd_rsp_ack,
                 phy_rsp_data => swd_rsp_data(31 downto 0), phy_rsp_par => swd_rsp_parity, phy_rsp_time => swd_rsp_time);
     csr_sampler_i : entity work.csr_sampler
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SAMPLER), bus_we => csr_we, bus_addr => csr_addr,
-                bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_SAMPLER), bus_err => csr_err(CSR_WIN_SAMPLER),
-                bus_rdata => csr_rdata(CSR_WIN_SAMPLER),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SAMPLER),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_SAMPLER),
                 control_run => smp_run, control_ap => ap, control_jitter => jitter, period => period,
                 slot_index => tbl_index, slot_addr => tbl_addr, slot_config_enable => tbl_enable,
                 slot_config_words => tbl_words, slot_write => tbl_write,
@@ -395,9 +386,8 @@ begin
                 fire_time => m_time, prev_time => m_prev, fire_index => m_fire_index, unmatched_seen => m_unmatched,
                 fire_first => m_fire_first, started => m_started);
     csr_smatch_i : entity work.csr_sampler_match
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SAMPLER_MATCH), bus_we => csr_we, bus_addr => csr_addr,
-                bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_SAMPLER_MATCH), bus_err => csr_err(CSR_WIN_SAMPLER_MATCH),
-                bus_rdata => csr_rdata(CSR_WIN_SAMPLER_MATCH),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SAMPLER_MATCH),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_SAMPLER_MATCH),
                 addr => m_addr, mask => m_mask, value => m_value, control_enable => m_enable, control_once => m_once,
                 control_after_start => m_after, control_first_sample => m_first_sample, control_started => m_started,
                 fire_first => m_fire_first,
@@ -413,8 +403,7 @@ begin
   no_smatch_g : if not (SAMPLER and SAMPLER_MATCH) generate
     smp_match <= '0';
     smatch_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_SAMPLER_MATCH), bus_ack => csr_ack(CSR_WIN_SAMPLER_MATCH),
-                bus_err => csr_err(CSR_WIN_SAMPLER_MATCH), bus_rdata => csr_rdata(CSR_WIN_SAMPLER_MATCH));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_SAMPLER_MATCH), bus_rsp => csr_rsp(CSR_WIN_SAMPLER_MATCH));
   end generate;
 
   -- DAP サンプラが無い: 上流の命令はそのまま PHY へ、サンプラの窓は読むとエラー
@@ -433,8 +422,7 @@ begin
     smp_index <= (others => '0'); smp_time <= (others => '0');
     smp_rec_valid <= '0'; smp_rec_kind <= (others => '0'); smp_rec_word <= (others => '0');
     sampler_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_SAMPLER), bus_ack => csr_ack(CSR_WIN_SAMPLER),
-                bus_err => csr_err(CSR_WIN_SAMPLER), bus_rdata => csr_rdata(CSR_WIN_SAMPLER));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_SAMPLER), bus_rsp => csr_rsp(CSR_WIN_SAMPLER));
   end generate;
 
   sampler_event <= (valid => smp_rec_valid, kind => smp_rec_kind, word => smp_rec_word);
@@ -474,9 +462,8 @@ begin
   swdio_oe <= swdio_oe_i;
 
   debug_csr_i : entity work.csr_debug
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_DEBUG), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_DEBUG),
-              bus_err => csr_err(CSR_WIN_DEBUG), bus_rdata => csr_rdata(CSR_WIN_DEBUG),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_DEBUG),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_DEBUG),
               sample_delay_swd => swd_sample_delay, sample_delay_jtag => jtag_sample_delay);
 
   -- PHY の設定（イベント 16 の [119:48]。並びは event_collector.vhd の先頭）。設定は PHY が命令を実行していない間に変わる

@@ -14,7 +14,7 @@ from __future__ import annotations
 from .access import TargetAccess, WritableAccess
 from .cexpr import ExpressionError, UnknownNameError, Value, evaluate, evaluate_number
 from .info import DebugInfo, FrameView, Variable
-from .location import EvalContext, MemoryPlace, NotAvailable, read_place
+from .location import EvalContext, MemoryPlace, NotAvailable, no_register, read_place
 from .typesys import EnumType, strip, type_name
 from .unwind import CallFrameTable, FrameState, Unwinder
 from .values import DecodeContext, decode, decode_bits, encode, unavailable
@@ -247,5 +247,4 @@ def _context(view: FrameView) -> EvalContext:
     return EvalContext(view.read_memory, view.read_register, cfa=view.cfa, load_bias=view.load_bias)
 
 
-def _no_register(number: int) -> int:
-    raise NotAvailable("フレームが無い（レジスタが無い）")
+_no_register = no_register("フレームが無い（レジスタが無い）")

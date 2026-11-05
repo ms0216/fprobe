@@ -10,6 +10,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.primer20k_pkg.all;
 
 entity primer20k_fprobe_eth_top is
@@ -45,6 +46,7 @@ entity primer20k_fprobe_eth_top is
 end entity;
 
 architecture rtl of primer20k_fprobe_eth_top is
+  constant LINK_PACKET_SIZE : positive := 512;   -- fprobe_core の packet_size（USB の High-Speed と同じ 512 バイト）
   signal sys_clk, sys_rst, pll_lock, link_rst, phy_released, peer_known : std_logic;
   -- DDR3（mem ドメイン）
   signal ddr3_memory_clk, mem_pll_lock, mem_clk, mem_rst, mem_ready : std_logic;
@@ -66,7 +68,7 @@ architecture rtl of primer20k_fprobe_eth_top is
   signal gpio_drive, gpio_enable : std_logic_vector(7 downto 0);
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe, target_tx, target_tx_oe : std_logic;
   signal func_o, func_oe : std_logic_vector(7 downto 0);
-  signal heartbeat : unsigned(25 downto 0) := (others => '0');
+  signal heartbeat : unsigned(HEARTBEAT_BITS - 1 downto 0) := (others => '0');
   signal diag : std_logic_vector(15 downto 0);                 -- eth_link の状態（診断へ）
 begin
   phy_reset_i : entity work.primer20k_ulpi_reset
@@ -137,7 +139,7 @@ begin
               ctrl_in_last => req_last,
               ctrl_out_valid => rsp_valid, ctrl_out_ready => rsp_ready, ctrl_out_data => rsp_data,
               ctrl_out_last => rsp_last,
-              packet_size => 512,
+              packet_size => LINK_PACKET_SIZE,
               dap_in_valid => dreq_valid, dap_in_ready => dreq_ready, dap_in_data => dreq_data, dap_in_last => dreq_last,
               dap_out_valid => drsp_valid, dap_out_ready => drsp_ready, dap_out_data => drsp_data,
               dap_out_last => drsp_last,

@@ -17,10 +17,14 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fprobe.api import NotConnected  # noqa: E402
 from fprobe.api.daemon import UI_DIR, create_app  # noqa: E402
+from fprobe.api.spec import load_spec  # noqa: E402
 from fprobe.mcp_server import Probe  # noqa: E402
 from fprobe.probe_service import expose  # noqa: E402
 from fprobe.probe_ui_state import UiStateService  # noqa: E402
 from fake_probe_contract import NOT_IN_DEMO, not_in_demo, signature_problems, unsupported_arg  # noqa: E402
+
+
+_API_IMPLS = frozenset(m.impl for m in load_spec().methods.values() if m.impl)
 
 
 @expose("_svc_ui_state", UiStateService)
@@ -53,7 +57,7 @@ class FakeProbe:
 
     def __getattr__(self, name):
         # 偽の機器が実装しない API のメソッド: AttributeError ではなく「偽物の不足」と分かる誤りにする
-        if name in NOT_IN_DEMO:
+        if name in NOT_IN_DEMO or name in _API_IMPLS:        # API にあるのに偽の機器が実装しないもの（内部の名前を漏らさない）
             return not_in_demo(name)
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
@@ -138,6 +142,9 @@ class FakeProbe:
     def symbol_info(self, location):
         return self._elf.symbol_info(location)
 
+    def symbol_search(self, query, limit, kind=None):
+        return self._elf.symbol_search(query, limit, kind)
+
     def source_list(self):
         return self._elf.source_list()
 
@@ -182,7 +189,7 @@ class FakeProbe:
         elif not enabled and address in self.breakpoints:
             self.bp_disabled[address] = self.breakpoints.pop(address)
         elif address not in self.breakpoints and address not in self.bp_disabled:
-            raise KeyError(f"{location!r} にブレークポイントが無い")
+            raise ValueError(f"{location} にブレークポイントが無い")
         return self.breakpoint_list()
 
     def breakpoint_list(self):

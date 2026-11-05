@@ -405,3 +405,18 @@ def test_instruction_steps_count_and_stop_at_the_time_limit(world):
     w.cores.on_step = on_step
     r = s._debug.step_instructions(T_OTHER, 2, timeout_s=5.0)
     assert (r["kind"], r["steps_done"], r["timed_out"], r["address"]) == ("step", 2, False, pc + 8)
+
+
+def test_once_the_process_is_seen_to_exit_every_operation_says_so_the_same_way(world):
+    """終了を一度見たら固定する: step・読み・ブレークポイント・メモリは、以後同じ『プロセスは終了している』で断る。状態の読みと close は通る。
+    （死んだタスクの task_struct が書き換わるまで古い値が読めて、step の成否が交互にぶれた: 実機 2026-11-05）"""
+    s = world.s
+    s.debug_attach(**ATTACH)
+    d = s._debug
+    d.last_stop = {"kind": "exit", "code": 11, "address": None}                  # 実行中に終了を見た後の状態
+    for operation in (lambda: d.step(d.current_tid(), "over", 100, 5.0), lambda: d.step_instructions(d.current_tid(), 1, 5.0),
+                      lambda: d.memory(0x10000, 4), lambda: d.break_insert("race.c:11", "sw")):
+        with pytest.raises(EngineError, match=r"プロセス \d+ は終了している（exit, code 11 = exit status 0, killed by signal 11）"):
+            operation()
+    assert d.status_facts()["last_stop"]["kind"] == "exit"                       # 状態の読みは通る
+    s.debug_close()                                                              # close は通る

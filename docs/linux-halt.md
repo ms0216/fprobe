@@ -40,6 +40,18 @@ fprobe の経路で開いている間はプローブの生の DAP を占有す�
 画面は View → Linux（JTAG で停止）。デーモンが強制終了されたら、次のデーモンで `open` → `rescue` → `recover`（下の「強制終了された
 デバッガの後始末」と同じ）。
 
+## 設定の保存・読み込み（`linux.halt.profile.*`、2026-11-05）
+
+`linux.halt.open` と `linux.halt.debug.attach` の引数は多いので、ファイルに書いて使い回せる。
+- `linux.halt.profile.save(path)`: 開いている口の `open` の引数と、attach 中なら `attach` の引数（**pid は除く**。実行のたびに変わる）、
+  offsets のファイルの SHA-256 を書く。
+- `linux.halt.profile.load(path)`: 読んで返すだけ（何も開かない・動かさない）。返った `open` を `linux.halt.open` へ、`attach` に pid を足して
+  `linux.halt.debug.attach` へ渡す。`offsets_matches` は保存時と今の offsets のファイルの SHA-256 の一致（事実だけ。合わなくても止めない。
+  カーネルを入れ替えたら offsets を作り直す）。
+- 画面（Linux のパネルの「設定」の「設定ファイル」）の読み込みは、欄に入れるだけ。「開く」「attach」は人が押す（AI が読んで渡すのと同じ操作が記録に残る）。
+- 形式は `{"format": "fprobe.linux_halt.profile", "version": 1, "saved_at_unix_s", "open", "offsets_sha256", "attach"}`。値に既定を補わない
+  （ファイルに無い引数は API が断る）。仕様: docs/superpowers/specs/2026-11-05-linux-halt-profile-design.md
+
 ## 止め方と、測った時間差（2026-10-29。どれも 0 ではない）
 
 時間差は、目標の側で測った値（各コアがカウンタを r4 に読み続け、止めた後に読む。root で実行。`linux-awareness-trial/tools/skew_fine.py`）。
@@ -243,6 +255,19 @@ python -m fprobe.linux_halt attach --backend fprobe --part zynq7000 --jtag-khz 2
 - 別の個体・配線・JTAG のクロックでは、測り直した値を渡す。測っていなければ `unmeasured`（既定の値は無い）。
 - 強制終了されたデバッガの後始末: `python -m fprobe.linux_halt rescue ...`（bp/wp を消し、停止デバッグを切り、止まったコアを再開）→
   `recover`（メモリに残った BKPT を戻す）。**共有ライブラリ（libc）に BKPT が残ると、全プロセスが落ちる**（sshd を含む）。強制終了しない。
+
+## ステップ・終了・シグナルの扱い（2026-11-06。Haiku の実機の周回と独立のレビューで直した分。実機の確かめは Pi が戻ってから）
+
+- **ELF の外へ戻る step**（main が libc へ戻る等）: 直前の命令が呼び出し（BL / BLX）だったかは、**LR が「その命令の次」になったか**で決める（命令セットの事実。`call_made`）。
+  戻りなら LR まで走らず、そこ（ELF の外）で止まる（以前は LR = 0 などで番地 0 にブレークポイントを置こうとして `0x0 is not mapped` で落ちた）。
+- **step out の戻り先**: 呼び出し元のフレームの戻り番地の **bit 0**（Thumb か ARM か）を `FrameState.thumb` に残す。実行ファイルにも取り寄せたシンボルにも無い所（stripped の libc の内部）への戻りは、この bit 0 で幅を決める。
+- **例外に入った命令を待つ間はハードウェアのブレークポイント**: step した命令が未定義命令の例外（VFP の初回使用など）に入ると、その命令に戻るのを待つ。ここでソフトウェアのブレークポイント（メモリを BKPT に書き換え）を使うと、
+  カーネルが例外の処理で命令をメモリから読み直して BKPT を読み、**SIGILL で死ぬ**（`data_types` の step over で再現）。メモリを書き換えないハードウェアのブレークポイントを使い、空きが無ければソフトウェアに戻る。
+- **プロセスの終了は固定される**: 終了を一度見たら（`last_stop.kind = exit`）、以後の step・読み・ブレークポイント・メモリは、最初の操作も含めて同じ文（「プロセス N は終了している（exit, code …）。close して attach し直す」）で断る。
+  状態の読みと close は通る。終了コードはカーネルの値で `(終了状態 << 8) | 終了させたシグナル`。
+- **シグナルで止まった**とき（reason = signal）、`debug.step` の応答に `signal`（番号）と `signal_name`（SIGSEGV 等。Linux ARM の番号の表）が付く。シグナルが配送される直前で止まっていて、次に走らせると配送される（致命的ならプロセスが死ぬ）。
+- **共有ライブラリの中のブレークポイント**: 名前・ファイル:行 は attach の ELF（実行ファイル）だけで解く。ライブラリの中は実行時の番地（`"0x76dc02ec"`）で置け、命令セットは取り寄せたシンボルの bit 0 で決める。
+- `linux.halt.processes` はカーネルのタスク一覧を JTAG で読むので、**対象の ssh が死んでいても中身が見える**（2026-11-05 の Pi の事故でユーザープロセスの正常さを確かめた）。
 
 ## 引数に既定が無いもの（使う側が決める）
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
 from ..dwarf.typesys import BaseType, strip, type_name
-from .base import NAME_LIMIT, KernelAwareness, stopped_note
+from .base import NAME_LIMIT, KernelAwareness
 from .cortexm import THREAD_PSP_EXC_RETURN, SavedContext, unstack_exception_frame
 from .model import HeapInfo, KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .stackcheck import check_stack
@@ -56,15 +56,8 @@ class Zephyr(KernelAwareness):
 
     def threads(self) -> list[int]:
         """_kernel.threads から next_thread を辿ったスレッドの番地。"""
-        out: list[int] = []
-        handle = self.mem.u32(self.kernel_address + self.kernel.offset("threads"))
-        while handle:
-            if handle in out or len(out) >= MAX_THREADS:
-                self.warnings.append(stopped_note("スレッドのリスト", len(out), "cycle" if handle in out else "limit", MAX_THREADS))
-                break
-            out.append(handle)
-            handle = self._field(handle, "next_thread")
-        return out
+        head = self.mem.u32(self.kernel_address + self.kernel.offset("threads"))
+        return self.follow(head, lambda handle: self._field(handle, "next_thread"), "スレッドのリスト", MAX_THREADS)
 
     def tasks(self) -> list[Task]:
         self.warnings = []
@@ -84,9 +77,7 @@ class Zephyr(KernelAwareness):
 
     def _task(self, handle: int, running: bool) -> Task:
         state_bits = self._field(handle, "base.thread_state")
-        signed = isinstance(strip(self.thread.member_type("base.prio")), BaseType) and \
-            strip(self.thread.member_type("base.prio")).signed
-        priority = self._field(handle, "base.prio", signed)
+        priority = self.handle_priority(handle)
         wait = None
         if state_bits & (DEAD | ABORTING):
             state = TaskState.DELETED
@@ -169,8 +160,9 @@ class Zephyr(KernelAwareness):
         return ZephyrObjects(self).heap()
 
     def handle_priority(self, handle: int) -> int:
-        signed = isinstance(strip(self.thread.member_type("base.prio")), BaseType) and             strip(self.thread.member_type("base.prio")).signed
-        return self._field(handle, "base.prio", signed)
+        """base.prio（負は協調的なスレッド。型が符号付きなら符号付きで読む）。"""
+        prio = strip(self.thread.member_type("base.prio"))
+        return self._field(handle, "base.prio", isinstance(prio, BaseType) and prio.signed)
 
     def heap_free_word(self) -> tuple[int, int | None] | None:
         """_system_heap の z_heap.free_bytes（CONFIG_SYS_HEAP_RUNTIME_STATS）。"""
@@ -204,8 +196,3 @@ class Zephyr(KernelAwareness):
 
     def mutex_empty_head(self, obj: KernelObject) -> int:
         return obj.handle + ZephyrObjects(self).layouts["k_mutex"].offset("wait_q.waitq")
-
-    def snapshot(self) -> dict:
-        tasks = self.tasks()
-        return {"rtos": self.name, "current": self._names.get(self.current()), "tasks": [t.to_dict() for t in tasks],
-                "warnings": list(self.warnings)}

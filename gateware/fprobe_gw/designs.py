@@ -69,7 +69,7 @@ _USB = ("usb/usb_types_pkg.vhd", "usb/usb_timing_pkg.vhd", "usb/usb_crc_pkg.vhd"
 _CORE = ("core/core_pkg.vhd", "common/stream_slice.vhd", "core/csr_decoder.vhd", "core/control_plane.vhd", "core/timebase.vhd", "core/caps_rom.vhd",
          "common/udiv.vhd", "common/udiv_shared.vhd", "common/reset_fanout.vhd", "debug/generated/dap_info_pkg.vhd", "debug/dap_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/obs_pkg.vhd", "debug/obs_cmd_queue.vhd", "debug/obs_match.vhd", "debug/obs_record_rx.vhd", "debug/obs_jtag_engine.vhd", "debug/debug_port.vhd",
          "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
-         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
+         "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler_pkg.vhd", "debug/dap_sampler_timer.vhd", "debug/dap_sampler_out.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
          "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd", "la/la_pkg.vhd", "la/la_front.vhd", "la/la_record.vhd", "la/la_capture.vhd", "la/la_lane_front.vhd", "la/la_lane_capture.vhd", "la/la_lane_inputs.vhd", "la/la_cap_domain.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
          "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd",
@@ -98,7 +98,7 @@ def _primer_usb(name: str, *, la_inputs: int = 0, **features) -> Design:
         name=name, board=PRIMER20K, top="primer20k_fprobe_top",
         sources=tuple(dict.fromkeys((          # 重複を除く（コアと共通部品が同じファイルを含む）
             *rtl(*_COMMON, *_PRIMER20K, *_USB, "common/async_fifo.vhd", "common/cdc_value.vhd",
-                 "boards/primer20k/primer20k_ulpi_reset.vhd"),
+                 "usb/usb_core_cdc.vhd", "boards/primer20k/primer20k_ulpi_reset.vhd"),
             *core_sources(caps_package_path(name)),
             *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_fprobe_top.vhd")))),
         pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in", "sync"),
@@ -287,7 +287,7 @@ DESIGNS: dict[str, Design] = {
         name="memtest", board=PRIMER20K, top="primer20k_fprobe_top",
         sources=tuple(dict.fromkeys((          # 重複を除く（コアと共通部品が同じファイルを含む）
             *rtl(*_COMMON, *_PRIMER20K, *_USB, "common/async_fifo.vhd", "common/cdc_value.vhd",
-                 "boards/primer20k/primer20k_ulpi_reset.vhd"),
+                 "usb/usb_core_cdc.vhd", "boards/primer20k/primer20k_ulpi_reset.vhd"),
             *core_sources(caps_package_path("memtest")),
             *rtl("boards/primer20k/primer20k_ddr3.vhd", "boards/primer20k/primer20k_fprobe_top.vhd")))),
         pin_groups=("clk27", "led", "ulpi", "pmod1", "ddr3", "aux", "la_in", "sync"),   # トップが同じ（入力は使わない）

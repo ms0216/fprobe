@@ -6,7 +6,7 @@ from tests.rtl import TEST_RTL
 SOURCES = [*rtl("core/generated/event_pkg.vhd", "common/util_pkg.vhd", "common/sync_bit.vhd", "serial/uart_rx.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
                "common/udiv.vhd", "common/udiv_shared.vhd", "debug/generated/dap_info_pkg.vhd", "debug/dap_pkg.vhd", "debug/swd_phy.vhd", "debug/jtag_phy.vhd", "debug/debug_port.vhd",
                "debug/dap_packet.vhd", "debug/dap_link.vhd", "debug/dap_cmd_config.vhd",
-               "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler.vhd", "debug/dap_monitor.vhd"),
+               "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler_pkg.vhd", "debug/dap_sampler_timer.vhd", "debug/dap_sampler_out.vhd", "debug/dap_sampler.vhd", "debug/dap_monitor.vhd"),
            TEST_RTL / "dap_harness.vhd"]
 
 

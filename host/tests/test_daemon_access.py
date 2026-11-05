@@ -98,7 +98,7 @@ def test_every_parameter_that_runs_or_writes_a_pc_file_is_marked_in_the_spec():
         ("la.stream", "raw_path"): "write", ("la.raw_to_vcd", "vcd_path"): "write",
         ("la.export", "path"): "write", ("recording.export", "path"): "write", ("snapshot.save", "path"): "write",
         ("snapshot.export_core", "out"): "write", ("target.flash.read", "path"): "write",
-        ("rules.states", "dot_path"): "write", ("rules.report", "path"): "write", ("hooks.save", "path"): "write",
+        ("rules.states", "dot_path"): "write", ("rules.report", "path"): "write", ("hooks.save", "path"): "write", ("linux.halt.profile.save", "path"): "write",
         ("stream.log_start", "path"): "write", ("profile.export", "path"): "write",
         ("testpoint.export", "path"): "write", ("testpoint.instrument", "out_dir"): "write",
         ("testpoint.instrument", "map_path"): "write", ("linux.core.fetch", "local_path"): "write",

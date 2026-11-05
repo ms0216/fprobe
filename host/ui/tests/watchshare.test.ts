@@ -1,6 +1,6 @@
 // 変数の観測をビューで分け合う: 始めるときは足すだけ、やめるときは自分だけの式を除く、取り合いの検出
 import { afterEach, describe, expect, it } from "vitest";
-import { claim, missing, planStart, planStop, release, startWatch, stopWatch } from "../src/lib/watchshare";
+import { claim, planStart, planStop, readWatch, release, startWatch, stopWatch } from "../src/lib/watchshare";
 import { FakeConn } from "./fake-conn";
 
 function daemon(names: string[], rate = 1000) {
@@ -35,8 +35,14 @@ describe("組の計算", () => {
     expect(planStop(["ai", "x", "y"], ["x", "y"], new Set(["y"]))).toEqual(["ai", "y"]);
   });
 
-  it("取り合い: 自分の式のうち組に無いもの", () => {
-    expect(missing(["x"], ["x", "y"])).toEqual(["y"]);
+  it("取り合い: 自分の式と組の関係は API の expressions をそのまま読む（画面で集合の差を取らない）", async () => {
+    const facts = { observed: ["x"], missing: ["y"], others: ["ai"], all_observed: false };
+    let sent: any;
+    const call = async (_m: any, p: any) => { sent = p; return { watches: [{ name: "x" }, { name: "ai" }], rate_hz: 100, expressions: facts }; };
+    const out = await readWatch(call as any, ["x", "y"]);
+    expect(sent).toEqual({ expressions: ["x", "y"] });
+    expect(out.facts).toEqual(facts);
+    expect((await readWatch(async () => ({ watches: [] }) as any)).facts).toBeNull();
   });
 });
 

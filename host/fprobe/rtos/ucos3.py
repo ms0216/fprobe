@@ -78,17 +78,6 @@ class UCOS3(KernelAwareness):
     def _field(self, handle: int, path: str) -> int:
         return self.mem.uint(handle + self.tcb.offset(path), self.tcb.member_size(path))
 
-    def _variable(self, name: str) -> int | None:
-        """カーネルの変数の値（大きさは DWARF の型。OS_STATE は 1 バイト等）。無ければ None。"""
-        try:
-            var = self.info.global_variable(name)
-        except KeyError:
-            return None
-        address = self.optional_address(name)
-        if address is None:
-            return None
-        return self.mem.uint(address, var.type.size or 4)
-
     def string(self, pointer: int) -> str | None:
         if not pointer:
             return None
@@ -323,9 +312,6 @@ class UCOS3(KernelAwareness):
     def mutex_empty_head(self, obj: KernelObject) -> int:
         return 0
 
-    def snapshot(self) -> dict:
-        tasks = self.tasks()
-        current = self.current()
-        return {"rtos": self.name, "version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
-                "tick": self.tick_count(), "current": self._names.get(current) if current else None,
-                "tasks": [t.to_dict() for t in tasks], "warnings": list(self.warnings)}
+    def snapshot_header(self) -> dict:
+        return {"version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
+                "tick": self.tick_count()}

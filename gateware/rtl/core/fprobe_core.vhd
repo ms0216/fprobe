@@ -235,8 +235,7 @@ architecture rtl of fprobe_core is
   constant PART_LA      : natural := 3;
   constant PART_STORAGE : natural := 4;
   constant PART_TOP     : natural := 5;              -- この entity の中の窓（system・timebase・gpio・caps）
-  type part_bits_t is array (0 to 5) of std_logic_vector(CSR_WINDOWS'range);
-  type part_words_t is array (0 to 5) of csr_word_array_t(CSR_WINDOWS'range);
+  type part_rsp_t is array (0 to 5) of csr_rsp_array_t(CSR_WINDOWS'range);
 
   -- 塊ごとのリセット（core_pkg の RST_*）
   signal rst_g : core_resets_t;
@@ -244,13 +243,10 @@ architecture rtl of fprobe_core is
   signal bus_addr  : csr_addr_t;
   signal bus_wdata, bus_rdata : csr_word_t;
   -- CSR の窓へ配る番地・書き込み値・書き込みの印（csr_decoder が要求の最初の周期にレジスタに取った写し。2026-10-29）
-  signal c_we : std_logic;
-  signal c_addr : csr_addr_t;
-  signal c_wdata : csr_word_t;
-  signal s_req, s_ack, s_err : std_logic_vector(CSR_WINDOWS'range);
-  signal s_rdata : csr_word_array_t(CSR_WINDOWS'range);
-  signal p_ack, p_err : part_bits_t;
-  signal p_rdata : part_words_t;
+  signal c_cmd : csr_cmd_t;
+  signal s_req : std_logic_vector(CSR_WINDOWS'range);
+  signal s_rsp : csr_rsp_array_t(CSR_WINDOWS'range);
+  signal p_rsp : part_rsp_t;
 
   signal time_count : unsigned(63 downto 0);
   signal time_lo    : std_logic_vector(31 downto 0);
@@ -318,43 +314,33 @@ begin
     generic map (WINDOWS => CSR_WINDOWS)
     port map (clk => clk, rst => rst_g(RST_BUS), bus_req => bus_req, bus_we => bus_we, bus_addr => bus_addr, bus_wdata => bus_wdata,
               bus_ack => bus_ack, bus_err => bus_err, bus_rdata => bus_rdata,
-              s_we => c_we, s_addr => c_addr, s_wdata => c_wdata,
-              s_req => s_req, s_ack => s_ack, s_err => s_err, s_rdata => s_rdata);
+              s_cmd => c_cmd, s_req => s_req, s_rsp => s_rsp);
 
   -- 窓の応答: 各部分は自分の窓だけを駆動し、ほかの窓は 0（csr_bus_pkg の約束どおり応答の周期以外も 0）。論理和でまとめる
   process (all)
-    variable ack, err : std_logic_vector(CSR_WINDOWS'range);
-    variable rdata : csr_word_array_t(CSR_WINDOWS'range);
+    variable rsp : csr_rsp_array_t(CSR_WINDOWS'range);
   begin
-    ack   := (others => '0');
-    err   := (others => '0');
-    rdata := (others => (others => '0'));
-    for p in part_bits_t'range loop
-      ack := ack or p_ack(p);
-      err := err or p_err(p);
+    rsp := (others => CSR_RSP_IDLE);
+    for p in part_rsp_t'range loop
       for w in CSR_WINDOWS'range loop
-        rdata(w) := rdata(w) or p_rdata(p)(w);
+        rsp(w).ack   := rsp(w).ack or p_rsp(p)(w).ack;
+        rsp(w).err   := rsp(w).err or p_rsp(p)(w).err;
+        rsp(w).rdata := rsp(w).rdata or p_rsp(p)(w).rdata;
       end loop;
     end loop;
-    s_ack   <= ack;
-    s_err   <= err;
-    s_rdata <= rdata;
+    s_rsp <= rsp;
   end process;
 
   -- この entity の窓: system（識別・疎通確認）・timebase（time_lo を読むと上位を保持）・gpio（拡張ヘッダの汎用入出力）・caps
   top_idle_g : for i in CSR_WINDOWS'range generate
     other_g : if i /= CSR_WIN_SYSTEM and i /= CSR_WIN_TIMEBASE and i /= CSR_WIN_GPIO and i /= CSR_WIN_CAPS generate
-      p_ack(PART_TOP)(i)   <= '0';
-      p_err(PART_TOP)(i)   <= '0';
-      p_rdata(PART_TOP)(i) <= (others => '0');
+      p_rsp(PART_TOP)(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
   system_i : entity work.csr_system
-    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_SYSTEM), bus_we => c_we,
-              bus_addr => c_addr, bus_wdata => c_wdata, bus_ack => p_ack(PART_TOP)(CSR_WIN_SYSTEM),
-              bus_err => p_err(PART_TOP)(CSR_WIN_SYSTEM), bus_rdata => p_rdata(PART_TOP)(CSR_WIN_SYSTEM),
-              scratch => open);
+    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_SYSTEM), bus_cmd => c_cmd,
+              bus_rsp => p_rsp(PART_TOP)(CSR_WIN_SYSTEM), scratch => open);
 
   timebase_i : entity work.timebase
     port map (clk => clk, rst => rst_g(RST_BUS), count => time_count, hold => time_read, held_hi => time_hi);
@@ -362,16 +348,12 @@ begin
   time_lo <= std_logic_vector(time_count(31 downto 0));
 
   timebase_csr_i : entity work.csr_timebase
-    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_TIMEBASE), bus_we => c_we,
-              bus_addr => c_addr, bus_wdata => c_wdata, bus_ack => p_ack(PART_TOP)(CSR_WIN_TIMEBASE),
-              bus_err => p_err(PART_TOP)(CSR_WIN_TIMEBASE), bus_rdata => p_rdata(PART_TOP)(CSR_WIN_TIMEBASE),
-              time_lo => time_lo, time_lo_read => time_read, time_hi => time_hi);
+    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_TIMEBASE), bus_cmd => c_cmd,
+              bus_rsp => p_rsp(PART_TOP)(CSR_WIN_TIMEBASE), time_lo => time_lo, time_lo_read => time_read, time_hi => time_hi);
 
   gpio_i : entity work.csr_gpio
-    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_GPIO), bus_we => c_we,
-              bus_addr => c_addr, bus_wdata => c_wdata, bus_ack => p_ack(PART_TOP)(CSR_WIN_GPIO),
-              bus_err => p_err(PART_TOP)(CSR_WIN_GPIO), bus_rdata => p_rdata(PART_TOP)(CSR_WIN_GPIO),
-              drive => gpio_drive, enable => gpio_enable, level => level_s, io => level_s);
+    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_GPIO), bus_cmd => c_cmd,
+              bus_rsp => p_rsp(PART_TOP)(CSR_WIN_GPIO), drive => gpio_drive, enable => gpio_enable, level => level_s, io => level_s);
 
   level_sync_g : for i in gpio_level'range generate
     level_sync_i : entity work.sync_bit
@@ -380,9 +362,9 @@ begin
 
   caps_i : entity work.caps_rom
     generic map (CONTENT => CAPS, WINDOW_SIZE => CSR_WINDOWS(CSR_WIN_CAPS).size)
-    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_CAPS), bus_addr => c_addr,
-              bus_ack => p_ack(PART_TOP)(CSR_WIN_CAPS), bus_rdata => p_rdata(PART_TOP)(CSR_WIN_CAPS));
-  p_err(PART_TOP)(CSR_WIN_CAPS) <= '0';                    -- ROM は範囲外も 0 で答える（エラーにしない）
+    port map (clk => clk, rst => rst_g(RST_BUS), bus_req => s_req(CSR_WIN_CAPS), bus_addr => c_cmd.addr,
+              bus_ack => p_rsp(PART_TOP)(CSR_WIN_CAPS).ack, bus_rdata => p_rsp(PART_TOP)(CSR_WIN_CAPS).rdata);
+  p_rsp(PART_TOP)(CSR_WIN_CAPS).err <= '0';                    -- ROM は範囲外も 0 で答える（エラーにしない）
 
   -- 割り算器は 1 つを DAP（優先）と UART ブリッジで共有する（どちらもまれ: SWJ_Clock・SWO・ボーレートの変更）
   divider_i : entity work.udiv_shared
@@ -400,8 +382,7 @@ begin
                  INJECTOR => INJECTOR, SAMPLER => SAMPLER, SAMPLER_MATCH => SAMPLER_MATCH,
                  SAMPLER_CHECK_MAX => SAMPLER_CHECK_MAX)
     port map (clk => clk, rst => rst_g, time_count => time_count,
-              csr_we => c_we, csr_addr => c_addr, csr_wdata => c_wdata, csr_req => s_req,
-              csr_ack => p_ack(PART_DEBUG), csr_err => p_err(PART_DEBUG), csr_rdata => p_rdata(PART_DEBUG),
+              csr_cmd => c_cmd, csr_req => s_req, csr_rsp => p_rsp(PART_DEBUG),
               packet_size => packet_size,
               dap_in_valid => dap_in_valid, dap_in_ready => dap_in_ready, dap_in_data => dap_in_data, dap_in_last => dap_in_last,
               dap_out_valid => dap_out_valid, dap_out_ready => dap_out_ready, dap_out_data => dap_out_data,
@@ -422,8 +403,7 @@ begin
   xtrig_i : entity work.core_xtrig
     generic map (XTRIG => XTRIG, TRIG_SEQ => TRIG_SEQ, XOUT_COUNT => XOUT_COUNT, LA_PIN_COUNT => LA_PIN_COUNT)
     port map (clk => clk, rst => rst_g, time_count => time_count,
-              csr_we => c_we, csr_addr => c_addr, csr_wdata => c_wdata, csr_req => s_req,
-              csr_ack => p_ack(PART_XTRIG), csr_err => p_err(PART_XTRIG), csr_rdata => p_rdata(PART_XTRIG),
+              csr_cmd => c_cmd, csr_req => s_req, csr_rsp => p_rsp(PART_XTRIG),
               la_probes => la_probes, la_pins => la_pins, la_triggered => la_triggered, deep_triggered => deep_triggered,
               match => match, match_time => match_time, obs_match => obs_match, smp_match => smp_match,
               la_ext => la_ext, inj_trigger => inj_trigger, inj_request => inj_request,
@@ -434,8 +414,7 @@ begin
     generic map (CLK_HZ => CLK_HZ, HAS_SWO_MANCHESTER => HAS_SWO_MANCHESTER, UART_FLOW => UART_FLOW, AUX => AUX,
                  SYNC => SYNC, OBS_PORT => OBS_PORT)
     port map (clk => clk, rst => rst_g, time_count => time_count,
-              csr_we => c_we, csr_addr => c_addr, csr_wdata => c_wdata, csr_req => s_req,
-              csr_ack => p_ack(PART_PERIPH), csr_err => p_err(PART_PERIPH), csr_rdata => p_rdata(PART_PERIPH),
+              csr_cmd => c_cmd, csr_req => s_req, csr_rsp => p_rsp(PART_PERIPH),
               swo_run => swo_run, swo_divisor => swo_divisor, swo_manchester => swo_manchester,
               swo_error => swo_error, swo_overrun => swo_overrun, swo_i => swo_i,
               swo_out_valid => swo_out_valid, swo_out_ready => swo_out_ready, swo_out_data => swo_out_data,
@@ -461,8 +440,7 @@ begin
                  LA_LANES => LA_LANES, LA_LANE_ADDR_BITS => LA_LANE_ADDR_BITS, LA_LANE_IN_AGE => LA_LANE_IN_AGE,
                  LA_FINE_PINS => LA_FINE_PINS, USE_DEEP_LANES => USE_DEEP_LANES)
     port map (clk => clk, cap_clk => cap_clk, rst => rst_g, time_count => time_count,
-              csr_we => c_we, csr_addr => c_addr, csr_wdata => c_wdata, csr_req => s_req,
-              csr_ack => p_ack(PART_LA), csr_err => p_err(PART_LA), csr_rdata => p_rdata(PART_LA),
+              csr_cmd => c_cmd, csr_req => s_req, csr_rsp => p_rsp(PART_LA),
               la_pins => la_pins, la_inputs => la_inputs, la_input_lanes => la_input_lanes, la_pin_lanes => la_pin_lanes,
               dap_busy => dap_busy, swdio_oe => swdio_oe_i, la_ext => la_ext, deep_latency => deep_latency,
               la_probes => la_probes, la_lane_data => la_lane_data, trig_cfg => la_trig_cfg,
@@ -476,8 +454,7 @@ begin
                  MEM_SAME_CLOCK => MEM_SAME_CLOCK, LA_LANES => LA_LANES, LA_LANE_IN_AGE => LA_LANE_IN_AGE,
                  USE_DEEP_LANES => USE_DEEP_LANES, EXT_DELAY => EXT_TRIGGER_DELAY)
     port map (clk => clk, rst => rst_g, time_count => time_count,
-              csr_we => c_we, csr_addr => c_addr, csr_wdata => c_wdata, csr_req => s_req,
-              csr_ack => p_ack(PART_STORAGE), csr_err => p_err(PART_STORAGE), csr_rdata => p_rdata(PART_STORAGE),
+              csr_cmd => c_cmd, csr_req => s_req, csr_rsp => p_rsp(PART_STORAGE),
               la_probes => la_probes, la_lane_data => la_lane_data, trig_cfg => la_trig_cfg,
               pw_enable => pw_enable, pw_event => pw_event, la_ext => la_ext,
               deep_triggered => deep_triggered, deep_latency => deep_latency,

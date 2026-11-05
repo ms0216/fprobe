@@ -776,7 +776,7 @@ def test_with_the_restart_path_the_fpga_restarts_every_core_and_the_host_does_no
     events = []
     a, cores, link, w = with_restart_watch(events=events)
     a.halt_all()
-    import fprobe.linux_halt.backend_arma as backend
+    import fprobe.linux_halt.arma_run as backend  # resume の持ち主（restart_request_all を差し替える）
     called, restart_all = [], backend.restart_request_all
     backend.restart_request_all = lambda ports: called.append(ports) or restart_all(ports)
     try:
@@ -858,7 +858,7 @@ def test_the_watch_is_armed_while_every_core_is_still_halted_just_before_the_res
     a, cores, link, w = with_watch(events=events)
     a.halt_all()
     assert arms(events) == []                                         # 止めている間は見張らない
-    import fprobe.linux_halt.backend_arma as backend
+    import fprobe.linux_halt.arma_run as backend  # resume の持ち主（restart_request_all を差し替える）
     seen, restart_all = [], backend.restart_request_all
 
     def recording(ports):

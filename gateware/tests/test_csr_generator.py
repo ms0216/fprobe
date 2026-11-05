@@ -6,6 +6,7 @@ from fprobe_gw.csr.model import Block, CsrMap, Field, Register
 from fprobe_gw.csr.vhdl import render_bank
 from fprobe_gw.rtl import rtl
 from fprobe_gw.toolchain.sim import run_cocotb
+from tests.rtl import TEST_RTL
 
 TEST_BLOCK = Block("probe", 0x200, 0x20, doc="生成器の試験", registers=(
     Register("ctrl", 0x00, (Field("enable", 0, 1, "RW", 1), Field("mode", 4, 3, "RW", 5),
@@ -21,7 +22,9 @@ TEST_BLOCK = Block("probe", 0x200, 0x20, doc="生成器の試験", registers=(
 def test_bank_simulation(tmp_path):
     source = tmp_path / "csr_probe.vhd"
     source.write_text(render_bank(TEST_BLOCK), encoding="utf-8")
-    run_cocotb(toplevel="csr_probe", sources=[*rtl("core/csr_bus_pkg.vhd"), source],
+    # 生成したバンクのポートは record なので、フラットなポートのラッパーを toplevel にする（GHDL の VPI の制約）
+    run_cocotb(toplevel="csr_probe_harness",
+               sources=[*rtl("core/csr_bus_pkg.vhd"), source, TEST_RTL / "csr_probe_harness.vhd"],
                test_module="tests.tb.csr_bank_tb", build_dir=tmp_path / "sim")
 
 

@@ -47,105 +47,6 @@ entity pynq_z2_fprobe_top is
 end entity;
 
 architecture rtl of pynq_z2_fprobe_top is
-  -- Vivado のブロック設計 ps7_bd（ps7_bd.tcl）が生成する包み。GHDL では使わない
-  component ps7_bd_wrapper
-    port (
-      aclk          : in  std_logic;
-      aresetn       : in  std_logic;
-      pjtag_tck     : in  std_logic;
-      pjtag_tms     : in  std_logic;
-      pjtag_tdi     : in  std_logic;
-      pjtag_tdo     : out std_logic;
-      m_axi_araddr  : out std_logic_vector(31 downto 0);
-      m_axi_arprot  : out std_logic_vector(2 downto 0);
-      m_axi_arready : in  std_logic;
-      m_axi_arvalid : out std_logic;
-      m_axi_awaddr  : out std_logic_vector(31 downto 0);
-      m_axi_awprot  : out std_logic_vector(2 downto 0);
-      m_axi_awready : in  std_logic;
-      m_axi_awvalid : out std_logic;
-      m_axi_bready  : out std_logic;
-      m_axi_bresp   : in  std_logic_vector(1 downto 0);
-      m_axi_bvalid  : in  std_logic;
-      m_axi_rdata   : in  std_logic_vector(31 downto 0);
-      m_axi_rready  : out std_logic;
-      m_axi_rresp   : in  std_logic_vector(1 downto 0);
-      m_axi_rvalid  : in  std_logic;
-      m_axi_wdata   : out std_logic_vector(31 downto 0);
-      m_axi_wready  : in  std_logic;
-      m_axi_wstrb   : out std_logic_vector(3 downto 0);
-      m_axi_wvalid  : out std_logic
-    );
-  end component;
-
-  component ps7_hp_bd_wrapper
-    port (
-      aclk          : in  std_logic;
-      aresetn       : in  std_logic;
-      pjtag_tck     : in  std_logic;
-      pjtag_tms     : in  std_logic;
-      pjtag_tdi     : in  std_logic;
-      pjtag_tdo     : out std_logic;
-      m_axi_araddr  : out std_logic_vector(31 downto 0);
-      m_axi_arprot  : out std_logic_vector(2 downto 0);
-      m_axi_arready : in  std_logic;
-      m_axi_arvalid : out std_logic;
-      m_axi_awaddr  : out std_logic_vector(31 downto 0);
-      m_axi_awprot  : out std_logic_vector(2 downto 0);
-      m_axi_awready : in  std_logic;
-      m_axi_awvalid : out std_logic;
-      m_axi_bready  : out std_logic;
-      m_axi_bresp   : in  std_logic_vector(1 downto 0);
-      m_axi_bvalid  : in  std_logic;
-      m_axi_rdata   : in  std_logic_vector(31 downto 0);
-      m_axi_rready  : out std_logic;
-      m_axi_rresp   : in  std_logic_vector(1 downto 0);
-      m_axi_rvalid  : in  std_logic;
-      m_axi_wdata   : out std_logic_vector(31 downto 0);
-      m_axi_wready  : in  std_logic;
-      m_axi_wstrb   : out std_logic_vector(3 downto 0);
-      m_axi_wvalid  : out std_logic;
-      s_axi_hp0_araddr   : in  std_logic_vector(31 downto 0);
-      s_axi_hp0_arburst  : in  std_logic_vector(1 downto 0);
-      s_axi_hp0_arcache  : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_arid     : in  std_logic_vector(5 downto 0);
-      s_axi_hp0_arlen    : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_arlock   : in  std_logic_vector(1 downto 0);
-      s_axi_hp0_arprot   : in  std_logic_vector(2 downto 0);
-      s_axi_hp0_arqos    : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_arready  : out std_logic;
-      s_axi_hp0_arsize   : in  std_logic_vector(2 downto 0);
-      s_axi_hp0_arvalid  : in  std_logic;
-      s_axi_hp0_awaddr   : in  std_logic_vector(31 downto 0);
-      s_axi_hp0_awburst  : in  std_logic_vector(1 downto 0);
-      s_axi_hp0_awcache  : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_awid     : in  std_logic_vector(5 downto 0);
-      s_axi_hp0_awlen    : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_awlock   : in  std_logic_vector(1 downto 0);
-      s_axi_hp0_awprot   : in  std_logic_vector(2 downto 0);
-      s_axi_hp0_awqos    : in  std_logic_vector(3 downto 0);
-      s_axi_hp0_awready  : out std_logic;
-      s_axi_hp0_awsize   : in  std_logic_vector(2 downto 0);
-      s_axi_hp0_awvalid  : in  std_logic;
-      s_axi_hp0_bid      : out std_logic_vector(5 downto 0);
-      s_axi_hp0_bready   : in  std_logic;
-      s_axi_hp0_bresp    : out std_logic_vector(1 downto 0);
-      s_axi_hp0_bvalid   : out std_logic;
-      s_axi_hp0_rdata    : out std_logic_vector(63 downto 0);
-      s_axi_hp0_rid      : out std_logic_vector(5 downto 0);
-      s_axi_hp0_rlast    : out std_logic;
-      s_axi_hp0_rready   : in  std_logic;
-      s_axi_hp0_rresp    : out std_logic_vector(1 downto 0);
-      s_axi_hp0_rvalid   : out std_logic;
-      s_axi_hp0_wdata    : in  std_logic_vector(63 downto 0);
-      s_axi_hp0_wid      : in  std_logic_vector(5 downto 0);
-      s_axi_hp0_wlast    : in  std_logic;
-      s_axi_hp0_wready   : out std_logic;
-      s_axi_hp0_wstrb    : in  std_logic_vector(7 downto 0);
-      s_axi_hp0_wvalid   : in  std_logic
-    );
-  end component;
-
   constant MAX_PAYLOAD : positive := 512;
   constant RAM_BITS : positive := 10;
 
@@ -196,7 +97,7 @@ architecture rtl of pynq_z2_fprobe_top is
   attribute IOB of sync_pad : signal is "TRUE";
   signal xout_o, xout_oe, xout_claim : std_logic_vector(1 downto 0);
   signal xout_pin : std_logic_vector(3 downto 0);
-  signal heartbeat : unsigned(25 downto 0);
+  signal heartbeat : unsigned(HEARTBEAT_BITS - 1 downto 0);
   -- 外部メモリ（MEM_ADDR_BITS = 0 なら使わない: mem_ready = 0）
   -- 取り込みのクロックを使う構成（CAP_RATIO >= 2）だけ、MMCM の 2 本目の出力を出す
   constant CAP_DIV : natural := mmcm_cap_div(work.design_caps_pkg.CAP_RATIO);

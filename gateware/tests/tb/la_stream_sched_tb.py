@@ -77,6 +77,7 @@ async def start_stream(dut, epoch, *, ev_first=0, gaps=0, ps_read=0):
     dut.w_total.value = 0
     dut.ev_wpos.value = ev_first
     dut.ev_safe.value = ev_first
+    dut.ev_unacked.value = 0
     await RisingEdge(dut.clk)
     dut.start.value = 0
     dut.stream.value = dut.gaps.value = dut.ps_read.value = 0     # 設定は start の周期の値
@@ -99,6 +100,7 @@ async def chunks_cover_everything_in_order_and_the_stream_ends(dut):
         dut.w_total.value = total
         dut.ev_wpos.value = ev_pos
         dut.ev_safe.value = ev_pos
+        dut.ev_unacked.value = 0
         await RisingEdge(dut.clk)
     dut.w_running.value = 0
     for _ in range(20000):
@@ -185,6 +187,7 @@ async def ps_read_follows_the_returned_positions_of_this_stream_only(dut):
     dut.w_total.value = 100
     dut.ev_wpos.value = 30
     dut.ev_safe.value = 30
+    dut.ev_unacked.value = 0
     dut.ret_epoch.value = 6                                         # 前の流れの値は使わない
     dut.ret_la.value = 100
     dut.ret_ev.value = 20
@@ -208,6 +211,7 @@ async def ps_read_follows_the_returned_positions_of_this_stream_only(dut):
     await RisingEdge(dut.clk)
     dut.ev_wpos.value = 40
     dut.ev_safe.value = 40
+    dut.ev_unacked.value = 0
     await ClockCycles(dut.clk, 3)
     await ReadOnly()
     assert int(dut.ev_pub.value) == 30

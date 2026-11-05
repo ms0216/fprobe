@@ -6,6 +6,7 @@
   // 故障のレジスタと積まれたレジスタは、値のダブルクリックで target.memory.write で書ける（番地と大きさは target.fault の
   // locations の事実。1 を書いて消すレジスタは write_one_to_clear）
   import { errorText } from "../../lib/api";
+  import Req from "./Req.svelte";
   import { FAULT_CATCH, VECTOR_CATCH, catchState, changesCatch, type VectorCatchState } from "../../lib/breakpoints";
   import { shared } from "../../lib/context";
   import { STACKED, headline, isFault, reportText, type FaultReport } from "../../lib/fault";
@@ -243,14 +244,14 @@
         </select>
         {#if etmForm.kind === "memory"}
           <input class="mono" bind:value={etmForm.address} placeholder={$i18n("fault.etmAddress")} aria-label={$i18n("fault.etmAddress")}
-                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+                 aria-required="true" /><Req />
           <input class="mono num" bind:value={etmForm.length} placeholder={$i18n("fault.etmLength")} aria-label={$i18n("fault.etmLength")}
-                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+                 aria-required="true" /><Req />
           <input class="mono num" bind:value={etmForm.oldest} placeholder={$i18n("fault.etmOldest")} aria-label={$i18n("fault.etmOldest")}
-                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+                 aria-required="true" /><Req />
         {:else}
           <input class="mono" bind:value={etmForm.path} placeholder={$i18n("fault.etmPath")} aria-label={$i18n("fault.etmPath")}
-                 aria-required="true" /><span class="req" aria-hidden="true">*</span>
+                 aria-required="true" /><Req />
         {/if}
         <select bind:value={etmConfig.commitOpt1} aria-label="commit_opt1" title={$i18n("fault.etmConfigTip")}>
           <option value="">{$i18n("fault.etmConfigFromStart")}</option>
@@ -259,7 +260,7 @@
         </select>
         <input class="mono num" bind:value={etmConfig.vmidBytes} placeholder="vmid_bytes" aria-label="vmid_bytes" title={$i18n("fault.etmConfigTip")} />
         <input class="mono num" bind:value={etmConfig.cidBytes} placeholder="cid_bytes" aria-label="cid_bytes" title={$i18n("fault.etmConfigTip")} />
-        <label class="muted">{$i18n("fault.etmCount")}<span class="req" aria-hidden="true">*</span>
+        <label class="muted">{$i18n("fault.etmCount")}<Req />
           <input class="mono num" bind:value={etmCount} inputmode="numeric" aria-required="true" /></label>
         <button class="small" disabled={etmBusy}>{$i18n("fault.etmDecode")}</button>
       </form>

@@ -47,4 +47,11 @@ describe("haltReasonKey", () => {
     expect(haltReasonKey({ state: "RUNNING", halt_reason: "breakpoint" })).toBeNull();
     expect(haltReasonKey(null)).toBeNull();
   });
+  it("Linux の停止デバッグ: シグナルでの停止・プロセスの終了は linux.stop_kind（API の事実）から。halt_reason があればそちら", () => {
+    expect(haltReasonKey({ state: "HALTED", linux: { stop_kind: "signal" } })).toBe("halt.linux.signal");
+    expect(haltReasonKey({ state: "HALTED", linux: { stop_kind: "exit" } })).toBe("halt.linux.exit");
+    expect(haltReasonKey({ state: "HALTED", halt_reason: "breakpoint", linux: { stop_kind: "swbreak" } })).toBe("halt.breakpoint");
+    expect(haltReasonKey({ state: "HALTED", linux: { stop_kind: "swbreak" } })).toBeNull();
+    expect(haltReasonKey({ state: "RUNNING", linux: { stop_kind: "exit" } })).toBeNull();
+  });
 });

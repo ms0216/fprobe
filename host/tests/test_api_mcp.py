@@ -23,8 +23,9 @@ def test_tools_are_generated_from_the_spec():
     assert "debug_run_until_halt" in names and "target_halt" in names
     # セッションの操作は道具にしない。読むだけのもの（許可の表・デーモンの状態・操作の記録）は人と同じく AI にも見せる
     # （断られた理由・人が止めた等を AI が確かめられる。点検 A4）
+    # session_hints: 使い方の落とし穴の記録（失敗したとき・迷ったときに AI も引く）
     assert {n for n in names if n.startswith("session_")} == {"session_permissions", "session_status",
-                                                               "session_activity_list"}
+                                                               "session_activity_list", "session_hints"}
 
 
 def test_binary_methods_are_not_tools():
@@ -197,3 +198,14 @@ def test_an_unexpected_bug_in_a_tool_stays_a_crash_not_a_message():
 
     error = _call_error(Buggy(), "target_halt", {})
     assert isinstance(error, UnexpectedToolError) and "内部の事情" not in str(error)
+
+
+def test_the_ai_sees_the_hint_ids_the_human_screen_sees():
+    """失敗の応答の data.hint_ids は、人の画面（Activity）だけでなく AI の誤りの文にも出す（人と AI で同じに見える）。"""
+    from fprobe.api.client import ApiError
+
+    class Failing:
+        def call(self, method, **params):
+            raise ApiError(-32020, "EngineError: x", {"hint_ids": ["linux_halt.attach.order"]})
+    error = _call_error(Failing(), "target_halt", {})
+    assert "linux_halt.attach.order" in str(error) and "session_hints" in str(error)

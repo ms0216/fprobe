@@ -5,7 +5,7 @@ RTOS ごとの読み手（FreeRTOS・Zephyr・RTX5・ThreadX・µC/OS-III・Nutt
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from ..dwarf.access import TargetAccess
 from ..dwarf.info import DebugInfo
@@ -140,6 +140,28 @@ class KernelAwareness:
             return None
         return (1 << (8 * size)) - 1 if size else None
 
+    def _variable(self, name: str, signed: bool = False) -> int | None:
+        """カーネルの変数の値（大きさは DWARF の型。型の大きさが分からなければ 4 バイト）。無ければ None。"""
+        try:
+            var = self.info.global_variable(name)
+        except KeyError:
+            return None
+        address = self.optional_address(name)
+        if address is None:
+            return None
+        return self.mem.uint(address, var.type.size or 4, signed)
+
+    def snapshot_header(self) -> dict:
+        """snapshot() の rtos の次に並べる RTOS 固有の項目（version・port・scheduler・tick 等）。"""
+        return {}
+
+    def snapshot(self) -> dict:
+        """タスクの一覧とカーネルの状態（API の rtos_state の元）。"""
+        tasks = self.tasks()
+        current = self.current()
+        return {"rtos": self.name, **self.snapshot_header(), "current": self._names.get(current) if current else None,
+                "tasks": [t.to_dict() for t in tasks], "warnings": list(self.warnings)}
+
     def wake_tick(self, tick: int | None, remaining: int) -> int | None:
         """いまのティック + 残り を、ティックの幅で回した起きるティック（幅か今のティックが分からなければ None）。"""
         mask = self.tick_mask()
@@ -172,19 +194,28 @@ class KernelAwareness:
         except KeyError:
             return None
 
-    def chain(self, head: int, link: int, what: str, count: int | None = None) -> list[int]:
-        """head から link（次を指すメンバーのバイト位置）を NULL まで辿った列。輪になる・多すぎるときは止めて warnings
-        に書く。count は期待する数（違えば警告）。"""
+    def follow(self, head: int, next_of: Callable[[int], int], label: str, limit: int | None = None) -> list[int]:
+        """head から next_of（節 → 次の節。NULL = 0 で終わり）を辿った節の列。輪になる・limit に達したときは止めて
+        warnings に書く（label は警告の文頭の呼び名）。"""
+        limit = MAX_CHAIN if limit is None else limit          # 既定は呼ぶときに読む（試験が MAX_CHAIN を差し替える）
         out: list[int] = []
-        node, seen = head, set()
+        seen: set[int] = set()
+        node = head
         while node:
-            if node in seen or len(seen) >= MAX_CHAIN:
-                self.warnings.append(stopped_note(f"{what} の列", len(seen), "cycle" if node in seen else "limit", MAX_CHAIN))
+            if node in seen or len(seen) >= limit:
+                self.warnings.append(stopped_note(label, len(seen), "cycle" if node in seen else "limit", limit))
                 return out
             seen.add(node)
             out.append(node)
-            node = self.mem.u32(node + link)
-        if count is not None and len(out) != count:
+            node = next_of(node)
+        return out
+
+    def chain(self, head: int, link: int, what: str, count: int | None = None) -> list[int]:
+        """head から link（次を指すメンバーのバイト位置）を NULL まで辿った列。輪になる・多すぎるときは止めて warnings
+        に書く。count は期待する数（違えば警告）。"""
+        noted = len(self.warnings)
+        out = self.follow(head, lambda node: self.mem.u32(node + link), f"{what} の列")
+        if count is not None and len(out) != count and len(self.warnings) == noted:     # 途中で止めたときは数を比べない
             self.warnings.append(f"{what} の数が合わない（数 {count}、列 {len(out)}）")
         return out
 

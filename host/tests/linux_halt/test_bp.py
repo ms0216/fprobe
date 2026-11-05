@@ -220,3 +220,16 @@ def test_a_failed_write_leaves_the_recorded_original_unchanged(tmp_path):
     with pytest.raises(Unmapped):
         t.write(100, 0x10ffc, b"\x01\x02\x03\x04\x05\x06\x07\x08")      # runs into the unmapped next page
     assert t.pending_journal()[0].orig == before
+
+
+def test_insert_says_which_kind_it_really_used_so_a_silent_sw_to_hw_switch_can_be_removed(tmp_path):
+    """unmapped == "hw" のとき、ソフトウェアが置けず hw に切り替わる。insert は実際に使った方式を返し、その方式で外せば hw のスロットが残らない
+    （_run_to が kind="sw" で外して、tmp の hw が残り続けた。独立のレビュー 2026-11-06）。"""
+    cores, t, _ = world(tmp_path, unmapped="hw")
+    used = t.insert(100, 0x50000, kind="sw", width=4, tmp=True)
+    assert used == "hw" and 0x50000 in cores.hw_bps.values()
+    t.remove(100, 0x50000, kind="sw", tmp=True)                      # 古い呼び方（方式の取り違え）では残る
+    assert 0x50000 in cores.hw_bps.values()
+    t.remove(100, 0x50000, kind=used, tmp=True)                      # 実際に使った方式で外せば残らない
+    assert 0x50000 not in cores.hw_bps.values()
+    assert t.insert(100, 0x10004, kind="sw", width=4) == "sw"       # 置けたときは sw

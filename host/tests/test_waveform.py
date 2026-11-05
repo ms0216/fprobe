@@ -6,6 +6,7 @@ from array import array
 import pytest
 from perf_budget import within
 
+from fprobe import la_wave
 from fprobe.la import Transitions, Waveform
 
 
@@ -86,7 +87,6 @@ def test_the_fast_edge_tables_match_the_plain_ones(monkeypatch):
     pytest.importorskip("numpy")
     import random
 
-    from fprobe import la
     rng = random.Random(3)
     values, starts, v, s = array("H"), array("Q"), 0, 0
     for _ in range(20_000):
@@ -96,7 +96,7 @@ def test_the_fast_edge_tables_match_the_plain_ones(monkeypatch):
         s += rng.randint(1, 50)
     tr = Transitions(values, starts, s + 10, 0, 0, 1e-8, 16)
     fast = Waveform(tr)
-    monkeypatch.setattr(la, "_np", None)
+    monkeypatch.setattr(la_wave, "_np", None)
     plain = Waveform(tr)
     assert fast._initial == plain._initial
     assert [list(e) for e in fast._edges] == [list(e) for e in plain._edges]

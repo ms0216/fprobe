@@ -22,13 +22,9 @@ entity core_xtrig is
     clk            : in  std_logic;
     rst            : in  core_resets_t;
     time_count     : in  unsigned(63 downto 0);
-    csr_we         : in  std_logic;
-    csr_addr       : in  csr_addr_t;
-    csr_wdata      : in  csr_word_t;
+    csr_cmd        : in  csr_cmd_t;
     csr_req        : in  std_logic_vector(CSR_WINDOWS'range);
-    csr_ack        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_err        : out std_logic_vector(CSR_WINDOWS'range);
-    csr_rdata      : out csr_word_array_t(CSR_WINDOWS'range);
+    csr_rsp        : out csr_rsp_array_t(CSR_WINDOWS'range);
     -- 源
     la_probes      : in  std_logic_vector(LA_WIDTH - 1 downto 0);   -- 多段トリガのパターン（ロジアナと同じ ch）
     la_pins        : in  std_logic_vector(LA_PIN_COUNT - 1 downto 0);   -- 出力の端子の並びの条件（外部ピン 0〜7）
@@ -68,9 +64,7 @@ architecture rtl of core_xtrig is
 begin
   idle_g : for i in CSR_WINDOWS'range generate
     other_g : if not owns(i) generate
-      csr_ack(i)   <= '0';
-      csr_err(i)   <= '0';
-      csr_rdata(i) <= (others => '0');
+      csr_rsp(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
@@ -127,9 +121,8 @@ begin
   end process;
 
   trigseq_csr_i : entity work.csr_trigseq
-    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_TRIGSEQ), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_TRIGSEQ),
-              bus_err => csr_err(CSR_WIN_TRIGSEQ), bus_rdata => csr_rdata(CSR_WIN_TRIGSEQ),
+    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_TRIGSEQ),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_TRIGSEQ),
               control_enable => seq_enable, control_stages => seq_stages,
               status_stage => std_logic_vector(seq_stage), status_fired => seq_fired,
               pattern_a_mask => seq_a_mask, pattern_a_value => seq_a_value,
@@ -146,15 +139,13 @@ begin
   no_trig_seq : if not TRIG_SEQ generate
     seq_fire  <= '0';
     trigseq_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_TRIGSEQ), bus_ack => csr_ack(CSR_WIN_TRIGSEQ),
-                bus_err => csr_err(CSR_WIN_TRIGSEQ), bus_rdata => csr_rdata(CSR_WIN_TRIGSEQ));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_TRIGSEQ), bus_rsp => csr_rsp(CSR_WIN_TRIGSEQ));
   end generate;
 
   xtrig_csr_g : if XTRIG generate
   xtrig_csr_i : entity work.csr_xtrig
-    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_XTRIG), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_XTRIG),
-              bus_err => csr_err(CSR_WIN_XTRIG), bus_rdata => csr_rdata(CSR_WIN_XTRIG),
+    port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_XTRIG),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_XTRIG),
               route_to_la => route_to_la, route_to_inject => route_to_inject, command_fire => host_fire,
               inject_ap => inject_cfg.ap, inject_addr => inject_cfg.addr, inject_value => inject_cfg.value,
               inject_status_busy => inject_status.busy, inject_status_result => inject_status.result,
@@ -176,8 +167,7 @@ begin
     match_cfg       <= (addr => (others => '0'), addr_mask => (others => '0'), data => (others => '0'),
                         data_mask => (others => '0'), on_write => '0', on_read => '0');
     xtrig_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_XTRIG), bus_ack => csr_ack(CSR_WIN_XTRIG),
-                bus_err => csr_err(CSR_WIN_XTRIG), bus_rdata => csr_rdata(CSR_WIN_XTRIG));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_XTRIG), bus_rsp => csr_rsp(CSR_WIN_XTRIG));
   end generate;
 
   -- クロストリガの動作「出力の端子」: 源（sources）と、ロジアナの外部ピン 0〜7 の並び → 出力 k
@@ -201,9 +191,8 @@ begin
     signal active : std_logic_vector(1 downto 0);
   begin
     xout_csr_i : entity work.csr_xtrig_out
-      port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_XTRIG_OUT), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_XTRIG_OUT),
-                bus_err => csr_err(CSR_WIN_XTRIG_OUT), bus_rdata => csr_rdata(CSR_WIN_XTRIG_OUT),
+      port map (clk => clk, rst => rst(RST_LA), bus_req => csr_req(CSR_WIN_XTRIG_OUT),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_XTRIG_OUT),
                 status_active => active,
                 when0_mask => w_mask(0), when0_value => w_value(0), when0_sources => w_sources(0), when0_any => w_any(0),
                 ctrl0_enable => c_enable(0), ctrl0_mode => c_mode(0), ctrl0_level => c_level(0),
@@ -258,7 +247,6 @@ begin
     xout_claim <= (others => '0');
     xout_pin   <= (others => '0');
     xout_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_XTRIG_OUT), bus_ack => csr_ack(CSR_WIN_XTRIG_OUT),
-                bus_err => csr_err(CSR_WIN_XTRIG_OUT), bus_rdata => csr_rdata(CSR_WIN_XTRIG_OUT));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_XTRIG_OUT), bus_rsp => csr_rsp(CSR_WIN_XTRIG_OUT));
   end generate;
 end architecture;

@@ -29,6 +29,7 @@ architecture rtl of control_plane_harness is
   signal bus_wdata, bus_rdata : csr_word_t;
   signal s_req, s_ack, s_err : std_logic_vector(0 to 1) := (others => '0');
   signal s_rdata : csr_word_array_t(0 to 1) := (others => (others => '0'));
+  signal s_rsp   : csr_rsp_array_t(0 to 1);
   signal memory  : csr_word_array_t(0 to 63) := (others => (others => '0'));
   signal lfsr    : unsigned(15 downto 0) := x"ACE1";
   signal waits   : unsigned(1 downto 0) := "00";
@@ -43,8 +44,10 @@ begin
   decoder_i : entity work.csr_decoder
     generic map (WINDOWS => WINDOWS)
     port map (clk => clk, rst => rst, bus_req => bus_req, bus_addr => bus_addr, bus_ack => bus_ack,
-              bus_err => bus_err, bus_rdata => bus_rdata, s_req => s_req, s_ack => s_ack,
-              s_err => s_err, s_rdata => s_rdata);
+              bus_err => bus_err, bus_rdata => bus_rdata, s_cmd => open, s_req => s_req, s_rsp => s_rsp);
+  rsp_g : for i in 0 to 1 generate
+    s_rsp(i) <= (ack => s_ack(i), err => s_err(i), rdata => s_rdata(i));
+  end generate;
 
   process (clk)
     variable index : natural range 0 to 63;

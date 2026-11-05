@@ -59,7 +59,9 @@ entity sync_link is
 end entity;
 
 architecture rtl of sync_link is
-  constant SYMBOLS : natural := 73;                 -- パルス 1 + 時刻 64 + CRC 8
+  constant TIME_BITS : natural := 64;               -- 送る時刻 T のビット数
+  constant CRC_BITS  : natural := 8;                -- CRC-8
+  constant SYMBOLS : natural := 1 + TIME_BITS + CRC_BITS;   -- パルス 1 + 時刻 64 + CRC 8 = 73
   constant GAP_TICKS : natural := 2 * BIT_TICKS;    -- 送りの間の 0 の最小（period が短くても次のパルスを見落とさせない）
 
   type tx_state_t is (S_TX_IDLE, S_TX_SEND);
@@ -141,11 +143,11 @@ begin
                 tx_state <= S_TX_IDLE;
               else
                 tx_sym <= tx_sym + 1;
-                if tx_sym < 64 then                  -- 次の記号 = 時刻のビット tx_sym
+                if tx_sym < TIME_BITS then                  -- 次の記号 = 時刻のビット tx_sym
                   tx_out  <= tx_data(tx_sym);
                   tx_crc  <= crc8_step(tx_crc, tx_data(tx_sym));
-                else                                 -- 次の記号 = CRC のビット tx_sym - 64
-                  tx_out <= tx_crc(tx_sym - 64);
+                else                                 -- 次の記号 = CRC のビット tx_sym - TIME_BITS
+                  tx_out <= tx_crc(tx_sym - TIME_BITS);
                 end if;
               end if;
             else
@@ -200,11 +202,11 @@ begin
           when S_RX_BITS =>
             if rx_wait = 0 then
               rx_wait <= BIT_TICKS - 1;
-              if rx_bit < 64 then
+              if rx_bit < TIME_BITS then
                 rx_data(rx_bit) <= rx_s;
                 rx_crc <= crc8_step(rx_crc, rx_s);
               else
-                rx_got(rx_bit - 64) <= rx_s;
+                rx_got(rx_bit - TIME_BITS) <= rx_s;
               end if;
               if rx_bit = SYMBOLS - 2 then           -- 最後（CRC の 8 ビット目）
                 rx_state <= S_RX_IDLE;

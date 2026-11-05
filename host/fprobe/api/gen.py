@@ -3,14 +3,15 @@
 import json
 from pathlib import Path
 
-from .spec import SPEC_PATH, Spec, load_spec
+from .spec import SPEC_PATH, Spec, load_hints, load_spec
 from .typeschema import refresh_defs
 
-__all__ = ["render_markdown", "render_typescript", "write_all"]
+__all__ = ["render_hints_markdown", "render_markdown", "render_typescript", "write_all"]
 
 ROOT = SPEC_PATH.parents[2]
 TS_PATH = SPEC_PATH.parent / "generated" / "fprobe_api.ts"
 MD_PATH = ROOT / "docs" / "api.md"
+HINTS_MD_PATH = ROOT / "docs" / "guide" / "hints.md"
 HEADER = "自動生成ファイル。直接編集しないこと（python -m fprobe.api gen で再生成）。生成元: host/api/fprobe_api.json"
 
 
@@ -115,6 +116,26 @@ def spec_text(data: dict) -> str:
     return json.dumps(ordered, indent=2, ensure_ascii=False) + "\n"
 
 
+def render_hints_markdown() -> str:
+    """使い方の落とし穴の記録（host/api/hints.json）→ 人が読む文書（docs/guide/hints.md）。出どころは hints.json の 1 つだけ。"""
+    doc = load_hints()
+    lines = ["# 使い方の落とし穴（ヒント）", "", f"<!-- {HEADER.replace('host/api/fprobe_api.json', 'host/api/hints.json')} -->", "",
+             doc["about"], "",
+             "API では `session.hints`（`method` でそのメソッドに付いたヒント、`id` で 1 件）。失敗の応答の `data.hint_ids` にも id が出る。"
+             "画面は Activity パネルでエラーの行を選ぶと出す。", ""]
+    for h in doc["hints"]:
+        lines += [f"## {h['title']}", "", f"`{h['id']}` — 付いたメソッド: " + ", ".join(f"`{m}`" for m in h["methods"]), "",
+                  f"**症状**: {h['symptom']}", ""]
+        if h["facts_to_check"]:
+            lines += ["**確かめる事実**:", ""] + [f"- `{c['api']}` — {c['reads']}" for c in h["facts_to_check"]] + [""]
+        if h.get("when"):
+            lines += ["**付く条件**（失敗の種類）: " + ", ".join(f"{k} = {' / '.join(v)}" for k, v in h["when"].items()), ""]
+        lines += ["**手順**:", ""] + [f"{i}. {step}" for i, step in enumerate(h["recipe"], 1)] + [""]
+        if h["docs"]:
+            lines += ["関連: " + ", ".join(f"`{d}`" for d in h["docs"]), ""]
+    return "\n".join(lines) + "\n"
+
+
 def refreshed_spec_text() -> str:
     """仕様の $defs のうち実装の型から作るもの（"x-from"）を作り直した、仕様の JSON の全文。"""
     data = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
@@ -132,7 +153,7 @@ def write_all(check: bool = False) -> list[Path]:
     else:
         SPEC_PATH.write_text(spec_now, encoding="utf-8", newline="\n")
     spec = load_spec()
-    outputs = {TS_PATH: render_typescript(spec), MD_PATH: render_markdown(spec)}
+    outputs = {TS_PATH: render_typescript(spec), MD_PATH: render_markdown(spec), HINTS_MD_PATH: render_hints_markdown()}
     for path, text in outputs.items():
         if check:
             assert path.read_text(encoding="utf-8") == text, f"{path} が古い（python -m fprobe.api gen）"

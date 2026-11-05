@@ -85,7 +85,9 @@ def _install() -> None:
         # 委ねた名前（fprobe.probe_service.delegate）は、そのサービスのクラスで包む
         owner = next(c for c in Probe.__mro__ if m.impl in vars(c))
         if isinstance(vars(owner)[m.impl], delegate):
-            owner = vars(owner)[m.impl].service
+            # サービスが混ぜ込む部品（mixin）から継いだ名前は、それを定義した部品のクラスで包む
+            service = vars(owner)[m.impl].service
+            owner = next(c for c in service.__mro__ if m.impl in vars(c))
         fn = vars(owner)[m.impl]
         if getattr(fn, "__api_result_check__", False):
             continue

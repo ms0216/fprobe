@@ -36,10 +36,14 @@ export async function coreClock(conn: Conn, _target?: string | undefined | null)
   return null;
 }
 
+const LINUX_STOP_KINDS = ["signal", "exit"] as const;
 const HALT_REASONS = ["request", "breakpoint", "bkpt_instruction", "watchpoint", "vector_catch", "external"] as const;
 
 /** 止まった理由（target.status の halt_reason。fprobe.fault.halt_reason）の文言のキー。停止中でない・知らない理由は null */
 export function haltReasonKey(target: Record<string, any> | null | undefined): Key | null {
   const r = target?.state === "HALTED" ? target.halt_reason : undefined;
-  return (HALT_REASONS as readonly string[]).includes(r) ? (`halt.${r}` as Key) : null;
+  if ((HALT_REASONS as readonly string[]).includes(r)) return `halt.${r}` as Key;
+  // Linux の停止デバッグ: halt_reason は「同じ事実のときだけ」で、シグナルでの停止・プロセスの終了は linux.stop_kind に元の種類が出る（API の事実）
+  const kind = target?.state === "HALTED" ? target.linux?.stop_kind : undefined;
+  return (LINUX_STOP_KINDS as readonly string[]).includes(kind) ? (`halt.linux.${kind}` as Key) : null;
 }

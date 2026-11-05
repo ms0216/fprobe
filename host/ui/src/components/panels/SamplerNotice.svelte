@@ -2,6 +2,7 @@
   // DAP サンプラ（変数を止めずに読む回路。1 つだけ）をほかのパネル・利用者が使っているときの知らせ: どのパネル・誰が
   // 使っているか、そのパネルを開く・止める操作。mine はこのパネルが使う道具（同じ道具なら出さない）
   import { shared } from "../../lib/context";
+  import { intervalNow } from "../common/interval";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
   import { onCalls } from "../../lib/notify";
@@ -20,9 +21,7 @@
 
   $effect(() => {
     if (!connected) return;
-    void refresh();
-    const timer = setInterval(() => void refresh(), 3000);
-    return () => clearInterval(timer);
+    return intervalNow(() => refresh(), 3000);
   });
   // サンプラを使い始める・やめる操作が誰か（AI も）から流れたら読み直す
   const STARTS = Object.values(SAMPLER_USERS).map((u) => u.start);

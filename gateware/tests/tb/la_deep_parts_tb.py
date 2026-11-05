@@ -207,6 +207,7 @@ async def pending_writes_are_taken_off_by_kind(dut):
         assert int(dut.la_safe.value) == (total - la_p) % (1 << 32), n
         assert int(dut.la_ptr_safe.value) == (ptr - la_p) % la_size, n
         assert int(dut.ev_safe.value) == (epos - ev_p) % (1 << ev_bits), n
+        assert int(dut.ev_unacked.value) == ev_p, n
         if start:
             history = [(k, False) for k, _ in history]
         if fire:

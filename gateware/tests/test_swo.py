@@ -2,6 +2,7 @@
 
 from fprobe_gw.rtl import rtl
 from fprobe_gw.toolchain.sim import run_cocotb
+from tests.rtl import TEST_RTL
 
 MANCHESTER = rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "debug/swo_manchester_rx.vhd")
 RECEIVER = rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "serial/uart_rx.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd")
@@ -32,5 +33,7 @@ def test_swo_receiver_fuzz_without_manchester(tmp_path):
 
 
 def test_dap_cmd_swo(tmp_path):
-    run_cocotb(toplevel="dap_cmd_swo", sources=rtl("common/util_pkg.vhd", "debug/dap_pkg.vhd", "debug/dap_cmd_swo.vhd"),
+    # dap_cmd_swo の dap_packet 側は record のポートなので、平たいポートのラッパーを toplevel にする（GHDL の VPI の制約）
+    run_cocotb(toplevel="dap_cmd_swo_flat",
+               sources=[*rtl("common/util_pkg.vhd", "debug/dap_pkg.vhd", "debug/dap_cmd_swo.vhd"), TEST_RTL / "dap_cmd_swo_flat.vhd"],
                test_module="tests.tb.dap_cmd_swo_tb", generics={"CLK_HZ": 100_000_000}, build_dir=tmp_path)

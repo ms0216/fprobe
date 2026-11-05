@@ -1,5 +1,7 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import Req from "./Req.svelte";
+  import { interval, intervalNow } from "../common/interval";
   // Dashboard（STM32CubeMonitor のダッシュボード・µC/Probe の部品を並べた操作パネル・MPLAB の DMCI）: ゲージ・数値・
   // 棒・グラフ・ボタン・スライダ・切り替え・ランプを並べて変数を読む・書く。配置はブラウザに覚え、JSON で書き出す・
   // 読み込む（読み込みは lib/dashboard の validateLayout で検証して直す）。
@@ -26,7 +28,8 @@
   import { load, save } from "../../lib/prefs";
   import { displayValue, numberOf, SampleStore } from "../../lib/sampling";
   import { axisTime, usSeconds } from "../../lib/time";
-  import { missing, readWatch, startWatch, stopWatch } from "../../lib/watchshare";
+  import { readWatch, startWatch, stopWatch, type ExpressionFacts } from "../../lib/watchshare";
+  import DashboardWidgetEdit from "./dashboard/DashboardWidgetEdit.svelte";
   import Empty from "./Empty.svelte";
 
   const OWNER = "dashboard";
@@ -45,6 +48,7 @@
   let problems = $state<Problem[]>([]);
   let readings = $state(new Map<string, Reading>());
   let running = $state<string[]>([]);          // 観測している式（全員の）
+  let facts = $state<ExpressionFacts | null>(null);   // 部品の式と観測の組の関係（watch.status の expressions。API の事実）
   let runningRate = $state(0);                 // 観測の組の周期（Hz。動いていなければ 0）
   // Live の周期: 観測が動いていなければ使う人が入れる（画面の既定を持たない）。動いていれば組の周期のまま
   let rateText = $state(load("dashboard.rate", "") || String(suggestedOf("watch.set", "rate_hz") ?? ""));   // 最初の値は仕様の既定（見えて書き換えられる）
@@ -61,9 +65,9 @@
   const halted = $derived(target?.state === "HALTED");
   const key = $derived(halted ? `${target?.pc}/${target?.run}` : "");
   const exprs = $derived(expressionsOf(layout));
-  // 部品の式がすべて観測の組にある（一部だけなら Live で足りない式を足す）
-  const sampled = $derived(exprs.length > 0 && exprs.every((e) => running.includes(e)));
-  const lost = $derived(live ? missing(running, exprs) : []);
+  // 部品の式がすべて観測の組にある（一部だけなら Live で足りない式を足す。API の all_observed）
+  const sampled = $derived(facts?.all_observed ?? false);
+  const lost = $derived(live ? (facts?.missing ?? []) : []);
   const typedRate = $derived(rateText.trim() === "" ? null : Number(rateText));
   const rateOk = $derived(typedRate !== null && Number.isFinite(typedRate) && typedRate > 0);
 
@@ -101,27 +105,32 @@
   // 走行中: 値を周期的に読む
   $effect(() => {
     if (!runningTarget || !connected) return;
-    const timer = setInterval(() => void read(), POLL_MS);
-    return () => clearInterval(timer);
+    return interval(() => read(), POLL_MS);
   });
   // 観測の組（Live の取り合い）を周期的に読む
   $effect(() => {
     if (!connected) return;
-    void readRunning();
-    const timer = setInterval(() => void readRunning(), STATUS_MS);
-    return () => clearInterval(timer);
+    return intervalNow(() => readRunning(), STATUS_MS);
   });
 
   async function readRunning() {
     try {
-      const w = await readWatch(call);
+      const w = await readWatch(call, exprs);
       running = w.names;
       runningRate = w.rate;
+      facts = w.facts;
     } catch {
       running = [];
       runningRate = 0;
+      facts = null;
     }
   }
+
+  // 部品の式が変わったら、組との関係を読み直す
+  $effect(() => {
+    void exprs.join("\n");
+    if (untrack(() => connected)) void untrack(() => readRunning());
+  });
 
   let reading = false;
   async function read() {
@@ -243,7 +252,7 @@
     {#if runningRate > 0}
       <span class="mono muted small" title={$i18n("sampling.sharedRateTip")}>{$i18n("sampling.sharedRate", { rate: runningRate })}</span>
     {:else}
-      <label class="small" title={$i18n("dashboard.rateTip")}>{$i18n("dashboard.rate")}<span class="req" aria-hidden="true">*</span>
+      <label class="small" title={$i18n("dashboard.rateTip")}>{$i18n("dashboard.rate")}<Req />
         <input class="mono rate" inputmode="decimal" aria-required="true" bind:value={rateText} /></label>
     {/if}
     <button class:on={sampled} disabled={busy || !connected || !exprs.length || (!sampled && runningRate <= 0 && !rateOk)}
@@ -340,41 +349,9 @@
                                        else if (e.key === "Escape") { e.preventDefault(); typing = null; } }} />
           {/if}
           {#if editing}
-            <div class="edit">
-              <select value={w.kind} aria-label={$i18n("dashboard.addWidget")}
-                      onchange={(e) => patch(w.id, { kind: e.currentTarget.value as WidgetKind })}>
-                {#each KINDS as k (k)}<option value={k}>{$i18n(`dashboard.kind.${k}` as Key)}</option>{/each}
-              </select>
-              <input class="mono" placeholder={$i18n("dashboard.expression")} aria-label={$i18n("dashboard.expression")}
-                     value={w.expr} onchange={(e) => patch(w.id, { expr: e.currentTarget.value.trim() })} />
-              <input placeholder={$i18n("dashboard.label")} aria-label={$i18n("dashboard.label")} value={w.label}
-                     onchange={(e) => patch(w.id, { label: e.currentTarget.value })} />
-              {#if w.kind !== "button" && w.kind !== "toggle" && w.kind !== "lamp"}
-                <label>{$i18n("dashboard.min")}<input type="number" value={w.min}
-                       onchange={(e) => patch(w.id, { min: Number(e.currentTarget.value) })} /></label>
-                <label>{$i18n("dashboard.max")}<input type="number" value={w.max}
-                       onchange={(e) => { const max = Number(e.currentTarget.value); if (max > w.min) patch(w.id, { max }); }} /></label>
-                <label>{$i18n("dashboard.unit")}<input value={w.unit} onchange={(e) => patch(w.id, { unit: e.currentTarget.value })} /></label>
-                <label>{$i18n("dashboard.digits")}<input type="number" min="0" max="6" value={w.digits}
-                       onchange={(e) => patch(w.id, { digits: Number(e.currentTarget.value) })} /></label>
-              {/if}
-              {#if w.kind === "button"}
-                <label title={$i18n("dashboard.valueTip")}>{$i18n("dashboard.value")}<input class="mono" value={w.value}
-                       onchange={(e) => patch(w.id, { value: e.currentTarget.value })} /></label>
-              {/if}
-              <label>{$i18n("dashboard.width")}<select value={w.w} onchange={(e) => patch(w.id, { w: Number(e.currentTarget.value) })}>
-                {#each Array.from({ length: MAX_W }, (_, k) => k + 1) as n (n)}<option value={n}>{n}</option>{/each}</select></label>
-              <label>{$i18n("dashboard.height")}<select value={w.h} onchange={(e) => patch(w.id, { h: Number(e.currentTarget.value) })}>
-                {#each Array.from({ length: MAX_H }, (_, k) => k + 1) as n (n)}<option value={n}>{n}</option>{/each}</select></label>
-              <span class="ops">
-                <button class="small" disabled={i === 0} title={$i18n("dashboard.moveUp")} aria-label={$i18n("dashboard.moveUp")}
-                        onclick={() => (layout = moveWidget(layout, w.id, -1))}>‹</button>
-                <button class="small" disabled={i === layout.widgets.length - 1} title={$i18n("dashboard.moveDown")}
-                        aria-label={$i18n("dashboard.moveDown")} onclick={() => (layout = moveWidget(layout, w.id, 1))}>›</button>
-                <button class="small" title={$i18n("common.remove")} aria-label={$i18n("common.remove")}
-                        onclick={() => (layout = removeWidget(layout, w.id))}>×</button>
-              </span>
-            </div>
+            <DashboardWidgetEdit {w} first={i === 0} last={i === layout.widgets.length - 1} {patch}
+                                 onmove={(dir) => (layout = moveWidget(layout, w.id, dir))}
+                                 onremove={() => (layout = removeWidget(layout, w.id))} />
           {/if}
         </div>
       {/each}
@@ -418,11 +395,4 @@
   .lamp { width: 26px; height: 26px; border-radius: 50%; background: var(--line); border: 1px solid var(--line); }
   .lamp.lit { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
   .lamp.unknown { background: none; border-style: dashed; }
-  .edit { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 6px;
-          font-size: 12px; }
-  .edit input, .edit select { font-size: 12px; max-width: 100%; }
-  .edit input:not([type]) { flex: 1 1 100px; }
-  .edit input[type="number"] { width: 64px; }
-  .edit label { display: flex; gap: 3px; align-items: center; }
-  .ops { margin-left: auto; display: flex; gap: 3px; }
 </style>

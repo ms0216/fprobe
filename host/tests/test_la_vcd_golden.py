@@ -10,7 +10,7 @@ from array import array
 
 import pytest
 
-from fprobe import la, la_vcd, la_wave
+from fprobe import la_stream, la_vcd, la_vcd_render, la_wave
 from fprobe.la import Capture, Transitions, VcdWriter, write_vcd
 
 PERIODS = (1e-8, 1.25e-9, 3.3e-9, 1e-6)
@@ -21,7 +21,7 @@ SHIFT_CHOICES = (0.0, 0.0, 0.5, 3.0, -1.25, 0.37, 7.0)
 def vcd_mode(request, monkeypatch):
     if request.param == "python":
         monkeypatch.setattr(la_wave, "_np", None)
-        monkeypatch.setattr(la, "_np", None)
+        monkeypatch.setattr(la_stream, "_np", None)
         monkeypatch.setattr(la_vcd, "_np", None)
     return request.param
 
@@ -185,7 +185,7 @@ def test_the_bulk_path_is_the_same_whatever_its_pieces_and_threads(case, piece, 
     # 描くかたまりの大きさ（境目の「前の位置」）・同じ形の続きの扱い・スレッドの数（欠けの行と描きかけの順）を変えても同じ
     pytest.importorskip("numpy")
     monkeypatch.setattr(la_vcd, "_PIECE", piece)
-    monkeypatch.setattr(la_vcd, "_UNIFORM_MIN", uniform)
+    monkeypatch.setattr(la_vcd_render, "_UNIFORM_MIN", uniform)
     monkeypatch.setattr(la_vcd, "default_workers", lambda: workers)
     path = tmp_path / "x.vcd"
     _make(path, case)

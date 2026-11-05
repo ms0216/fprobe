@@ -21,126 +21,38 @@ import { NO_ORIGINS, type Origins } from "../time";
 import { t } from "../i18n";
 import { captureRequest, panView, rateChoices, readCaptureSettings, zoomView, type CaptureInfo, type CaptureRequest,
          type View } from "../waveform";
-import type { RowSpec, TimelineFrame } from "./compose";
+import type { RowSpec } from "./compose";
 import { cursorRows, type CursorValues } from "./cursor";
-import { createDecimator, type Anomaly, type Decimator } from "./decimator";
+import { createDecimator, type Decimator } from "./decimator";
 import { announceSelect } from "./events";
 import type { PickedItem } from "./query";
 import {
   EMPTY_CONFIG, RowRegistry, moveGroup, moveRow, parseConfig, setShown, systemHides, toggleFold, unhide, type GroupDef,
   type RowConfig,
   type VisibleRow, systemOrder } from "./rows";
-import { overlapOf, tileServes, type TileHeader } from "./tile";
+import { TileCache } from "./tilecache";
+import { followView, originOf, overviewSpecs, revealPlan, revealTicks, specsOf } from "./viewmath";
 
-export type Source = "capture" | "recording";
+import type { Mark, MarkSet, RemotePointer, Reveal, Source, TimelineSnapshot } from "./types";
+import { addListener } from "../store";
 
-/** ビューが時間軸に置く印（検索の結果・解読の注釈・長い順の上位）。目盛りの帯と縮図に描く。時刻は源の単位 */
-export interface Mark {
-  t: number;
-  tEnd?: number;
-  label?: string;
-  tone?: 0 | 1 | 2 | 3;                // 0 = 普通 / 1 = bad / 2 = good / 3 = warn（段の tone と同じ）
-}
-
-/** 印の組（ビューごと。owner で置き換える）。source が今の源と違う組は描かない */
-export interface MarkSet {
-  owner: string;
-  source: Source;
-  marks: Mark[];                       // t の昇順
-}
-
-/** ほかの窓・AI のマウスのカーソル（画面の状態 ui.state の pointers）。role = human / ai / script */
-export interface RemotePointer {
-  t: number;
-  source: Source;
-  label: string;
-  role: string;
-}
-
-/** ほかのビューから時間軸のその時刻へ飛ぶ（reveal）。時刻は源の単位（捕捉はサンプル番号、記録はタイムベース）か、
- *  タイムベースの µs（us。watch.series 等。記録の 1 単位の秒で換算する）。tEnd（usEnd）があれば区間が見えるように
- *  視点を合わせ、無ければ幅を保って真ん中に。item があればその出来事を選ぶ */
-export interface Reveal {
-  source: Source;
-  t?: number;
-  tEnd?: number;
-  us?: number;
-  usEnd?: number;
-  item?: PickedItem | null;
-}
-
-export interface TimelineSnapshot {
-  source: Source;
-  capture: CaptureInfo | null;          // source = capture の捕捉
-  recording: string | null;             // source = recording の記録の名前
-  extent: [number, number] | null;      // データの範囲 [始め, 終わり)（捕捉はサンプル番号、記録はタイムベース）
-  tickS: number;                        // 1 単位の秒
-  view: View;                           // 見ている範囲（整数、[start, end)）
-  width: number;                        // 間引きの幅（デバイスの画素）
-  frame: TimelineFrame | null;          // 最新の間引きの結果
-  header: TileHeader | null;            // その元のタイルの見出し
-  rows: VisibleRow[];                   // 描く段（上から）
-  groups: GroupDef[];                   // すべての段（隠したものも。段の一覧のメニュー）
-  config: RowConfig;
-  autoHidden: string[];                 // 頼まれずに隠した段（システム解析の並びで変化の無いピン。画面が数を出して見せ直す）
-  selection: number | null;             // 選択カーソル
-  reference: number | null;             // 基準のカーソル
-  selected: PickedItem | null;          // 選んだ出来事
-  overview: TimelineFrame | null;       // 縮図（全体のタイルを縮図の幅で）
-  anomalies: Anomaly[];                 // 縮図の異常の印
-  capturedBy: string | null;            // 捕捉した利用者（記録の通知で分かったとき）
-  marks: MarkSet[];                     // ビューが置いた印（setMarks）
-  pointers: RemotePointer[];            // ほかの窓・AI のマウスのカーソル
-  origins: Origins;                     // 源ごとの時刻 0（記録・捕捉の始め）と 1 単位の秒。今の源でなくても持つ
-  live: boolean;                        // 記録中の記録を見ている（範囲が伸びる）
-  follow: boolean;                      // 伸びた端を追いかける（視点の終わりが端にある）
-  loading: boolean;                     // タイルを読んでいる
-  error: string | null;                 // 捕捉が無い以外の読みの誤り
-  decimator: "worker" | "inline";
-}
+// 型は types.ts へ分けた。ここから再び公開する（import 元は変えない）
+export type { Mark, MarkSet, RemotePointer, Reveal, Source, TimelineSnapshot } from "./types";
+// 純関数は viewmath.ts へ分けた。ここから再び公開する（import 元は変えない）
+export { followView, originOf, overviewSpecs, specsOf } from "./viewmath";
 
 const CAPTURE_METHODS = new Set(["la.capture", "la.collect", "la.deep.capture", "la.deep.collect"]);
 // 記録の段が変わる操作: 印を足す・FPGA の信号の定義を変える（記録の情報の名前で段を作り直す）
 const MARK_METHODS = new Set(["recording.mark", "fpga_obs.signals_set"]);
 const MAX_PX_PER_SAMPLE = 32;         // 拡大の限界（1 単位を最大 32 画素に）
-const MAX_TILES = 4;
 const LIVE_POLL_MS = 1000;            // 記録中の範囲の読みの間（前の読みが終わってから）
 
 type Conn = Pick<DaemonConnection, "call" | "on" | "onLink">;
-interface HeldTile { id: number; header: TileHeader }
-
-/** 今の源の時刻 0 の位置（捕捉・記録の始め。lib/time.ts） */
-export function originOf(s: Pick<TimelineSnapshot, "source" | "origins">): number {
-  return s.origins[s.source]?.t0 ?? 0;
-}
-
-/** 伸びた範囲で端を追いかける視点: 全体を見ていれば新しい全体、そうでなければ幅を保って終わりを端に */
-export function followView(view: View, before: [number, number], extent: [number, number]): View {
-  if (view.start <= before[0] && view.end >= before[1]) return { start: extent[0], end: extent[1] };
-  const width = view.end - view.start;
-  return { start: Math.max(extent[0], extent[1] - width), end: extent[1] };
-}
-
-/** 描く段 → Worker への段の指定 */
-export function specsOf(rows: VisibleRow[]): RowSpec[] {
-  return rows.map((r) => ({ id: r.def.id, type: r.def.type, color: r.def.color }));
-}
-
-/** 縮図の段: 記録の stream のまとまり（無ければロジアナのチャンネル全部。切らない） */
-export function overviewSpecs(groups: GroupDef[]): RowSpec[] {
-  const streams = groups.filter((g) => g.id !== "logic").map((g) => ({ id: `group:${g.id}`, type: "group" as const,
-                                                                         color: 0 }));
-  if (streams.length) return streams;
-  return (groups.find((g) => g.id === "logic")?.rows ?? [])
-    .map((r) => ({ id: r.id, type: r.type, color: r.color }));
-}
 
 export class TimelineState {
   private snap: TimelineSnapshot;
   private listeners = new Set<(s: TimelineSnapshot) => void>();
-  private tiles: HeldTile[] = [];
-  private whole: HeldTile | null = null;   // 全体のタイル（縮図・範囲の外の問い合わせ）
-  private nextTile = 1;
+  private cache: TileCache;
   private capturer: string | null = null;
   private fetching = false;
   private refetch = false;
@@ -151,12 +63,13 @@ export class TimelineState {
   private registry = new RowRegistry();
   private overviewWidth = 0;
   private overviewKey = "";
-  private revealing: Reveal | null = null;
-  private lastFullMs = 0;                     // 前の全体の読み込みにかかった時間（記録中の読み直しの間に使う）   // 源を変える・読み込みの後に当てる reveal
+  private revealing: Reveal | null = null;   // 源を変える・読み込みの後に当てる reveal
+  private lastFullMs = 0;                     // 前の全体の読み込みにかかった時間（記録中の読み直しの間に使う）
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private conn: Conn, private app: AppState, private decimator: Decimator = createDecimator(),
               private livePollMs = LIVE_POLL_MS) {
+    this.cache = new TileCache(decimator);
     const config = loadConfig("capture");
     this.snap = {
       source: "capture", capture: null, recording: null, extent: null, tickS: 0, view: { start: 0, end: 0 }, width: 0,
@@ -189,18 +102,12 @@ export class TimelineState {
 
   /** 時刻 0 の位置だけの store（変わったときだけ配る。表の時刻の欄が多くても、視点の動きのたびには走らない） */
   readonly origins = {
-    subscribe: (fn: (o: Origins) => void): (() => void) => {
-      this.originListeners.add(fn);
-      fn(this.snap.origins);
-      return () => this.originListeners.delete(fn);
-    },
+    subscribe: (fn: (o: Origins) => void): (() => void) => addListener(this.originListeners, fn, this.snap.origins),
   };
   private originListeners = new Set<(o: Origins) => void>();
 
   subscribe(fn: (s: TimelineSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   get snapshot(): TimelineSnapshot {
@@ -309,8 +216,7 @@ export class TimelineState {
     this.setConfig(moveGroup(this.snap.config, this.snap.groups, group, before));
   }
 
-  /** システム解析の並び（MCU と FPGA が隣り合う。rows.ts の systemOrder） */
-  /** システム解析の並び。flat = 記録の中で変化の無いピン（API の unchanged_channels）を隠す。頼まれずに隠した段は
+  /** システム解析の並び（MCU と FPGA が隣り合う。rows.ts の systemOrder）。flat = 記録の中で変化の無いピン（API の unchanged_channels）を隠す。頼まれずに隠した段は
    *  autoHidden に覚え、画面が「N ch を隠した」と出して showAutoHidden で見せ直せるようにする */
   arrangeForSystem(flat: number[] = []): void {
     const hides = systemHides(this.snap.config, flat);
@@ -423,9 +329,7 @@ export class TimelineState {
 
   /** 問い合わせに使うタイルの順（視点を描いているもの、ほかの持っているもの、全体） */
   private tileOrder(): number[] {
-    const best = this.best();
-    const ids = [best?.id, ...this.tiles.map((t) => t.id), this.whole?.id].filter((x): x is number => x !== undefined);
-    return [...new Set(ids)];
+    return this.cache.order(this.snap.view, this.snap.width);
   }
 
   /** 使う人が Timeline のパネルで入れて覚えた設定（速さ・プリトリガ・深いバッファの拍）で捕捉する（メニュー・Logic
@@ -473,7 +377,7 @@ export class TimelineState {
     if (r.source !== this.snap.source) {
       this.revealing = r;
       this.setSource(r.source);
-    } else if (!this.snap.extent || this.revealTicks(r) >= this.snap.extent[1]) {
+    } else if (!this.snap.extent || revealTicks(r, this.snap.tickS) >= this.snap.extent[1]) {
       this.revealing = r;          // 範囲がまだ無い・伸びている記録のまだ読んでいない時刻: 読み直してから当てる
       this.reload();
     } else {
@@ -482,31 +386,14 @@ export class TimelineState {
     }
   }
 
-  /** 移動先の時刻（源の単位。µs で指定されていれば換算。無ければ -∞） */
-  private revealTicks(r: Reveal): number {
-    const { tickS } = this.snap;
-    if (r.t !== undefined) return r.t;
-    return r.us !== undefined && tickS > 0 ? Math.round(r.us * 1e-6 / tickS) : -Infinity;
-  }
-
   private applyReveal(r: Reveal): void {
     const { extent, tickS, view } = this.snap;
     if (!extent) return;
-    const ticksOf = (us: number) => (tickS > 0 ? Math.round(us * 1e-6 / tickS) : NaN);
-    const raw = r.t ?? (r.us !== undefined ? ticksOf(r.us) : NaN);
-    if (!Number.isFinite(raw)) return;
-    const rawEnd = r.tEnd ?? (r.usEnd !== undefined ? ticksOf(r.usEnd) : raw);
-    const clamp = (x: number) => Math.min(extent[1] - 1, Math.max(extent[0], Math.round(x)));
-    const t = clamp(raw), tEnd = Math.max(t, clamp(rawEnd));
-    if (tEnd > t) {
-      // 区間: 前後に区間の半分ずつの余白（幅は 1 単位 × 画素の数を下限に）
-      const pad = Math.max((tEnd - t) / 2, 1);
-      const start = Math.max(extent[0], Math.floor(t - pad)), end = Math.min(extent[1], Math.ceil(tEnd + pad));
-      this.setView({ start, end: Math.max(end, start + 1) });
-    } else if (t < view.start || t >= view.end || view.end <= view.start) {
-      this.centerOn(t);
-    }
-    this.select(t, r.item ?? null);
+    const plan = revealPlan(r, extent, tickS, view);
+    if (!plan) return;
+    if (plan.view === "center") this.centerOn(plan.t);
+    else if (plan.view) this.setView(plan.view);
+    this.select(plan.t, r.item ?? null);
   }
 
   /** 全体を読み直す（捕捉・記録が変わったかもしれない） */
@@ -522,20 +409,8 @@ export class TimelineState {
     if (!this.serving()) void this.fetch();
   }
 
-  private serving(): HeldTile | undefined {
-    const { view, width } = this.snap;
-    const pixel = (view.end - view.start) / Math.max(1, width);
-    return [...this.tiles, ...(this.whole ? [this.whole] : [])]
-      .find((t) => tileServes(t.header, view.start, view.end, pixel));
-  }
-
-  /** 描くのに使うタイル: 足りるもの、無ければ視点といちばん重なるもの */
-  private best(): HeldTile | undefined {
-    const { view } = this.snap;
-    const all = [...this.tiles, ...(this.whole ? [this.whole] : [])];
-    return this.serving() ?? all.reduce<HeldTile | undefined>(
-      (a, t) => (!a || overlapOf(t.header, view.start, view.end) > overlapOf(a.header, view.start, view.end) ? t : a),
-      undefined);
+  private serving() {
+    return this.cache.serving(this.snap.view, this.snap.width);
   }
 
   /** 読みは同時に 1 つ。読みの途中の操作は、終わってから最後の視点で 1 回だけ読み直す */
@@ -665,36 +540,20 @@ export class TimelineState {
   }
 
   private keep(result: any, whole: boolean): void {
-    const { data, ...header } = result;
-    const buffer = (Object.values(data ?? {})[0] as ArrayBufferView | undefined)?.buffer as ArrayBuffer | undefined;
-    const id = this.nextTile++;
-    this.decimator.addTile(id, header as TileHeader, buffer ?? new ArrayBuffer(0));
-    const held = { id, header: header as TileHeader };
-    if (whole) {
-      if (this.whole) this.decimator.dropTile(this.whole.id);
-      this.whole = held;
-    } else {
-      this.tiles.unshift(held);
-      for (const old of this.tiles.splice(MAX_TILES - 1)) this.decimator.dropTile(old.id);
-    }
-    if (this.registry.merge(header as TileHeader) || !this.snap.rows.length) this.relayout();
+    const { id, header } = this.cache.keep(result, whole);
+    if (this.registry.merge(header) || !this.snap.rows.length) this.relayout();
     else void this.render();
     if (whole) {
       void this.renderOverview();
       void this.decimator.anomalies(id).then((anomalies) => {
-        if (this.whole?.id === id) this.set({ anomalies });
+        if (this.cache.whole?.id === id) this.set({ anomalies });
       });
     }
   }
 
   private dropTiles(all: boolean): void {
-    for (const t of this.tiles) this.decimator.dropTile(t.id);
-    this.tiles = [];
-    if (all) {
-      this.whole = null;
-      this.overviewKey = "";
-      this.decimator.reset();
-    }
+    this.cache.drop(all);
+    if (all) this.overviewKey = "";
   }
 
   // --- 間引き -----------------------------------------------------------------------------------
@@ -709,7 +568,7 @@ export class TimelineState {
     try {
       do {
         this.rerender = false;
-        const tile = this.best();
+        const tile = this.cache.best(this.snap.view, this.snap.width);
         const { view, width, rows } = this.snap;
         if (!tile || !width || view.end <= view.start) break;
         const frame = await this.decimator.frame({ tile: tile.id, v0: view.start, v1: view.end, width,
@@ -722,7 +581,7 @@ export class TimelineState {
   }
 
   private async renderOverview(): Promise<void> {
-    const whole = this.whole, width = this.overviewWidth, e = this.snap.extent;
+    const whole = this.cache.whole, width = this.overviewWidth, e = this.snap.extent;
     if (!whole || !width || !e) return;
     const rows = overviewSpecs(this.snap.groups);
     const key = `${whole.id}:${width}:${rows.map((r) => r.id).join(",")}`;

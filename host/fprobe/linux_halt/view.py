@@ -7,32 +7,25 @@ debug.backtrace・debug.frame_variables・target.registers.read 等）だけを�
 """
 from __future__ import annotations
 
-import dataclasses
 import time
-from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path, PurePosixPath
 
-from ..disasm import SYNC_LIMIT, Disassembler, Instruction
-from ..dwarf import Inspector
-from ..dwarf.inspector import check_expression
-from ..memview import MemoryReadError, diff, format_hexdump, hexdump
-from .libsyms import library_bases, parse_maps
-from ..symbols import Location, Symbols, is_line_location, is_network_path
-from .debugger import REG_NAMES, HaltDebugger, _ThreadAccess
+from ..symbols import Location
+from .debugger import HaltDebugger
+from .debugger_common import SIGNAL_NAMES, exited_message
 from .engine import EngineError
-from .mmu import Unmapped
+from .view_breakpoints import ViewBreakpointsMixin
+from .view_inspect import ViewInspectMixin
+from .view_sources import SOURCE_LIMIT, ViewSourcesMixin, prefetch_libraries, prefetch_sources
 
-__all__ = ["LinuxDebugView", "SOURCE_LIMIT", "prefetch_sources"]
-
-SOURCE_LIMIT = 2 << 20               # 読むソースの大きさの上限（probe_inspect.SOURCE_LIMIT と同じ）
+__all__ = ["LinuxDebugView", "SOURCE_LIMIT", "prefetch_libraries", "prefetch_sources"]
 
 # 停止の種類 → target.status の halt_reason（同じ事実のときだけ。ほかは欠いて linux.stop_kind に元の種類）
 HALT_REASON = {"swbreak": "breakpoint", "hwbreak": "breakpoint", "watch": "watchpoint", "int": "request",
                "step": "request", "attach": "request"}
 
 
-class LinuxDebugView:
+class LinuxDebugView(ViewInspectMixin, ViewBreakpointsMixin, ViewSourcesMixin):
     """1 つの HaltDebugger をマイコンの API の形で見せる。"""
 
     def __init__(self, debugger: HaltDebugger, *, breakpoint_kind: str | None, sources: dict[str, dict] | None = None,
@@ -172,19 +165,16 @@ class LinuxDebugView:
             r = self.d.run_to_location(tid, location, limit_s)
         else:
             raise ValueError(f"mode は over / into / out / until（{mode!r}）")
-        return self._step_reply(r, time.monotonic() - t0)
+        return self._step_reply(r, time.monotonic() - t0, self.d.proc.tgid)
 
     @staticmethod
-    def _step_reply(r: dict, elapsed_s: float) -> dict:
+    def _step_reply(r: dict, elapsed_s: float, pid: int | None = None) -> dict:
         """HaltDebugger の止まり → debug.step の形。reason: step（終えた）/ timeout（時間の上限）/ max_instructions（命令の数の
         上限）/ breakpoint・watchpoint
-        （途中の当たり）/ そのほかの種類の名前。終了したプロセスには pc が無いので、その事実を誤りにする。"""
+        （途中の当たり）/ そのほかの種類の名前。終了したプロセスには pc が無いので、その事実を誤りにする
+        （以後の操作の断りと同じ文: exited_message）。"""
         if r.get("address") is None:
-            code = r.get("code")
-            # カーネルの終了コードは (終了状態 << 8) | 終了させたシグナル（0 ならシグナルなし）。読み方を事実として添える
-            how = "" if code is None else (f", code {code} = exit status {code >> 8}" +
-                                           (f", killed by signal {code & 0x7F}" if code & 0x7F else ""))
-            raise RuntimeError("プロセスが止まった場所が無い（%s%s）" % (r.get("kind"), how))
+            raise EngineError(exited_message(pid, r.get("kind"), r.get("code")))
         if r.get("timed_out"):
             reason = "timeout"
         elif r["kind"] == "step":                               # 着かずに命令の数の上限を使い切った: max_instructions
@@ -198,364 +188,12 @@ class LinuxDebugView:
                 out[key] = r[key]
         if "instructions" in r:
             out["steps"] = r["instructions"]
+        if r.get("kind") == "signal" and r.get("signal") is not None:    # どのシグナルで止まったか（番号はカーネルの事実、名前は表）
+            out["signal"] = r["signal"]
+            if r["signal"] in SIGNAL_NAMES:
+                out["signal_name"] = SIGNAL_NAMES[r["signal"]]
         return out
 
-    # ------------------------------------------------------------------ レジスタ・呼び出し履歴・変数
-    def _regs(self) -> list[int]:
-        return self.d.engine.get_regs(self.d.current_tid())
-
-    def _inspector(self, max_frames: int = 64, assume_leaf: bool = False) -> Inspector:
-        if self.d.info is None:
-            raise RuntimeError("ELF に DWARF（-g）が無い: %s" % self.d.image.path)
-        return Inspector(self.d.info, _ThreadAccess(self._regs(), self.d.proc.mem), symbols=self.d.symbols,
-                         max_frames=max_frames, assume_leaf=assume_leaf, load_bias=self.d.load_bias)
-
-    def read_registers(self, names: list[str] | None = None) -> dict[str, int]:
-        def go():
-            regs = dict(zip(REG_NAMES, self._regs()))
-            if not names:
-                return regs
-            alias = {"r13": "sp", "r14": "lr", "r15": "pc"}
-            missing = [n for n in names if alias.get(n.lower(), n.lower()) not in regs]
-            if missing:
-                raise KeyError(f"Linux のユーザのスレッドでは読まないレジスタ: {missing}（読めるのは {REG_NAMES}）")
-            return {n: regs[alias.get(n.lower(), n.lower())] for n in names}
-        return self.d.use(go, halted=True)
-
-    def _in_library(self, pc: int) -> tuple[str | None, int | None, str | None]:
-        """pc が共有ライブラリの中なら (関数名, 先頭からのバイト数, 表示の文字)。関数の名前が引けなくても、どのライブラリの
-        中かは分かる（ライブラリ名!ライブラリの中の番地）。ライブラリの外なら (None, None, None)。"""
-        lib = self.d.lib_location(pc)
-        if lib is not None:
-            return lib.function, lib.offset, f"{lib.function}+{lib.offset} ({lib.module})"
-        module = self.d.module_of(pc)
-        if module is not None:
-            return None, None, f"{module[0]}!0x{module[1]:08X}"
-        return None, None, None
-
-    def backtrace(self, variables: bool = False, max_frames: int = 64, max_elements: int = 64,
-                  assume_leaf: bool = False) -> list[dict]:
-        def go():
-            insp = self._inspector(max_frames, assume_leaf)
-            out = []
-            for entry in insp.backtrace(variables, max_elements):
-                pc = entry["pc"]
-                where = (str(Location(pc, entry["function"], entry["offset"], entry["file"], entry["line"]))
-                         if entry["function"] is not None or entry["file"] else f"0x{pc:08X}")
-                if entry["function"] is None and not entry["file"]:       # 共有ライブラリの中: 名前（引ければ）とライブラリ名
-                    function, offset, text = self._in_library(pc)
-                    if text is not None:
-                        entry = {**entry, "function": function, "offset": offset}
-                        where = text
-                out.append({"index": entry["index"], "pc": pc, "where": where, "note": entry["note"], "cfa": entry["cfa"],
-                            "function": entry["function"], "offset": entry["offset"], "file": entry["file"],
-                            "line": entry["line"],
-                            **{k: entry[k] for k in ("stop", "arguments", "locals") if k in entry}})
-            return out
-        return self.d.use(go, halted=True)
-
-    def frame_variables(self, frame: int = 0, max_elements: int = 64) -> dict:
-        return self.d.use(lambda: self._inspector().frame_variables(frame, max_elements), halted=True)
-
-    def evaluate(self, expression: str, frame: int = 0, max_elements: int = 64, live: bool = False) -> dict:
-        if live:
-            raise RuntimeError("Linux のプロセスは走らせたまま読めない（live）: 止めて読む")
-        return self.d.use(lambda: self._inspector().read(expression, frame, max_elements), halted=True)
-
-    def expression_check(self, expression: str) -> dict:
-        """ELF の DWARF だけで調べる（番地は実行時 = リンク時 + load bias）。"""
-        if self.d.info is None:
-            raise RuntimeError("ELF に DWARF（-g）が無い: 式は調べられない")
-        return check_expression(self.d.info, expression, load_bias=self.d.load_bias)
-
-    def type_info(self, name: str) -> dict:
-        if self.d.info is None:
-            raise RuntimeError("ELF に DWARF（-g）が無い: 型は調べられない")
-        return Inspector(self.d.info, None, symbols=self.d.symbols, load_bias=self.d.load_bias).type_info(name)
-
-    def symbol_info(self, location: str) -> dict:
-        """場所 ↔ 実行時の番地（リンク時 + load bias）。関数名は前置きの後ではなく関数の先頭（マイコンと同じ）。"""
-        symbols, bias = self.d.symbols, self.d.load_bias
-        text = location.strip()
-        if text.lower().startswith("0x"):
-            address = int(text, 16)
-        else:
-            address = (symbols.resolve(text) + bias) & 0xFFFFFFFF
-        loc = symbols.describe((address - bias) & 0xFFFFFFFF)
-        out = {"address": address, "where": str(Location(address, loc.function, loc.offset, loc.file, loc.line))
-               if loc.function is not None or loc.file else f"0x{address:08X}",
-               "function": loc.function, "offset": loc.offset, "file": loc.file, "line": loc.line}
-        if not text.lower().startswith("0x") and not is_line_location(text):
-            sym = symbols.symbol(text)
-            out.update(kind=sym.kind, size=sym.size)
-        return out
-
-    def disasm_around(self, address: int | None = None, before: int = 8, after: int = 8, from_elf: bool = False,
-                      branch_tables: list[dict] | None = None, sync_limit: int = SYNC_LIMIT,
-                      data_ranges: list[dict] | None = None) -> dict:
-        """プロセスの仮想メモリ（置いた BKPT は元の命令で）を、ELF の $a / $t / $d で区切って逆アセンブルする。番地は
-        実行時（リンク時の番地で解いて load bias を足す）。命令の中の名前（target_name・literal_name）はリンク時の番地で
-        引く。from_elf・branch_tables・data_ranges は使わない（渡したら断る）。"""
-        if from_elf or branch_tables or data_ranges:
-            raise ValueError("Linux のプロセスの逆アセンブルでは from_elf・branch_tables・data_ranges は使わない")
-
-        def go():
-            pc = self._regs()[15] if address is None else address
-            bias = self.d.load_bias
-            memory = _LinkMemory(self.d, bias)
-            dis = Disassembler(memory, self.d.symbols)
-            listing = dis.around((pc - bias) & 0xFFFFFFFF, before, after, sync_limit)
-            # in_flash: Linux のプロセスの番地はマイコンの Flash の領域ではない（target.flash の領域が無い）
-            items = [{**_shift(i, bias).as_dict(), "in_flash": False} for i in listing.instructions]
-            skipped = listing.sync_skipped
-            if skipped is not None:
-                skipped = {**skipped, "from": (skipped["from"] + bias) & 0xFFFFFFFF}
-            return {"pc": pc, "memory": "target", "sync": listing.sync, "sync_skipped": skipped, "total": len(items),
-                    "offset": 0, "pc_index": listing.pc_index, "instructions": items}
-        return self.d.use(go, halted=True)
-
-    def memory_view(self, address: int, length: int, unit: int = 8, width: int = 16, compare: bool = False,
-                    from_elf: bool = False) -> dict:
-        """プロセスの仮想メモリの 16 進表示（マイコンの target.memory.view と同じ形。4096 バイトまで）。全コアが止まって
-        いるときだけ読む。置いた BKPT は元の命令で見せる（linux.halt.debug.memory と同じ読み）。compare なら前回の同じ範囲との
-        差（変わった単位に印）。番地にシンボル（ELF。リンク時の番地 + load bias）の名前を付ける。"""
-        from ..probe_inspect import VIEW_HISTORY, VIEW_LIMIT
-        if from_elf:
-            raise ValueError("Linux のプロセスのメモリ表示では from_elf は使わない（ELF の中身は debug.elf の道）")
-        if not 0 < length <= VIEW_LIMIT:
-            raise ValueError(f"length は 1〜{VIEW_LIMIT}")
-        if not 0 <= address < 1 << 32:
-            raise ValueError(f"番地 0x{address:X} は 32 ビットの番地の空間の外")
-        length = min(length, (1 << 32) - address)          # 番地の空間の終わりで止める（折り返して 0 番地を読まない）
-        read = self.d.memory(address, length)
-        if read["data"] is None:                           # 未マップ: 読めた事実だけを返す（理由は読みの結果のまま）
-            raise MemoryReadError(f"0x{address:08X} から {length} バイトは読めない: {read['reason']}")
-        data = bytes.fromhex(read["data"])
-        key = (address, length)
-        stored = self._view_previous.pop(key, None)
-        previous = stored if compare else None
-        self._view_previous[key] = data                    # 新しいものを後ろへ。古い範囲から忘れる
-        while len(self._view_previous) > VIEW_HISTORY:
-            del self._view_previous[next(iter(self._view_previous))]
-        rows = hexdump(data, address, width=width, unit=unit, previous=previous)
-        out = {"memory": "target", "address": address, "length": length, "unit": unit,
-               "rows": [{"address": r.address, "values": list(r.values), "text": r.text, "changed": list(r.changed)}
-                        for r in rows],
-               "dump": format_hexdump(rows, unit), "names": self._names_in(address, length)}
-        if compare:
-            out["compared"] = previous is not None
-            out["changes"] = [{"address": c.address, "before": c.before.hex(), "after": c.after.hex()}
-                              for c in (diff(previous, data, address) if previous is not None else [])]
-        return out
-
-    def _names_in(self, address: int, length: int) -> list[dict]:
-        """範囲の中で始まる ELF のシンボル（実行時の番地 = リンク時の番地 + load bias）。"""
-        bias = self.d.load_bias
-        found = [{"address": (s.address + bias) & 0xFFFFFFFF, "name": s.name, "kind": "symbol"}
-                 for s in self.d.symbols.names()]
-        return sorted((n for n in found if address <= n["address"] < address + length), key=lambda n: n["address"])
-
-    # ------------------------------------------------------------------ 書く
-    def write_register(self, name: str, value: int) -> None:
-        self.d.write_register(self.d.current_tid(), name, value)
-
-    def write_expression(self, expression: str, value, frame: int = 0) -> dict:
-        tid = self.d.current_tid()
-        self.d.write_expression(tid, expression, value, frame)
-        return {**self.evaluate(expression, frame), "via": "halted"}           # 止まっているときだけ書く
-
-    def watch_write(self, expression: str, value) -> dict:
-        raise RuntimeError("Linux のプロセスは走らせたまま書けない: 止めて debug.write_expression で書く")
-
-    def watchpoint_set(self, location: str, kind: str = "write", size: int | None = None) -> dict:
-        raise RuntimeError("Linux のプロセスのウォッチポイントは画面の道に無い（linux.halt.gdb.serve の gdb の watch）")
-
-    def watchpoint_clear(self, location: str) -> dict:
-        raise RuntimeError("Linux のプロセスのウォッチポイントは画面の道に無い")
-
-    # ------------------------------------------------------------------ ブレークポイント
-    def _row(self, bp: dict, enabled: bool) -> dict:
-        loc = self.d.symbols.describe(self.d._link(bp["address"]))
-        row = {"address": bp["address"], "location": bp["location"], "enabled": enabled,
-               "where": str(Location(bp["address"], loc.function, loc.offset, loc.file, loc.line))
-               if loc.function is not None or loc.file else f"0x{bp['address']:08X}"}
-        for key in ("function", "file", "line"):
-            if bp.get(key) is not None:
-                row[key] = bp[key]
-        at = self.d.symbols.line_place(bp["location"])
-        if at is not None:
-            row["at"] = at
-        if enabled:
-            row["kind"] = bp["kind"]
-        return row
-
-    def breakpoint_list(self) -> dict:
-        def go():
-            rows = [self._row(b, True) for b in self.d.breakpoints.values()]
-            rows += [self._row(b, False) for b in self._disabled.values()]
-            return {"breakpoints": sorted(rows, key=lambda b: b["address"]), "watchpoints": []}
-        return self.d.use(go, halted=False)
-
-    def breakpoint_enable(self, location: str, enabled: bool) -> dict:
-        """無効 = 外して場所と種類を覚える、有効 = 同じ場所・種類で置き直す（マイコンと同じ）。"""
-        def go():
-            if enabled:
-                bp = self._disabled.get(location) or next(
-                    (b for b in self._disabled.values() if b["address"] == self.d.resolve(location)[0]), None)
-                if bp is None:
-                    self._find(location)                         # 置いてあれば何もしない（無ければ KeyError）
-                    return self.breakpoint_list()
-                self.d.break_insert(bp["location"], bp["kind"])
-                del self._disabled[bp["location"]]
-            else:
-                bp = self._find(location)
-                self.d.break_remove(bp["id"])
-                self._disabled[bp["location"]] = bp
-            return self.breakpoint_list()
-        return self.d.use(go, halted="auto")                   # 走行中なら短く止めて置き外し、また走らせる（一般のデバッガと同じ）
-
-    def breakpoint_set(self, location: str, condition: str | None = None, ignore_count: int = 0,
-                       log: list[str] | None = None, message: str | None = None) -> dict:
-        if condition is not None or ignore_count or log is not None or message is not None:
-            raise ValueError("Linux のプロセスのブレークポイントには condition・ignore_count・log・message は使えない")
-        if self.breakpoint_kind is None:
-            raise RuntimeError("linux.halt.debug.attach に breakpoint_kind（sw / hw）を渡していない: 種類を渡さない置き方"
-                               "（画面の行のクリック等）には使う種類が要る（linux.halt.debug.break.insert なら kind を渡す）")
-        bp = self.d.break_insert(location, self.breakpoint_kind)
-        row = self._row(bp, True)
-        return {k: row[k] for k in ("address", "where", "function", "file", "line") if k in row}
-
-    def _find(self, location: str) -> dict:
-        """置いたときの location の文字列か、同じ番地に解ける場所のブレークポイント。"""
-        for b in self.d.breakpoints.values():
-            if b["location"] == location:
-                return b
-        address = self.d.resolve(location)[0]
-        for b in self.d.breakpoints.values():
-            if b["address"] == address:
-                return b
-        raise KeyError(f"{location!r} にブレークポイントが無い")
-
-    def breakpoint_clear(self, location: str | None = None) -> dict:
-        def go():
-            if location is None:
-                self._disabled.clear()
-                ids = list(self.d.breakpoints)
-            elif location in self._disabled:
-                del self._disabled[location]
-                ids = []
-            else:
-                ids = [self._find(location)["id"]]
-            for bp_id in ids:
-                self.d.break_remove(bp_id)
-            return self.breakpoint_list()
-        return self.d.use(go, halted="auto")                   # 走行中なら短く止めて外し、また走らせる
-
-    # ------------------------------------------------------------------ ELF・ソース
-    def elf_status(self) -> dict:
-        """debug.elf.status の形: attach の ELF（読み込みの見張りは無い。プロセスの像と ELF の一致は
-        linux.halt.debug.status の image の事実）。"""
-        path = self.d.image.path
-        try:
-            stat = path.stat()
-            changed = (stat.st_size, stat.st_mtime_ns) != self._elf_stamp
-        except OSError:
-            changed = True
-        return {"path": str(path), "loaded_at": self.loaded_at, "watching": False, "auto_reload": False, "interval_s": 0,
-                "file_changed": changed, "target_image": "unknown", "changes": 0, "reloads": 0, "last": None,
-                "error": None}
-
-    def source_list(self) -> dict:
-        symbols = self.d.symbols
-        relocated = symbols.relocated()
-        files = []
-        for name, path in sorted(symbols.sources().items()):
-            item = {"name": name, "path": str(path), "exists": not is_network_path(path) and path.is_file(),
-                    **({"built_path": str(relocated[name]["built"])} if name in relocated else {})}
-            got = self.sources.get(name)
-            if got is not None:
-                item["fetched" if "error" not in got else "fetch_error"] = dict(got)
-            files.append(item)
-        return {"files": files, "same_name": {n: [str(p) for p in ps]
-                                              for n, ps in sorted(symbols.source_conflicts().items())}}
-
-    def source_read(self, name: str) -> dict:
-        path = self.d.symbols.sources().get(name)
-        if path is None:
-            raise KeyError(f"{name!r} はこの ELF のソースではない")
-        if is_network_path(path):
-            raise ValueError(f"外の共有のソースは開かない: {path}")
-        lines = self.d.symbols.lines_of(name)
-        if path.is_file():
-            return {"name": name, "path": str(path), "text": _text(path), "lines": lines}
-        got = self.sources.get(name)
-        if got is None:
-            raise FileNotFoundError(
-                f"{name} がこの PC に無い（{path}）。止まっている間は対象の ssh が答えないので、取り寄せは attach のとき"
-                "（コアを止める前）だけ: linux.halt.debug.attach に fetch_from_target（linux.connect のターゲットの名前）を渡す")
-        if "error" in got:
-            raise FileNotFoundError(f"{name} は attach のときに {got['target']} の {got['path']} から取り寄せられなかった: "
-                                    f"{got['error']}")
-        return {"name": name, "path": got["local_path"], "text": _text(Path(got["local_path"])), "lines": lines,
-                "fetched": dict(got)}
-
-
-def _built(symbols, name: str, path: Path) -> str:
-    """行表の場所（ビルドした場所。ELF の隣の同じ名前に置き換えたなら元の場所）を posix の文字で。"""
-    built = symbols.relocated().get(name, {}).get("built", path)
-    return Path(built).as_posix()
-
-
-def prefetch_sources(elf: str, target: str, fetch: Callable[[str, str, str], dict]) -> dict[str, dict]:
-    """attach のとき（コアを止める前。止まった対象の ssh は答えない）に、ELF の行表が指すソースのうちこの PC に無いものを
-    対象から取り寄せ、ELF と同じ所の <ELF の名前>.sources/<対象の上の道> に写す。名前 → {target, path, local_path, bytes,
-    sha256}、取り寄せられなければ {target, path, error}（1 つの失敗で他をやめない）。"""
-    symbols = Symbols(elf)
-    root = Path(elf).parent / f"{Path(elf).name}.sources"
-    out: dict[str, dict] = {}
-    for name, path in sorted(symbols.sources().items()):
-        if not is_network_path(path) and path.is_file():
-            continue
-        remote = _built(symbols, name, path)
-        parts = [p for p in PurePosixPath(remote).parts if p not in ("/", "..", ".")]
-        local = root.joinpath(*parts) if parts else root / name
-        try:
-            got = fetch(target, remote, str(local))
-            out[name] = {"target": target, "path": remote, "local_path": got["local_path"], "bytes": got["bytes"],
-                         "sha256": got["sha256"]}
-        except Exception as e:  # noqa: BLE001 - 取り寄せられなかった事実を残し、他のファイルは続ける
-            out[name] = {"target": target, "path": remote, "error": f"{type(e).__name__}: {e}"}
-    return out
-
-
-def prefetch_libraries(elf: str, target: str, pid: int, fetch: Callable[[str, str, str], dict]) -> list[dict]:
-    """attach のとき（コアを止める前）に、対象の /proc/<pid>/maps が指す共有ライブラリを取り寄せ、ELF と同じ所の
-    <ELF の名前>.libs/<対象の上の道> に写す。[{path, local_path, base（ファイルの先頭の対応の始まり）, bytes, sha256}]、
-    取り寄せられなければ {path, base, error}（1 つの失敗で他をやめない）。maps が読めなければ、その事実の 1 件だけ。"""
-    maps_local = Path(elf).parent / f"{Path(elf).name}.maps"
-    try:
-        got = fetch(target, f"/proc/{pid}/maps", str(maps_local))
-        maps = parse_maps(Path(got["local_path"]).read_text(encoding="utf-8", errors="replace"))
-    except Exception as e:  # noqa: BLE001 - 読めなかった事実を残す
-        return [{"path": f"/proc/{pid}/maps", "base": None, "error": f"{type(e).__name__}: {e}"}]
-    root = Path(elf).parent / f"{Path(elf).name}.libs"
-    out: list[dict] = []
-    for path, base in sorted(library_bases(maps).items()):          # 名前に .so を含むファイルだけ（実行ファイルは ELF として別に取り寄せ済み）
-        parts = [p for p in PurePosixPath(path).parts if p not in ("/", "..", ".")]
-        local = root.joinpath(*parts)
-        try:
-            got = fetch(target, path, str(local))
-            out.append({"path": path, "local_path": got["local_path"], "base": base, "bytes": got["bytes"],
-                        "sha256": got["sha256"]})
-        except Exception as e:  # noqa: BLE001 - 取り寄せられなかった事実を残し、他は続ける
-            out.append({"path": path, "base": base, "error": f"{type(e).__name__}: {e}"})
-    return out
-
-
-def _text(path: Path) -> str:
-    if path.stat().st_size > SOURCE_LIMIT:
-        raise ValueError(f"{path.name} は大きすぎる（{SOURCE_LIMIT // (1 << 20)} MB まで）")
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _where_text(pc: int, r: dict) -> str:
@@ -563,25 +201,3 @@ def _where_text(pc: int, r: dict) -> str:
         return f"0x{pc:08X}"
     head = r["function"] if r.get("function") is not None else f"0x{pc:08X}"
     return f"{head} ({r['file']}:{r['line']})" if r.get("file") else head
-
-
-class _LinkMemory:
-    """逆アセンブルの読み手: リンク時の番地 → プロセスの仮想メモリ（実行時 = + load bias）。置いた BKPT は元の命令で。"""
-
-    def __init__(self, debugger: HaltDebugger, bias: int):
-        self.d, self.bias = debugger, bias
-
-    def read_memory(self, address: int, length: int) -> bytes:
-        va = (address + self.bias) & 0xFFFFFFFF
-        try:
-            data = self.d.proc.mem.read(va, length)
-        except Unmapped as e:
-            raise MemoryReadError(str(e)) from None
-        return self.d.engine.bps.shadow(self.d.proc.tgid, va, data)
-
-
-def _shift(i: Instruction, bias: int) -> Instruction:
-    """リンク時の番地の命令 → 実行時の番地（番地・分岐の先・PC 相対で読む番地に load bias を足す）。"""
-    def add(v):
-        return None if v is None else (v + bias) & 0xFFFFFFFF
-    return dataclasses.replace(i, address=add(i.address), target=add(i.target), literal=add(i.literal))

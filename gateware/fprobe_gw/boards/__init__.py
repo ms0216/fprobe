@@ -7,8 +7,7 @@ gateware/rtl/boards/<board>/ にあり、ここはツール側から見たボー
 
 from dataclasses import dataclass
 
-from ..toolchain.pll import PllSolution
-from ..toolchain.vivado import MmcmSolution
+from ..toolchain.pll import MmcmSolution, PllSolution
 from ..toolchain.programmer import JtagIdentity
 from ..toolchain.project import ClockConstraint, GowinIp, IoDelay, Pin
 

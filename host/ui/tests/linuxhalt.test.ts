@@ -78,7 +78,7 @@ describe("画面は考えない層（API の応答を描くだけ）", () => {
     expect(src).not.toMatch(/0x4BA00477|zynq7000"\s*}|2000000|0xBB400000|0x80000000/);
   });
   it("Linux のパネルに止めずに読む口の JTAG がある", () => {
-    const linux = readFileSync(resolve(import.meta.dirname, "../src/components/panels/LinuxPanel.svelte"), "utf8");
+    const linux = readFileSync(resolve(import.meta.dirname, "../src/components/panels/linux/LinuxRing.svelte"), "utf8");
     expect(linux).toMatch(/linux\.memap\.connect_jtag/);
   });
 });
@@ -155,7 +155,7 @@ describe("状態の読み直しの循環を作らない（2026-11-04 実機: att
       expect(shouldRefreshOn(m), m).toBe(true);
     }
     for (const m of ["linux.halt.status", "linux.halt.debug.status", "linux.halt.debug.threads", "linux.halt.processes",
-                     "linux.halt.gdb.status", "debug.backtrace", "target.status"]) {
+                     "linux.halt.gdb.status", "linux.halt.profile.save", "linux.halt.profile.load", "debug.backtrace", "target.status"]) {
       expect(shouldRefreshOn(m), m).toBe(false);
     }
   });

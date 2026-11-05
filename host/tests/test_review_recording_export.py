@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("numpy")
 
-from fprobe import la_vcd
+from fprobe import la_vcd, la_vcd_render
 from fprobe.recording import Recording
 
 import recording_vcd_scenarios as s
@@ -32,7 +32,7 @@ def test_dense_random_recordings(tmp_path, monkeypatch, seed):
     finally:
         del s.SCENARIOS[name]
     monkeypatch.setattr(la_vcd, "_PIECE", rng.choice([1, 2, 3, 17]))
-    monkeypatch.setattr(la_vcd, "_UNIFORM_MIN", rng.choice([1, 2, 64]))
+    monkeypatch.setattr(la_vcd_render, "_UNIFORM_MIN", rng.choice([1, 2, 64]))
     fast = export(tmp_path / "r", channels, tmp_path / "a.vcd", False, monkeypatch, workers=rng.choice([1, 3]))
     slow = export(tmp_path / "r", channels, tmp_path / "b.vcd", True, monkeypatch)
     assert fast == slow

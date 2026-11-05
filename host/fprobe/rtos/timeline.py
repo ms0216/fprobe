@@ -240,6 +240,7 @@ def timeline_from_events(events: Iterable[TaskEvent], names: Mapping[int, str], 
     running: tuple[int, int] | None = None        # (TCB, 始め)
     previous: int | None = None                   # 最後に CPU を使っていたタスク（分からなければ None）
     gap_start: int | None = None
+    gap_reason = ""                                          # gap_start があるときの理由（出来事の種類）
 
     def close(t: int, cut: bool = False) -> None:
         nonlocal running, previous

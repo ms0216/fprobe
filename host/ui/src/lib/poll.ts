@@ -2,6 +2,7 @@
 // 読み込み中と読めなかった誤りを状態に出す（黙って捨てない）。Svelte に依らない（store の約束 subscribe だけを満たす）。
 // 画面の部品は components/panels/LoadState.svelte（読み込み中・誤りの表示）。
 import { errorText } from "./api";
+import { addListener } from "./store";
 
 export interface PollState {
   loading: boolean;          // 読んでいる最中
@@ -35,9 +36,7 @@ export class Poller {
   }
 
   subscribe(fn: (s: PollState) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   get state(): PollState {

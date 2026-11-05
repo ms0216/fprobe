@@ -16,6 +16,21 @@ package csr_bus_pkg is
   subtype csr_word_t is std_logic_vector(31 downto 0);
   type csr_word_array_t is array (natural range <>) of csr_word_t;
 
+  -- 窓への要求（全部の窓で共通。窓ごとの選択 bus_req は別の std_logic で渡す）と、窓の応答。
+  -- record のポートは GHDL の VPI が駆動できないので、cocotb の toplevel にする entity では使わない（ラッパーを通す）。
+  type csr_cmd_t is record
+    we    : std_logic;
+    addr  : csr_addr_t;
+    wdata : csr_word_t;
+  end record;
+  type csr_rsp_t is record
+    ack   : std_logic;
+    err   : std_logic;
+    rdata : csr_word_t;                 -- 応答の周期以外は err・rdata とも 0（上の約束）
+  end record;
+  type csr_rsp_array_t is array (natural range <>) of csr_rsp_t;
+  constant CSR_RSP_IDLE : csr_rsp_t := (ack => '0', err => '0', rdata => (others => '0'));
+
   type csr_window_t is record
     base : natural;      -- ワードアドレス
     size : positive;     -- ワード数（2 の冪。base はその倍数）

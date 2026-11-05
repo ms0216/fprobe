@@ -73,14 +73,16 @@ architecture rtl of serial_link is
   constant FRAME_MAX    : positive := MAX_PAYLOAD + 3;      -- ch + payload + crc
   constant RAM_BITS     : positive := clog2(FRAME_MAX);
 
-  -- CRC-16/CCITT-FALSE の 1 バイト分
+  -- CRC-16/CCITT-FALSE の 1 バイト分（多項式 0x1021・初期値 0xFFFF）
+  constant CRC_POLY : std_logic_vector(15 downto 0) := x"1021";
+  constant CRC_INIT : std_logic_vector(15 downto 0) := x"FFFF";
   function crc_next(crc : std_logic_vector(15 downto 0); b : std_logic_vector(7 downto 0)) return std_logic_vector is
     variable c : std_logic_vector(15 downto 0) := crc;
   begin
     c(15 downto 8) := c(15 downto 8) xor b;
     for i in 0 to 7 loop
       if c(15) = '1' then
-        c := (c(14 downto 0) & '0') xor x"1021";
+        c := (c(14 downto 0) & '0') xor CRC_POLY;
       else
         c := c(14 downto 0) & '0';
       end if;
@@ -100,7 +102,7 @@ architecture rtl of serial_link is
   signal code_left : natural range 0 to 255 := 0;           -- 今のブロックの残り（0 = 次はコード）
   signal zero_due  : boolean := false;                      -- 次のブロックの前に 0 を入れる
   signal overflow  : boolean := false;
-  signal rx_crc    : std_logic_vector(15 downto 0) := x"FFFF";
+  signal rx_crc    : std_logic_vector(15 downto 0) := CRC_INIT;
   signal d1, d2    : std_logic_vector(7 downto 0) := (others => '0');   -- 直近の 2 バイト（CRC に入れるのを遅らせる）
   signal bad_r     : unsigned(15 downto 0) := (others => '0');
   signal commit    : std_logic := '0';
@@ -115,7 +117,7 @@ architecture rtl of serial_link is
   signal f_q       : std_logic_vector(7 downto 0);          -- frame_mux の送信バッファの同期読み出し（番地 scan）
   signal f_done    : std_logic := '0';
   signal tx_len    : natural range 0 to FRAME_MAX := 0;     -- CRC を含むバイト数
-  signal tx_crc    : std_logic_vector(15 downto 0) := x"FFFF";
+  signal tx_crc    : std_logic_vector(15 downto 0) := CRC_INIT;
   signal pos, scan, blk_end : natural range 0 to FRAME_MAX := 0;
   signal hit_zero  : boolean := false;
   signal tx_q      : std_logic_vector(7 downto 0);          -- フレーム(scan)。CRC の 2 バイトは末尾に足して見せる
@@ -185,7 +187,7 @@ begin
       code_left <= 0;
       zero_due  <= false;
       overflow  <= false;
-      rx_crc    <= x"FFFF";
+      rx_crc    <= CRC_INIT;
     end procedure;
   begin
     if rising_edge(clk) then
@@ -242,7 +244,7 @@ begin
         case tx_state is
           when T_IDLE =>
             scan   <= 0;
-            tx_crc <= x"FFFF";
+            tx_crc <= CRC_INIT;
             if f_valid = '1' and f_done = '0' then             -- f_done の次の周期はまだ前のフレームの valid
               tx_len   <= f_len + 2;
               tx_state <= T_CRC_WAIT;

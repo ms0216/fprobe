@@ -64,6 +64,20 @@ def test_each_interval_and_longest_names_its_bin(recording):
     assert interval_report([]).as_dict()["interval_bins"] == []
 
 
+def test_each_histogram_bin_lists_its_intervals_and_whether_a_longest_is_in_it(recording):
+    # 箱ごとの intervals・has_longest は API の事実（画面が interval_bins / longest.bin を突き合わせない）
+    d = measure(recording, START, END, bins=8, longest=3).as_dict()
+    hist = d["histogram"]
+    for i, h in enumerate(hist):
+        assert h["intervals"] == [p for p, k in zip(d["intervals"], d["interval_bins"]) if k == i]
+        assert len(h["intervals"]) == h["count"]
+        assert h["has_longest"] == any(o["bin"] == i for o in d["longest"])
+    assert sum(h["has_longest"] for h in hist) >= 1
+    from fprobe.profile import limit_intervals
+    cut = limit_intervals(measure(recording, START, END, bins=8).as_dict(), 5)
+    assert sum(len(h["intervals"]) for h in cut["histogram"]) == 5 and len(cut["intervals"]) == 5
+
+
 def test_pair_times_matches_recording_rule(recording):
     starts = [e.t for e in recording.find(START)]
     ends = [e.t for e in recording.find(END)]

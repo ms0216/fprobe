@@ -24,13 +24,9 @@ entity core_periph is
     clk             : in  std_logic;
     rst             : in  core_resets_t;
     time_count      : in  unsigned(63 downto 0);
-    csr_we          : in  std_logic;
-    csr_addr        : in  csr_addr_t;
-    csr_wdata       : in  csr_word_t;
+    csr_cmd         : in  csr_cmd_t;
     csr_req         : in  std_logic_vector(CSR_WINDOWS'range);
-    csr_ack         : out std_logic_vector(CSR_WINDOWS'range);
-    csr_err         : out std_logic_vector(CSR_WINDOWS'range);
-    csr_rdata       : out csr_word_array_t(CSR_WINDOWS'range);
+    csr_rsp         : out csr_rsp_array_t(CSR_WINDOWS'range);
     -- SWO（設定と状態は core_debug の DAP の SWO コマンド。ほかは fprobe_core のポートと同じ）
     swo_run         : in  std_logic;
     swo_divisor     : in  unsigned(15 downto 0);
@@ -111,9 +107,7 @@ architecture rtl of core_periph is
 begin
   idle_g : for i in CSR_WINDOWS'range generate
     other_g : if not owns(i) generate
-      csr_ack(i)   <= '0';
-      csr_err(i)   <= '0';
-      csr_rdata(i) <= (others => '0');
+      csr_rsp(i) <= CSR_RSP_IDLE;
     end generate;
   end generate;
 
@@ -176,9 +170,8 @@ begin
   uart_tx_oe <= uart_tx_used;
 
   uart_csr_i : entity work.csr_uart
-    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_UART), bus_we => csr_we,
-              bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_UART),
-              bus_err => csr_err(CSR_WIN_UART), bus_rdata => csr_rdata(CSR_WIN_UART),
+    port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_UART),
+              bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_UART),
               baud => std_logic_vector(uart_baud_now), frame_errors => std_logic_vector(uart_frame_errors),
               overruns => std_logic_vector(uart_overruns),
               flow_auto => flow_auto, flow_rts_claim => flow_rts_claim, flow_rts_pin => flow_rts_pin,
@@ -214,17 +207,15 @@ begin
       end if;
     end process;
     aux_csr_i : entity work.csr_aux
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_AUX), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_AUX),
-                bus_err => csr_err(CSR_WIN_AUX), bus_rdata => csr_rdata(CSR_WIN_AUX),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_AUX),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_AUX),
                 target_mv => target_mv,
                 samples => std_logic_vector(samples), errors => std_logic_vector(errors));
   end generate;
   no_aux_g : if not AUX generate
     aux_event <= (valid => '0', ch => 0, value => (others => '0'), time => (others => '0'));
     aux_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_AUX), bus_ack => csr_ack(CSR_WIN_AUX),
-                bus_err => csr_err(CSR_WIN_AUX), bus_rdata => csr_rdata(CSR_WIN_AUX));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_AUX), bus_rsp => csr_rsp(CSR_WIN_AUX));
   end generate;
 
   -- ボードの間の時刻の同期: 親として sync_out に出し、子として sync_in の組をイベント 10 に
@@ -250,9 +241,8 @@ begin
       end if;
     end process;
     sync_csr_i : entity work.csr_sync
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SYNC), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_SYNC),
-                bus_err => csr_err(CSR_WIN_SYNC), bus_rdata => csr_rdata(CSR_WIN_SYNC),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_SYNC),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_SYNC),
                 control_enable => enable, control_master => master, period => period,
                 status_pairs => std_logic_vector(pairs), status_crc_errors => std_logic_vector(crc_errors));
   end generate;
@@ -260,8 +250,7 @@ begin
     sync_out   <= '0';
     sync_event <= (valid => '0', local => (others => '0'), parent => (others => '0'));
     sync_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_SYNC), bus_ack => csr_ack(CSR_WIN_SYNC),
-                bus_err => csr_err(CSR_WIN_SYNC), bus_rdata => csr_rdata(CSR_WIN_SYNC));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_SYNC), bus_rsp => csr_rsp(CSR_WIN_SYNC));
   end generate;
 
   -- 対象の FPGA の観測: 対象の JTAG の観測の回路をスキャンし続け、記録をイベント 8、時刻合わせをイベント 9 に
@@ -299,9 +288,8 @@ begin
                 ev_time => ev_time, tck => obs_tck, tms => obs_tms, tdi => obs_tdi, tdo => obs_tdo, oe => obs_oe);
     obs_event <= (valid => ev_valid, sync => ev_sync, data => ev_data, addr => ev_addr, time => ev_time);
     obs_csr_i : entity work.csr_obs
-      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_OBS), bus_we => csr_we,
-                bus_addr => csr_addr, bus_wdata => csr_wdata, bus_ack => csr_ack(CSR_WIN_OBS),
-                bus_err => csr_err(CSR_WIN_OBS), bus_rdata => csr_rdata(CSR_WIN_OBS),
+      port map (clk => clk, rst => rst(RST_BUS), bus_req => csr_req(CSR_WIN_OBS),
+                bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_OBS),
                 control_enable => enable, control_release => free_pins, half_period => half_period,
                 chain_ir_len => ir_len, chain_ir_before => ir_before, chain_ir_after => ir_after,
                 chain_dr_before => dr_before, chain_dr_after => dr_after, user_ir => user_ir, words => words,
@@ -321,7 +309,6 @@ begin
     obs_oe    <= '0';
     obs_match <= '0';
     obs_absent_i : entity work.csr_absent
-      port map (clk => clk, bus_req => csr_req(CSR_WIN_OBS), bus_ack => csr_ack(CSR_WIN_OBS),
-                bus_err => csr_err(CSR_WIN_OBS), bus_rdata => csr_rdata(CSR_WIN_OBS));
+      port map (clk => clk, bus_req => csr_req(CSR_WIN_OBS), bus_rsp => csr_rsp(CSR_WIN_OBS));
   end generate;
 end architecture;

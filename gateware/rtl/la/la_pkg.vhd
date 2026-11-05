@@ -15,6 +15,10 @@ package la_pkg is
   -- 拍 beat の r 番目（0〜3）のレコードの「続いた数 − 1」
   function rle_run_minus_1(beat : std_logic_vector(127 downto 0); r : natural) return unsigned;
 
+  -- N 並列の語（レーン k の ch c = w(k × width + c)。k = 0 が最も古い）の、レーン k の width ビット。
+  -- w の範囲は downto 0 でなくてもよい（w'low からの相対）。la_lane_front・la_lane_rle が使う
+  function lane_slice(w : std_logic_vector; width : positive; k : natural) return std_logic_vector;
+
 end package;
 
 package body la_pkg is
@@ -36,6 +40,11 @@ package body la_pkg is
   function rle_run_minus_1(beat : std_logic_vector(127 downto 0); r : natural) return unsigned is
   begin
     return unsigned(beat(32 * r + 31 downto 32 * r + 16));
+  end function;
+
+  function lane_slice(w : std_logic_vector; width : positive; k : natural) return std_logic_vector is
+  begin
+    return w(k * width + width - 1 + w'low downto k * width + w'low);
   end function;
 
 end package body;

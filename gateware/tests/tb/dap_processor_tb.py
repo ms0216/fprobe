@@ -96,7 +96,7 @@ async def info_and_unknown_commands(dut):
 async def connect_and_read_dpidr(dut):
     dap, model = await setup(dut)
     count, resp, data = await dap.transfer((DP_IDCODE_R, None))
-    assert (count, resp) == (0, 7)                                             # 接続前（ピン解放）は無応答
+    assert (count, resp, data) == (0, 0, [])                                   # 接続前は線に出さず、処理数 0・応答 0（DAP.c と同じ。e74df5c4）
     await dap.connect()
     assert await dap.transfer((DP_IDCODE_R, None)) == (1, OK, [DPIDR])
 

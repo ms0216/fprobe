@@ -91,13 +91,9 @@ architecture rtl of dap_processor is
   signal put_val    : std_logic_vector(63 downto 0);
   signal header     : std_logic_vector(23 downto 0);
   signal header_n   : natural range 0 to 3;
-  -- ユニットごとの要求
-  type units_bit_t is array (dap_unit_t) of std_logic;
-  type units_n_t is array (dap_unit_t) of natural range 1 to 8;
-  type units_word_t is array (dap_unit_t) of std_logic_vector(63 downto 0);
-  signal u_start, u_done, u_get_req, u_put_req : units_bit_t;
-  signal u_get_n, u_put_n : units_n_t;
-  signal u_put_val  : units_word_t;
+  -- ユニットごとの要求・応答
+  signal u_req      : unit_req_array_t;
+  signal u_rsp      : unit_rsp_array_t;
   -- dap_link ⇄ ユニット（シーケンス・転送）
   signal link_req, link_ack, link_take, xfer_take : std_logic;
   signal link_op    : std_logic_vector(1 downto 0);
@@ -136,37 +132,34 @@ begin
               get_req => get_req, get_n => get_n, get_ack => get_ack, arg => arg,
               put_req => put_req, put_n => put_n, put_val => put_val, put_ack => put_ack);
 
-  -- 起動したユニット（unit）の要求だけを dap_packet へ通す
+  -- start は起動したユニット（unit）にだけ渡し、そのユニットの要求だけを dap_packet へ通す
   process (all)
   begin
-    u_start         <= (others => '0');
-    u_start(unit)   <= start;
+    for u in dap_unit_t loop
+      u_req(u).command <= command;
+      u_req(u).start   <= '0';
+      u_req(u).get_ack <= get_ack;
+      u_req(u).arg     <= arg;
+      u_req(u).put_ack <= put_ack;
+    end loop;
+    u_req(unit).start <= start;
   end process;
   -- ユニット無し（U_NONE）の分も明示的に駆動する。宣言の初期値は合成で無視され、駆動されない配線は実機で値が
   -- 定まらない（配置で変わり、シミュレーションでは見えない。2026-10-17 に Ethernet 版で DAP の要求が化けた原因）
-  u_done(U_NONE)    <= '0';
-  u_get_req(U_NONE) <= '0';
-  u_put_req(U_NONE) <= '0';
-  u_get_n(U_NONE)   <= 1;
-  u_put_n(U_NONE)   <= 1;
-  u_put_val(U_NONE) <= (others => '0');
+  u_rsp(U_NONE) <= UNIT_RSP_IDLE;
 
-  done     <= u_done(unit);
-  get_req  <= u_get_req(unit);
-  get_n    <= u_get_n(unit);
-  put_req  <= u_put_req(unit);
-  put_n    <= u_put_n(unit);
-  put_val  <= u_put_val(unit);
+  done     <= u_rsp(unit).done;
+  get_req  <= u_rsp(unit).get_req;
+  get_n    <= u_rsp(unit).get_n;
+  put_req  <= u_rsp(unit).put_req;
+  put_n    <= u_rsp(unit).put_n;
+  put_val  <= u_rsp(unit).put_val;
   header   <= xfer_header when unit = U_TRANSFER else (others => '0');
   header_n <= xfer_header_n when unit = U_TRANSFER else 0;
 
   config_i : entity work.dap_cmd_config
     generic map (CLK_HZ => CLK_HZ, SWO_BUFFER => SWO_BUFFER, HAS_JTAG => HAS_JTAG, HAS_SWO_MANCHESTER => HAS_SWO_MANCHESTER)
-    port map (clk => clk, rst => rst, packet_size => packet_size, command => command,
-              start => u_start(U_CONFIG), done => u_done(U_CONFIG),
-              get_req => u_get_req(U_CONFIG), get_n => u_get_n(U_CONFIG), get_ack => get_ack, arg => arg,
-              put_req => u_put_req(U_CONFIG), put_n => u_put_n(U_CONFIG), put_val => u_put_val(U_CONFIG),
-              put_ack => put_ack,
+    port map (clk => clk, rst => rst, packet_size => packet_size, req => u_req(U_CONFIG), rsp => u_rsp(U_CONFIG),
               enable => enable, jtag => jtag_r, half_period => swd_half_period, turnaround => swd_turnaround,
               data_phase => swd_data_phase, idle_cycles => swd_idle_cycles, wait_retry => wait_retry,
               match_retry => match_retry, jtag_count => jtag_count, jtag_index => jtag_index,
@@ -177,11 +170,7 @@ begin
 
   swo_i : entity work.dap_cmd_swo
     generic map (CLK_HZ => CLK_HZ, HAS_MANCHESTER => HAS_SWO_MANCHESTER)
-    port map (clk => clk, rst => rst, command => command,
-              start => u_start(U_SWO), done => u_done(U_SWO),
-              get_req => u_get_req(U_SWO), get_n => u_get_n(U_SWO), get_ack => get_ack, arg => arg,
-              put_req => u_put_req(U_SWO), put_n => u_put_n(U_SWO), put_val => u_put_val(U_SWO),
-              put_ack => put_ack,
+    port map (clk => clk, rst => rst, req => u_req(U_SWO), rsp => u_rsp(U_SWO),
               swo_run => swo_run, swo_divisor => swo_divisor, swo_manchester => swo_manchester,
               swo_error => swo_error, swo_overrun => swo_overrun,
               div_start => swo_div_start, div_num => swo_div_num, div_den => swo_div_den,
@@ -219,22 +208,14 @@ begin
 
   sequence_i : entity work.dap_cmd_sequence
     generic map (CLK_HZ => CLK_HZ)
-    port map (clk => clk, rst => rst, command => command,
-              start => u_start(U_SEQUENCE), done => u_done(U_SEQUENCE),
-              get_req => u_get_req(U_SEQUENCE), get_n => u_get_n(U_SEQUENCE), get_ack => get_ack, arg => arg,
-              put_req => u_put_req(U_SEQUENCE), put_n => u_put_n(U_SEQUENCE), put_val => u_put_val(U_SEQUENCE),
-              put_ack => put_ack,
+    port map (clk => clk, rst => rst, req => u_req(U_SEQUENCE), rsp => u_rsp(U_SEQUENCE),
               link_req => seq_link_req, link_op => seq_op, link_count => seq_count, link_request => seq_request,
               link_data => seq_data, link_ack => link_ack, link_val => link_val,
               nreset_low => nreset_low, nreset_in => nreset_in);
 
   transfer_i : entity work.dap_cmd_transfer
-    port map (clk => clk, rst => rst, command => command,
-              start => u_start(U_TRANSFER), done => u_done(U_TRANSFER),
+    port map (clk => clk, rst => rst, req => u_req(U_TRANSFER), rsp => u_rsp(U_TRANSFER),
               header => xfer_header, header_n => xfer_header_n,
-              get_req => u_get_req(U_TRANSFER), get_n => u_get_n(U_TRANSFER), get_ack => get_ack, arg => arg,
-              put_req => u_put_req(U_TRANSFER), put_n => u_put_n(U_TRANSFER), put_val => u_put_val(U_TRANSFER),
-              put_ack => put_ack,
               link_req => xfer_link_req, link_request => xfer_request, link_data => xfer_data,
               link_ack => link_ack, link_take => xfer_take, link_resp => link_resp, link_ok => link_ok, link_rdata => link_rdata,
               link_stamp => link_stamp, enable => enable,

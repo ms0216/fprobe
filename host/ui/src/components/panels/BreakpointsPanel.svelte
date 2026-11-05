@@ -17,7 +17,7 @@
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n, t, type Key } from "../../lib/i18n";
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
   import { load, save } from "../../lib/prefs";
   import { nearestAtOrBefore, onTimeline } from "../../lib/timeline/events";
   import SafetyConditions from "./SafetyConditions.svelte";
@@ -38,8 +38,8 @@
   let entries = $state<LogEntry[]>([]);
   let discarded = $state(0);                       // 画面に持つ上限を超えて捨てたログの行
   let selected = $state<number | null>(null);           // 選んだログの seq
-  let flashBp = $state<any>(null);
-  let mode = $state<any>(null);                         // target.debug_mode.get
+  let flashBp = $state<Result<"debug.breakpoint.flash"> | null>(null);
+  let mode = $state<Result<"target.debug_mode.get"> | null>(null);                         // target.debug_mode.get
   // 接続中に読みを API が断った理由（画面は対象の種類で項目を決めず、API の文をそのまま出す。backlog 65 番）
   let vcError = $state<string | null>(null);
   let modeError = $state<string | null>(null);

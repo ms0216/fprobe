@@ -9,6 +9,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 
 entity serial_fprobe is
   generic (
@@ -35,6 +36,7 @@ entity serial_fprobe is
 end entity;
 
 architecture rtl of serial_fprobe is
+  constant LINK_PACKET_SIZE : positive := 512;   -- fprobe_core の packet_size（USB の High-Speed と同じ 512 バイト）
   signal sys_rst : std_logic;
   -- serial_link（PC 側）⇄ fprobe_core
   signal req_valid, req_ready, req_last, rsp_valid, rsp_ready, rsp_last : std_logic;
@@ -48,7 +50,7 @@ architecture rtl of serial_fprobe is
   -- デバッグポート
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe, target_tx, target_tx_oe : std_logic;
   signal gpio_drive, gpio_enable, func_o, func_oe : std_logic_vector(7 downto 0);
-  signal heartbeat : unsigned(25 downto 0) := (others => '0');
+  signal heartbeat : unsigned(HEARTBEAT_BITS - 1 downto 0) := (others => '0');
 begin
   sys_reset_i : entity work.reset_sync
     port map (clk => sys_clk, arst_in => not pll_lock, rst => sys_rst);
@@ -91,7 +93,7 @@ begin
               ctrl_in_last => req_last,
               ctrl_out_valid => rsp_valid, ctrl_out_ready => rsp_ready, ctrl_out_data => rsp_data,
               ctrl_out_last => rsp_last,
-              packet_size => 512,
+              packet_size => LINK_PACKET_SIZE,
               dap_in_valid => dreq_valid, dap_in_ready => dreq_ready, dap_in_data => dreq_data, dap_in_last => dreq_last,
               dap_out_valid => drsp_valid, dap_out_ready => drsp_ready, dap_out_data => drsp_data,
               dap_out_last => drsp_last,

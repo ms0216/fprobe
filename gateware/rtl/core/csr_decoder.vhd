@@ -5,7 +5,7 @@
 -- 窓にしか渡らないので、応答する窓は 1 つ。窓ごとの選択（多入力のマルチプレクサ）が要らない。
 -- マスタは応答を受けた次の周期から次の要求を出せる（応答を返した周期の bus_req は前の要求の続きとして無視する）。
 -- スレーブには bus_req を窓ごとに分けて渡す。番地・書き込み値・書き込みの印は、要求の最初の周期にレジスタに取った写し
--- （s_addr・s_wdata・s_we）を全部の窓に配る（2026-10-29: マスタのレジスタから全部の窓へ直接配ると、チップ全体に広がる配線が
+-- （s_cmd）を全部の窓に配る（2026-10-29: マスタのレジスタから全部の窓へ直接配ると、チップ全体に広がる配線が
 -- sys の周期を決めていた。写しは Vivado が負荷の近くに複製してよい）。マスタは要求の間これらを変えない約束なので、写しは
 -- マスタの値と同じ。窓への要求（s_req）は、もともと最初の周期の次から出しているので、写しと揃う。
 library ieee;
@@ -28,14 +28,10 @@ entity csr_decoder is
     bus_ack   : out std_logic;
     bus_err   : out std_logic;
     bus_rdata : out csr_word_t;
-    -- スレーブ側（窓ごと。s_we・s_addr・s_wdata は全部の窓で共通）
-    s_we      : out std_logic;
-    s_addr    : out csr_addr_t;
-    s_wdata   : out csr_word_t;
+    -- スレーブ側（窓ごと。s_cmd は全部の窓で共通）
+    s_cmd     : out csr_cmd_t;
     s_req     : out std_logic_vector(WINDOWS'range);
-    s_ack     : in  std_logic_vector(WINDOWS'range);
-    s_err     : in  std_logic_vector(WINDOWS'range);
-    s_rdata   : in  csr_word_array_t(WINDOWS'range)
+    s_rsp     : in  csr_rsp_array_t(WINDOWS'range)
   );
 end entity;
 
@@ -69,9 +65,9 @@ begin
     err   := miss_ack;
     rdata := (others => '0');
     for i in WINDOWS'range loop
-      ack   := ack or s_ack(i);
-      err   := err or s_err(i);
-      rdata := rdata or s_rdata(i);
+      ack   := ack or s_rsp(i).ack;
+      err   := err or s_rsp(i).err;
+      rdata := rdata or s_rsp(i).rdata;
     end loop;
     ack_c   <= ack;
     err_c   <= err;
@@ -83,9 +79,9 @@ begin
   bus_rdata <= rdata_r;
 
   s_req   <= req_r;
-  s_we    <= we_r;
-  s_addr  <= addr_r;
-  s_wdata <= wdata_r;
+  s_cmd.we    <= we_r;
+  s_cmd.addr  <= addr_r;
+  s_cmd.wdata <= wdata_r;
 
   process (clk)
   begin

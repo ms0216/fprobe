@@ -9,6 +9,7 @@ import type { DaemonConnection } from "./api";
 import { confirmer } from "./confirm";
 import { t, type Key, type Translate } from "./i18n";
 import type { AppState, Snapshot } from "./state";
+import { addListener } from "./store";
 
 export interface SymbolHit {
   name: string;
@@ -199,9 +200,7 @@ export class Safety {
   }
 
   subscribe(fn: (s: SafetySnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   get snapshot(): SafetySnapshot {

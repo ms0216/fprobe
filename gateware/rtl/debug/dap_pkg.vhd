@@ -77,6 +77,7 @@ package dap_pkg is
   constant ACK_OK    : std_logic_vector(2 downto 0) := "001";
   constant ACK_WAIT  : std_logic_vector(2 downto 0) := "010";
   constant ACK_FAULT : std_logic_vector(2 downto 0) := "100";
+  constant ACK_NONE  : std_logic_vector(2 downto 0) := "111";   -- 無応答・プロトコル異常（jtag_phy が OK / WAIT / FAULT 以外に返す値）
 
   -- コマンドを受け持つユニット
   type dap_unit_t is (U_NONE, U_CONFIG, U_SWO, U_SEQUENCE, U_TRANSFER);
@@ -92,9 +93,45 @@ package dap_pkg is
   function byte_word(b : std_logic_vector(7 downto 0)) return std_logic_vector;
   -- 1 µs の周期数（四捨五入。DAP_Delay・SWJ_Pins の待ち）
   function us_cycles(clk_hz : positive) return positive;
+  -- AP の CSW への書き込み値: csw の上位 26 ビットと bit3 は保ち、アドレス増加（bit5:4）を addrinc に、サイズ（bit2:0）を 32 ビットにする
+  constant CSW_SIZE_32        : std_logic_vector(2 downto 0) := "010";
+  constant CSW_ADDRINC_OFF    : std_logic_vector(1 downto 0) := "00";
+  constant CSW_ADDRINC_SINGLE : std_logic_vector(1 downto 0) := "01";
+  function csw_word32(csw : std_logic_vector(31 downto 0); addrinc : std_logic_vector(1 downto 0))
+    return std_logic_vector;
   -- 転送応答: OK / WAIT / FAULT はそのまま、それ以外（無応答 111 等）は 3 ビットの値。OK でもパリティ異常は ERROR
   function transfer_response(ack : std_logic_vector(2 downto 0); parity_error, reading : std_logic)
     return std_logic_vector;
+
+  -- dap_packet とコマンドのユニット（dap_cmd_*）の間の I/F。dap_processor が起動したユニットだけを dap_packet へつなぐ。
+  --   start（1 周期）で command の処理を始め、done（1 周期）で終える。
+  --   引数: get_req（1 周期）で get_n バイトを頼み、get_ack の周期に arg（下位から）が揃う。
+  --   応答: put_req（1 周期）で put_val の下位 put_n バイトを頼み、put_ack で受け取られる。
+  type unit_req_t is record                  -- dap_packet → ユニット
+    command : natural range 0 to 255;
+    start   : std_logic;
+    get_ack : std_logic;
+    arg     : std_logic_vector(63 downto 0);
+    put_ack : std_logic;
+  end record;
+  type unit_rsp_t is record                  -- ユニット → dap_packet
+    done    : std_logic;
+    get_req : std_logic;
+    get_n   : natural range 1 to 8;
+    put_req : std_logic;
+    put_n   : natural range 1 to 8;
+    put_val : std_logic_vector(63 downto 0);
+  end record;
+  constant UNIT_RSP_IDLE : unit_rsp_t :=
+    (done => '0', get_req => '0', get_n => 1, put_req => '0', put_n => 1, put_val => (others => '0'));
+  type unit_req_array_t is array (dap_unit_t) of unit_req_t;
+  type unit_rsp_array_t is array (dap_unit_t) of unit_rsp_t;
+
+  -- 半周期の時計（swd_phy・jtag_phy の線の相の長さ。クロックのプロセスから呼ぶ）: timer は相の残り周期数、expired は
+  -- 相の最後の周期（timer = 0。1 周期前に timer = 1 を見て決める）。half_restart は相を始める（half_period 周期後に
+  -- expired。half_period は 1 以上）、half_tick は 1 周期進める
+  procedure half_restart(signal timer : out unsigned; signal expired : out boolean; half_period : in unsigned);
+  procedure half_tick(signal timer : inout unsigned; signal expired : out boolean);
 
 end package;
 
@@ -143,13 +180,31 @@ package body dap_pkg is
     return (clk_hz + 500_000) / 1_000_000;
   end function;
 
+  function csw_word32(csw : std_logic_vector(31 downto 0); addrinc : std_logic_vector(1 downto 0))
+    return std_logic_vector is
+  begin
+    return csw(31 downto 6) & addrinc & csw(3) & CSW_SIZE_32;
+  end function;
+
   function transfer_response(ack : std_logic_vector(2 downto 0); parity_error, reading : std_logic)
     return std_logic_vector is
   begin
-    if ack = "001" and reading = '1' and parity_error = '1' then
+    if ack = ACK_OK and reading = '1' and parity_error = '1' then
       return RESP_ERROR;
     end if;
     return "00000" & ack;
   end function;
+
+  procedure half_restart(signal timer : out unsigned; signal expired : out boolean; half_period : in unsigned) is
+  begin
+    timer   <= half_period - 1;
+    expired <= half_period = 1;
+  end procedure;
+
+  procedure half_tick(signal timer : inout unsigned; signal expired : out boolean) is
+  begin
+    timer   <= timer - 1;
+    expired <= timer = 1;
+  end procedure;
 
 end package body;

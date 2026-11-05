@@ -9,6 +9,14 @@ import { allowed } from "./guard";
 import { unitHex } from "./memory";
 import type { AppState } from "./state";
 
+/** 記録の見張り（recording.trigger_set / recording.trigger_status の応答） */
+export interface RecordingTrigger {
+  state: string; condition?: string; action?: string; hits?: number; last_t?: number | null; error?: string | null;
+}
+
+/** FPGA の条件で仕掛けた停止・捕捉の状態（fpga_obs.trigger_status の応答。orphan = デーモンの再起動前に仕掛けた条件が残っている） */
+export interface HaltState { condition: string | null; count?: number; orphan?: boolean; halt?: boolean }
+
 export interface Watch {
   name: string;
   address: number;

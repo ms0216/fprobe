@@ -1,11 +1,12 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import { intervalNow } from "../common/interval";
   // Power（J-Link の Power・Ozone の Power Graph に当たる）: いまのターゲットの電圧（probe.voltage を周期的に読み、
   // デーモンが残した読みの窓 probe.voltage_history の推移と最小・最大・平均を描く。止める・消す・CSV）、記録の電圧
   // （stream aux・kind mv）のグラフと、recording.voltage の指定した電圧以下の区間の一覧（ダブルクリック・最低の点で
   // 時間軸へ、区間を時間軸の印に、時間軸の選択をグラフの縦線に）。
   // 電流は追加のハード（INA226）が要るので、理由を出すだけ（作らない）
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
   import { untrack } from "svelte";
   import Chart from "../charts/Chart.svelte";
   import { download, type Series } from "../../lib/chart";
@@ -38,7 +39,7 @@
   let rec = $state<{ name: string; hz: number } | null>(null);
   let recVolts = $state<{ x: number[]; y: number[] } | null>(null);
   let recTotal = $state(0);
-  let recFacts = $state<any>(null);             // recording.voltage（統計・いちばん低い点・指定した電圧以下の区間）
+  let recFacts = $state<Result<"recording.voltage"> | null>(null);             // recording.voltage（統計・いちばん低い点・指定した電圧以下の区間）
   let cursor = $state<number | null>(null);
 
   const linkOpen = $derived($app.link === "open");
@@ -53,9 +54,7 @@
   // いまの電圧を周期的に読む（止めている間は読まない）
   $effect(() => {
     if (!linkOpen || !aux || paused) return;
-    void readVoltage();
-    const timer = setInterval(() => void readVoltage(), POLL_MS);
-    return () => clearInterval(timer);
+    return intervalNow(() => readVoltage(), POLL_MS);
   });
 
   async function readVoltage() {

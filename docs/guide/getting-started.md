@@ -139,3 +139,6 @@ AI から使うなら、MCP の登録（[mcp.md](mcp.md)）をして、`probe_in
 - 書き込みが拒否された: IDCODE の照合に失敗した、またはポートが一意でない。`python -m fprobe_gw detect` で見える機器を確かめる。
 - Ethernet でつながらない: `ping 192.168.77.2`。PC 側のアドレスが `192.168.77.1/24` か。
 - 症状別の一覧は [troubleshooting.md](troubleshooting.md)。
+- **API（WebSocket）を直接使うとき**: 名前を当てずっぽうで試さず、`session.methods`（一覧と説明。`prefix` で絞る、`name` で 1 つの全部）と `session.hints`
+  （使い方の落とし穴の記録。失敗した API の名前を `method` に）。ELF の関数・変数は `debug.symbol.search`（名前の一部から探す）。
+  失敗の応答の `ApiError.data` に `hint_ids`・候補が付く。ヒントの一覧は [hints.md](hints.md)。

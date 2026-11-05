@@ -328,10 +328,10 @@ def test_deep_capture_that_never_fills_says_what_to_check(probe, monkeypatch, ta
 
 def test_itm_duration_makes_stop_wait(itm_probe, table_path):
     p = itm_probe
+    begun = time.monotonic()                          # 開始の前から測る（開始に時間がかかる負荷のとき、後から測ると足りなくなる）
     p.testpoint_start("itm", map_path=str(table_path), swo_baud=2_000_000, duration_s=0.05)
-    begun = time.monotonic()
     assert p.testpoint_stop()["duration_s"] == 0.05
-    assert time.monotonic() - begun >= 0.04
+    assert time.monotonic() - begun >= 0.05           # 停止は、開始から duration_s たつまで待つ
 
 
 # --- RTT ---------------------------------------------------------------------------------------

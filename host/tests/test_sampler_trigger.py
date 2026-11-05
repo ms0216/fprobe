@@ -49,7 +49,7 @@ def test_status_is_the_register_facts(probe):
     st = probe.sampler_trigger_status()
     assert st == {"enabled": True, "address": DHCSR, "mask": S_HALT, "value": S_HALT, "halt": True, "la": True,
                   "matched": True, "seen_any": True, "seen": 40, "count": 2,
-                  "time": (1 << 32) + 5, "prev_time": (1 << 32) + 3}
+                  "time": (1 << 32) + 5, "time_valid": True, "prev_time": (1 << 32) + 3}
 
 
 def test_clear_disables_and_removes_only_its_route_bit(probe):

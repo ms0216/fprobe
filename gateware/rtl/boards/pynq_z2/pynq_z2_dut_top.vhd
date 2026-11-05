@@ -9,6 +9,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.pynq_z2_pkg.all;
 
 entity pynq_z2_dut_top is
@@ -25,37 +26,6 @@ entity pynq_z2_dut_top is
 end entity;
 
 architecture rtl of pynq_z2_dut_top is
-  -- Vivado のブロック設計 ps7_bd（ps7_bd.tcl）が生成する包み。GHDL では使わない
-  component ps7_bd_wrapper
-    port (
-      aclk          : in  std_logic;
-      aresetn       : in  std_logic;
-      pjtag_tck     : in  std_logic;
-      pjtag_tms     : in  std_logic;
-      pjtag_tdi     : in  std_logic;
-      pjtag_tdo     : out std_logic;
-      m_axi_araddr  : out std_logic_vector(31 downto 0);
-      m_axi_arprot  : out std_logic_vector(2 downto 0);
-      m_axi_arready : in  std_logic;
-      m_axi_arvalid : out std_logic;
-      m_axi_awaddr  : out std_logic_vector(31 downto 0);
-      m_axi_awprot  : out std_logic_vector(2 downto 0);
-      m_axi_awready : in  std_logic;
-      m_axi_awvalid : out std_logic;
-      m_axi_bready  : out std_logic;
-      m_axi_bresp   : in  std_logic_vector(1 downto 0);
-      m_axi_bvalid  : in  std_logic;
-      m_axi_rdata   : in  std_logic_vector(31 downto 0);
-      m_axi_rready  : out std_logic;
-      m_axi_rresp   : in  std_logic_vector(1 downto 0);
-      m_axi_rvalid  : in  std_logic;
-      m_axi_wdata   : out std_logic_vector(31 downto 0);
-      m_axi_wready  : in  std_logic;
-      m_axi_wstrb   : out std_logic_vector(3 downto 0);
-      m_axi_wvalid  : out std_logic
-    );
-  end component;
-
   signal sys_clk, sys_rst, mmcm_lock, aresetn : std_logic;
   signal araddr, awaddr, rdata, wdata : std_logic_vector(31 downto 0);
   signal arprot, awprot : std_logic_vector(2 downto 0);
@@ -63,7 +33,7 @@ architecture rtl of pynq_z2_dut_top is
   signal bresp, rresp : std_logic_vector(1 downto 0);
   signal wstrb : std_logic_vector(3 downto 0);
   signal dbg : std_logic_vector(5 downto 0);
-  signal heartbeat : unsigned(25 downto 0);
+  signal heartbeat : unsigned(HEARTBEAT_BITS - 1 downto 0);
 begin
   clock_i : entity work.xilinx_mmcm
     generic map (CLKIN_PERIOD_NS => MMCM_CLKIN_PERIOD_NS, MULT => MMCM_MULT, DIVCLK => MMCM_DIVCLK,

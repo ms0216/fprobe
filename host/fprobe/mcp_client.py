@@ -62,7 +62,7 @@ def _annotation(schema: dict):
 
 # 道具にする session.*（読むだけのもの）: 許可の表、デーモンの状態（利用者・一時停止・ターゲットの状態）、操作の記録（人が
 # 何をしたかを AI も見る。人と AI の見えるものを一対一に）
-MCP_SESSION_METHODS = ("session.permissions", "session.status", "session.activity.list")
+MCP_SESSION_METHODS = ("session.permissions", "session.status", "session.activity.list", "session.hints")
 # AI に知らせる通知（次の道具の結果の notices に添える）: ELF の更新、人の操作（activity の role = human。AI 自身の操作は
 # 自分で知っている）、一時停止・再開（control）
 NOTICE_TOPICS = ("elf.changed", "activity", "control")
@@ -133,7 +133,8 @@ def tool_function(client, method: Method, notices: Notices | None = None):
         except (ApiError, ConnectionError) as e:
             # デーモンが返した誤り（例外の種類とメッセージ。ApiError の文面は "型: メッセージ"）と接続の切れは、想定した誤りとして
             # 文面ごと AI に返す。ToolError 以外の例外は MCP の SDK が文面を隠し、AI は原因を知れず同じ道具を繰り返した
-            raise ToolError(str(e)) from e
+            hints = (getattr(e, "data", None) or {}).get("hint_ids")
+            raise ToolError(str(e) + (f"（ヒント: {', '.join(hints)}。session_hints で引く）" if hints else "")) from e
         return result if notices is None else notices.attach(result)
 
     tool.__signature__ = _inspect.Signature(parameters)

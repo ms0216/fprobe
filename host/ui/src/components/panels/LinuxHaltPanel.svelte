@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import Req from "./Req.svelte";
   // Linux（JTAG で全コアを止める。API の linux.halt.*。CLI python -m fprobe.linux_halt と一対一）:
   // 開く設定・全コアの停止と再開・プロセスとスレッド・BKPT の回復・後始末・gdb のサーバ。
   // 考えない層: 値はすべて API の応答のまま描く（停止の上限の良し悪し・並べ替えの基準を持たない。比較は API の skew_verdict）
@@ -23,6 +24,10 @@
   let attached = $state<Result<"linux.halt.debug.attach"> | null>(null);
   let detached = $state<Result<"linux.halt.debug.close"> | null>(null);
   let threadsPid = $state(load("linuxHalt.threadsPid", ""));
+  // 設定ファイル（API の linux.halt.profile.save / load。欄に入れるだけ。開く・attach は人が押す）。パスは前に書いた値（見せ方の便利さ）
+  let profilePath = $state(load("linuxHalt.profilePath", ""));
+  let profileOffsets = $state<boolean | null | undefined>(undefined);   // 読み込んだ offsets の SHA-256 の一致（API の offsets_matches）
+  $effect(() => { save("linuxHalt.profilePath", profilePath); });
   type Status = Result<"linux.halt.status">;
   type OpenStatus = Extract<Status, { open: true }>;
   let status = $state<Status | null>(null);
@@ -120,6 +125,18 @@
     await refresh();
   }
 
+  async function profileSave() {
+    await call("linux.halt.profile.save", { path: profilePath.trim() });
+  }
+
+  async function profileLoad() {
+    const r = await call("linux.halt.profile.load", { path: profilePath.trim() });
+    if (r === undefined) return;
+    form = haltFormOf(form, r.open as Record<string, unknown>);
+    if (r.attach) attachForm = attachFormOf(attachForm, r.attach as Record<string, unknown>);
+    profileOffsets = r.offsets_matches;
+  }
+
   async function threadsOf() {
     const built = haltThreadsParams(threadsPid);
     if ("error" in built) { error = $i18n("linux.badField", { field: built.error }); return; }
@@ -184,24 +201,31 @@
   <details class="pad" open={!status?.open}>
     <summary>{$i18n("linuxHalt.settings")}</summary>
   <form id="halt-open" class="pane-bar wrapbar" onsubmit={(e) => { e.preventDefault(); void open(); }}>
-    <label class="fld"><span class="nm" title="backend">{$i18n("linuxHalt.f.backend")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.backend} aria-label="backend" aria-required="true">
+    <label class="fld"><span class="nm" title="backend">{$i18n("linuxHalt.f.backend")}<Req /></span><select disabled={openLocked} bind:value={form.backend} aria-label="backend" aria-required="true">
       <option value="" disabled>backend</option><option value="fprobe">fprobe</option><option value="openocd">openocd</option>
     </select></label>
-    <label class="fld"><span class="nm" title="jtag_khz">{$i18n("linuxHalt.f.jtag_khz")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="offsets">{$i18n("linuxHalt.f.offsets")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={$i18n("linuxHalt.offsetsHint")} aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="page_offset">{$i18n("linuxHalt.f.page_offset")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="phys_offset">{$i18n("linuxHalt.f.phys_offset")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="linear_map_end">{$i18n("linuxHalt.f.linear_map_end")}<span class="req" aria-hidden="true">*</span></span><input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="max_tasks">{$i18n("linuxHalt.f.max_tasks")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="max_threads">{$i18n("linuxHalt.f.max_threads")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="mmu_format">{$i18n("linuxHalt.f.mmu_format")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true">
+    <label class="fld"><span class="nm" title="jtag_khz">{$i18n("linuxHalt.f.jtag_khz")}<Req /></span><input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="offsets">{$i18n("linuxHalt.f.offsets")}<Req /></span><input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={$i18n("linuxHalt.offsetsHint")} aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="page_offset">{$i18n("linuxHalt.f.page_offset")}<Req /></span><input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="phys_offset">{$i18n("linuxHalt.f.phys_offset")}<Req /></span><input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="linear_map_end">{$i18n("linuxHalt.f.linear_map_end")}<Req /></span><input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_tasks">{$i18n("linuxHalt.f.max_tasks")}<Req /></span><input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_threads">{$i18n("linuxHalt.f.max_threads")}<Req /></span><input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="mmu_format">{$i18n("linuxHalt.f.mmu_format")}<Req /></span><select disabled={openLocked} bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true">
       <option value="" disabled>mmu_format</option><option value="short">short</option><option value="lpae">lpae</option>
     </select></label>
-    <label class="fld"><span class="nm" title="journal">{$i18n("linuxHalt.f.journal")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={$i18n("linuxHalt.journalHint")} aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="fpga_request_times">{$i18n("linuxHalt.f.fpga_request_times")}<span class="req" aria-hidden="true">*</span></span><select disabled={openLocked} bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true">
+    <label class="fld"><span class="nm" title="journal">{$i18n("linuxHalt.f.journal")}<Req /></span><input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={$i18n("linuxHalt.journalHint")} aria-required="true" disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="fpga_request_times">{$i18n("linuxHalt.f.fpga_request_times")}<Req /></span><select disabled={openLocked} bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true">
       <option value="" disabled>fpga_request_times</option><option value="true">true</option><option value="false">false</option>
     </select></label>
   </form>
+    <div class="bar">
+      <span class="nm" title="linux.halt.profile.*">{$i18n("linuxHalt.profile")}</span>
+      <input class="mono" bind:value={profilePath} placeholder="path" aria-label={$i18n("linuxHalt.profilePath")} />
+      <button type="button" class="small" disabled={!status?.open || !profilePath.trim()} title={$i18n("linuxHalt.profileSaveHint")} onclick={() => void profileSave()}>{$i18n("linuxHalt.profileSave")}</button>
+      <button type="button" class="small" disabled={!profilePath.trim()} title={$i18n("linuxHalt.profileLoadHint")} onclick={() => void profileLoad()}>{$i18n("linuxHalt.profileLoad")}</button>
+      {#if profileOffsets !== undefined}<span class="mono small">{$i18n("linuxHalt.profileOffsets", { state: profileOffsets === null ? $i18n("linuxHalt.profileUnread") : profileOffsets ? $i18n("linuxHalt.profileSame") : $i18n("linuxHalt.profileDiffers") })}</span>{/if}
+    </div>
   </details>
   <details class="pad">
     <summary>{$i18n("linuxHalt.backendFields")}</summary>
@@ -295,22 +319,22 @@
       <details open>
         <summary>{$i18n("linuxHalt.debug")}</summary>
         <form class="bar" onsubmit={(e) => { e.preventDefault(); void attach(); }}>
-          <label class="fld"><span class="nm" title="pid">{$i18n("linuxHalt.f.pid")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="elf">{$i18n("linuxHalt.f.elf")}<span class="req" aria-hidden="true">*</span></span><input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={$i18n("linuxHalt.elfHint")} aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="pid">{$i18n("linuxHalt.f.pid")}<Req /></span><input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="elf">{$i18n("linuxHalt.f.elf")}<Req /></span><input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={$i18n("linuxHalt.elfHint")} aria-required="true" disabled={attachLocked} /></label>
           <details class="adv">
             <summary>{$i18n("linuxHalt.advanced")} <span class="mono muted small">{attachForm.skewLimitNs} ns · {attachForm.maxHaltS} s · {attachForm.breakpointKind || "-"} bp · {attachForm.stepMaxInstructions} / {attachForm.stepTimeoutS} s</span></summary>
-          <label class="fld"><span class="nm" title="skew_limit_ns">{$i18n("linuxHalt.f.skew_limit_ns")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="thread_id">{$i18n("linuxHalt.f.thread_id")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true">
+          <label class="fld"><span class="nm" title="skew_limit_ns">{$i18n("linuxHalt.f.skew_limit_ns")}<Req /></span><input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="thread_id">{$i18n("linuxHalt.f.thread_id")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true">
             <option value="" disabled>thread_id</option><option value="stack">stack</option><option value="contextidr">contextidr</option>
           </select></label>
-          <label class="fld"><span class="nm" title="kernel_isa">{$i18n("linuxHalt.f.kernel_isa")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
+          <label class="fld"><span class="nm" title="kernel_isa">{$i18n("linuxHalt.f.kernel_isa")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
             <option value="" disabled>kernel_isa</option><option value="arm">arm</option><option value="thumb">thumb</option>
           </select></label>
-          <label class="fld"><span class="nm" title="max_step_retries">{$i18n("linuxHalt.f.max_step_retries")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="bp_unmapped">{$i18n("linuxHalt.f.bp_unmapped")}<span class="req" aria-hidden="true">*</span></span><select disabled={attachLocked} bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
+          <label class="fld"><span class="nm" title="max_step_retries">{$i18n("linuxHalt.f.max_step_retries")}<Req /></span><input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="bp_unmapped">{$i18n("linuxHalt.f.bp_unmapped")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
             <option value="" disabled>bp_unmapped</option><option value="error">error</option><option value="hw">hw</option>
           </select></label>
-          <label class="fld"><span class="nm" title="max_halt_s">{$i18n("linuxHalt.f.max_halt_s")}<span class="req" aria-hidden="true">*</span></span><input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="max_halt_s">{$i18n("linuxHalt.f.max_halt_s")}<Req /></span><input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" disabled={attachLocked} /></label>
           <label class="fld"><span class="nm" title="fetch_from_target">{$i18n("linuxHalt.f.fetch_from_target")}</span><input class="mono" bind:value={attachForm.fetchFromTarget} placeholder="fetch_from_target" aria-label="fetch_from_target" title={$i18n("linuxHalt.fetchHint")} disabled={attachLocked} /></label>
           <label class="fld"><span class="nm" title="breakpoint_kind">{$i18n("linuxHalt.f.breakpoint_kind")}</span><select disabled={attachLocked} bind:value={attachForm.breakpointKind} aria-label="breakpoint_kind" title={$i18n("linuxHalt.bpKindHint")}>
             <option value="">breakpoint_kind</option><option value="sw">sw</option><option value="hw">hw</option>
@@ -334,19 +358,19 @@
       <details>
         <summary>gdb</summary>
         <form class="bar" onsubmit={(e) => { e.preventDefault(); void serve(); }}>
-          <input class="mono num" bind:value={gdbForm.pid} placeholder="pid" aria-label="pid" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={gdbForm.port} placeholder="port" aria-label="port" aria-required="true" /><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={gdbForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          <input class="mono num" bind:value={gdbForm.pid} placeholder="pid" aria-label="pid" aria-required="true" /><Req />
+          <input class="mono num" bind:value={gdbForm.port} placeholder="port" aria-label="port" aria-required="true" /><Req />
+          <input class="mono num" bind:value={gdbForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" /><Req />
           <select bind:value={gdbForm.threadId} aria-label="thread_id" aria-required="true">
             <option value="" disabled>thread_id</option><option value="stack">stack</option><option value="contextidr">contextidr</option>
-          </select><span class="req" aria-hidden="true">*</span>
+          </select><Req />
           <select bind:value={gdbForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
             <option value="" disabled>kernel_isa</option><option value="arm">arm</option><option value="thumb">thumb</option>
-          </select><span class="req" aria-hidden="true">*</span>
-          <input class="mono num" bind:value={gdbForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" /><span class="req" aria-hidden="true">*</span>
+          </select><Req />
+          <input class="mono num" bind:value={gdbForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" /><Req />
           <select bind:value={gdbForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
             <option value="" disabled>bp_unmapped</option><option value="error">error</option><option value="hw">hw</option>
-          </select><span class="req" aria-hidden="true">*</span>
+          </select><Req />
           <input class="mono" bind:value={gdbForm.log} placeholder="log" aria-label="log" />
           <button class="primary small">{$i18n("linuxHalt.gdbServe")}</button>
           <button type="button" class="small" onclick={async () => { const r = await call("linux.halt.gdb.stop"); if (r !== undefined) gdb = r.gdb; await refresh(); }}>{$i18n("linuxHalt.gdbStop")}</button>

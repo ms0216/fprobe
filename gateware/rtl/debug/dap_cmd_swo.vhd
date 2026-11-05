@@ -18,17 +18,8 @@ entity dap_cmd_swo is
     clk         : in  std_logic;
     rst         : in  std_logic;
     -- dap_packet との I/F
-    command     : in  natural range 0 to 255;
-    start       : in  std_logic;
-    done        : out std_logic;
-    get_req     : out std_logic;
-    get_n       : out natural range 1 to 8;
-    get_ack     : in  std_logic;
-    arg         : in  std_logic_vector(63 downto 0);
-    put_req     : out std_logic;
-    put_n       : out natural range 1 to 8;
-    put_val     : out std_logic_vector(63 downto 0);
-    put_ack     : in  std_logic;
+    req         : in  unit_req_t;
+    rsp         : out unit_rsp_t;
     -- SWO 受信器
     swo_run     : out std_logic;
     swo_divisor : out unsigned(15 downto 0);                 -- 1 ビットの clk 周期数
@@ -48,9 +39,7 @@ architecture rtl of dap_cmd_swo is
   type state_t is (S_IDLE, S_DISPATCH, S_WAIT_GET, S_WAIT_PUT, S_DONE,
                    S_TRANSPORT, S_MODE, S_BAUD, S_BAUD_DIVIDE, S_BAUD_ACTUAL, S_BAUD_DONE, S_CONTROL);
   signal state, ret : state_t := S_IDLE;
-  signal get_req_r, put_req_r, done_r : std_logic := '0';
-  signal get_n_r, put_n_r : natural range 1 to 8 := 1;
-  signal put_val_r : std_logic_vector(63 downto 0) := (others => '0');
+  signal rsp_r      : unit_rsp_t := UNIT_RSP_IDLE;
   signal run_r     : std_logic := '0';
   signal man_r     : std_logic := '0';
   signal mode_ok   : boolean;                                -- 引数の方式を受けられる（0・1、Manchester なら 2 も）
@@ -60,35 +49,30 @@ architecture rtl of dap_cmd_swo is
   signal div_r     : unsigned(15 downto 0) := to_unsigned(CLK_HZ / 115_200, 16);
   signal status    : std_logic_vector(7 downto 0);           -- bit0 受信中, bit6 異常, bit7 取りこぼし
 begin
-  get_req     <= get_req_r;
-  get_n       <= get_n_r;
-  put_req     <= put_req_r;
-  put_n       <= put_n_r;
-  put_val     <= put_val_r;
-  done        <= done_r;
+  rsp          <= rsp_r;
   swo_run     <= run_r;
   swo_divisor <= div_r;
   swo_manchester <= man_r;
-  mode_ok     <= arg(7 downto 0) = x"00" or arg(7 downto 0) = x"01" or (HAS_MANCHESTER and arg(7 downto 0) = x"02");
+  mode_ok     <= req.arg(7 downto 0) = x"00" or req.arg(7 downto 0) = x"01" or (HAS_MANCHESTER and req.arg(7 downto 0) = x"02");
   status      <= swo_overrun & swo_error & "00000" & run_r;
 
 
   process (clk)
     procedure get(n : natural; back : state_t) is
     begin
-      get_req_r <= '1';
-      get_n_r   <= n;
-      ret       <= back;
-      state     <= S_WAIT_GET;
+      rsp_r.get_req <= '1';
+      rsp_r.get_n   <= n;
+      ret           <= back;
+      state         <= S_WAIT_GET;
     end procedure;
 
     procedure put(n : natural; v : std_logic_vector(63 downto 0); back : state_t) is
     begin
-      put_req_r <= '1';
-      put_n_r   <= n;
-      put_val_r <= v;
-      ret       <= back;
-      state     <= S_WAIT_PUT;
+      rsp_r.put_req <= '1';
+      rsp_r.put_n   <= n;
+      rsp_r.put_val <= v;
+      ret           <= back;
+      state         <= S_WAIT_PUT;
     end procedure;
 
     procedure reply_status(ok : boolean) is
@@ -101,11 +85,11 @@ begin
     end procedure;
   begin
     if rising_edge(clk) then
-      get_req_r <= '0';
-      put_req_r <= '0';
-      done_r    <= '0';
+      rsp_r.get_req <= '0';
+      rsp_r.put_req <= '0';
+      rsp_r.done    <= '0';
       div_start <= '0';
-      arg_zero  <= unsigned(arg(31 downto 0)) = 0;
+      arg_zero  <= unsigned(req.arg(31 downto 0)) = 0;
 
       if rst = '1' then
         state <= S_IDLE;
@@ -115,12 +99,12 @@ begin
       else
         case state is
           when S_IDLE =>
-            if start = '1' then
+            if req.start = '1' then
               state <= S_DISPATCH;
             end if;
 
           when S_DISPATCH =>
-            case command is
+            case req.command is
               when ID_SWO_TRANSPORT => get(1, S_TRANSPORT);
               when ID_SWO_MODE      => get(1, S_MODE);
               when ID_SWO_BAUDRATE  => get(4, S_BAUD);
@@ -130,27 +114,27 @@ begin
             end case;
 
           when S_WAIT_GET =>
-            if get_ack = '1' then
+            if req.get_ack = '1' then
               state <= ret;
             end if;
 
           when S_WAIT_PUT =>
-            if put_ack = '1' then
+            if req.put_ack = '1' then
               state <= ret;
             end if;
 
           when S_DONE =>
-            done_r <= '1';
+            rsp_r.done <= '1';
             state  <= S_IDLE;
 
           when S_TRANSPORT =>
-            reply_status(run_r = '0' and (arg(7 downto 0) = x"00" or arg(7 downto 0) = x"02"));
+            reply_status(run_r = '0' and (req.arg(7 downto 0) = x"00" or req.arg(7 downto 0) = x"02"));
 
           -- 参照実装と同じく、受信中でも受けて受信を止める（pyOCD は設定し直す前に Mode OFF で止める）
           when S_MODE =>
             if mode_ok then
               run_r <= '0';
-              man_r <= arg(1);
+              man_r <= req.arg(1);
             end if;
             reply_status(mode_ok);
 
@@ -159,8 +143,8 @@ begin
             if run_r = '1' or arg_zero then
               put(4, (others => '0'), S_DONE);                       -- 設定できない: 0
             else
-              div_num   <= to_unsigned(CLK_HZ, 32) + shift_right(unsigned(arg(31 downto 0)), 1);
-              div_den   <= unsigned(arg(31 downto 0));
+              div_num   <= to_unsigned(CLK_HZ, 32) + shift_right(unsigned(req.arg(31 downto 0)), 1);
+              div_den   <= unsigned(req.arg(31 downto 0));
               div_start <= '1';
               state     <= S_BAUD_DIVIDE;
             end if;
@@ -183,7 +167,7 @@ begin
             end if;
 
           when S_CONTROL =>
-            run_r <= arg(0);
+            run_r <= req.arg(0);
             reply_status(true);
         end case;
       end if;

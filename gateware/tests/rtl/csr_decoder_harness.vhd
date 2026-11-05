@@ -24,6 +24,8 @@ architecture rtl of csr_decoder_harness is
   constant WINDOWS : csr_windows_t := ((base => 0, size => 4), (base => 16, size => 16));
   signal s_req, s_ack, s_err : std_logic_vector(0 to 1) := (others => '0');
   signal s_rdata : csr_word_array_t(0 to 1) := (others => (others => '0'));
+  signal s_rsp   : csr_rsp_array_t(0 to 1);
+  signal s_cmd   : csr_cmd_t;
   signal regs    : csr_word_array_t(0 to 3) := (others => (others => '0'));
   signal wait_n  : natural range 0 to 3 := 0;
   signal c_we    : std_logic;                     -- デコーダが窓へ配る値（レジスタを通した写し）
@@ -34,8 +36,13 @@ begin
     generic map (WINDOWS => WINDOWS)
     port map (clk => clk, rst => rst, bus_req => bus_req, bus_we => bus_we, bus_addr => bus_addr, bus_wdata => bus_wdata,
               bus_ack => bus_ack, bus_err => bus_err, bus_rdata => bus_rdata,
-              s_we => c_we, s_addr => c_addr, s_wdata => c_wdata,
-              s_req => s_req, s_ack => s_ack, s_err => s_err, s_rdata => s_rdata);
+              s_cmd => s_cmd, s_req => s_req, s_rsp => s_rsp);
+  c_we    <= s_cmd.we;
+  c_addr  <= s_cmd.addr;
+  c_wdata <= s_cmd.wdata;
+  rsp_g : for i in 0 to 1 generate
+    s_rsp(i) <= (ack => s_ack(i), err => s_err(i), rdata => s_rdata(i));
+  end generate;
 
   process (clk)
     variable index : natural range 0 to 3;

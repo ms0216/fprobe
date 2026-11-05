@@ -18,7 +18,6 @@ _session と、InspectService（SVD・周辺の一括読みの守り・target_fa
 """
 
 import re
-import struct
 from datetime import datetime
 from pathlib import Path
 
@@ -29,9 +28,11 @@ from .home import fprobe_home
 from . import fault
 from .api import NotConnected
 from .debug import _REASONS
-from .dwarf.access import AccessError
 from .rtos import detect
-from .snapshot import SUFFIX, ElfPrint, Region, Snapshot, SnapshotAccess, merge_regions, write_core
+from .snapshot import SUFFIX, ElfPrint, Region, Snapshot, merge_regions, write_core
+from .snapshot_system import (DEMCR, FPCCR, ICTR, MPU_TYPE, NVIC_IABR, NVIC_IPR, NVIC_ISER, NVIC_ISPR, SCB, SHPR2, SYST_CSR, V6M_PARTNOS,
+                              restore_system)
+from .snapshot_target import SnapshotReadOnly, SnapshotTarget
 from .symbols import Symbols, is_network_path
 from .probe_service import HostView
 
@@ -43,86 +44,6 @@ OPTIONAL_REGISTERS = ["basepri", "faultmask", "fpscr"] + [f"s{i}" for i in range
 RESTORE_ORDER = (["control", "msp", "psp", "primask", "basepri", "faultmask"] + [f"r{i}" for i in range(13)]
                  + ["lr", "pc", "xpsr", "fpscr"] + [f"s{i}" for i in range(32)])
 READ_CHUNK = 0x4000
-
-# システム制御空間（読んでも状態が変わらない所）
-ICTR, SYST_CSR, SYST_RVR, SYST_CVR = 0xE000E004, 0xE000E010, 0xE000E014, 0xE000E018
-NVIC_ISER, NVIC_ICER, NVIC_ISPR, NVIC_ICPR, NVIC_IABR, NVIC_IPR = (0xE000E100, 0xE000E180, 0xE000E200, 0xE000E280,
-                                                                    0xE000E300, 0xE000E400)
-SCB, VTOR, AIRCR, SCR, CCR, SHPR1, SHPR2, SHPR3, SHCSR = (0xE000ED00, 0xE000ED08, 0xE000ED0C, 0xE000ED10, 0xE000ED14,
-                                                         0xE000ED18, 0xE000ED1C, 0xE000ED20, 0xE000ED24)
-MPU_TYPE, DEMCR, FPCCR, FPDSCR = 0xE000ED90, 0xE000EDFC, 0xE000EF34, 0xE000EF3C
-AIRCR_VECTKEY, AIRCR_PRIGROUP = 0x05FA0000, 0x700
-SHCSR_ENABLES = 0x000F0000                         # MEMFAULTENA・BUSFAULTENA・USGFAULTENA・SECUREFAULTENA
-_V6M_PARTNOS = {0xC20, 0xC60, 0xD20}
-
-
-class SnapshotReadOnly(RuntimeError):
-    """開いたスナップショットに書こうとした・実行しようとした。"""
-
-
-def _read_only(*_args, **_kwargs):
-    raise SnapshotReadOnly("スナップショットは読むだけ（書き込み・実行は target_connect で実物に）")
-
-
-class SnapshotTarget:
-    """pyOCD の CortexM の読みの口を、スナップショットで満たす（Debugger・PyocdAccess・fault・TargetMemory が使う所）。
-    状態はいつも HALTED、止まった理由は保存した時のもの。書き込み・実行は SnapshotReadOnly。"""
-
-    memory_map: list = []
-
-    def __init__(self, snapshot: Snapshot):
-        self.snapshot = snapshot
-        self.access = SnapshotAccess(snapshot)
-
-    # 状態
-    def get_state(self):
-        return Target.State.HALTED
-
-    def get_halt_reason(self):
-        name = (self.snapshot.info.get("halt") or {}).get("reason")
-        return {v: k for k, v in _REASONS.items()}.get(name)      # 保存した理由が "unknown" 等なら None
-
-    # メモリ（読めない番地は pyOCD と同じくバスエラー）
-    def read_memory_block8(self, address, length):
-        try:
-            return list(self.access.read_memory(address, length))
-        except AccessError as e:
-            raise pyocd_errors.TransferFaultError(str(e)) from None
-
-    def read_memory_block32(self, address, count):
-        return list(struct.unpack(f"<{count}I", bytes(self.read_memory_block8(address, 4 * count))))
-
-    def read_memory(self, address, transfer_size=32, now=True):
-        return int.from_bytes(bytes(self.read_memory_block8(address, transfer_size // 8)), "little")
-
-    def read32(self, address):
-        return self.read_memory(address, 32)
-
-    def read16(self, address):
-        return self.read_memory(address, 16)
-
-    def read8(self, address):
-        return self.read_memory(address, 8)
-
-    # コアレジスタ
-    def read_core_register_raw(self, name):
-        try:
-            return self.access.read_register(name)
-        except AccessError as e:
-            raise pyocd_errors.CoreRegisterAccessError(str(e)) from None
-
-    read_core_register = read_core_register_raw
-
-    def read_core_registers_raw(self, names):
-        return [self.read_core_register_raw(n) for n in names]
-
-    def flush(self):
-        pass
-
-    write_memory = write_memory_block8 = write_memory_block32 = write32 = write16 = write8 = _read_only
-    write_core_register = write_core_register_raw = write_core_registers_raw = _read_only
-    resume = halt = step = reset = reset_and_halt = _read_only
-    set_breakpoint = remove_breakpoint = set_watchpoint = remove_watchpoint = _read_only
 
 
 class SnapshotService:
@@ -154,7 +75,7 @@ class SnapshotService:
     def _live(self):
         """接続中のターゲット（スナップショットではない）。"""
         if self._host._debug is None:
-            raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
+            raise NotConnected("ターゲット未接続（MCU なら target.connect を先に呼ぶ。MCP の道具名は target_connect。Linux のプロセスなら linux.halt.open → linux.halt.debug.attach）")
         return self._host._debug.target
 
     @staticmethod
@@ -263,7 +184,7 @@ class SnapshotService:
     def _capture_system(self, target, fpu: bool, taken: list[Region], skipped: list) -> list[Region]:
         """システム制御空間のうち、読んでも状態が変わらない所（DHCSR・DFSR 以外のデバッグのレジスタは読まない）。"""
         partno = target.read32(fault.CPUID) >> 4 & 0xFFF
-        if partno in _V6M_PARTNOS:                                # ARMv6-M: 割り込みは 32 本、SCB は少ない
+        if partno in V6M_PARTNOS:                                # ARMv6-M: 割り込みは 32 本、SCB は少ない
             wanted = [(SYST_CSR, 16, "SysTick"), (NVIC_ISER, 4, "NVIC.ISER"), (NVIC_ISPR, 4, "NVIC.ISPR"),
                       (NVIC_IPR, 32, "NVIC.IPR"), (SCB, 0x18, "SCB"), (SHPR2, 12, "SCB.SHPR"),
                       (fault.DFSR, 4, "SCB.DFSR"), (DEMCR, 4, "DEMCR")]
@@ -454,7 +375,7 @@ class SnapshotService:
                 for start in range(0, len(r.data), READ_CHUNK):
                     target.write_memory_block8(r.address + start, list(r.data[start:start + READ_CHUNK]))
             target.flush()
-            system = _restore_system(target, snap.access())
+            system = restore_system(target, snap.access())
             written = self._restore_peripherals(target, snap, peripherals or [])
             restored = []
             for name in RESTORE_ORDER:
@@ -525,51 +446,3 @@ def _covered(address: int, length: int, regions: list[Region], kind: str) -> boo
         if at >= address + length:
             return True
     return False
-
-
-def _restore_system(target, access: SnapshotAccess) -> list[str]:
-    """システム制御空間を書き戻す（取ってあるものだけ）。割り込みは全部消してから許可と保留を書き、SysTick は
-    再読み込み値と現在値を書いてから有効にする。MPU の領域は窓（RNR）の 1 つしか取っていないので戻さない。"""
-    written: list[str] = []
-
-    def saved(address: int) -> int | None:
-        try:
-            return int.from_bytes(access.read_memory(address, 4), "little")
-        except AccessError:
-            return None
-
-    def put(address: int, value: int, name: str) -> None:
-        target.write_memory(address, value & 0xFFFFFFFF)
-        written.append(name)
-
-    for address, name in ((VTOR, "VTOR"), (SCR, "SCR"), (CCR, "CCR"), (SHPR1, "SHPR1"), (SHPR2, "SHPR2"),
-                          (SHPR3, "SHPR3"), (fault.CPACR, "CPACR"), (FPCCR, "FPCCR"), (FPDSCR, "FPDSCR")):
-        if (value := saved(address)) is not None:
-            put(address, value, name)
-    if (value := saved(AIRCR)) is not None:
-        put(AIRCR, AIRCR_VECTKEY | value & AIRCR_PRIGROUP, "AIRCR.PRIGROUP")
-    if (value := saved(SHCSR)) is not None:
-        current = target.read32(SHCSR)
-        put(SHCSR, current & ~SHCSR_ENABLES | value & SHCSR_ENABLES, "SHCSR")
-    for i in range(0, 496, 4):
-        if (value := saved(NVIC_IPR + i)) is None:
-            break
-        put(NVIC_IPR + i, value, f"NVIC.IPR{i // 4}")
-    for n in range(16):
-        enabled, pending = saved(NVIC_ISER + 4 * n), saved(NVIC_ISPR + 4 * n)
-        if enabled is None and pending is None:
-            break
-        if enabled is not None:
-            put(NVIC_ICER + 4 * n, 0xFFFFFFFF, f"NVIC.ICER{n}")
-            put(NVIC_ISER + 4 * n, enabled, f"NVIC.ISER{n}")
-        if pending is not None:
-            put(NVIC_ICPR + 4 * n, 0xFFFFFFFF, f"NVIC.ICPR{n}")
-            put(NVIC_ISPR + 4 * n, pending, f"NVIC.ISPR{n}")
-    control = saved(SYST_CSR)
-    if (value := saved(SYST_RVR)) is not None:
-        put(SYST_RVR, value, "SYST_RVR")
-        put(SYST_CVR, 0, "SYST_CVR")                              # 現在値は書けない（書くと 0 になる）
-    if control is not None:
-        put(SYST_CSR, control & 0x7, "SYST_CSR")
-    target.flush()
-    return written

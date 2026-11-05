@@ -6,7 +6,8 @@
   // （時刻に連動。recording.code_at の task。窓ごとに外せる）。
   // 優先度は値のダブルクリックで target.memory.write で書ける（番地と大きさは rtos.tasks の locations の事実）。
   // 場所の無い値（状態・待ち・スタックの使用量。読んだ値から作ったもの）は書けないと示す
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
+  import { intervalNow } from "../common/interval";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
   import { isRunning } from "../../lib/commands";
@@ -27,7 +28,7 @@
 
   const { app, conn, tl, reveal, showAddress, codeAt } = shared();
   const origins = tl.origins;
-  let info = $state<any>(null);
+  let info = $state<Result<"rtos.tasks"> | null>(null);
   let failed = $state(false);
   let open = $state<Set<number>>(new Set());
   let frames = $state<Record<number, { frames?: any[]; error?: string }>>({});
@@ -54,9 +55,7 @@
   // 走っている間は 1 秒ごとに走らせたまま読む
   $effect(() => {
     if (!running) return;
-    void read(true);
-    const timer = setInterval(() => void read(true), 1000);
-    return () => clearInterval(timer);
+    return intervalNow(() => read(true), 1000);
   });
 
   // 時刻に連動（時間軸の選択カーソルの記録の時刻 → recording.code_at の task）: その時刻に動いていたタスクの行を強調して

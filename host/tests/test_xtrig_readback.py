@@ -33,7 +33,7 @@ def test_xtrig_status_reads_back_the_match_and_inject_settings():
     xt.set_match(0x2000_0010, address_mask=0xFFFF_FFFC, data=5, data_mask=0xFF, on_write=False, on_read=True)
     xt.set_inject(0x4000_0000, 0x1234, ap=1)
     out = probe_of(dev).xtrig_status()
-    assert out["match"] == {"count": 0, "time": 0, "address": 0x2000_0010, "address_mask": 0xFFFF_FFFC, "data": 5,
+    assert out["match"] == {"count": 0, "time": 0, "time_valid": False, "address": 0x2000_0010, "address_mask": 0xFFFF_FFFC, "data": 5,
                             "data_mask": 0xFF, "on_write": False, "on_read": True}
     assert out["inject"]["ap"] == 1 and out["inject"]["address"] == 0x4000_0000 and out["inject"]["value"] == 0x1234
     assert out["inject"]["count"] == 0 and out["inject"]["result"] == "ok"

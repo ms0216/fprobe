@@ -62,16 +62,29 @@ class IntervalReport:
                                   for k in ("min", "max", "mean", "stdev", "median", "p90", "p99")}
         out["intervals"] = [list(p) for p in self.pairs]
         out["interval_bins"] = [d.bin_of(v, self.bins) for _, v in self.pairs]   # intervals と同じ並びの箱の番号
+        _attach_bin_facts(out)
         return out
+
+
+def _attach_bin_facts(report: dict) -> None:
+    """histogram の各箱に、その箱の事実を足す（画面が箱番号の突き合わせをしなくてよいように）:
+    intervals = 返した生の組（intervals）のうちその箱に入るもの（interval_bins が箱の番号）、
+    has_longest = 長い順の上位（longest）にその箱に入るものがあるか。"""
+    pairs, bins = report.get("intervals", []), report.get("interval_bins", [])
+    outlying = {o["bin"] for o in report.get("longest", ())}
+    for i, h in enumerate(report.get("histogram", ())):
+        h["intervals"] = [p for p, k in zip(pairs, bins) if k == i]
+        h["has_longest"] = i in outlying
 
 
 def limit_intervals(report: dict, limit: int) -> dict:
     """IntervalReport.as_dict() の生の組（intervals と、同じ並びの interval_bins）を先頭 limit 件に切る（切る前の数は
-    intervals_total）。統計・箱・長い順の上位は全部の組のまま。"""
+    intervals_total）。統計・箱・長い順の上位は全部の組のまま。箱ごとの intervals は切った後の組のもの。"""
     if len(report.get("intervals", ())) > limit:
         report["intervals_total"] = len(report["intervals"])
         report["intervals"] = report["intervals"][:limit]
         report["interval_bins"] = report["interval_bins"][:limit]
+        _attach_bin_facts(report)
     return report
 
 

@@ -27,6 +27,12 @@ SIGNALS = {"groups": {"0": [
     {"name": "left_hi", "lsb": 8, "width": 4, "format": "dec"}, {"name": "dropped", "lsb": 12, "width": 1},
     {"name": "stuck", "lsb": 13, "width": 1}, {"name": "mode", "lsb": 14, "width": 2}]}}
 WATCH = ["g_requests", "g_errors", "g_retries", "g_last_a", "g_last_b"]
+CAUSE_FIELDS = ("condition", "preceded", "coverage", "judged")     # recording.correlate の各原因の候補から出す欄
+
+
+def cause_rows(causes: list[dict]) -> list[dict]:
+    """recording.correlate の causes から、題材の結果に出す欄だけ取り出す。"""
+    return [{k: c[k] for k in CAUSE_FIELDS} for c in causes]
 
 
 class Demo:
@@ -107,8 +113,7 @@ def s1(d: Demo) -> dict:
     cor = d.c.call("recording.correlate", effect="g_errors changed", causes=None, window_s=0.01, limit=5)
     tx = d.c.call("recording.transactions", start="state changed and state=BUSY", counts=["restart changed"],
                   effect="g_errors changed", rows=0)
-    return {"effect": cor["effect"], "top": [{k: c[k] for k in ("condition", "preceded", "coverage", "judged")}
-                                             for c in cor["causes"][:3]],
+    return {"effect": cor["effect"], "top": cause_rows(cor["causes"][:3]),
             "warnings": cor["warnings"], "by_effect": tx["by_effect"], "effect_offset_s": tx["effect_offset_s"]}
 
 
@@ -120,8 +125,7 @@ def s2(d: Demo) -> dict:
                    causes=["dropped changed", "restart changed", "state changed and state=BUSY"], window_s=0.02)
     halt = d.halt_on_fpga("dropped changed")
     d.scenario(0)
-    return {"effect": cor["effect"], "causes": [{k: c[k] for k in ("condition", "preceded", "coverage", "judged")}
-                                                for c in cor["causes"]], "halt": halt}
+    return {"effect": cor["effect"], "causes": cause_rows(cor["causes"]), "halt": halt}
 
 
 def s3(d: Demo) -> dict:
@@ -131,8 +135,7 @@ def s3(d: Demo) -> dict:
     d.scenario(0)
     cor = d.c.call("recording.correlate", effect="g_errors changed",
                    causes=["ch14 changed and spi=1", "ch14 changed", "spi rose"], window_s=0.012)
-    return {"effect": cor["effect"], "causes": [{k: c[k] for k in ("condition", "preceded", "coverage", "judged")}
-                                                for c in cor["causes"]], "warnings": cor["warnings"]}
+    return {"effect": cor["effect"], "causes": cause_rows(cor["causes"]), "warnings": cor["warnings"]}
 
 
 def s4(d: Demo) -> dict:

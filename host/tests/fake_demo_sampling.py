@@ -29,7 +29,7 @@ from fprobe.dwarf.info import FrameView
 from fprobe.dwarf.location import NotAvailable
 from fprobe.dwarf.typesys import type_name
 from fprobe.dwarf.values import encode
-from fprobe.probe_watch import _RAW, ValueStats, WatchService, _read_value, measure, pair_latest, rates, xy_result
+from fprobe.probe_watch import _RAW, ValueStats, WatchService, _read_value, expression_facts, measure, pair_latest, rates, xy_result
 from fprobe.sampler import plan_slots
 from fprobe.voltage import VoltageHistory
 from fprobe.watch_trigger import Capture, Condition
@@ -230,7 +230,7 @@ class SamplingDemo:
             self._watches = []
         return status if status is not None else {"stopped": True}
 
-    def watch_status(self):
+    def watch_status(self, expressions=None):
         with self._sim_lock:
             sampled = any(not w.chase for w in self._watches)
             c = self._capture
@@ -242,7 +242,7 @@ class SamplingDemo:
                     "client": self._watch_client,
                     "capture": None if c is None else {"state": c.state, "reason": c.reason},
                     **(self._sampler_status(True) if sampled else {})}
-            return {**out, **rates(out)}
+            return {**out, **rates(out), "expressions": expression_facts(expressions, out["watches"], out["rejected"])}
 
     def _need_watch(self) -> None:
         if not self._watches:
@@ -255,7 +255,7 @@ class SamplingDemo:
                                if w.series else {"name": w.name, "time_us": None, "value": None}
                                for w in self._watches]}
 
-    def watch_series(self, name, last=1000):
+    def watch_series(self, name, last=1000, after_us=None):
         self._need_watch()
         with self._sim_lock:
             w = next((w for w in self._watches if w.name == name), None)
@@ -264,8 +264,10 @@ class SamplingDemo:
             kept = list(w.series)
             samples = kept[-min(last, SERIES_LIMIT):]
         older = len(kept) > len(samples)                     # 読まなかった古い値（本物の from_us と同じ意味）
+        from_us = samples[0][0] * 1e6 / HZ if older and samples else None
         return {"name": name, "samples": [{"time_us": t * 1e6 / HZ, "value": v} for t, v in samples],
-                "from_us": samples[0][0] * 1e6 / HZ if older and samples else None}
+                "from_us": from_us,
+                "gap": [after_us, from_us] if after_us is not None and from_us is not None and after_us < from_us else None}
 
     def watch_xy(self, x, y, last=1000, max_dt_us=None):
         self._need_watch()

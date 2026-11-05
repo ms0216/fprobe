@@ -2,6 +2,7 @@
   // Log（段階 B §3 の 8）: 解読したログ（defmt / trice / 文字 / compact / memfault）を RTT・SWO・UART から受けて、記録の表で
   // 並べる（log.start / log.stop / log.read）。重要度・文字で絞る。値は API の記録のまま
   import { errorText, readQuiet } from "../../lib/api";
+  import { interval } from "../common/interval";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
@@ -68,8 +69,7 @@
   }));
   $effect(() => {
     if (!running) return;
-    const timer = setInterval(() => void pull(), POLL_MS);
-    return () => clearInterval(timer);
+    return interval(() => pull(), POLL_MS);
   });
 
   async function start() {

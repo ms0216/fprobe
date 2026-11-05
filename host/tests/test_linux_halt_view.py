@@ -352,7 +352,7 @@ def test_the_screen_memory_view_says_why_an_address_cannot_be_read_and_refuses_e
         gui.call("target.memory.view", address=0x10, length=4)
     with pytest.raises(ApiError, match="from_elf"):
         gui.call("target.memory.view", address=world.addr("counter"), length=4, from_elf=True)
-    with pytest.raises(ApiError, match="maximum of 4096"):                  # API の仕様の検査が先に断る
+    with pytest.raises(ApiError, match="4096 以下"):                  # API の仕様の検査が先に断る
         gui.call("target.memory.view", address=world.addr("counter"), length=5000)
 
 
@@ -598,9 +598,9 @@ def test_a_step_on_a_dead_process_says_the_exit_status_and_the_killing_signal():
     """クラッシュで死んだプロセスへのステップの誤り: カーネルの終了コード（(状態 << 8) | シグナル）の読み方を事実として添える
     （「exit, code 11」だけでは、終了状態 11 なのかシグナル 11 なのか分からなかった）。"""
     from fprobe.linux_halt.view import LinuxDebugView
-    with pytest.raises(RuntimeError, match=r"code 11 = exit status 0, killed by signal 11"):
-        LinuxDebugView._step_reply({"address": None, "kind": "exit", "code": 11}, 0.0)
-    with pytest.raises(RuntimeError, match=r"code 256 = exit status 1）"):
+    with pytest.raises(RuntimeError, match=r"プロセス 77 は終了している（exit, code 11 = exit status 0, killed by signal 11）"):
+        LinuxDebugView._step_reply({"address": None, "kind": "exit", "code": 11}, 0.0, 77)     # 以後の操作の断りと同じ文
+    with pytest.raises(RuntimeError, match=r"code 256 = exit status 1）。code はカーネルの終了コード"):
         LinuxDebugView._step_reply({"address": None, "kind": "exit", "code": 256}, 0.0)
 
 def test_the_debug_status_returns_the_settings_the_attach_used_so_the_human_screen_shows_what_the_ai_ran(race):  # noqa: F811
@@ -644,3 +644,12 @@ def test_the_watched_state_says_linux_halt_is_open_before_any_process_is_attache
     ai.call("linux.halt.close")
     st = wait_for(lambda: (s := seen.last()) and s["state"] == "DISCONNECTED" and "linux_halt_open" not in s and s)
     assert "linux_halt_open" not in gui.call("system.status")["mcu"]
+
+
+def test_a_step_that_stopped_on_a_signal_says_which_one():
+    """reason が signal の step の応答に、シグナルの番号と名前（SIGILL 等）を載せる（Haiku の周回 3: 番号が無く、何で止まったか分からなかった）。"""
+    from fprobe.linux_halt.view import LinuxDebugView
+    out = LinuxDebugView._step_reply({"address": 0x10400, "kind": "signal", "signal": 4, "code": 4}, 0.1)
+    assert out["reason"] == "signal" and out["signal"] == 4 and out["signal_name"] == "SIGILL"
+    plain = LinuxDebugView._step_reply({"address": 0x10400, "kind": "step", "reached_new_line": True}, 0.1)
+    assert "signal" not in plain and "signal_name" not in plain

@@ -21,85 +21,32 @@ debug）で動かす共通の部分（U32）。pyOCD はこれらのコアのデ
 - ブレークポイント・ウォッチポイントはハードウェアの組だけ（ソフトの BKPT は使わない）。
 
 呼び手（fprobe.arm_a_target）は、レジスタ・メモリ・ブレークポイントを触る前にコアを止めておく。
+
+分け方: ここには道の型・状態と実行（止める・再開・ステップ・入る / 出る）・複数コアまとめの関数を置く。レジスタは arm_debug_regs.py、
+メモリは arm_debug_memory.py、キャッシュは arm_debug_cache.py、ブレークポイントは arm_debug_points.py（いずれも ArmDebugCore に混ぜ込む部品）。
 """
 
-import contextlib
 import time
 from typing import Protocol
 
+from .arm_debug_cache import _CacheMixin
+from .arm_debug_memory import _MemoryMixin
+from .arm_debug_points import _PointsMixin, _byte_select
+from .arm_debug_regs import _RegistersMixin
+
 __all__ = ["ArmDebugCore", "ArmDebugError", "CoreDebugPort", "REGISTER_NAMES", "arm_mcr", "arm_mrc"]
 
-# --- DSCR（ARMv7 と ARMv6 で同じ位置） ----------------------------------------------------------------
-
-DSCR_HALTED, DSCR_RESTARTED = 1 << 0, 1 << 1
-DSCR_MOE_SHIFT = 2
-DSCR_SDABORT, DSCR_ADABORT, DSCR_UND = 1 << 6, 1 << 7, 1 << 8
-DSCR_STICKY = DSCR_SDABORT | DSCR_ADABORT | DSCR_UND
-DSCR_INTDIS, DSCR_UDCCDIS, DSCR_ITREN, DSCR_HDBGEN, DSCR_MDBGEN = 1 << 11, 1 << 12, 1 << 13, 1 << 14, 1 << 15
-DSCR_EXTDCC = 3 << 20
-DSCR_EXTDCC_FAST = 2 << 20                                # 速いモード: DTRTX を読むたびに ITR の命令を実行し直す
-DSCR_INSTRCOMPL = 1 << 24
-DSCR_TXFULL, DSCR_RXFULL = 1 << 29, 1 << 30
-_DSCR_KEEP = DSCR_UDCCDIS | DSCR_MDBGEN                  # 止めても再開しても、ターゲットの設定のまま残すビット
-
-# 止まった理由（DSCR.MOE。ARMv7-A ARM C11.11.20。8 = OS Unlock catch・9 = 同期の watchpoint（v7.1）以外の値は予約）。
-# 表に無い値は "unknown"（停止の要求等の名前を当てない）
-_MOE = {0: "halt_request", 1: "breakpoint", 2: "watchpoint", 3: "bkpt", 4: "external", 5: "vector_catch",
-        8: "os_unlock_catch", 0xA: "watchpoint"}
-
-# --- CPSR ---------------------------------------------------------------------------------------------
-CPSR_T, CPSR_F, CPSR_I = 1 << 5, 1 << 6, 1 << 7
-
-# --- BCR / WCR -----------------------------------------------------------------------------------------
-BP_ENABLE, BP_ANY_PRIVILEGE = 1 << 0, 3 << 1
-BP_MISMATCH = 4 << 20                                    # ARMv7 の BT = 0b0100 / ARM11 の bits[22:21] = 0b10（同じ値）
-WP_LOAD, WP_STORE = 1 << 3, 2 << 3
-WP_KINDS = {"read": WP_LOAD, "write": WP_STORE, "access": WP_LOAD | WP_STORE}
-
-REGISTER_NAMES = [f"r{i}" for i in range(13)] + ["sp", "lr", "pc", "cpsr"]
-
-
-def arm_mcr(cp: int, opc1: int, rt: int, crn: int, crm: int, opc2: int) -> int:
-    """MCR p<cp>, opc1, Rt, CRn, CRm, opc2（ARM の符号化、条件は常に）。"""
-    return 0xEE000010 | opc1 << 21 | crn << 16 | rt << 12 | cp << 8 | opc2 << 5 | crm
-
-
-def arm_mrc(cp: int, opc1: int, rt: int, crn: int, crm: int, opc2: int) -> int:
-    return arm_mcr(cp, opc1, rt, crn, crm, opc2) | 1 << 20
-
-
-def _to_dtr(rt: int) -> int:                              # MCR p14, 0, Rt, c0, c5, 0（Rt → DBGDTRTX）
-    return arm_mcr(14, 0, rt, 0, 5, 0)
-
-
-def _from_dtr(rt: int) -> int:                            # MRC p14, 0, Rt, c0, c5, 0（DBGDTRRX → Rt）
-    return arm_mrc(14, 0, rt, 0, 5, 0)
-
-
-MOV_R0_PC, MOV_PC_R0, MRS_R0_CPSR, MSR_CPSR_R0 = 0xE1A0000F, 0xE1A0F000, 0xE10F0000, 0xE12FF000
-# 大きさ（バイト）→ (LDR r1, [r0], #n, STR r1, [r0], #n)
-LOAD_STORE = {4: (0xE4901004, 0xE4801004), 2: (0xE0D010B2, 0xE0C010B2), 1: (0xE4D01001, 0xE4C01001)}
-LDC_DTRTX = 0xECB05E01                                     # LDC p14, c5, [r0], #4（メモリの語を DTRTX へ。速い読み）
-DSB, ISB = 0xF57FF04F, 0xF57FF06F                        # ARMv7 の命令（ARMv6 は CP15 の操作で代わりにする）
-CP15 = {
-    "ctr": arm_mrc(15, 0, 0, 0, 0, 1), "mpidr": arm_mrc(15, 0, 0, 0, 0, 5),
-    "dccmvau": arm_mcr(15, 0, 0, 7, 11, 1),              # ARMv7: D キャッシュの行を PoU まで掃き出す（MVA）
-    "iciallu": arm_mcr(15, 0, 0, 7, 5, 0), "bpiall": arm_mcr(15, 0, 0, 7, 5, 6),
-    "iciallis": arm_mcr(15, 0, 0, 7, 1, 0), "bpiallis": arm_mcr(15, 0, 0, 7, 1, 6),   # 内側の共有域（MP 拡張）
-    "v6_clean_dline": arm_mcr(15, 0, 0, 7, 10, 1),       # ARMv6: D キャッシュの行を掃き出す（MVA）
-    "v6_dsb": arm_mcr(15, 0, 0, 7, 10, 4), "v6_prefetch_flush": arm_mcr(15, 0, 0, 7, 5, 4),
-    # 変換の設定・プロセスの文脈・システム制御（読むだけ。read_cp15 が使う。Linux のプロセスを再現するのに要る）
-    "ttbr0": arm_mrc(15, 0, 0, 2, 0, 0), "ttbr1": arm_mrc(15, 0, 0, 2, 0, 1), "ttbcr": arm_mrc(15, 0, 0, 2, 0, 2),
-    "contextidr": arm_mrc(15, 0, 0, 13, 0, 1), "sctlr": arm_mrc(15, 0, 0, 1, 0, 0),
-}
-CP15_READABLE = ("ttbr0", "ttbr1", "ttbcr", "contextidr", "sctlr")
-MODE_MASK = 0x1F
-MODE_USR, MODE_SYS = 0x10, 0x1F
-_FAST_READ_ROUND_TRIPS = 4                               # read_memory_fast の往復（ARMv7 の JTAG。語の数によらない）
-
-
-class ArmDebugError(RuntimeError):
-    pass
+from .arm_debug_defs import (  # noqa: F401  (再公開)
+    DSCR_HALTED, DSCR_RESTARTED, DSCR_MOE_SHIFT, DSCR_SDABORT, DSCR_ADABORT, DSCR_UND,
+    DSCR_STICKY, DSCR_INTDIS, DSCR_UDCCDIS, DSCR_ITREN, DSCR_HDBGEN, DSCR_MDBGEN,
+    DSCR_EXTDCC, DSCR_EXTDCC_FAST, DSCR_INSTRCOMPL, DSCR_TXFULL, DSCR_RXFULL, _DSCR_KEEP,
+    _MOE, CPSR_T, CPSR_F, CPSR_I, BP_ENABLE, BP_ANY_PRIVILEGE,
+    BP_MISMATCH, WP_LOAD, WP_STORE, WP_KINDS, REGISTER_NAMES, arm_mcr,
+    arm_mrc, _to_dtr, _from_dtr, MOV_R0_PC, MOV_PC_R0, MRS_R0_CPSR,
+    MSR_CPSR_R0, LOAD_STORE, LDC_DTRTX, DSB, ISB, CP15,
+    CP15_READABLE, MODE_MASK, WORD_MASK, MODE_USR, MODE_SYS, _FAST_READ_ROUND_TRIPS,
+    ArmDebugError,
+)
 
 
 class CoreDebugPort(Protocol):
@@ -130,14 +77,8 @@ class CoreDebugPort(Protocol):
     def write_watchpoint(self, index: int, value: int, control: int) -> None: ...
 
 
-def _byte_select(address: int, thumb: bool) -> int:
-    """BCR の BAS: ARM の命令は 4 バイト（0b1111）、Thumb は番地の bit 1 で下か上の半語。"""
-    if address & 2:
-        return 0xC << 5
-    return (0x3 if thumb else 0xF) << 5
 
-
-class ArmDebugCore:
+class ArmDebugCore(_RegistersMixin, _MemoryMixin, _CacheMixin, _PointsMixin):
     """1 つのコアの停止デバッグ（CoreDebugPort の上）。"""
 
     def __init__(self, port: CoreDebugPort, timeout_s: float = 0.5, didr: int | None = None):
@@ -295,7 +236,7 @@ class ArmDebugCore:
 
     def _entered(self, dscr: int, r0: int, r1: int, raw_pc: int, cpsr: int) -> None:
         self.thumb = bool(cpsr & CPSR_T)
-        self._cache = {"r0": r0, "r1": r1, "cpsr": cpsr, "pc": (raw_pc - (4 if self.thumb else 8)) & 0xFFFFFFFF}
+        self._cache = {"r0": r0, "r1": r1, "cpsr": cpsr, "pc": (raw_pc - (4 if self.thumb else 8)) & WORD_MASK}
         self._dirty = set()
         self._moe = (dscr >> DSCR_MOE_SHIFT) & 0xF
 
@@ -328,160 +269,13 @@ class ArmDebugCore:
             elif s[0] == "clear_sticky":
                 self.port.clear_sticky()
             elif s[0] == "put":
-                self.port.to_core(s[1] & 0xFFFFFFFF)
+                self.port.to_core(s[1] & WORD_MASK)
                 self.port.execute(s[2])
             else:
                 self.port.execute(s[1])
                 if s[0] == "read":
                     out.append(self.port.from_core())
         return out
-
-    def _get(self, rt: int) -> int:
-        return self._run([("read", _to_dtr(rt))])[0]
-
-    def _put(self, rt: int, value: int) -> None:
-        self._run([("put", value, _from_dtr(rt))])
-
-    def _set_r0(self, value: int) -> None:
-        self._put(0, value)
-
-    def _set_cached(self, name: str, value: int) -> None:
-        self._cache[name] = value & 0xFFFFFFFF
-        self._dirty.add(name)
-
-    # --- レジスタ --------------------------------------------------------------------------------------
-
-    @staticmethod
-    def register_number(name: str) -> int | str:
-        key = name.strip().lower()
-        if key in ("pc", "r15"):
-            return "pc"
-        if key == "cpsr":
-            return "cpsr"
-        aliases = {"sp": 13, "lr": 14, "fp": 11, "ip": 12, "sb": 9, "sl": 10}
-        if key in aliases:
-            return aliases[key]
-        if key.startswith("r") and key[1:].isdigit() and 0 <= int(key[1:]) <= 14:
-            return int(key[1:])
-        raise ValueError(f"レジスタ {name!r} を知らない（r0〜r15・sp・lr・pc・cpsr。今のモードのもの。"
-                         "他のモードのバンクのレジスタ・SPSR・CP15 は未対応）")
-
-    def read_register(self, name: str) -> int:
-        return self.read_registers([name])[0]
-
-    def read_registers(self, names: list[str]) -> list[int]:
-        """レジスタをまとめて読む（r0・r1・PC・CPSR は覚えた値、他は 1 つの列 = ARMv7 なら 1 回の往復）。"""
-        numbers = [self.register_number(n) for n in names]
-        cache = self._require_halted()
-        direct = [n for n in numbers if isinstance(n, int) and n > 1]
-        values = dict(zip(direct, self._run([("read", _to_dtr(n)) for n in direct]))) if direct else {}
-        return [cache[n] if n in ("pc", "cpsr") else cache[f"r{n}"] if n in (0, 1) else values[n] for n in numbers]
-
-    def write_register(self, name: str, value: int) -> None:
-        self.write_registers([(name, value)])
-
-    def write_registers(self, pairs: list[tuple[str, int]]) -> None:
-        """レジスタをまとめて書く（r0・r1・PC・CPSR は覚えて再開の前に戻す。他は 1 つの列 = ARMv7 なら 1 回の往復。列は各レジスタに
-        決まった値を入れるだけなので、頭からやり直せる。r0 は借りているので壊してよい）。"""
-        self._require_halted()
-        steps = []
-        for name, value in pairs:
-            number = self.register_number(name)
-            if number in ("pc", "cpsr"):
-                self._set_cached(number, value)
-            elif number in (0, 1):
-                self._set_cached(f"r{number}", value)
-            else:
-                steps.append(("put", value, _from_dtr(number)))
-        if steps:
-            self._run(steps)
-
-    # --- メモリ ----------------------------------------------------------------------------------------
-
-    def _check_abort(self, dscr: int | None, address: int, what: str) -> None:
-        if dscr is None or not dscr & DSCR_STICKY:
-            return
-        self.port.clear_sticky()
-        if dscr & DSCR_UND:
-            raise ArmDebugError(f"0x{address:08X} の{what}: コアが命令を未定義として扱った（DSCR 0x{dscr:08X}）")
-        raise ArmDebugError(f"0x{address:08X} の{what}でアボート（番地はコアの見る番地 = MMU が有効なら仮想番地。"
-                            f"変換が無い・アクセス権が無い・存在しない番地。DSCR 0x{dscr:08X}）")
-
-    def read_memory(self, address: int, count: int, size: int = 4) -> list[int]:
-        """size（1 / 2 / 4）バイトの値を count 個、コアに読ませる。"""
-        load = LOAD_STORE[size][0]
-        self._require_halted()
-        self._dirty |= {"r0", "r1"}
-        self._set_r0(address)
-        out = []
-        pair = getattr(self.port, "execute_once_and_read", None)   # 読みの命令と受け取りを 1 回の往復で（ARMv7）
-        for i in range(count):
-            here = address + i * size
-            if pair is not None:
-                dscr, value = pair(load, _to_dtr(1))
-                self._check_abort(dscr, here, "読み")
-                out.append(value)
-                continue
-            self._check_abort(self.port.execute(load), here, "読み")
-            try:
-                out.append(self._get(1))
-            except ArmDebugError:
-                self._check_abort(self.port.dscr(), here, "読み")
-                raise
-        # 最後の命令の後の DSCR（まとめた道は、その往復で最後の命令の後に読んだもの。読み直しと同じ時点）
-        last = self.port.last_dscrs[-1] if pair is not None and getattr(self.port, "last_dscrs", None) else self.port.dscr()
-        self._check_abort(last, address, "読み")
-        return out
-
-    def read_memory_fast(self, address: int, count: int) -> list[int]:
-        """32 ビットの語を count 個、ARMv7 の DCC の速いモードで読む（OpenOCD の cortex_a_read_cpu_memory_fast と同じ手順）。
-        LDC を ITR に書き、DTRTX を count 回まとめて読む（読むたびにコアが次の語を読む。1 語ごとの往復が無い）。
-        最後の 1 語は非ブロックのモードに戻してから読む。ポートがまとめて読めなければ read_memory と同じ。
-        往復の数で道を選ぶ: 速いモードは語の数によらず 4 回（番地を置く・速いモードと ITR とまとめた読み・戻すと DSCR・最後の語）、
-        1 語ずつの道（ARMv7 の execute_once_and_read）は 1 + 語の数。少ない方（語が 3 未満なら 1 語ずつ）を使う。"""
-        block = getattr(self.port, "read_dtrtx_fast", None)
-        per_word = getattr(self.port, "execute_once_and_read", None) is not None
-        if not self.v7 or block is None or count < 2 or (per_word and 1 + count < _FAST_READ_ROUND_TRIPS):
-            return self.read_memory(address, count)
-        self._require_halted()
-        self._dirty |= {"r0"}
-        self._set_r0(address)
-        dscr = self.port.last_dscrs[-1]                    # 番地を置いた命令の後の DSCR（設定のビットはこれで足りる）
-        normal = dscr & ~DSCR_EXTDCC & ~(DSCR_HALTED | DSCR_RESTARTED | DSCR_STICKY | DSCR_INSTRCOMPL
-                                          | DSCR_TXFULL | DSCR_RXFULL | (0xF << DSCR_MOE_SHIFT))
-        failed = True
-        try:
-            # 速いモードでは ITR に書いても実行されず、DTRTX を読むと「今の値を返してから」命令を実行する（実機の Cortex-A7、
-            # 2026-10-23）。よって最初の読みは前の値（捨てる）で、count 回の読みで count−1 語、最後の 1 語は下で読む。
-            # 速いモードにする DSCR の書きと ITR の書きは 1 回の往復で
-            out = block(LDC_DTRTX, count, fast_dscr=normal | DSCR_EXTDCC_FAST)[1:]
-            failed = False
-        finally:
-            dscr = self.port.write_dscr_and_read(normal)    # どの道でも非ブロックのモードに戻す（戻した後の DSCR も同じ往復で）
-            if failed:
-                self.port.clear_sticky()                    # アボートの印を残したまま、再開の手順の命令を流さない
-        if not dscr & DSCR_INSTRCOMPL:
-            dscr = self._wait(DSCR_INSTRCOMPL, "速い読みの最後の命令が終わらない")
-        self._check_abort(dscr, address, f"{count} 語の速い読み")
-        out.append(self.port.from_core(dscr))               # その DSCR に TXfull が見えていれば、待たずに読む
-        return out
-
-    def write_memory(self, address: int, values: list[int], size: int = 4) -> None:
-        """size バイトの値の列を、コアに書かせる。書いた範囲は命令として実行されても良いようにキャッシュを揃える。"""
-        if not values:
-            return
-        store = LOAD_STORE[size][1]
-        self._require_halted()
-        self._dirty |= {"r0", "r1"}
-        self._set_r0(address)
-        mask = (1 << (8 * size)) - 1
-        for i, value in enumerate(values):
-            self._put(1, value & mask)
-            self._check_abort(self.port.execute(store), address + i * size, "書き込み")
-        self._check_abort(self.port.dscr(), address, "書き込み")
-        self._sync_caches(address, len(values) * size)
-
-    # --- キャッシュ・バリア ------------------------------------------------------------------------------
 
     def _barrier_steps(self) -> list[tuple]:
         """書き込みを完了させる列（ARMv7 は DSB、ARMv6 は CP15 の操作。r0 を壊す）。"""
@@ -501,62 +295,6 @@ class ArmDebugCore:
         """CPSR に cpsr を書く列（モードの切り替え。r0 を壊す）。"""
         return [("put", cpsr, _from_dtr(0)), ("exec", MSR_CPSR_R0), *self._sync_steps()]
 
-    def _read_cp15(self, name: str) -> int:
-        return self._run(self._cp15_steps(name))[0]
-
-    @staticmethod
-    def _cp15_steps(name: str) -> list[tuple]:
-        return [("exec", CP15[name]), ("read", _to_dtr(0))]
-
-    @contextlib.contextmanager
-    def privileged(self):
-        """止めたコアが USR モードなら、中の間だけ SYS モードにする（レジスタは USR と共通で、バンクの違いが出ない）。USR モードの
-        ままだと、カーネルのメモリへの LDR/STR はアボートし、キャッシュ操作（CP15）は未定義命令になる（OpenOCD の cortex_a も
-        メモリアクセスの前に同じことをする）。出るときに CPSR を元に戻す。"""
-        cache = self._require_halted()
-        cpsr = cache["cpsr"]
-        if cpsr & MODE_MASK != MODE_USR:
-            yield
-            return
-        self._dirty.add("r0")
-        self._run(self._mode_steps((cpsr & ~MODE_MASK) | MODE_SYS))
-        try:
-            yield
-        finally:
-            self._run(self._mode_steps(cpsr))
-
-    def _state_steps(self, cp15: tuple[str, ...], sp_modes: tuple[int, ...]) -> list[tuple]:
-        """CP15 のレジスタ（cp15 の順）とモードごとの SP（sp_modes の順）を読む列。USR モードなら CP15 は SYS モードで読む。
-        モードを切り替える列は、頭で元のモード（USR なら SYS）を書き直し、最後に元の CPSR に戻す: 途中まで実行された後に頭から
-        やり直しても、同じモードで同じレジスタを読む。"""
-        cpsr = self._cache["cpsr"]
-        mode = cpsr & MODE_MASK
-        home = (cpsr & ~MODE_MASK) | MODE_SYS if mode == MODE_USR else cpsr
-        switches = mode == MODE_USR and cp15 or any(m != mode and not (mode == MODE_USR and m == MODE_SYS)
-                                                     for m in sp_modes)
-        steps = self._mode_steps(home) if switches else []
-        for name in cp15:
-            steps += self._cp15_steps(name)
-        for m in sp_modes:
-            if m == mode or (mode == MODE_USR and m == MODE_SYS) or (mode == MODE_SYS and m == MODE_USR):
-                steps.append(("read", _to_dtr(13)))          # USR と SYS は SP が共通
-            else:
-                steps += [*self._mode_steps((cpsr & ~MODE_MASK) | m), ("read", _to_dtr(13)), *self._mode_steps(home)]
-        if switches:
-            steps += self._mode_steps(cpsr)
-        return steps
-
-    def read_cp15(self, name: str) -> int:
-        """CP15 のレジスタ（ttbr0 / ttbr1 / ttbcr / contextidr / sctlr）を、止めたコアに読ませる。借りた r0 は再開の前に戻る。"""
-        if name not in CP15_READABLE:
-            raise ValueError(f"CP15 のレジスタ {name!r} は読めない（{', '.join(CP15_READABLE)}）")
-        return self.read_state((name,), ())[0]
-
-    def read_banked_sp(self, mode: int) -> int:
-        """モード（0x10 USR・0x11 FIQ・0x12 IRQ・0x13 SVC・0x17 ABT・0x1B UND・0x1F SYS）の SP。今のモードならそのまま読む。
-        別のモードは、CPSR のモードを書き替えて読み、すぐ元の CPSR に戻す（OpenOCD の arm_dpm と同じ手順）。"""
-        return self.read_state((), (mode,))[0]
-
     def read_state(self, cp15: tuple[str, ...], sp_modes: tuple[int, ...]) -> list[int]:
         """CP15 のレジスタとモードごとの SP をまとめて読む（1 つの列 = ARMv7 なら 1 回の往復）。値は cp15、sp_modes の順。"""
         return read_state_all([self], cp15, sp_modes)[0]
@@ -567,76 +305,6 @@ class ArmDebugCore:
         if self._cache is None and self.state() != "halted":
             return None
         return self._moe
-
-    def invalidate_instruction_caches(self) -> None:
-        """このコアだけの I キャッシュと分岐予測を無効にする（書いたコードを、このコアの命令フェッチから見えるようにする）。
-        1 つの列（無効にする操作は何度しても同じ）。"""
-        self._require_halted()
-        self._dirty.add("r0")
-        ops = [("put", 0, _from_dtr(0)), *([("exec", DSB)] if self.v7 else []), ("exec", CP15["iciallu"]),
-               ("exec", CP15["bpiall"]), *([("exec", DSB)] if self.v7 else [])]
-        cpsr = self._cache["cpsr"]
-        if cpsr & MODE_MASK == MODE_USR:
-            ops = self._mode_steps((cpsr & ~MODE_MASK) | MODE_SYS) + ops + self._mode_steps(cpsr)
-        self._run(ops)
-
-    def line_size(self) -> int:
-        if self._line is None:
-            self._set_line(self._read_cp15("ctr"))
-        return self._line
-
-    def _set_line(self, ctr: int) -> None:
-        self._line = 4 << ((ctr >> 16) & 0xF) if ctr >> 29 == 0b100 else 1 << (((ctr >> 12) & 3) + 3)
-
-    def _sync_caches(self, address: int, length: int) -> None:
-        """書いた範囲: D キャッシュを PoU まで掃き出し、I キャッシュ・分岐予測を無効にする（ARMv7 で MP 拡張が
-        あれば内側の共有域の全コアに）。1 つの列（各行の番地を r0 に入れ直して掃き出す。掃き出し・無効化は何度しても同じ）。"""
-        self._dirty.add("r0")
-        if self.v7 and self._line is None and self._mp is None:   # 初めて: CTR と MPIDR を 1 つの列で（r0 を毎回入れ直す）
-            ctr, mpidr = self._run(self._cp15_steps("ctr") + self._cp15_steps("mpidr"))
-            self._set_line(ctr)
-            self._mp = bool(mpidr >> 31)
-        line = self.line_size()
-        if self.v7 and self._mp is None:
-            self._mp = bool(self._read_cp15("mpidr") >> 31)
-        clean = CP15["dccmvau"] if self.v7 else CP15["v6_clean_dline"]
-        steps = []
-        for at in range(address & ~(line - 1), address + length, line):
-            steps += [("put", at, _from_dtr(0)), ("exec", clean)]
-        steps.append(("put", 0, _from_dtr(0)))
-        if self.v7:
-            steps += [("exec", DSB), ("exec", CP15["iciallis" if self._mp else "iciallu"]),
-                      ("exec", CP15["bpiallis" if self._mp else "bpiall"]), ("exec", DSB)]
-        else:
-            steps += [("exec", CP15["v6_dsb"]), ("exec", CP15["iciallu"]), ("exec", CP15["bpiall"])]
-        self._run(steps)
-
-    # --- ブレークポイント・ウォッチポイント --------------------------------------------------------------
-
-    def set_breakpoint(self, index: int, address: int, thumb: bool | None = None) -> None:
-        """index（0〜breakpoint_count - 2）の組を、番地の一致に置く。thumb は命令の種類（None なら止まったときの
-        CPSR.T）: ARM は 4 バイト、Thumb は半語を見る。"""
-        if not 0 <= index < self.breakpoint_count - 1:
-            raise ValueError(f"ブレークポイントの組は 0〜{self.breakpoint_count - 2}（最後の組はステップ用）")
-        thumb = self.thumb if thumb is None else thumb
-        self.port.write_breakpoint(index, address & ~3, _byte_select(address, thumb) | BP_ANY_PRIVILEGE | BP_ENABLE)
-
-    def clear_breakpoint(self, index: int) -> None:
-        self.port.write_breakpoint(index, 0, 0)
-
-    def set_watchpoint(self, index: int, address: int, size: int, kind: str) -> bool:
-        """index の組を、番地の size バイト（1 / 2 / 4、1 語の中）の kind（read / write / access）に置く。"""
-        if size not in (1, 2, 4) or (address & 3) + size > 4 or address % size:
-            return False
-        if not 0 <= index < self.watchpoint_count:
-            raise ValueError(f"ウォッチポイントの組は 0〜{self.watchpoint_count - 1}")
-        byte_select = ((1 << size) - 1) << (address & 3)
-        self.port.write_watchpoint(index, address & ~3,
-                                   byte_select << 5 | WP_KINDS[kind] | BP_ANY_PRIVILEGE | BP_ENABLE)
-        return True
-
-    def clear_watchpoint(self, index: int) -> None:
-        self.port.write_watchpoint(index, 0, 0)
 
 
 # --- 複数のコアをまとめて（同じ道なら、全コアの列を 1 回の往復で） ----------------------------------------------
@@ -721,3 +389,4 @@ def read_state_all(cores: list[ArmDebugCore], cp15: tuple[str, ...], sp_modes: t
         c._require_halted()
         c._dirty.add("r0")
     return _run_many(cores, [c._state_steps(cp15, sp_modes) for c in cores])
+

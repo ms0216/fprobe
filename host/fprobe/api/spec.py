@@ -7,13 +7,18 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
-__all__ = ["SPEC_PATH", "InvalidParams", "InvalidResult", "Method", "Spec", "load_spec", "result_schema_problems"]
+__all__ = ["HINTS_PATH", "SPEC_PATH", "InvalidParams", "InvalidResult", "Method", "Spec", "load_hints", "load_spec", "result_schema_problems"]
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "api" / "fprobe_api.json"
+HINTS_PATH = SPEC_PATH.parent / "hints.json"             # 使い方の落とし穴の記録（session.hints）
 
 
 class InvalidParams(Exception):
-    """引数が仕様に合わない。"""
+    """引数が仕様に合わない。validator = jsonschema の検証の種類（required・type・additionalProperties 等。ヒントを絞る事実）。"""
+
+    def __init__(self, message: str, validator: str | None = None):
+        super().__init__(message)
+        self.validator = validator
 
 
 class InvalidResult(Exception):
@@ -67,8 +72,59 @@ class Spec:
         if errors:
             e = errors[0]
             where = ".".join(str(p) for p in e.path) or "(引数)"
-            raise InvalidParams(f"{name}: {where}: {e.message}")
+            raise InvalidParams(f"{name}: {where}: {_param_message(e)}", e.validator)
         _integral(method.params, params)
+
+
+_JSON_TYPES = {"string": "文字列", "integer": "整数", "number": "数", "boolean": "真偽値", "array": "配列", "object": "オブジェクト",
+               "null": "null"}
+
+
+def cut(text: str, limit: int) -> str:
+    """誤りの文に載せる文字列。長いときは先頭だけにして、全体の長さを言う（欠けを明示する）。"""
+    return text if len(text) <= limit else f"{text[:limit]}…（全体 {len(text)} 文字）"
+
+
+def shown(value, limit: int = 120) -> str:
+    """誤りの文に載せる値（repr。長いときは cut）。"""
+    return cut(repr(value), limit)
+
+
+def _param_message(e) -> str:
+    """検証の誤り e を、何が足りない・何が違うかの日本語の文にする（jsonschema の英文をそのまま返さない）。
+    種類を知らない検証は元の文を添える（事実を落とさない）。"""
+    kind, rule = e.validator, e.validator_value
+    if kind == "required":
+        missing = [k for k in rule if k not in (e.instance if isinstance(e.instance, dict) else {})]
+        return "必須の引数が無い: " + ", ".join(missing)
+    if kind == "additionalProperties" and isinstance(e.instance, dict):
+        props = e.schema.get("properties", {}) if isinstance(e.schema, dict) else {}
+        extra = [k for k in e.instance if k not in props]
+        return "未知の引数: " + ", ".join(extra) + "（この API の引数: " + (", ".join(props) or "なし") + "）"
+    if kind == "type":
+        want = rule if isinstance(rule, list) else [rule]
+        note = ""
+        if isinstance(e.instance, str) and any(t in ("integer", "number") for t in want):
+            try:                                      # '0x20000000' のような文字列: JSON の数（10 進）で渡す
+                note = f"。文字列でなく JSON の数で渡す（{e.instance} は {int(e.instance, 0)}）"
+            except ValueError:
+                note = "。文字列でなく JSON の数で渡す"
+        return f"型が違う（{'または'.join(_JSON_TYPES.get(t, t) for t in want)}が必要。渡された値: {shown(e.instance)}{note}）"
+    if kind == "enum":
+        return f"受け付ける値は {', '.join(repr(v) for v in rule)} のどれか（渡された値: {shown(e.instance)}）"
+    if kind in ("minimum", "exclusiveMinimum"):
+        return f"{rule} {'より大きい' if kind == 'exclusiveMinimum' else '以上'}が必要（渡された値: {shown(e.instance)}）"
+    if kind in ("maximum", "exclusiveMaximum"):
+        return f"{rule} {'より小さい' if kind == 'exclusiveMaximum' else '以下'}が必要（渡された値: {shown(e.instance)}）"
+    if kind == "minLength":
+        return f"{rule} 文字以上が必要" + ("（空の文字列は受け付けない）" if rule == 1 else "")
+    if kind == "maxLength":
+        return f"{rule} 文字以下が必要"
+    if kind == "minItems":
+        return f"要素が {rule} 個以上必要"
+    if kind == "maxItems":
+        return f"要素は {rule} 個以下"
+    return cut(e.message, 300)
 
 
 def _integral(schema: dict, value: Any):
@@ -202,3 +258,15 @@ def result_schema_problems(spec: Spec) -> list[str]:
     # 定義どうしの参照も使われたとみなす（walk が $defs も歩いて used に入れている）
     problems += [f"$defs.{name}: どこからも使われない" for name in sorted(set(spec.defs) - used)]
     return problems
+
+
+_HINTS_CACHE: tuple[float, dict] | None = None
+
+
+def load_hints() -> dict:
+    """使い方の落とし穴の記録（host/api/hints.json）。診断ではなく、確かめる事実と手順の文書。ファイルの更新時刻でキャッシュする。"""
+    global _HINTS_CACHE
+    mtime = HINTS_PATH.stat().st_mtime
+    if _HINTS_CACHE is None or _HINTS_CACHE[0] != mtime:
+        _HINTS_CACHE = (mtime, json.loads(HINTS_PATH.read_text(encoding="utf-8")))
+    return _HINTS_CACHE[1]

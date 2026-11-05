@@ -21,7 +21,7 @@ class Process:
         kernel.verify()                                  # オフセットが動いているカーネルのものだと確かめてから読む
         leader = kernel.find_leader(tgid)
         if leader is None:
-            raise ProcessNotFound("pid %d not found" % tgid)
+            raise ProcessNotFound("pid %d not found in the kernel task list (the process has exited, or the pid is wrong)" % tgid)
         if leader.mm == 0:
             raise ProcessNotFound("pid %d is a kernel thread (no address space)" % tgid)
         self.leader, self.mm = leader, leader.mm

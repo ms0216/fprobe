@@ -135,8 +135,8 @@ describe("出力の端子", () => {
 
 describe("回数・時刻（機器のレジスタの事実だけ。回路に無いものは unreadable、まだ無いものは null）", () => {
   const xtrig: XtrigStatus = {
-    inject: { busy: false, result: "ok", ack: 1, count: 2, time: 500, ap: 0, address: 0xE000EDF0, value: 0xA05F0003 },
-    match: { count: 3, time: 1234, address: 0x20000010, address_mask: 0xFFFFFFFF, data: 0, data_mask: 0,
+    inject: { busy: false, result: "ok", ack: 1, count: 2, time: 500, time_valid: true, ap: 0, address: 0xE000EDF0, value: 0xA05F0003 },
+    match: { count: 3, time: 1234, time_valid: true, address: 0x20000010, address_mask: 0xFFFFFFFF, data: 0, data_mask: 0,
              on_write: true, on_read: false },
     route: { to_la: [], to_inject: [] } };
   const la: LaTriggerStatus = {
@@ -150,7 +150,7 @@ describe("回数・時刻（機器のレジスタの事実だけ。回路に無�
                 fire_windows: [] },
     obs: { condition: "state=BUSY", halt: true, la: false, count: 5 },
     sampler: { enabled: true, address: 0xE000EDF0, mask: 0x20000, value: 0x20000, halt: false, la: true, matched: false,
-               seen_any: true, seen: 40, count: 1, time: 900, prev_time: 880 },
+               seen_any: true, seen: 40, count: 1, time: 900, time_valid: true, prev_time: 880 },
     la,
   } satisfies Statuses;
 
@@ -163,8 +163,8 @@ describe("回数・時刻（機器のレジスタの事実だけ。回路に無�
     expect(sourceFacts("sampler_match", st)).toEqual({ count: 1, time: 900 });
   });
 
-  it("0 回なら時刻は無い。読めていなければ null", () => {
-    expect(sourceFacts("dap_match", { xtrig: { ...xtrig, match: { ...xtrig.match, count: 0, time: 0 } } }))
+  it("API が time_valid でないとした時刻は出さない。読めていなければ null", () => {
+    expect(sourceFacts("dap_match", { xtrig: { ...xtrig, match: { ...xtrig.match, count: 0, time: 0, time_valid: false } } }))
       .toEqual({ count: 0, time: null });
     expect(sourceFacts("sequence", { sequence: { ...st.sequence, fired: false } })).toEqual({ count: "unreadable", time: null });
     expect(sourceFacts("obs_match", { obs: { condition: null } })).toEqual({ count: null, time: "unreadable" });
@@ -181,7 +181,7 @@ describe("回数・時刻（機器のレジスタの事実だけ。回路に無�
 
   it("割り込み書き込みの結果・回数・時刻", () => {
     expect(injectFacts(st.xtrig)).toEqual({ result: "ok", busy: false, count: 2, time: 500 });
-    expect(injectFacts({ ...xtrig, inject: { busy: false, result: "ok", ack: 0, count: 0, time: 0, ap: 0, address: 0, value: 0 } }))
+    expect(injectFacts({ ...xtrig, inject: { busy: false, result: "ok", ack: 0, count: 0, time: 0, time_valid: false, ap: 0, address: 0, value: 0 } }))
       .toEqual({ result: "ok", busy: false, count: 0, time: null });
     expect(injectFacts(null)).toBeNull();
   });

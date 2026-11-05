@@ -87,7 +87,7 @@ class MonitorModeService:
         いる間も動く例外・割り込み）、モニタ方式なら state・stops・stack_overflow も。"""
         with self._host._lock:
             if self._host._debug is None:
-                raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
+                raise NotConnected("ターゲット未接続（MCU なら target.connect を先に呼ぶ。MCP の道具名は target_connect。Linux のプロセスなら linux.halt.open → linux.halt.debug.attach）")
             raw = self._host.target if self._monitor is None else self._monitor.inner
             out: dict = {"mode": "monitor" if self._monitor is not None else "halt"}
             try:
@@ -111,7 +111,7 @@ class MonitorModeService:
             raise ValueError(f"mode は {' / '.join(MODES)}（{mode!r}）")
         with self._host._lock:
             if self._host._debug is None:                            # スナップショットの読み手には方式が無い
-                raise NotConnected("ターゲット未接続（target_connect を先に呼ぶ）")
+                raise NotConnected("ターゲット未接続（MCU なら target.connect を先に呼ぶ。MCP の道具名は target_connect。Linux のプロセスなら linux.halt.open → linux.halt.debug.attach）")
             self._host.target
             raw = self._host._debug.target
             left = None

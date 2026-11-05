@@ -313,9 +313,6 @@ class ThreadX(KernelAwareness):
     def mutex_empty_head(self, obj: KernelObject) -> int:
         return 0
 
-    def snapshot(self) -> dict:
-        tasks = self.tasks()
-        current = self.current()
-        return {"rtos": self.name, "version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
-                "tick": self.tick_count(), "current": self._names.get(current) if current else None,
-                "tasks": [t.to_dict() for t in tasks], "warnings": list(self.warnings)}
+    def snapshot_header(self) -> dict:
+        return {"version": self.version(), "port": self.port, "scheduler": self.scheduler_state(),
+                "tick": self.tick_count()}

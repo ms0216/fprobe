@@ -274,6 +274,13 @@ class ArmAConnection:
                 **self.details}
 
 
+def _one_bit_shift_of(seen: int, expected: int) -> bool:
+    """seen が expected を 1 ビット左か右にずらした値と、版（上位 4 ビット）を除いて一致するか（事実の比較だけ）。"""
+    mask = 0x0FFFFFFF
+    return seen & mask != expected & mask and (seen & mask in ((expected << 1) & mask, (expected << 1 | 1) & mask,
+                                                               (expected >> 1) & mask, ((expected >> 1) | 0x08000000) & mask))
+
+
 def _find_tap(wire, part: ArmAPart, jtag_chain: list[int] | None) -> tuple[list[int], int]:
     """チェーンを走査して part の装置（IDCODE）の位置と IR 長の列を返す。"""
     scan = scan_chain(wire)
@@ -282,8 +289,12 @@ def _find_tap(wire, part: ArmAPart, jtag_chain: list[int] | None) -> tuple[list[
     if index is None:
         seen = ", ".join(f"0x{d.idcode:08X}" if d.idcode is not None else "BYPASS" for d in scan.devices) or "なし"
         name = "ARM1176" if part.kind == "arm11" else "Arm の JTAG-DP"
+        shifted = [d.idcode for d in scan.devices if d.idcode is not None and _one_bit_shift_of(d.idcode, part.idcode)]
+        shift_note = (f"。見えた 0x{shifted[0]:08X} は、期待の IDCODE を 1 ビットずらした値と下位 28 ビットが一致する"
+                      f"（TDO を取り込む時期がずれていても、この形になる。jtag.sample_delay_scan で遅れごとの読みを調べ、"
+                      f"jtag.sample_delay_set で合わせる）") if shifted else ""
         raise ArmDebugError(f"{part.name}: チェーンに {name}（IDCODE 0x{part.idcode:08X}）が見えない（見えた装置: "
-                            f"{seen}。{' / '.join(scan.notes)}）。配線・ターゲットの JTAG の有効化"
+                            f"{seen}。{' / '.join(scan.notes)}）{shift_note}。配線・ターゲットの JTAG の有効化"
                             f"（Pi は config.txt の enable_jtag_gpio=1）・TRST を確かめる")
     chain = list(jtag_chain) if jtag_chain is not None else scan.chain
     if chain is None or len(chain) != len(scan.devices):

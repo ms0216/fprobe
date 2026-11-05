@@ -3,7 +3,7 @@
   // Peripherals: SVD の周辺の木。周辺を開くとレジスタを読み、フィールドに解読する（読むと状態が変わるものは読まない）。
   // フィールドは SVD の定義に合わせて書ける（1 ビット = チェックボックス、値の名前 = 選択、ほか = 数。Enter で書く）。
   // レジスタの値はダブルクリックで全体を書く（16 進）。読むと状態が変わるレジスタは ⚠ と確認
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
   import { tick } from "svelte";
   import { shared } from "../../lib/context";
   import { onCalls } from "../../lib/notify";
@@ -17,7 +17,7 @@
   let device = $state("");
   let filter = $state("");
   let open = $state<string | null>(null);
-  let regs = $state<any>(null);
+  let regs = $state<Result<"target.peripheral.read"> | null>(null);
   let defs = $state<Record<string, RegisterDef>>({});        // 開いた周辺のレジスタの定義（path → 定義）
   let editingReg = $state<{ path: string; text: string } | null>(null);
   let error = $state<string | null>(null);

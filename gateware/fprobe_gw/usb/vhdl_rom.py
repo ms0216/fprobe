@@ -5,14 +5,13 @@
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from ..rtl import RTL_ROOT
 from . import descriptors as d
 from .fprobe_device import MSOS20_VENDOR_CODE, FprobeUsbDevice
 
 __all__ = ["COMMITTED_PACKAGE", "endpoint_kinds", "endpoint_masks", "interface_endpoint_masks",
-           "render_package", "write_package"]
+           "render_package"]
 
 COMMITTED_PACKAGE = RTL_ROOT / "usb" / "generated" / "usb_descriptors_pkg.vhd"
 
@@ -168,9 +167,3 @@ def render_package(device: FprobeUsbDevice) -> str:
         "end package;",
         "",
     ])
-
-
-def write_package(device: FprobeUsbDevice, path: Path = COMMITTED_PACKAGE) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_package(device), encoding="utf-8", newline="\n")
-    return path

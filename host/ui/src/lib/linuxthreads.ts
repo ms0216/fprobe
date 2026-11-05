@@ -4,6 +4,7 @@
 // Svelte に依らない（store の約束 subscribe だけを満たす）
 import { errorText, type DaemonConnection, type Result } from "./api";
 import type { AppState } from "./state";
+import { addListener } from "./store";
 
 export type LinuxThreadRows = Result<"linux.halt.debug.threads">;
 
@@ -58,9 +59,7 @@ export class LinuxThreads {
   }
 
   subscribe(fn: (s: LinuxThreadsSnapshot) => void): () => void {
-    this.listeners.add(fn);
-    fn(this.snap);
-    return () => this.listeners.delete(fn);
+    return addListener(this.listeners, fn, this.snap);
   }
 
   private set(patch: Partial<LinuxThreadsSnapshot>): void {

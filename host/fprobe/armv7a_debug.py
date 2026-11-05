@@ -427,12 +427,6 @@ class V7DebugPort:
             self._wait(DSCR_TXFULL | (1 << 26), "DTRTX に値が来ない")
         return self._read(DTRTX)
 
-    def read_breakpoint_control(self, index: int) -> int:
-        return self._read(BCR + 4 * index)
-
-    def read_watchpoint_control(self, index: int) -> int:
-        return self._read(WCR + 4 * index)
-
     def write_breakpoint(self, index: int, value: int, control: int) -> None:
         """無効にしてから番地を変え、制御を書く（3 つの書きを順に、1 回の往復で）。"""
         b = self.base

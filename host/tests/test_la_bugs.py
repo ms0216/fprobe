@@ -29,7 +29,7 @@ SEEDS = range(12)
 def numpy_mode(request, monkeypatch):
     if request.param == "python":
         monkeypatch.setattr(la_wave, "_np", None)
-        monkeypatch.setattr("fprobe.la._np", None)
+        monkeypatch.setattr("fprobe.la_stream._np", None)
     return request.param
 
 

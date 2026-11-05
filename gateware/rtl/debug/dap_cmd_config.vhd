@@ -24,17 +24,8 @@ entity dap_cmd_config is
     rst         : in  std_logic;
     packet_size : in  natural range 64 to 512;
     -- dap_packet との I/F（dap_pkg の説明を参照）
-    command     : in  natural range 0 to 255;
-    start       : in  std_logic;
-    done        : out std_logic;
-    get_req     : out std_logic;
-    get_n       : out natural range 1 to 8;
-    get_ack     : in  std_logic;
-    arg         : in  std_logic_vector(63 downto 0);
-    put_req     : out std_logic;
-    put_n       : out natural range 1 to 8;
-    put_val     : out std_logic_vector(63 downto 0);
-    put_ack     : in  std_logic;
+    req         : in  unit_req_t;
+    rsp         : out unit_rsp_t;
     -- 設定
     enable      : out std_logic;
     jtag        : out std_logic;
@@ -71,9 +62,7 @@ architecture rtl of dap_cmd_config is
                    S_INFO, S_INFO_FETCH, S_INFO_LENGTH, S_INFO_STRING, S_CONNECT, S_TRANSFER_CONFIG, S_SWD_CONFIGURE, S_DELAY, S_DELAY_WAIT,
                    S_CLOCK, S_CLOCK_DIVIDE, S_CLOCK_DONE, S_JCONF_COUNT, S_JCONF_NEXT, S_JCONF_LEN, S_DONE);
   signal state, ret : state_t := S_IDLE;
-  signal get_req_r, put_req_r, done_r : std_logic := '0';
-  signal get_n_r, put_n_r : natural range 1 to 8 := 1;
-  signal put_val_r  : std_logic_vector(63 downto 0) := (others => '0');
+  signal rsp_r      : unit_rsp_t := UNIT_RSP_IDLE;
 
   signal enable_r     : std_logic := '0';
   signal jtag_r       : std_logic := '0';
@@ -116,12 +105,7 @@ architecture rtl of dap_cmd_config is
   signal rest       : integer range -255 to 255 := 0;          -- ir_total − 選んだ装置の累積和（2 段目）
   signal rest_len   : natural range 1 to 32 := 4;
 begin
-  get_req <= get_req_r;
-  get_n   <= get_n_r;
-  put_req <= put_req_r;
-  put_n   <= put_n_r;
-  put_val <= put_val_r;
-  done    <= done_r;
+  rsp     <= rsp_r;
 
   enable      <= enable_r;
   jtag        <= jtag_r;
@@ -166,19 +150,19 @@ begin
   process (clk)
     procedure get(n : natural; back : state_t) is
     begin
-      get_req_r <= '1';
-      get_n_r   <= n;
-      ret       <= back;
-      state     <= S_WAIT_GET;
+      rsp_r.get_req <= '1';
+      rsp_r.get_n   <= n;
+      ret           <= back;
+      state         <= S_WAIT_GET;
     end procedure;
 
     procedure put(n : natural; v : std_logic_vector(63 downto 0); back : state_t) is
     begin
-      put_req_r <= '1';
-      put_n_r   <= n;
-      put_val_r <= v;
-      ret       <= back;
-      state     <= S_WAIT_PUT;
+      rsp_r.put_req <= '1';
+      rsp_r.put_n   <= n;
+      rsp_r.put_val <= v;
+      ret           <= back;
+      state         <= S_WAIT_PUT;
     end procedure;
 
     procedure reply_status(s : std_logic_vector(7 downto 0)) is
@@ -187,9 +171,9 @@ begin
     end procedure;
   begin
     if rising_edge(clk) then
-      get_req_r <= '0';
-      put_req_r <= '0';
-      done_r    <= '0';
+      rsp_r.get_req <= '0';
+      rsp_r.put_req <= '0';
+      rsp_r.done    <= '0';
       div_start <= '0';
 
       if rst = '1' then
@@ -209,12 +193,12 @@ begin
       else
         case state is
           when S_IDLE =>
-            if start = '1' then
+            if req.start = '1' then
               state <= S_DISPATCH;
             end if;
 
           when S_DISPATCH =>
-            case command is
+            case req.command is
               when ID_INFO            => get(1, S_INFO);
               when ID_HOST_STATUS     => reply_status(DAP_OK);         -- 受け付けるだけ（引数は読み捨て）
               when ID_CONNECT         => get(1, S_CONNECT);
@@ -229,22 +213,22 @@ begin
             end case;
 
           when S_WAIT_GET =>
-            if get_ack = '1' then
+            if req.get_ack = '1' then
               state <= ret;
             end if;
 
           when S_WAIT_PUT =>
-            if put_ack = '1' then
+            if req.put_ack = '1' then
               state <= ret;
             end if;
 
           when S_DONE =>
-            done_r <= '1';
+            rsp_r.done <= '1';
             state  <= S_IDLE;
 
           -- DAP_Info
           when S_INFO =>
-            case to_integer(unsigned(arg(7 downto 0))) is
+            case to_integer(unsigned(req.arg(7 downto 0))) is
               when 16#08# =>                                          -- タイムスタンプの時計（共通タイムベース = clk）
                 put(5, x"000000" & std_logic_vector(to_unsigned(CLK_HZ, 32)) & x"04", S_DONE);
               when 16#F0# =>
@@ -257,7 +241,7 @@ begin
                 put(3, x"0000000000" & std_logic_vector(to_unsigned(packet_size, 16)) & x"02", S_DONE);
               when 0 to 7 | 9 to DAP_INFO_SLOTS - 1 =>
                 -- 文字列（NUL 込み）か、未知の ID（長さ 0）: ROM の枠の先頭（長さ）を読む
-                rom_addr <= to_unsigned(to_integer(unsigned(arg(3 downto 0))) * DAP_INFO_SLOT_BYTES, DAP_INFO_ADDR_BITS);
+                rom_addr <= to_unsigned(to_integer(unsigned(req.arg(3 downto 0))) * DAP_INFO_SLOT_BYTES, DAP_INFO_ADDR_BITS);
                 state    <= S_INFO_FETCH;
               when others =>
                 put(1, (others => '0'), S_DONE);                    -- 文字列の ID ではない（長さ 0）
@@ -282,11 +266,11 @@ begin
             end if;
 
           when S_CONNECT =>
-            if arg(7 downto 0) = x"00" or arg(7 downto 0) = x"01" then
+            if req.arg(7 downto 0) = x"00" or req.arg(7 downto 0) = x"01" then
               enable_r <= '1';
               jtag_r   <= '0';
               reply_status(x"01");                                  -- SWD（既定も SWD）
-            elsif arg(7 downto 0) = x"02" and HAS_JTAG then
+            elsif req.arg(7 downto 0) = x"02" and HAS_JTAG then
               enable_r <= '1';
               jtag_r   <= '1';
               reply_status(x"02");                                  -- JTAG
@@ -295,19 +279,19 @@ begin
             end if;
 
           when S_TRANSFER_CONFIG =>
-            idle_r        <= to_integer(unsigned(arg(7 downto 0)));
-            wait_retry_r  <= unsigned(arg(23 downto 8));
-            match_retry_r <= unsigned(arg(39 downto 24));
+            idle_r        <= to_integer(unsigned(req.arg(7 downto 0)));
+            wait_retry_r  <= unsigned(req.arg(23 downto 8));
+            match_retry_r <= unsigned(req.arg(39 downto 24));
             reply_status(DAP_OK);
 
           when S_SWD_CONFIGURE =>
-            turnaround_r <= to_integer(unsigned(arg(1 downto 0))) + 1;
-            data_phase_r <= arg(2);
+            turnaround_r <= to_integer(unsigned(req.arg(1 downto 0))) + 1;
+            data_phase_r <= req.arg(2);
             reply_status(DAP_OK);
 
           -- DAP_Delay: arg µs 待つ
           when S_DELAY =>
-            us_left <= unsigned(arg(15 downto 0));
+            us_left <= unsigned(req.arg(15 downto 0));
             cycles  <= 0;
             state   <= S_DELAY_WAIT;
 
@@ -324,11 +308,11 @@ begin
           -- SWJ_Clock: half_period = ceil(HALF_CLOCK_HZ / (1.01 * clock))、1〜65535（1 = SWCLK / TCK が sys / 2。
           -- docs/superpowers/specs/2026-11-03-dap-line-rate-design.md §2）
           when S_CLOCK =>
-            if unsigned(arg(31 downto 0)) = 0 then
+            if unsigned(req.arg(31 downto 0)) = 0 then
               reply_status(DAP_ERROR);
             else
-              div_num   <= to_unsigned(HALF_CLOCK_TOL_HZ, 32) + unsigned(arg(31 downto 0)) - 1;  -- 切り上げ
-              div_den   <= unsigned(arg(31 downto 0));
+              div_num   <= to_unsigned(HALF_CLOCK_TOL_HZ, 32) + unsigned(req.arg(31 downto 0)) - 1;  -- 切り上げ
+              div_den   <= unsigned(req.arg(31 downto 0));
               div_start <= '1';
               state     <= S_CLOCK_DIVIDE;
             end if;
@@ -344,10 +328,10 @@ begin
 
           -- JTAG_Configure: count、IR 長 × count
           when S_JCONF_COUNT =>
-            if arg(7 downto 0) = x"00" or unsigned(arg(7 downto 0)) > JTAG_MAX_DEVICES then
+            if req.arg(7 downto 0) = x"00" or unsigned(req.arg(7 downto 0)) > JTAG_MAX_DEVICES then
               reply_status(DAP_ERROR);
             else
-              count_r  <= to_integer(unsigned(arg(7 downto 0)));
+              count_r  <= to_integer(unsigned(req.arg(7 downto 0)));
               conf_i   <= 0;
               ir_total <= 0;
               state    <= S_JCONF_NEXT;
@@ -361,12 +345,12 @@ begin
             end if;
 
           when S_JCONF_LEN =>
-            if arg(7 downto 0) = x"00" or unsigned(arg(7 downto 0)) > 32 then
+            if req.arg(7 downto 0) = x"00" or unsigned(req.arg(7 downto 0)) > 32 then
               reply_status(DAP_ERROR);
             else
-              irlen(conf_i)     <= to_integer(unsigned(arg(7 downto 0)));
+              irlen(conf_i)     <= to_integer(unsigned(req.arg(7 downto 0)));
               ir_prefix(conf_i) <= ir_total;
-              ir_total <= ir_total + to_integer(unsigned(arg(7 downto 0)));
+              ir_total <= ir_total + to_integer(unsigned(req.arg(7 downto 0)));
               conf_i   <= conf_i + 1;
               state    <= S_JCONF_NEXT;
             end if;

@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック la_deep（0x00000700, 128 バイト）: ロジアナの深いバッファ（外部メモリ。docs/superpowers/specs/2026-10-16-m8-ddr3-design.md §5）。前段の設定（rate・trig_*）は la ブロックと共通。番地・数は拍（MEM_BEAT_BYTES バイト）単位
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_la_deep is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_run : out std_logic;   -- control.run（RW）
     control_rle : out std_logic;   -- control.rle（RW）
     control_stream : out std_logic;   -- control.stream（RW）
@@ -80,7 +76,7 @@ architecture rtl of csr_la_deep is
   signal read_region_r : std_logic := '0';
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(4 downto 0));
+  index <= to_integer(bus_cmd.addr(4 downto 0));
 
   process (clk)
   begin
@@ -115,20 +111,20 @@ begin
             rdata(9 downto 8) <= control_step_r;
             rdata(15 downto 12) <= control_first_r;
             rdata(16) <= control_gaps_r;
-            if bus_we = '1' then
-              control_run_r <= bus_wdata(0);
-              control_rle_r <= bus_wdata(1);
-              control_stream_r <= bus_wdata(2);
-              control_ps_read_r <= bus_wdata(3);
-              control_pack_r <= bus_wdata(6 downto 4);
-              control_step_r <= bus_wdata(9 downto 8);
-              control_first_r <= bus_wdata(15 downto 12);
-              control_gaps_r <= bus_wdata(16);
+            if bus_cmd.we = '1' then
+              control_run_r <= bus_cmd.wdata(0);
+              control_rle_r <= bus_cmd.wdata(1);
+              control_stream_r <= bus_cmd.wdata(2);
+              control_ps_read_r <= bus_cmd.wdata(3);
+              control_pack_r <= bus_cmd.wdata(6 downto 4);
+              control_step_r <= bus_cmd.wdata(9 downto 8);
+              control_first_r <= bus_cmd.wdata(15 downto 12);
+              control_gaps_r <= bus_cmd.wdata(16);
             end if;
           when 1 =>   -- post_beats
             rdata(31 downto 0) <= post_beats_r;
-            if bus_we = '1' then
-              post_beats_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              post_beats_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 2 =>   -- status
             rdata(0) <= status_capturing;
@@ -148,23 +144,23 @@ begin
             rdata(31 downto 0) <= trigger_time_hi;
           when 7 =>   -- read_first
             rdata(31 downto 0) <= read_first_r;
-            if bus_we = '1' then
-              read_first_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              read_first_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 8 =>   -- read_count
             rdata(31 downto 0) <= read_count_r;
-            if bus_we = '1' then
-              read_count_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              read_count_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 9 =>   -- command
-            if bus_we = '1' then
-              command_read_r <= bus_wdata(0);
-              command_read_ps_r <= bus_wdata(1);
+            if bus_cmd.we = '1' then
+              command_read_r <= bus_cmd.wdata(0);
+              command_read_ps_r <= bus_cmd.wdata(1);
             end if;
           when 10 =>   -- read_region
             rdata(0) <= read_region_r;
-            if bus_we = '1' then
-              read_region_r <= bus_wdata(0);
+            if bus_cmd.we = '1' then
+              read_region_r <= bus_cmd.wdata(0);
             end if;
           when 11 =>   -- ring_beats
             rdata(31 downto 0) <= ring_beats;
@@ -195,9 +191,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_run <= control_run_r;
   control_rle <= control_rle_r;
   control_stream <= control_stream_r;

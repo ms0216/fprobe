@@ -5,6 +5,9 @@ use ieee.numeric_std.all;
 
 package util_pkg is
 
+  -- ボードの LED の心拍用の自走カウンタの幅。最上位ビットが LED になる（sys 100 MHz で 2^25 周期 = 約 0.33 秒ごとに反転）
+  constant HEARTBEAT_BITS : positive := 26;
+
   -- n を表すのに必要なビット数（ceil(log2(n))。n = 1 なら 0）
   function clog2(n : positive) return natural;
 

@@ -67,7 +67,7 @@ architecture rtl of la_lane_rle is
 
   function lane(w : std_logic_vector; k : natural) return val_t is
   begin
-    return w(k * WIDTH + WIDTH - 1 + w'low downto k * WIDTH + w'low);
+    return lane_slice(w, WIDTH, k);
   end function;
 
   function rec(len : unsigned; v : val_t) return rec_t is

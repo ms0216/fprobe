@@ -2,15 +2,14 @@
   // Flash（J-Flash Lite の型）: データ ファイル（デーモンの PC のパス・この PC から選んで送る・読み込んだ ELF）、
   // 消去（auto / sector / chip）・ベリファイ・変更なしを省略・リセットして実行の設定、Program・Verify・Erase・Read Back、
   // 進捗（通知 flash.progress。AI の書き込みも見える）、結果（段ごとの時間・速度・ベリファイ）。詳細に Flash の領域・
-  // CMSIS パック（探す・入れるはネットに出るので確認）・速度の計測
+  // CMSIS パック（探す・入れるはネットに出るので確認）・速度の計測。詳細の各節は panels/flash/ の部品
   import { onDestroy } from "svelte";
+  import Req from "./Req.svelte";
   import { shared } from "../../lib/context";
   import { base64 } from "../../lib/debugger";
-  import { frequency } from "../../lib/format";
   import {
-    algoParams, baseName, defaultReadPath, emptyAlgo, eraseMethodKey, loadOptions, parseNumber,
-    programParams, programStages, sectorsText, seconds, size, speed, verifyParams, type AlgoForm,
-    type FlashOptions, type Progress, type Stage,
+    defaultReadPath, loadOptions, parseNumber, programParams, seconds, size, verifyParams,
+    type FlashOptions, type FlashResultState, type Progress,
   } from "../../lib/flash";
   import type { Methods, Params, Result } from "../../lib/api";
   import { allowed } from "../../lib/guard";
@@ -19,9 +18,13 @@
   import { load, save } from "../../lib/prefs";
   import Empty from "./Empty.svelte";
   import { hex32 } from "./format";
-  import { changedFields } from "../../lib/protection";
+  import FlashBench from "./flash/FlashBench.svelte";
+  import FlashPacks from "./flash/FlashPacks.svelte";
+  import FlashProtection from "./flash/FlashProtection.svelte";
+  import FlashRegions from "./flash/FlashRegions.svelte";
+  import FlashResult from "./flash/FlashResult.svelte";
 
-  const { app, conn, dbg, ui } = shared();
+  const { app, conn, dbg } = shared();
 
   let path = $state(load("flash.path", ""));
   // 前の版は ELF・HEX のときも欄を隠して値を覚えていた: 隠れていた値を黙って送らないよう、覚える名前を変え空から始める
@@ -35,39 +38,23 @@
   let readAddress = $state("");
   let readLength = $state("");
   let busy = $state<string | null>(null);
-  // 保護（オプションバイト・保護の解除）: 名前ごとの値と説明。全消去・保護をかける書き込みは、人が明示して許す
-  let ob = $state<any>(null);
+  // 保護の部品の表と結果は、接続の有無で部品が作り直されても残すためここに持つ
+  let ob = $state<Result<"target.option_bytes.read"> | null>(null);
   let obEdit = $state<Record<string, string>>({});
   let obResult = $state<any>(null);
-  let allowMassErase = $state(false);
-  let allowProtect = $state(false);
   let progress = $state<Progress | null>(null);
   let note = $state<string | null>(null);              // 送った・保存した等の一行
   let invalid = $state<string | null>(null);           // 欄の誤り
-  let result = $state<{ kind: "program" | "verify" | "erase" | "read"; data: any } | null>(null);
-  let regions = $state<any[] | null>(null);
-  let algos = $state<any[]>([]);                       // target.flash.algo.add で足したアルゴリズム
-  let algo = $state<AlgoForm>(emptyAlgo());
-  let packs = $state<any[] | null>(null);
-  let packPath = $state(load("flash.packPath", ""));
-  let targets = $state<string[]>([]);                  // 入れた・読み込んだ Pack のターゲット名（接続に使える）
-  let pattern = $state("");
-  let updateIndex = $state(false);
-  let found = $state<any[] | null>(null);
-  let benchSector = $state("");
-  let bench = $state<any>(null);
+  let result = $state<FlashResultState | null>(null);
   let fileInput = $state<HTMLInputElement>();
 
   const online = $derived($app.link === "open");
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
-  const stages = $derived<Stage[]>(result?.kind === "program" ? programStages(result.data) : []);
-  const verify = $derived(result?.kind === "program" ? result.data?.verify : result?.kind === "verify" ? result.data : null);
 
   $effect(() => save("flash.path", path));
   $effect(() => save("flash.loadAddress", address));
   $effect(() => save("flash.options", JSON.stringify(options)));
   $effect(() => save("flash.readPath", readPath));
-  $effect(() => save("flash.packPath", packPath));
   // 初めて開いたとき: パスが空なら読み込んでいる ELF
   $effect(() => {
     if (!path && $dbg.elf) path = $dbg.elf;
@@ -161,192 +148,16 @@
     }
   }
 
-  async function loadRegions() {
-    try {
-      const r = await conn.call("target.flash.regions", {}, { quiet: true });
-      regions = r.regions;
-      algos = r.algorithms ?? [];
-    } catch {
-      regions = null;
-    }
-  }
-
-  /** 外付けのアルゴリズム（.FLM）で Flash の領域を足す（未接続なら覚えておき、接続後の最初の操作で足す） */
-  async function addAlgo() {
-    let params;
-    try {
-      params = algoParams(algo);
-    } catch (e) {
-      invalid = (e as Error).message === "flm" ? t("flash.needFlm") : t("flash.numberHint");
-      return;
-    }
-    const r = await run("algo", "target.flash.algo.add", params);
-    if (r) {
-      note = "pending" in r && r.pending ? `${t("flash.algoAdded", { name: r.name })} · ${t("flash.algoPending")}`
-                       : t("flash.algoAdded", { name: r.name });
-      algo = emptyAlgo();
-      await loadRegions();
-    }
-  }
-
-  async function removeAlgo(name: string) {
-    if (await run("algo", "target.flash.algo.remove", { name })) await loadRegions();
-  }
-
-  /** デーモンの PC の .pack ファイルのデバイスをターゲットとして登録する */
-  async function loadPackFile() {
-    const p = packPath.trim();
-    if (!p) return;
-    busy = "packs";
-    try {
-      if (!(await allowed(app))) return;
-      const r = await app.act("target.pack.load", { path: p });
-      if (r) targets = r.targets ?? [];
-    } finally {
-      busy = null;
-    }
-  }
-
-  /** そのターゲット名で接続のダイアログを開く（ダイアログは覚えたターゲット名を読む） */
-  function useTarget(name: string) {
-    save("connect.target", name);
-    ui.open("connect");
-  }
-
-  async function loadPacks() {
-    try {
-      packs = (await conn.call("target.pack.list", {}, { quiet: true })).packs;
-    } catch {
-      packs = null;
-    }
-  }
-
-  async function findPacks() {
-    if (!pattern.trim() || !(await confirmer.ask(t("flash.confirmNet", { what: pattern.trim() }),
-                                                 { ok: t("flash.download") }))) return;
-    busy = "packs";
-    try {
-      const r = await app.act("target.pack.find", { pattern: pattern.trim(), update: updateIndex });
-      found = r?.parts ?? null;
-    } finally {
-      busy = null;
-    }
-  }
-
-  async function install(part: string) {
-    if (!(await allowed(app)) || !(await confirmer.ask(t("flash.confirmNet", { what: part }), { ok: t("flash.download") }))) {
-      return;
-    }
-    busy = "packs";
-    try {
-      const r = await app.act("target.pack.install", { pattern: part, update: updateIndex });
-      if (r) {
-        targets = r.targets ?? [];
-        await loadPacks();
-        found = found?.map((p) => (p.part === part ? { ...p, installed: true } : p)) ?? null;
-      }
-    } finally {
-      busy = null;
-    }
-  }
-
-  async function benchmark() {
-    const sector = benchSector.trim() ? parseNumber(benchSector) : null;
-    if (benchSector.trim() && sector === null) {
-      invalid = t("flash.addressHint");
-      return;
-    }
-    const r = await run("benchmark", "target.flash.benchmark", sector !== null ? { program_address: sector } : {});
-    if (r) bench = r;
-  }
-
-  const benchRows = (b: any): [Key, any][] => [
-    ["flash.bench.ramWrite", b.ram?.write], ["flash.bench.ramRead", b.ram?.read], ["flash.bench.flashRead", b.flash_read],
-    ["flash.bench.flashErase", b.flash_program?.erase], ["flash.bench.flashProgram", b.flash_program?.program],
-    ["flash.bench.flashTotal", b.flash_program?.total],
-  ].filter(([, r]) => r) as [Key, any][];
-
-  /** 消去の方法の名前（知らない方法はそのまま） */
-  const methodText = (m: string | undefined) => {
-    const k = eraseMethodKey(m);
-    return k ? $i18n(k) : m ?? "";
-  };
-  /** 消したセクタの数（セクタごとの消去なら数だけ、チップ全体等なら方法も） */
-  const sectorsNote = (n: number, method: string | undefined) => !method || method === "sector"
-    ? $i18n("flash.sectorsOnly", { n }) : $i18n("flash.sectorsNote", { n, method: methodText(method) });
-  const stageNote = (s: Stage) => s.sectors !== undefined ? sectorsNote(s.sectors, s.method)
-    : s.skipped ? $i18n("flash.skippedNote", { size: size(s.skipped) }) : "";
-
-  async function readOptionBytes() {
-    const r = await run("protect", "target.option_bytes.read", {});
-    if (r) {
-      ob = r;
-      obEdit = Object.fromEntries(Object.entries(r.fields ?? {}).map(([k, v]) => [k, String(v)]));
-    }
-  }
-
-  async function writeOptionBytes() {
-    const built = changedFields(ob?.fields ?? {}, obEdit);
-    if ("error" in built) {
-      invalid = built.error === "nothing" ? t("protect.nothing") : t("protect.badField", { field: built.error });
-      return;
-    }
-    const params = { fields: built.fields, confirm_mass_erase: allowMassErase, confirm_protect: allowProtect };
-    if (!(await confirmer.ask(t("protect.confirmWrite", { params: JSON.stringify(params) }),
-                              { ok: t("protect.write"), danger: true }))) return;
-    const r = await run("protect", "target.option_bytes.write", params);
-    allowMassErase = allowProtect = false;               // 危ない変更を許す印は 1 回ごと
-    if (r) {
-      obResult = r;
-      await readOptionBytes();                            // 書いた後の値（表の値を新しく）
-    }
-  }
-
-  async function unlock() {
-    if (!(await confirmer.ask(t("protect.confirmUnlock"), { ok: t("protect.unlock"), danger: true }))) return;
-    const r = await run("protect", "target.unlock", { confirm_mass_erase: allowMassErase });
-    allowMassErase = allowProtect = false;
-    if (r) obResult = r;
-  }
+  const setInvalid = (message: string) => (invalid = message);
+  const setNote = (message: string) => (note = message);
 </script>
 
 <div class="pane">
-  {#snippet protection()}
-    <details>
-      <summary title={$i18n("protect.tip")}>{$i18n("protect.title")}</summary>
-      <div class="row pad">
-        <button class="small" disabled={!online || !connected || !!busy} onclick={() => void readOptionBytes()}>{$i18n("protect.read")}</button>
-        <label title={$i18n("protect.allowMassEraseTip")}><input type="checkbox" bind:checked={allowMassErase} />
-          {$i18n("protect.allowMassErase")}</label>
-        <label title={$i18n("protect.allowProtectTip")}><input type="checkbox" bind:checked={allowProtect} />
-          {$i18n("protect.allowProtect")}</label>
-        <button class="small danger" disabled={!online || !!busy} title={$i18n("protect.unlockTip")}
-                onclick={() => void unlock()}>{$i18n("protect.unlock")}</button>
-      </div>
-      {#if ob}
-        <div class="line mono">{ob.part?.name ?? ""} {ob.family ?? ""} · RDP {ob.rdp_level ?? "?"} · {hex32(ob.address ?? 0)} = {ob.raw != null ? hex32(ob.raw) : ""}</div>
-        <table class="grid">
-          <thead><tr><th>{$i18n("common.name")}</th><th>{$i18n("protect.value")}</th><th>{$i18n("protect.description")}</th></tr></thead>
-          <tbody>
-            {#each Object.keys(ob.fields ?? {}) as name (name)}
-              <tr>
-                <td class="mono">{name}</td>
-                <td><input class="mono num" bind:value={obEdit[name]} aria-label={name} /></td>
-                <td class="muted">{ob.descriptions?.[name] ?? ""}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-        <div class="row pad">
-          <button class="small danger" disabled={!online || !connected || !!busy} onclick={() => void writeOptionBytes()}>{$i18n("protect.write")}</button>
-        </div>
-      {/if}
-      {#if obResult}<pre class="mono line">{JSON.stringify(obResult, null, 2)}</pre>{/if}
-    </details>
-  {/snippet}
   {#if !connected}
     <Empty need="connected" />
-    <div class="form">{@render protection()}</div>
+    <div class="form">
+      <FlashProtection {online} {connected} {busy} {run} onInvalid={setInvalid} bind:ob bind:obEdit bind:obResult />
+    </div>
   {:else}
     <div class="form">
       <label for="flash-path">{$i18n("flash.file")}</label>
@@ -392,9 +203,9 @@
         </select>
         {#if eraseMode === "range"}
           <input class="mono num" bind:value={eraseAddress} aria-label={$i18n("flash.address")} aria-required="true"
-                 placeholder={$i18n("flash.address")} title={$i18n("flash.address")} /><span class="req" aria-hidden="true">*</span>
+                 placeholder={$i18n("flash.address")} title={$i18n("flash.address")} /><Req />
           <input class="mono len" bind:value={eraseLength} aria-label={$i18n("flash.length")} aria-required="true"
-                 placeholder={$i18n("flash.length")} title={$i18n("flash.length")} /><span class="req" aria-hidden="true">*</span>
+                 placeholder={$i18n("flash.length")} title={$i18n("flash.length")} /><Req />
         {/if}
         <button disabled={!online || !!busy} onclick={erase}>{$i18n("flash.eraseNow")}</button>
       </div>
@@ -420,180 +231,15 @@
     {#if invalid}<div class="line bad">{invalid}</div>{/if}
     {#if note}<div class="line muted">{note}</div>{/if}
 
-    {#if result}
-      <section class="result">
-        {#if result.kind === "program"}
-          <div class="line mono">{baseName(result.data.image?.source ?? path)} · {result.data.image?.format?.toUpperCase()} ·
-            {size(result.data.image?.bytes)}</div>
-          <table class="grid">
-            <thead><tr><th>{$i18n("flash.stage")}</th><th>{$i18n("flash.size")}</th><th>{$i18n("flash.time")}</th>
-              <th>{$i18n("flash.speed")}</th><th></th></tr></thead>
-            <tbody>
-              {#each stages as s (s.stage)}
-                <tr class:total={s.stage === "total"}>
-                  <td>{$i18n(`flash.stage.${s.stage}` as Key)}</td>
-                  <td class="mono">{size(s.bytes)}</td><td class="mono">{s.stage === "ram" ? "" : seconds(s.seconds)}</td>
-                  <td class="mono">{speed(s.bps)}</td><td class="muted">{stageNote(s)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        {:else if result.kind === "erase"}
-          <div class="line">
-            {#if result.data.start !== undefined}
-              {$i18n("flash.erasedRange", { start: hex32(result.data.start), end: hex32(result.data.end) })}
-              · {sectorsNote(result.data.sectors, "sector")}
-            {:else}
-              {$i18n("flash.erasedAll", { method: methodText(result.data.method) })}
-            {/if}
-            {#if result.data.rate}· <span class="mono">{seconds(result.data.rate.seconds)} · {speed(result.data.rate.bytes_per_s)}</span>{/if}
-            {#if result.data.seconds !== undefined}· <span class="mono">{seconds(result.data.seconds)}</span>{/if}
-          </div>
-        {:else if result.kind === "read"}
-          <div class="line">{$i18n("flash.readDone", { path: result.data.path, size: size(result.data.bytes),
-                                                        crc: hex32(result.data.crc32) })}
-            · <span class="mono">{hex32(result.data.address)} · {seconds(result.data.read?.seconds)} · {speed(result.data.read?.bytes_per_s)}</span></div>
-        {/if}
-        {#if verify}
-          {#if verify.match}
-            <div class="line ok">{$i18n("flash.verifyOk")} · <span class="mono">{size(verify.bytes)} · {speed(verify.read?.bytes_per_s)}</span></div>
-          {:else}
-            <div class="line bad">{$i18n("flash.verifyBad", { n: verify.differing_bytes })}</div>
-            <table class="grid">
-              <thead><tr><th>{$i18n("common.address")}</th><th>{$i18n("flash.expected")}</th><th>{$i18n("flash.actual")}</th></tr></thead>
-              <tbody>
-                {#each verify.differences.slice(0, 16) as d (d.address)}
-                  <tr><td class="mono">{hex32(d.address)}</td><td class="mono hexbytes">{d.expected}</td>
-                    <td class="mono hexbytes bad">{d.actual}</td></tr>
-                {/each}
-              </tbody>
-            </table>
-            {#if verify.differences.length > 16 || verify.more_differences}
-              <div class="line muted">{$i18n("flash.more", { n: verify.differences.length - 16 + (verify.more_differences ?? 0) })}</div>
-            {/if}
-          {/if}
-        {/if}
-      </section>
-    {/if}
+    {#if result}<FlashResult {result} {path} />{/if}
 
-    <details ontoggle={(e) => (e.currentTarget as HTMLDetailsElement).open && loadRegions()}>
-      <summary>{$i18n("flash.regions")}</summary>
-      {#if regions}
-        <table class="grid">
-          <thead><tr><th>{$i18n("common.name")}</th><th>{$i18n("flash.start")}</th><th>{$i18n("flash.size")}</th>
-            <th>{$i18n("flash.sectors")}</th><th>{$i18n("flash.algorithm")}</th><th>{$i18n("flash.boot")}</th></tr></thead>
-          <tbody>
-            {#each regions as r (r.name)}
-              <tr class:muted={!r.usable}>
-                <td class="mono">{r.name}</td><td class="mono">{hex32(r.start)}</td><td class="mono">{size(r.size)}</td>
-                <td class="mono">{sectorsText(r.sectors)}</td><td class="mono">{r.algorithm}</td><td>{r.boot ? "✓" : ""}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-      <div class="sub" title={$i18n("flash.algosTip")}>{$i18n("flash.algos")}</div>
-      {#if algos.length}
-        <table class="grid">
-          <thead><tr><th>{$i18n("common.name")}</th><th>FLM</th><th>{$i18n("flash.start")}</th><th>{$i18n("flash.size")}</th>
-            <th></th></tr></thead>
-          <tbody>
-            {#each algos as a (a.name)}
-              <tr>
-                <td class="mono">{a.name}</td><td class="mono">{baseName(a.flm)}</td>
-                <td class="mono">{a.address !== null && a.address !== undefined ? hex32(a.address) : "-"}</td>
-                <td class="mono">{size(a.size)}</td>
-                <td><button class="small" disabled={!online || !!busy} onclick={() => removeAlgo(a.name)}>
-                  {$i18n("common.remove")}</button></td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-      <form class="row pad" onsubmit={(e) => { e.preventDefault(); void addAlgo(); }}>
-        <input class="mono grow" bind:value={algo.flm} placeholder={$i18n("flash.algoFlm")} aria-label={$i18n("flash.algoFlm")}
-               spellcheck="false" />
-        <input class="mono num" bind:value={algo.address} placeholder={$i18n("flash.address")} aria-label={$i18n("flash.address")} />
-        <input class="mono len" bind:value={algo.size} placeholder={$i18n("flash.size")} aria-label={$i18n("flash.size")} />
-        <input class="mono num" bind:value={algo.ramAddress} placeholder={$i18n("flash.ramAddress")}
-               aria-label={$i18n("flash.ramAddress")} />
-        <input class="mono len" bind:value={algo.ramSize} placeholder={$i18n("flash.ramSize")} aria-label={$i18n("flash.ramSize")} />
-        <input class="len" bind:value={algo.name} placeholder={$i18n("common.name")} aria-label={$i18n("common.name")} />
-        <button class="small" disabled={!online || !algo.flm.trim() || !!busy} title={$i18n("flash.algosTip")}>
-          {$i18n("common.add")}</button>
-      </form>
-    </details>
+    <FlashRegions {online} {busy} {run} onInvalid={setInvalid} onNote={setNote} />
 
+    <FlashProtection {online} {connected} {busy} {run} onInvalid={setInvalid} bind:ob bind:obEdit bind:obResult />
 
-    {@render protection()}
+    <FlashPacks {online} bind:busy />
 
-    <details ontoggle={(e) => (e.currentTarget as HTMLDetailsElement).open && loadPacks()}>
-      <summary title={$i18n("flash.packsTip")}>{$i18n("flash.packs")}</summary>
-      {#if packs?.length}
-        <ul class="packs mono">{#each packs as p (p.pack)}<li>{p.pack} <span class="muted">{p.version}</span></li>{/each}</ul>
-      {:else if packs}
-        <div class="line muted">{$i18n("flash.packNone")}</div>
-      {/if}
-      <div class="row pad">
-        <input class="grow" bind:value={pattern} placeholder={$i18n("flash.packPattern")}
-               onkeydown={(e) => e.key === "Enter" && findPacks()} />
-        <label><input type="checkbox" bind:checked={updateIndex} /> {$i18n("flash.packUpdate")}</label>
-        <button class="small" disabled={!online || !pattern.trim() || !!busy} onclick={findPacks}>{$i18n("flash.packFind")}</button>
-      </div>
-      {#if found}
-        <table class="grid">
-          <thead><tr><th>{$i18n("flash.part")}</th><th>{$i18n("flash.vendor")}</th><th>{$i18n("flash.pack")}</th>
-            <th>{$i18n("flash.version")}</th><th></th></tr></thead>
-          <tbody>
-            {#each found as p (p.part)}
-              <tr>
-                <td class="mono">{p.part}</td><td>{p.vendor}</td><td class="mono">{p.pack}</td><td class="mono">{p.version}</td>
-                <td>{#if p.installed}<span class="muted">{$i18n("flash.packInstalled")}</span>{:else}
-                  <button class="small" disabled={!!busy} onclick={() => install(p.part)}>{$i18n("flash.packInstall")}</button>{/if}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-      <form class="row pad" onsubmit={(e) => { e.preventDefault(); void loadPackFile(); }}>
-        <input class="mono grow" bind:value={packPath} placeholder={$i18n("flash.packPath")} aria-label={$i18n("flash.packPath")}
-               spellcheck="false" />
-        <button class="small" disabled={!online || !packPath.trim() || !!busy} title={$i18n("flash.packLoadTip")}>
-          {$i18n("flash.packLoad")}</button>
-      </form>
-      {#if targets.length}
-        <div class="row pad targets">
-          <span class="muted">{$i18n("flash.packTargets")}</span>
-          {#each targets as name (name)}
-            <span class="mono">{name}</span>
-            <button class="small" title={$i18n("flash.useTargetTip")} onclick={() => useTarget(name)}>
-              {$i18n("flash.useTarget")}</button>
-          {/each}
-        </div>
-      {/if}
-    </details>
-
-    <details>
-      <summary title={$i18n("flash.benchmarkTip")}>{$i18n("flash.benchmark")}</summary>
-      <div class="row pad">
-        <label>{$i18n("flash.benchSector")} <input class="mono num" bind:value={benchSector} /></label>
-        <button class="small" disabled={!online || !!busy} title={$i18n("flash.benchmarkTip")} onclick={benchmark}>
-          {$i18n("flash.benchRun")}</button>
-        {#if bench?.frequency_hz}<span class="muted mono">{$i18n("flash.frequency", { f: frequency(bench.frequency_hz) })}</span>{/if}
-      </div>
-      {#if bench}
-        <table class="grid">
-          <thead><tr><th>{$i18n("flash.stage")}</th><th>{$i18n("flash.size")}</th><th>{$i18n("flash.time")}</th>
-            <th>{$i18n("flash.speed")}</th></tr></thead>
-          <tbody>
-            {#each benchRows(bench) as [k, r] (k)}
-              <tr><td>{$i18n(k)}</td><td class="mono">{size(r.bytes)}</td><td class="mono">{seconds(r.seconds)}</td>
-                <td class="mono">{speed(r.bytes_per_s)}</td></tr>
-            {/each}
-          </tbody>
-        </table>
-      {/if}
-    </details>
+    <FlashBench {online} {busy} {run} onInvalid={setInvalid} />
   {/if}
 </div>
 
@@ -602,7 +248,6 @@
           border-bottom: 1px solid var(--line); }
   .form > label { color: var(--muted); font-size: 12px; }
   .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
-  .row.pad { padding: 4px 10px; }
   .options label { display: inline-flex; gap: 4px; align-items: center; }
   .grow { flex: 1; min-width: 120px; }
   .num { width: 110px; }
@@ -611,14 +256,5 @@
   .bar { flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
   .bar span { display: block; height: 100%; background: var(--accent); transition: width 0.1s linear; }
   .line { padding: 4px 10px; }
-  .result { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
-  tr.total td { font-weight: 600; }
-  .ok { color: var(--ok); }
   .bad { color: var(--bad); }
-  .hexbytes { word-break: break-all; }
-  details { border-bottom: 1px solid var(--line); }
-  summary { padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; }
-  .packs { list-style: none; margin: 0; padding: 2px 10px; }
-  .sub { padding: 6px 10px 2px; color: var(--muted); font-size: 12px; }
-  .targets { font-size: 12px; }
 </style>

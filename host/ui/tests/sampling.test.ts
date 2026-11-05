@@ -4,7 +4,6 @@ import {
   addExpr, arrayWave, captureSeries, chartSeries, displayValue, health, numberOf, parseExprList,
   RATES, rateOptions, removeExpr, SampleStore, SharedSampling, toggleCursor, triggerParams, windowDomain, xyPoints,
 } from "../src/lib/sampling";
-import { missing } from "../src/lib/watchshare";
 import { FakeConn } from "./fake-conn";
 import { ints, varray, vbool, vbytes, venum, vfloat, vint, vna, vstruct } from "./value-kinds";
 
@@ -47,9 +46,6 @@ describe("一覧と周期をデーモンの画面の状態で分け合う（別�
     expect(got).toEqual([]);
   });
 
-  it("外された誤った式は、ほかの利用者に外されたと数えない", () => {
-    expect(missing(["a"], ["a", "bad", "gone"], ["bad"])).toEqual(["gone"]);
-  });
 });
 
 describe("式の一覧", () => {
@@ -120,14 +116,17 @@ describe("値の積み上げ（SampleStore）", () => {
     expect(st.discarded("b")).toBe(0);
   });
 
-  it("読みが追いつかず読まなかった区間（API の from_us より前で、前回の最後より後）を数える（黙って抜かさない）", () => {
+  it("読みが追いつかず読まなかった区間は、API が返した gap を並べるだけ（画面は検出しない）。lastTime は次の after_us に渡す", () => {
     const st = new SampleStore();
+    expect(st.lastTime("a")).toBeNull();
     st.merge("a", [1, 2].map((t) => s(t, t)), null);
-    st.merge("a", [2, 3, 4].map((t) => s(t, t)), 2);                // 読んだ範囲の始め 2 が前回の最後 2 以前: 続いている
+    expect(st.lastTime("a")).toBe(2);
+    st.merge("a", [2, 3, 4].map((t) => s(t, t)), null);             // 続いている（API が gap を返さない）
     expect(st.gaps("a")).toEqual([]);
-    st.merge("a", [10, 11].map((t) => s(t, t)), 10);                // 前回の最後 4 と 10 の間を読んでいない
+    st.merge("a", [10, 11].map((t) => s(t, t)), [4, 10]);           // API が [after_us, from_us] を返した
     expect(st.gaps("a")).toEqual([[4, 10]]);
-    st.merge("b", [50].map((t) => s(t, t)), 50);                    // 初めての読み: 前が無いので抜けではない
+    expect(st.lastTime("a")).toBe(11);
+    st.merge("b", [50].map((t) => s(t, t)), null);
     expect(st.gaps("b")).toEqual([]);
   });
 

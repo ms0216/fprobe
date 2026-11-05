@@ -38,7 +38,7 @@ NOT_IN_DEMO = frozenset({
     "linux_halt_debug_memory", "linux_halt_debug_read", "linux_halt_debug_run", "linux_halt_debug_status",
     "linux_halt_debug_select", "linux_halt_debug_step", "linux_halt_debug_threads", "linux_halt_gdb_serve",
     "linux_halt_gdb_status", "linux_halt_gdb_stop", "linux_halt_halt_all", "linux_halt_open", "linux_halt_processes",
-    "linux_halt_recover", "linux_halt_rescue", "linux_halt_resume_all", "linux_halt_status", "linux_halt_threads",
+    "linux_halt_profile_load", "linux_halt_profile_save", "linux_halt_recover", "linux_halt_rescue", "linux_halt_resume_all", "linux_halt_status", "linux_halt_threads",
     "linux_log_read", "linux_memap_connect", "linux_memap_connect_jtag", "linux_memap_disconnect",
     "linux_perf_record", "linux_perf_stat", "linux_probe_add", "linux_probe_list", "linux_probe_remove",
     "linux_ring_open", "linux_ring_read", "linux_ring_unwatch", "linux_ring_watch", "linux_sync", "linux_targets",

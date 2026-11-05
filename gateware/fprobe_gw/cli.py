@@ -9,7 +9,8 @@ from .boards.pynq_z2 import PYNQ_Z2
 from .designs import DESIGNS
 from .toolchain.build import INPUTS_STAMP, BuildError, GowinBuilder
 from .toolchain.ftdi import FtdiUnavailable, list_ftdi_devices, usb_port_chain
-from .toolchain.gowin import GowinToolchain, ToolchainNotFound
+from .toolchain.gowin import GowinToolchain
+from .toolchain.locate import ToolchainNotFound
 from .toolchain.vivado import VivadoToolchain
 from .toolchain.vivado_build import VivadoBuilder
 from .toolchain.pynq_loader import PynqError, PynqLoader
@@ -116,7 +117,7 @@ def _resources(design, build_dir: Path, depth: int) -> None:
     """モジュールごとの資源（合成の報告。配置の版によらず同じ）と、版ごとの Fmax（配置配線の時間の報告）。"""
     from .toolchain.resources import read_gowin_hierarchy, read_vivado_hierarchy, table
     from .toolchain.timing import parse_timing_report
-    from .toolchain.vivado import parse_vivado_timing
+    from .toolchain.vivado_report import parse_vivado_timing
     vivado = design.board.toolchain == "vivado"
     variants = sorted(d for d in build_dir.iterdir() if d.is_dir()) if build_dir.is_dir() else []
     if not variants:
@@ -145,77 +146,101 @@ def _print_local(text: str) -> None:
     print(text.encode(enc, "replace").decode(enc), flush=True)
 
 
+def _cmd_pynq(args) -> int:
+    loader = PynqLoader(VivadoToolchain.locate())
+    if args.action == "install":
+        pynq_setup.install(loader)
+        print("据え付け完了（fprobe-relay・fprobe-pl・サービス）")
+    elif args.action in ("ringmap", "unringmap"):
+        pynq_setup.ringmap(loader, undo=args.action == "unringmap", announce=_print_local)
+        print("起動時の読み込みを外した" if args.action == "unringmap" else
+              "起動時の読み込みを置いた。再起動の後に pynq status で確かめること")
+    elif args.action in ("reserve", "unreserve"):
+        pynq_setup.reserve(loader, undo=args.action == "unreserve")
+        print("PYNQ を再起動した。起動の後、PL は未構成: fprobe の回路を書き直すこと")
+    else:
+        _print_local(pynq_setup.status(loader))     # PYNQ の日本語のログ（cp932 で出せない文字は置き換える）
+    return 0
+
+
+def _cmd_gen(_args) -> int:
+    written = write_all()
+    for path in written:
+        print(f"生成: {path}")
+    if not written:
+        print("生成物は最新")
+    return 0
+
+
+def _program_gowin(toolchain, board, bitstream: Path, *, persistent: bool) -> None:
+    if persistent:
+        # B34: 外部 Flash への書き込みの間、書き込み器が FPGA を別の回路で動かし、J12 の端子を駆動する
+        # （2026-10-19 に XIAO の行の線が押され、キーが 573 文字届いた。SRAM への書き込みでは起きない）
+        print("注意: Flash への書き込みの間は J12 の端子が駆動されることがある。ターゲットの入力につないだ線"
+              "（キーの行など）は外してから書く", file=sys.stderr)
+    GowinProgrammer(toolchain, board.jtag_identity).program(bitstream, persistent=persistent)
+    print(f"書き込み完了（{board.name}, {'外部 Flash' if persistent else 'SRAM'}）")
+
+
+def _program_vivado(args, bitstream: Path) -> None:
+    if args.persistent:
+        raise BuildError("PYNQ-Z2 の起動時の回路の置き換えは未対応（JTAG で SRAM に書くだけ）")
+    if args.shifter and not getattr(DESIGNS.get(bitstream.resolve().parent.name), "ps_axi", False):
+        # PS7 を持たない回路でレベルシフタを有効にすると Linux が固まった（2026-10-20）。PS7 の有無は PS からは分からないので、
+        # ビルドの置き場所（build/<構成>/）が ps_axi の構成のときだけ許す
+        raise BuildError("--shifter は PS が AXI で触る構成（ps_axi。例 zynq_dut）のビルドの置き場所の top.bit にだけ使える"
+                         f"（{bitstream} の親の名前は構成として登録されていないか、ps_axi ではない）")
+    _program_pynq(bitstream, relay=args.relay, shifter=args.shifter)
+
+
+def _cmd_build(args) -> int:
+    design = DESIGNS[args.design]
+    if design.board.toolchain == "vivado":
+        return _build_vivado(args)
+    toolchain = GowinToolchain.locate()
+    build_dir = Path(args.build_dir or BUILD_ROOT / design.name)
+    builder = GowinBuilder(toolchain)
+    result = (builder.build(design.project(), build_dir) if args.single
+              else builder.build_best(design.project(), build_dir))
+    print(result.timing.describe())
+    print(f"ビットストリーム: {result.bitstream}")
+    if args.program:
+        _program_gowin(toolchain, design.board, result.bitstream, persistent=args.persistent)
+    return 0
+
+
+def _cmd_program(args) -> int:
+    board = BOARDS[args.board]
+    toolchain = GowinToolchain.locate() if board.toolchain == "gowin" else None
+    bitstream = Path(args.bitstream)
+    if not args.unverified and not (bitstream.parent / INPUTS_STAMP).is_file():
+        raise BuildError(f"{bitstream} の隣に成功したビルドの印 {INPUTS_STAMP} が無い（タイミング未達・"
+                         "駆動されない配線などで採用されなかった版かもしれない）。外で作ったものなら --unverified")
+    if board.toolchain == "vivado":
+        _program_vivado(args, bitstream)
+    else:
+        _program_gowin(toolchain, board, bitstream, persistent=args.persistent)
+    return 0
+
+
+def _cmd_detect(args) -> int:
+    _detect(BOARDS[args.board])
+    return 0
+
+
+def _cmd_resources(args) -> int:
+    _resources(DESIGNS[args.design], Path(args.build_dir or BUILD_ROOT / args.design), args.depth)
+    return 0
+
+
+_COMMANDS = {"detect": _cmd_detect, "pynq": _cmd_pynq, "resources": _cmd_resources, "gen": _cmd_gen,
+             "build": _cmd_build, "program": _cmd_program}
+
+
 def main(argv=None) -> int:
     args = make_parser().parse_args(argv)
     try:
-        if args.command == "detect":
-            _detect(BOARDS[args.board])
-            return 0
-        if args.command == "pynq":
-            loader = PynqLoader(VivadoToolchain.locate())
-            if args.action == "install":
-                pynq_setup.install(loader)
-                print("据え付け完了（fprobe-relay・fprobe-pl・サービス）")
-            elif args.action in ("ringmap", "unringmap"):
-                pynq_setup.ringmap(loader, undo=args.action == "unringmap", announce=_print_local)
-                print("起動時の読み込みを外した" if args.action == "unringmap" else
-                      "起動時の読み込みを置いた。再起動の後に pynq status で確かめること")
-            elif args.action in ("reserve", "unreserve"):
-                pynq_setup.reserve(loader, undo=args.action == "unreserve")
-                print("PYNQ を再起動した。起動の後、PL は未構成: fprobe の回路を書き直すこと")
-            else:
-                _print_local(pynq_setup.status(loader))     # PYNQ の日本語のログ（cp932 で出せない文字は置き換える）
-            return 0
-        if args.command == "resources":
-            _resources(DESIGNS[args.design], Path(args.build_dir or BUILD_ROOT / args.design), args.depth)
-            return 0
-        if args.command == "gen":
-            written = write_all()
-            for path in written:
-                print(f"生成: {path}")
-            if not written:
-                print("生成物は最新")
-            return 0
-
-        if args.command == "build" and DESIGNS[args.design].board.toolchain == "vivado":
-            return _build_vivado(args)
-        toolchain = GowinToolchain.locate() if BOARDS.get(getattr(args, "board", ""), PRIMER20K).toolchain == "gowin" else None
-        if args.command == "build":
-            design = DESIGNS[args.design]
-            build_dir = Path(args.build_dir or BUILD_ROOT / design.name)
-            builder = GowinBuilder(toolchain)
-            result = (builder.build(design.project(), build_dir) if args.single
-                      else builder.build_best(design.project(), build_dir))
-            print(result.timing.describe())
-            print(f"ビットストリーム: {result.bitstream}")
-            if not args.program:
-                return 0
-            board, bitstream = design.board, result.bitstream
-        else:
-            board, bitstream = BOARDS[args.board], Path(args.bitstream)
-            if not args.unverified and not (bitstream.parent / INPUTS_STAMP).is_file():
-                raise BuildError(f"{bitstream} の隣に成功したビルドの印 {INPUTS_STAMP} が無い（タイミング未達・"
-                                 "駆動されない配線などで採用されなかった版かもしれない）。外で作ったものなら --unverified")
-
-        if board.toolchain == "vivado":
-            if args.persistent:
-                raise BuildError("PYNQ-Z2 の起動時の回路の置き換えは未対応（JTAG で SRAM に書くだけ）")
-            if args.shifter and not getattr(DESIGNS.get(bitstream.resolve().parent.name), "ps_axi", False):
-                # PS7 を持たない回路でレベルシフタを有効にすると Linux が固まった（2026-10-20）。PS7 の有無は PS からは分からないので、
-                # ビルドの置き場所（build/<構成>/）が ps_axi の構成のときだけ許す
-                raise BuildError("--shifter は PS が AXI で触る構成（ps_axi。例 zynq_dut）のビルドの置き場所の top.bit にだけ使える"
-                                 f"（{bitstream} の親の名前は構成として登録されていないか、ps_axi ではない）")
-            _program_pynq(bitstream, relay=args.relay, shifter=args.shifter)
-            return 0
-        if args.persistent:
-            # B34: 外部 Flash への書き込みの間、書き込み器が FPGA を別の回路で動かし、J12 の端子を駆動する
-            # （2026-10-19 に XIAO の行の線が押され、キーが 573 文字届いた。SRAM への書き込みでは起きない）
-            print("注意: Flash への書き込みの間は J12 の端子が駆動されることがある。ターゲットの入力につないだ線"
-                  "（キーの行など）は外してから書く", file=sys.stderr)
-        GowinProgrammer(toolchain, board.jtag_identity).program(
-            bitstream, persistent=args.persistent)
-        print(f"書き込み完了（{board.name}, {'外部 Flash' if args.persistent else 'SRAM'}）")
-        return 0
+        return _COMMANDS[args.command](args)
     except _EXPECTED_ERRORS as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 1

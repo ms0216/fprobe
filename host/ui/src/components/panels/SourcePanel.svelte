@@ -1,5 +1,6 @@
 <script lang="ts">
   import Hint from "./Hint.svelte";
+  import Req from "./Req.svelte";
   // Source: 行の左の余白にブレークポイント、いまの行（▶）の強調、選んだ行（Run to Cursor・F9 の対象）、
   // 逆アセンブルの混在表示（Mixed）。何も開いていなければ Open ELF / Load Demo / 最近使った項目。
   import { tick } from "svelte";
@@ -219,7 +220,7 @@
         <input class="mono" bind:value={cycEnd} placeholder={$i18n("cycles.end")} aria-label={$i18n("cycles.end")} />
         <button type="button" class="small" disabled={selected === undefined} title={$i18n("cycles.useLineTip")}
                 onclick={() => pickLine("end")}>{$i18n("cycles.useLine")}</button>
-        <label class="muted">{$i18n("cycles.count")}<span class="req" aria-hidden="true">*</span>
+        <label class="muted">{$i18n("cycles.count")}<Req />
           <input class="mono num" bind:value={cycCount} inputmode="numeric" aria-required="true" /></label>
         <button class="small" disabled={!online}>{$i18n("cycles.measure")}</button>
         {#if cycError}<span class="bad">{cycError}</span>{/if}

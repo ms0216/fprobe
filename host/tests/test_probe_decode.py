@@ -60,6 +60,11 @@ def test_default_kinds_come_from_the_registry(probe):
     assert swd["matched"] == 0                                      # SWD は transfer だけ（変わらない振る舞い）
     # 絞った種類を返す: 画面は「件数と表の食い違い」を、既定の種類の外として説明する
     assert swd["kinds"] == ["transfer"] and out["kinds"] is None
+    # 絞りの外の種類と件数は API が返す（画面は引き算をしない）。絞らなければ空
+    assert out["hidden_kinds"] == {} and set(swd["hidden_kinds"]) == set(swd["counts"]) - {"transfer"}
+    assert all(n == swd["counts"][k] for k, n in swd["hidden_kinds"].items())
+    explicit = probe.la_decode("swd", {"swclk": 0, "swdio": 3, "drive": None, "turnaround": 1, "orundetect": False}, kinds=["transfer"])
+    assert explicit["hidden_kinds"] == swd["hidden_kinds"]
 
 
 def test_decoders_list_and_user_decoder_file(probe, tmp_path):

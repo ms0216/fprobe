@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from ..dwarf.access import AccessError, TargetAccess
 from ..dwarf.info import DebugInfo
-from .base import NAME_LIMIT, KernelAwareness, stopped_note
+from .base import NAME_LIMIT, KernelAwareness
 from .cortexm import THREAD_PSP_EXC_RETURN, SavedContext, read_fp_first_context
 from .model import KernelObject, StackInfo, Task, TaskState, WaitInfo, field_location
 from .rtx5_objects import RTX5Objects
@@ -118,14 +118,7 @@ class RTX5(KernelAwareness):
 
     def walk(self, head: int, link: str, what: str) -> list[int]:
         """head から link（thread_next・delay_next）を辿ったスレッド。壊れていれば止め、warnings に書く。"""
-        out: list[int] = []
-        while head:
-            if head in out or len(out) >= MAX_THREADS:
-                self.warnings.append(stopped_note(f"{what} のリスト", len(out), "cycle" if head in out else "limit", MAX_THREADS))
-                break
-            out.append(head)
-            head = self._field(head, link)
-        return out
+        return self.follow(head, lambda handle: self._field(handle, link), f"{what} のリスト", MAX_THREADS)
 
     def delays(self) -> dict[int, int]:
         """delay_list のスレッド → 残りのティック（差分の和）。"""
@@ -313,6 +306,7 @@ class RTX5(KernelAwareness):
         return 0
 
     def snapshot(self) -> dict:
+        # 読む順（タスク → version・scheduler・tick → current）を保つため、基底の snapshot() の雛形は使わない
         tasks = self.tasks()
         return {"rtos": self.name, "version": self.version(), "scheduler": self.scheduler_state(),
                 "tick": self.tick_count(), "current": self._names.get(self.current()),

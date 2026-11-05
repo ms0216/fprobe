@@ -155,7 +155,7 @@ def test_swo_stop_without_a_connection_is_not_connected(tmp_path):
 # BUG-API-011: NaN（JSON に無い字句。Python の json は出し・読みする）が number の引数に通り、rtt.read の timeout_s が NaN だと
 # 作業スレッドが永久に待ち、デーモンの全操作が止まる
 def test_nan_timeout_does_not_block_the_worker_forever():
-    # 塞がった作業スレッドが試験の process の CPU を食うので、別の process で 4 秒だけ試す
+    # 塞がった作業スレッドが試験の process の CPU を食うので、別の process で試す（永遠に返らないことを見る。負荷で遅くても落ちないよう 15 秒待つ）
     import os
     import subprocess
     import sys
@@ -166,9 +166,9 @@ def test_nan_timeout_does_not_block_the_worker_forever():
     try:
         assert child.stdout.readline().strip() == b"started"       # 読み込みの時間は数えない
         try:
-            child.wait(timeout=4)
+            child.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            pytest.fail("rtt_read(timeout_s=NaN) が 4 秒たっても返らない")
+            pytest.fail("rtt_read(timeout_s=NaN) が 15 秒たっても返らない")
     finally:
         child.kill()
         child.wait()

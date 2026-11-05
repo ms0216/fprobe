@@ -62,6 +62,37 @@ Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=�
 { entries: Array<ActivityEntry> }
 ```
 
+## session.methods
+
+種類: `read`。この API のメソッドの一覧と説明を返す（API 自身が説明する。名前を当てずっぽうで試さない）。name を渡すとそのメソッド 1 つの全部（summary・kind・params・result の JSON Schema）。prefix（名前の先頭。"target." など。"" で全部）で絞った一覧は name と kind。with_summary = true で一覧に summary も付ける（長い）。name が無ければ、その名前で始まるメソッドを candidates に挙げて断る。MCP では全メソッドがもともと道具として並ぶので、これは WebSocket の API の利用者向け。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `prefix` | `string` |  |
+| `name` | `string | null` |  |
+| `with_summary` | `boolean` |  |
+
+応答:
+
+```ts
+{ api_version: number; total: number; methods: Array<{ name: string; kind: string; summary?: string; params?: Json; result?: Json; binary?: boolean; irreversible?: boolean }> }
+```
+
+## session.hints
+
+種類: `read`。使い方の落とし穴の記録（ヒント）を返す。診断ではない: 症状に当てはまりうる『確かめる事実』と、それを読む API、手順を並べるだけで、当てはまるかの判断は使う側。method（API のメソッド名。例 "linux.halt.debug.attach"）でそのメソッドに付いたヒント、id で 1 件、どちらも無ければ全部。失敗した呼び出しの後や、迷ったときに引く。ヒントは実機・アクティビティの失敗の事実から足している。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `method` | `string | null` |  |
+| `id` | `string | null` |  |
+
+応答:
+
+```ts
+{ version: number; total: number; hints: Array<{ id: string; title: string; methods: Array<string>; symptom: string; facts_to_check: Array<{ api: string; reads: string }>; recipe: Array<string>; docs: Array<string>; when?: { [key: string]: Array<string> } }> }
+```
+
 ## session.permissions
 
 種類: `read`。このデーモンの許可の表（PC で実行してよいファイル exec・書いてよい場所 write）。利用者が起動の前に permissions.json に書き、デーモンが起動時に読む（API からは変えられない）。checked = デーモンがパスを確かめるか、file = 表のファイル、loaded = そのファイルがあって読んだか、created = この起動で初めての表として作ったか（表のファイルが無かった: <FPROBE_HOME>/out だけに書いてよく、実行は何も許さない表。既にある表は書き換えない）。表に無いパスを渡す呼び出しは E_NOT_ALLOWED（data.reason = path_not_permitted）。
@@ -937,6 +968,22 @@ ElfLoaded
 { address: number; where: string; function: string | null; offset: number | null; file: string | null; line: number | null; kind?: "function" | "object"; size?: number }
 ```
 
+## debug.symbol.search
+
+種類: `read`。ELF の記号（関数・変数）を名前の部分一致で探す（大文字小文字を区別しない。query が空なら全部）。kind = function / object / null（両方）。名前順で先頭 limit 件（件数は使う側が明示）。total = 一致した数、returned = 返した数（total > returned なら limit で切れた）。各記号は name・address・size・kind。ブレークポイントの場所・式に使う名前を探すときに（debug.symbol.info は 1 つの場所の番地と行）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `query` | `string` | ○ |
+| `kind` | `"function" | "object" | null` |  |
+| `limit` | `number` | ○ |
+
+応答:
+
+```ts
+{ total: number; returned: number; symbols: Array<{ name: string; address: number; size: number; kind: "function" | "object" }> }
+```
+
 ## debug.source.list
 
 種類: `read`。読み込んだ ELF の行番号の情報が参照するソース（name・path・この PC にあるか exists）。同じ名前の別のファイルは files には最初のものだけで、same_name = {名前: [場所]} に全部（"ファイル:行" は名前だけでは選ばず、ディレクトリを添えて選ぶ。例 "drivers/util.c:10"）。 ビルドした場所に無く ELF の隣の同じ名前のファイルを使ったものは built_path（行表の場所）も（同じ名前なら同じソースとみなす。中身は確かめていない）。
@@ -1119,7 +1166,7 @@ Stop
 応答:
 
 ```ts
-{ reason: string; pc: number; where: string; function?: string; file?: string; line?: number; elapsed_s: number; time_source: "host"; halt_bits?: Array<string>; steps?: number; runs?: number; return_value?: ReturnValue; exit_code?: number; fault?: FaultSummary }
+{ reason: string; pc: number; where: string; function?: string; file?: string; line?: number; elapsed_s: number; time_source: "host"; halt_bits?: Array<string>; steps?: number; runs?: number; return_value?: ReturnValue; exit_code?: number; fault?: FaultSummary; signal?: number; signal_name?: string }
 ```
 
 ## debug.call
@@ -1620,7 +1667,7 @@ TimelineTile
 応答:
 
 ```ts
-{ protocol: string; params: { [key: string]: Json }; capture: { id: number; length: number; sample_period_ns: number; trigger_index: number; channels: number; source: string }; total: number; errors: number; counts: { [key: string]: number }; kinds: Array<string> | null; matched: number; offset: number; annotations: Array<{ start: number; end: number; start_s: number; end_s: number; start_rel_s: number; end_rel_s: number; kind: string; text: string; value: number | null; error: string | null; fields: { [key: string]: Json } | null }> }
+{ protocol: string; params: { [key: string]: Json }; capture: { id: number; length: number; sample_period_ns: number; trigger_index: number; channels: number; source: string }; total: number; errors: number; counts: { [key: string]: number }; kinds: Array<string> | null; matched: number; offset: number; annotations: Array<{ start: number; end: number; start_s: number; end_s: number; start_rel_s: number; end_rel_s: number; kind: string; text: string; value: number | null; error: string | null; fields: { [key: string]: Json } | null }>; hidden_kinds: { [key: string]: number } }
 ```
 
 ## la.decoders
@@ -1974,12 +2021,16 @@ Record<string, never>
 
 ## watch.status
 
-種類: `control`。観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）、最後に watch.set した呼び出し元（client: {id, name, role}。デーモンが記録した事実。分からなければ null）も。 loss_ratio = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、measured_hz = 巡回 ÷ since_start_s（数が無い・0 なら null）。stats = 変数ごとの watch.set から読んだ値すべての統計 {count, min, max, mean, not_numeric}（サンプラの値はイベント記録を続きから読んで数える。読めずに一周された・上限を超えたイベントの数は stats_lost_events）。
+種類: `control`。観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）、最後に watch.set した呼び出し元（client: {id, name, role}。デーモンが記録した事実。分からなければ null）も。 loss_ratio = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、measured_hz = 巡回 ÷ since_start_s（数が無い・0 なら null）。stats = 変数ごとの watch.set から読んだ値すべての統計 {count, min, max, mean, not_numeric}（サンプラの値はイベント記録を続きから読んで数える。読めずに一周された・上限を超えたイベントの数は stats_lost_events）。 expressions を渡すと、その式のうち観測している・いない・観測の組にあるが渡した式に無いものを expressions に返す（集合の差をクライアントでしなくてよい）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `expressions` | `Array<string> | null` |  |
 
 応答:
 
 ```ts
-{ watches: Array<WatchedVariable>; rejected: Array<{ expression: string; error: string }>; stats: { [key: string]: { count: number; min: number | null; max: number | null; mean: number | null; not_numeric: number } }; stats_lost_events: number | null; running: boolean; since_start_s: number | null; rate_hz: number | null; client: { id: number; name: string; role: string } | null; chase_rate_hz: number | null; chase_errors: { [key: string]: string }; capture: { state: "armed" | "capturing" | "done"; reason: "stop" | "post" | "max_samples" | "cancelled" | null } | null; rounds?: number; errors?: number; overruns?: number; last_ack?: number; busy?: boolean; held?: boolean; device?: { rounds: number; errors: number; overruns: number }; loss_ratio: number | null; measured_hz: number | null }
+{ watches: Array<WatchedVariable>; rejected: Array<{ expression: string; error: string }>; stats: { [key: string]: { count: number; min: number | null; max: number | null; mean: number | null; not_numeric: number } }; stats_lost_events: number | null; running: boolean; since_start_s: number | null; rate_hz: number | null; client: { id: number; name: string; role: string } | null; chase_rate_hz: number | null; chase_errors: { [key: string]: string }; capture: { state: "armed" | "capturing" | "done"; reason: "stop" | "post" | "max_samples" | "cancelled" | null } | null; rounds?: number; errors?: number; overruns?: number; last_ack?: number; busy?: boolean; held?: boolean; device?: { rounds: number; errors: number; overruns: number }; loss_ratio: number | null; measured_hz: number | null; expressions: { observed: Array<string>; missing: Array<string>; others: Array<string>; all_observed: boolean } | null }
 ```
 
 ## watch.values
@@ -2000,11 +2051,12 @@ Record<string, never>
 |---|---|---|
 | `name` | `string` | ○ |
 | `last` | `number` |  |
+| `after_us` | `number | null` |  |
 
 応答:
 
 ```ts
-{ name: string; time_point: "read_request" | "value_returned"; samples: Array<{ time_us: number; value: Value; time_lo_us?: number | null; time_hi_us?: number | null }>; from_us: number | null }
+{ name: string; time_point: "read_request" | "value_returned"; samples: Array<{ time_us: number; value: Value; time_lo_us?: number | null; time_hi_us?: number | null }>; from_us: number | null; gap: Array<number> | null }
 ```
 
 ## watch.xy
@@ -2038,7 +2090,7 @@ Record<string, never>
 応答:
 
 ```ts
-{ a_us: number; b_us: number; dt_us: number; rows: Array<{ name: string; a: { time_us: number; value: Value } | null; b: { time_us: number; value: Value } | null; delta: number | null; stats: { count: number; min: number | null; max: number | null; mean: number | null; not_numeric: number }; first_us: number | null }> }
+{ a_us: number; b_us: number; dt_us: number; rows: Array<{ name: string; a: { time_us: number; value: Value } | null; b: { time_us: number; value: Value } | null; delta: number | null; stats: { count: number; min: number | null; max: number | null; mean: number | null; not_numeric: number }; first_us: number | null; covers_range_start: boolean }> }
 ```
 
 ## rtos.info
@@ -2691,12 +2743,12 @@ null
 
 ## xtrig.status
 
-種類: `read`。割り込み書き込みの状態 inject（結果 result・busy・ack・成功した回数 count・最後の時刻 time）と中身（ap・address・value。レジスタの読み戻し）、番地一致 match の回数 count・最後の時刻 time（タイムベースのカウント）と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route（レジスタから読んだ to_la・to_inject の源の名前。xtrig.route 以外の道具が書いたビットも含む）。
+種類: `read`。割り込み書き込みの状態 inject（結果 result・busy・ack・成功した回数 count・最後の時刻 time・その時刻が意味を持つか time_valid）と中身（ap・address・value。レジスタの読み戻し）、番地一致 match の回数 count・最後の時刻 time（タイムベースのカウント）・time_valid と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route（レジスタから読んだ to_la・to_inject の源の名前。xtrig.route 以外の道具が書いたビットも含む）。
 
 応答:
 
 ```ts
-{ inject: { busy: boolean; result: "ok" | "swd_error" | "not_connected" | "absent"; ack: number; count: number; time: number; ap: number; address: number; value: number }; match: { count: number; time: number; address: number; address_mask: number; data: number; data_mask: number; on_write: boolean; on_read: boolean }; route: { to_la: Array<"la_trigger" | "dap_match" | "host" | "sequence" | "obs_match" | "sampler_match">; to_inject: Array<"la_trigger" | "dap_match" | "host" | "sequence" | "obs_match" | "sampler_match"> } }
+{ inject: { busy: boolean; result: "ok" | "swd_error" | "not_connected" | "absent"; ack: number; count: number; time: number; time_valid: boolean; ap: number; address: number; value: number }; match: { count: number; time: number; time_valid: boolean; address: number; address_mask: number; data: number; data_mask: number; on_write: boolean; on_read: boolean }; route: { to_la: Array<"la_trigger" | "dap_match" | "host" | "sequence" | "obs_match" | "sampler_match">; to_inject: Array<"la_trigger" | "dap_match" | "host" | "sequence" | "obs_match" | "sampler_match"> } }
 ```
 
 ## xtrig.output_set
@@ -5493,7 +5545,7 @@ LinuxGdbRelayStatus
 応答:
 
 ```ts
-{ enabled: boolean; address: number; mask: number; value: number; halt: boolean; la: boolean; matched: boolean; seen_any: boolean; seen: number; count: number; time: number; prev_time: number }
+{ enabled: boolean; address: number; mask: number; value: number; halt: boolean; la: boolean; matched: boolean; seen_any: boolean; seen: number; count: number; time: number; time_valid: boolean; prev_time: number }
 ```
 
 ## sampler.trigger_clear
@@ -5973,6 +6025,34 @@ HaltDebugEvent
 HaltDebugClose
 ```
 
+## linux.halt.profile.save
+
+種類: `control`。いま開いている linux.halt の設定をファイルに書く（open の引数、attach 中なら attach の引数から pid を除いたもの。pid は実行のたびに変わるので書かない。offsets は中身の SHA-256 を書く）。コアは動かさない。人の画面の「保存」と同じ。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `path` | `string` | ○ |
+
+応答:
+
+```ts
+HaltProfile
+```
+
+## linux.halt.profile.load
+
+種類: `read`。保存した設定のファイルを読んで中身を返す。何も開かない・動かさない。返った open を linux.halt.open へ、attach を（pid を足して）linux.halt.debug.attach へ、そのまま渡して使う（画面の「読み込み」は欄に入れるだけ。人が押して実行する）。offsets_matches は保存時と今の offsets のファイルの SHA-256 の一致（事実だけ。合わなくても止めない）。
+
+| 引数 | 型 | 必須 |
+|---|---|---|
+| `path` | `string` | ○ |
+
+応答:
+
+```ts
+HaltProfileLoaded
+```
+
 ## 応答の共通の形
 
 ### ActivityEntry
@@ -6425,6 +6505,22 @@ linux.halt の gdb のサーバの事実（state・ended_by・後始末の誤り
 { backend: "fprobe" | "openocd"; jtag_khz: number; offsets: string; page_offset: number; phys_offset: number; linear_map_end: number; max_tasks: number; max_threads: number; mmu_format: "short" | "lpae"; journal: string; fpga_request_times: boolean; part?: string; fpga_halt_watch_bound_ns?: number | "unmeasured"; fpga_halt_watch_poll_s?: number; cti_board?: string; cti_request_bound_ns?: number; cti_event_bound_ns?: number | "unmeasured"; cti_hw_wait_s?: number; cti_ack_polls?: number; ocd_board?: string; ocd_port?: number; ocd_timeout_s?: number; hw_slots?: number; watch_slots?: number }
 ```
 
+### HaltProfile
+
+linux.halt の設定のファイル（open に渡した引数・attach に渡した引数から pid を除いたもの）。offsets_sha256 は保存したときの offsets のファイルの SHA-256
+
+```ts
+{ path: string; format: "fprobe.linux_halt.profile"; version: 1; saved_at_unix_s: number; open: HaltOptions; offsets_sha256: string | null; attach: { elf: string; skew_limit_ns: number; thread_id: "stack" | "contextidr"; kernel_isa: "arm" | "thumb"; max_step_retries: number; bp_unmapped: "error" | "hw"; max_halt_s: number; fetch_from_target: string | null | null; breakpoint_kind: "sw" | "hw" | null | null; step_max_instructions: number | null | null; step_timeout_s: number | null | null } | null }
+```
+
+### HaltProfileLoaded
+
+読んだ設定。何も開かない・動かさない。offsets_matches = 保存したときの offsets の SHA-256 と今のファイルが同じか（ファイルが読めなければ null）
+
+```ts
+{ path: string; format: "fprobe.linux_halt.profile"; version: 1; saved_at_unix_s: number; open: HaltOptions; offsets_sha256: string | null; attach: { elf: string; skew_limit_ns: number; thread_id: "stack" | "contextidr"; kernel_isa: "arm" | "thumb"; max_step_retries: number; bp_unmapped: "error" | "hw"; max_halt_s: number; fetch_from_target: string | null | null; breakpoint_kind: "sw" | "hw" | null | null; step_max_instructions: number | null | null; step_timeout_s: number | null | null } | null; offsets_sha256_now: string | null; offsets_matches: boolean | null }
+```
+
 ### HaltStopReport
 
 1 回の全コアの停止の事実（fprobe.linux_halt.core_access.StopReport。上限 null = 分からない）
@@ -6492,7 +6588,7 @@ linux.halt の gdb のサーバの事実（state・ended_by・後始末の誤り
 区間の統計（profile.timing.IntervalReport.as_dict。時刻・時間はタイムベースの刻み。統計は count > 0 のとき、seconds は timebase_hz があるとき。intervals = [開始, 時間]）
 
 ```ts
-{ count: number; unit: "ticks"; timebase_hz: number | null; min?: number; max?: number; mean?: number; stdev?: number; median?: number; p90?: number; p99?: number; min_at?: number; max_at?: number; histogram?: Array<{ lo: number; hi: number; count: number }>; longest?: Array<{ t: number; t_end: number; duration: number; bin: number }>; seconds?: { min: number; max: number; mean: number; stdev: number; median: number; p90: number; p99: number }; intervals: Array<[number, number]>; interval_bins: Array<number>; intervals_total?: number }
+{ count: number; unit: "ticks"; timebase_hz: number | null; min?: number; max?: number; mean?: number; stdev?: number; median?: number; p90?: number; p99?: number; min_at?: number; max_at?: number; histogram?: Array<{ lo: number; hi: number; count: number; intervals: Array<[number, number]>; has_longest: boolean }>; longest?: Array<{ t: number; t_end: number; duration: number; bin: number }>; seconds?: { min: number; max: number; mean: number; stdev: number; median: number; p90: number; p99: number }; intervals: Array<[number, number]>; interval_bins: Array<number>; intervals_total?: number }
 ```
 
 ### ItmPacket

@@ -1,7 +1,7 @@
 -- 自動生成ファイル。直接編集しないこと（python -m fprobe_gw gen で再生成）。
 -- CSR ブロック sampler（0x00000C00, 64 バイト）: DAP サンプラ（F4: 変数のライブ観測。docs/superpowers/specs/2026-10-17-f4-live-sampler-design.md）。最大 8 か所（各 1〜16 語）を周期的に読み、1 語ごとにイベント（種類 7）にする
 -- CSR バスのスレーブ（csr_bus_pkg）。要求の次の周期に応答する。未定義のワードはエラー、
--- RO / CONST への書き込みは無視する。応答の周期以外の bus_rdata・bus_err は 0。
+-- RO / CONST への書き込みは無視する。応答の周期以外の bus_rsp の rdata・err は 0。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -12,12 +12,8 @@ entity csr_sampler is
     clk       : in  std_logic;
     rst       : in  std_logic;
     bus_req   : in  std_logic;
-    bus_we    : in  std_logic;
-    bus_addr  : in  csr_addr_t;
-    bus_wdata : in  csr_word_t;
-    bus_ack   : out std_logic;
-    bus_err   : out std_logic;
-    bus_rdata : out csr_word_t;
+    bus_cmd   : in  csr_cmd_t;
+    bus_rsp : out csr_rsp_t;
     control_run : out std_logic;   -- control.run（RW）
     control_ap : out std_logic_vector(7 downto 0);   -- control.ap（RW）
     control_jitter : out std_logic_vector(3 downto 0);   -- control.jitter（RW）
@@ -56,7 +52,7 @@ architecture rtl of csr_sampler is
   signal check_words_r : std_logic_vector(6 downto 0) := "0000001";
 begin
   start <= bus_req = '1' and ack = '0';
-  index <= to_integer(bus_addr(3 downto 0));
+  index <= to_integer(bus_cmd.addr(3 downto 0));
 
   process (clk)
   begin
@@ -82,36 +78,36 @@ begin
             rdata(0) <= control_run_r;
             rdata(15 downto 8) <= control_ap_r;
             rdata(19 downto 16) <= control_jitter_r;
-            if bus_we = '1' then
-              control_run_r <= bus_wdata(0);
-              control_ap_r <= bus_wdata(15 downto 8);
-              control_jitter_r <= bus_wdata(19 downto 16);
+            if bus_cmd.we = '1' then
+              control_run_r <= bus_cmd.wdata(0);
+              control_ap_r <= bus_cmd.wdata(15 downto 8);
+              control_jitter_r <= bus_cmd.wdata(19 downto 16);
             end if;
           when 1 =>   -- period
             rdata(31 downto 0) <= period_r;
-            if bus_we = '1' then
-              period_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              period_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 2 =>   -- slot_index
             rdata(2 downto 0) <= slot_index_r;
-            if bus_we = '1' then
-              slot_index_r <= bus_wdata(2 downto 0);
+            if bus_cmd.we = '1' then
+              slot_index_r <= bus_cmd.wdata(2 downto 0);
             end if;
           when 3 =>   -- slot_addr
             rdata(31 downto 0) <= slot_addr_r;
-            if bus_we = '1' then
-              slot_addr_r <= bus_wdata(31 downto 0);
+            if bus_cmd.we = '1' then
+              slot_addr_r <= bus_cmd.wdata(31 downto 0);
             end if;
           when 4 =>   -- slot_config
             rdata(0) <= slot_config_enable_r;
             rdata(11 downto 8) <= slot_config_words_r;
-            if bus_we = '1' then
-              slot_config_enable_r <= bus_wdata(0);
-              slot_config_words_r <= bus_wdata(11 downto 8);
+            if bus_cmd.we = '1' then
+              slot_config_enable_r <= bus_cmd.wdata(0);
+              slot_config_words_r <= bus_cmd.wdata(11 downto 8);
             end if;
           when 5 =>   -- slot_write
-            if bus_we = '1' then
-              slot_write_r <= bus_wdata(0);
+            if bus_cmd.we = '1' then
+              slot_write_r <= bus_cmd.wdata(0);
             end if;
           when 6 =>   -- rounds
             rdata(31 downto 0) <= rounds;
@@ -126,8 +122,8 @@ begin
           when 10 =>   -- check
             rdata(6 downto 0) <= check_words_r;
             rdata(14 downto 8) <= check_max;
-            if bus_we = '1' then
-              check_words_r <= bus_wdata(6 downto 0);
+            if bus_cmd.we = '1' then
+              check_words_r <= bus_cmd.wdata(6 downto 0);
             end if;
           when others =>
             err <= '1';
@@ -136,9 +132,9 @@ begin
     end if;
   end process;
 
-  bus_ack   <= ack;
-  bus_err   <= err;
-  bus_rdata <= rdata;
+  bus_rsp.ack   <= ack;
+  bus_rsp.err   <= err;
+  bus_rsp.rdata <= rdata;
   control_run <= control_run_r;
   control_ap <= control_ap_r;
   control_jitter <= control_jitter_r;

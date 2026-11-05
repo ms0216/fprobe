@@ -166,11 +166,11 @@ export class SampleStore {
     return t;
   }
 
-  /** 新しい値を足す（古い順）。足した数を返す。fromUs = API（watch.series の from_us）が返した読んだ範囲の始め
-   *  （それより古い値を読まなかった）: 前回の最後がそれより前なら、その間を読まなかった区間（gaps）に数える */
-  merge(name: string, samples: Sample[], fromUs: number | null = null): number {
+  /** 新しい値を足す（古い順）。足した数を返す。gap = API（watch.series の gap）が返した、値が返らなかった区間
+   *  （画面は検出しない。API に after_us として渡した前回の最後の時刻から、読んだ範囲の始めまで）を並べる */
+  merge(name: string, samples: Sample[], gap: [number, number] | null = null): number {
     const t = this.track(name);
-    if (fromUs !== null && t.last && t.last.time_us < fromUs) t.gaps.push([t.last.time_us, fromUs]);
+    if (gap !== null) t.gaps.push(gap);
     let added = 0;
     for (const s of samples) {
       if (typeof s.time_us !== "number" || (t.last && !(s.time_us > t.last.time_us))) continue;
@@ -192,6 +192,11 @@ export class SampleStore {
   /** 最新の値だけを足す（watch.values。値の列を読まない式の表） */
   note(name: string, sample: Sample | null): void {
     if (sample) this.merge(name, [sample]);
+  }
+
+  /** 持っている最後の値の時刻（µs。watch.series の after_us に渡す。無ければ null） */
+  lastTime(name: string): number | null {
+    return this.tracks.get(name)?.last?.time_us ?? null;
   }
 
   /** 画面の読みが追いつかず読まなかった区間（µs。グラフに無い） */

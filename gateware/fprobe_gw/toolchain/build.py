@@ -7,67 +7,25 @@ gw_sh は絶対パスで直接実行する（cmd がカレントディレクト�
 """
 
 import dataclasses
-import hashlib
-import os
 import re
-from concurrent.futures import ThreadPoolExecutor
 import shutil
-import stat
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .build_support import (INPUTS_STAMP, BuildError, BuildResult, force_remove as _force_remove, git_state,
+                            inputs_digest, is_reusable, publish_files, run_tool, write_build_stamp)
 from .gowin import GowinToolchain
-from .project import BuildInfo, BuildStamp, GowinIp, GowinProject
+from .project import BuildStamp, GowinIp, GowinProject
 from .timing import TimingReportError, TimingSummary, parse_timing_report
 
-__all__ = ["BuildError", "BuildResult", "GowinBuilder", "git_state", "margin", "undriven_nets"]
+# INPUTS_STAMP・BuildError・BuildResult・git_state は共有部品（build_support）。従来の import 先として再公開する
+__all__ = ["INPUTS_STAMP", "BuildError", "BuildResult", "GowinBuilder", "git_state", "margin", "undriven_nets"]
 
 TIMING_REPORT = Path("impl") / "pnr" / "project_tr_content.html"
-INPUTS_STAMP = "inputs.sha256"           # 成功したビルドの入力のハッシュ
 BUILD_TIMEOUT_S = 60 * 60                # 1 回のビルドの上限（通常は 5〜8 分。Primer の fprobe は配線の限界に近く、20 分では配線が終わらないことがある。2026-10-24）
-
-
-class BuildError(RuntimeError):
-    """ビルドが失敗した、または成果物が信頼できない。"""
-
-
-def _make_writable_and_retry(function, path, _exc):
-    os.chmod(path, stat.S_IWRITE)
-    function(path)
-
-
-def _force_remove(path: Path) -> None:
-    """読み取り専用属性を持つファイル・ディレクトリも含めて削除する。"""
-    if path.is_dir():
-        shutil.rmtree(path, onexc=_make_writable_and_retry)
-    elif path.exists():
-        os.chmod(path, stat.S_IWRITE)
-        path.unlink()
-
-
-@dataclass(frozen=True)
-class BuildResult:
-    bitstream: Path
-    log: Path
-    timing: TimingSummary
-
-
-def git_state(repo: Path) -> tuple[str | None, bool]:
-    """repo の HEAD のコミット（取れなければ None）と、repo の下にコミットしていない変更があるか。"""
-    def git(*args: str) -> str | None:
-        try:
-            r = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return r.stdout if r.returncode == 0 else None
-    head = git("rev-parse", "HEAD")
-    if head is None:
-        return None, False
-    status = git("status", "--porcelain", "--", ".")
-    return head.strip(), bool(status and status.strip())
 
 
 class GowinBuilder:
@@ -90,10 +48,8 @@ class GowinBuilder:
         tcl = project.prepare(build_dir)
         digest = _inputs_digest(project, build_dir, tcl)
         stamp = build_dir / INPUTS_STAMP
-        reuse = (bitstream.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8") == digest
-                 and (project.stamp is None or project.stamp.target(build_dir).is_file()))
 
-        if not reuse:
+        if not is_reusable(bitstream, build_dir, digest, project.stamp):
             # 前回の成果物が残っていると、失敗したビルドで古いビットストリームや
             # 古いタイミングレポートを信じてしまう。Gowin は成果物を読み取り専用で出力するため、
             # 属性を解除してから確実に削除する（削除できなければ例外で止める）
@@ -102,16 +58,9 @@ class GowinBuilder:
             _force_remove(build_dir / "impl")
             if project.stamp is not None:
                 self._write_stamp(project.stamp, build_dir, digest)
-            try:
-                result = self._run([str(self._toolchain.gw_sh), tcl.name], cwd=build_dir,
-                                   capture_output=True, text=True, timeout=self.timeout_s)
-            except subprocess.TimeoutExpired as e:
-                log.write_text(str(e.stdout or "") + str(e.stderr or ""), encoding="utf-8")
-                raise BuildError(f"gw_sh が {self.timeout_s} 秒で終わらない（{log}）") from e
-            log.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
-            if result.returncode != 0:
-                raise BuildError(f"gw_sh が終了コード {result.returncode} で失敗（{log}）")
-            undriven = undriven_nets((result.stdout or "") + (result.stderr or ""))
+            out = run_tool(self._run, [str(self._toolchain.gw_sh), tcl.name], cwd=build_dir,
+                           timeout_s=self.timeout_s, log=log, tool="gw_sh")
+            undriven = undriven_nets(out)
             if undriven:
                 _force_remove(bitstream)                 # 使えないビットストリームは残さない
                 raise BuildError("駆動されない配線がある（実機では値が定まらず配置で変わる。シミュレーションでは初期値で"
@@ -196,9 +145,7 @@ class GowinBuilder:
             return False
 
     def _write_stamp(self, stamp: BuildStamp, build_dir: Path, digest: str) -> None:
-        commit, dirty = self._git(stamp.repo)
-        info = BuildInfo(digest=digest, time=int(self._now()), git=commit, dirty=dirty)
-        stamp.target(build_dir).write_text(stamp.render(info), encoding="utf-8", newline="\n")
+        write_build_stamp(stamp, build_dir, digest, self._git, self._now)
 
     def _generate_ip(self, project: GowinProject, ip: GowinIp, build_dir: Path) -> None:
         """IP を生成する。設定（生成用の TCL）が前回と同じで生成物があれば省く（生成は 1 つ十数秒かかる）。"""
@@ -235,12 +182,8 @@ _UNDRIVEN = re.compile(r"""EX1998\) : Net '([^']+)' does not have a driver\("([^
 
 
 def _publish(result: BuildResult, build_dir: Path) -> BuildResult:
-    """採用した版のビットストリームと成功したビルドの印を build_dir 直下に写す（Gowin の出力は読み取り専用属性）。"""
-    for source in (result.bitstream, result.bitstream.parent / INPUTS_STAMP):
-        target = build_dir / source.name
-        if source.resolve() != target.resolve():
-            _force_remove(target)
-            shutil.copyfile(source, target)
+    """採用した版のビットストリームと成功したビルドの印を build_dir 直下に写し、結果をそのまま返す。"""
+    publish_files(result, build_dir)
     return result
 
 
@@ -280,14 +223,10 @@ def _with_place_option(options: tuple[str, ...], n: int) -> tuple[str, ...]:
 def _inputs_digest(project: GowinProject, build_dir: Path, tcl: Path) -> str:
     """ビルドの入力（生成した TCL・SDC・CST と、ソース・IP の中身）のハッシュ。版のパッケージは含めない（版がこの
     ハッシュを含むため。TCL がビルドディレクトリの版のパッケージを指すことは含まれる）。"""
-    h = hashlib.sha256()
     stamped = project.stamp.source if project.stamp is not None else None
-    files = [tcl, build_dir / f"{project.name}.sdc", build_dir / f"{project.name}.cst",
-             *sorted(Path(s) for s in project.sources if s != stamped), *(ip.source(build_dir) for ip in project.ips)]
-    for path in files:
-        # 改行は揃える（git のブランチ切り替えで CRLF / LF が変わっても作り直さない。ツールは同じに扱う）
-        h.update(str(path).encode() + b"\0" + Path(path).read_bytes().replace(b"\r\n", b"\n") + b"\0")
-    return h.hexdigest()
+    return inputs_digest([tcl, build_dir / f"{project.name}.sdc", build_dir / f"{project.name}.cst",
+                          *sorted(Path(s) for s in project.sources if s != stamped),
+                          *(ip.source(build_dir) for ip in project.ips)])
 
 
 def _check_constrained_clocks(project: GowinProject, timing: TimingSummary, report: Path) -> None:

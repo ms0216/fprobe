@@ -3,7 +3,7 @@ tests/api_result_check.py）。中身の働きは test_probe_linux.py 等が確�
 import json
 from pathlib import Path
 
-from fprobe import probe_linux
+from fprobe import probe_linux_ring as probe_linux
 from fprobe.jtag_chain import ChainDevice, ChainScan
 from test_api_linux_halt import rig  # noqa: F401  (fixture)
 from test_probe_linux import FakeRingCpu, _connect, _ring_bytes, _ring_probe, _wait, probe  # noqa: F401  (fixture)

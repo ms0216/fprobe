@@ -6585,6 +6585,394 @@
       ],
       "additionalProperties": false
     },
+    "HaltProfile": {
+      "description": "linux.halt の設定のファイル（open に渡した引数・attach に渡した引数から pid を除いたもの）。offsets_sha256 は保存したときの offsets のファイルの SHA-256",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "const": "fprobe.linux_halt.profile"
+        },
+        "version": {
+          "const": 1
+        },
+        "saved_at_unix_s": {
+          "type": "number"
+        },
+        "open": {
+          "$ref": "#/$defs/HaltOptions"
+        },
+        "offsets_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attach": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "elf": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "そのプロセスの実行ファイルの ELF（PC の上のパス。DWARF の付いたビルドの出力）。fetch_from_target を渡すと先にターゲットの /proc/<pid>/exe をここに写す"
+                },
+                "skew_limit_ns": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）"
+                },
+                "thread_id": {
+                  "enum": [
+                    "stack",
+                    "contextidr"
+                  ],
+                  "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）"
+                },
+                "kernel_isa": {
+                  "enum": [
+                    "arm",
+                    "thumb"
+                  ],
+                  "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）"
+                },
+                "max_step_retries": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか"
+                },
+                "bp_unmapped": {
+                  "enum": [
+                    "error",
+                    "hw"
+                  ],
+                  "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）"
+                },
+                "max_halt_s": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す。注意: 全コアを止めている間、対象のカーネルは動けないので、対象のハードウェアのウォッチドッグ（例: Raspberry Pi の BCM2835 は上限が約 15 秒）に餌をやれず、対象がハードウェアリセットされる（2026-11-04 実機: 6 回中 6 回、止めて約 15〜25 秒後）。max_halt_s がその上限より長いなら、先に対象のウォッチドッグを止める（systemd なら RuntimeWatchdogSec=0）"
+                },
+                "fetch_from_target": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "linux.connect のターゲットの名前。渡すと ssh でそのターゲットの /proc/<pid>/exe を elf に写してから使う（対象の上のファイルは strip されていることが多い: elf.has_dwarf で分かる）。PC に無いソースも、このとき（コアを止める前。止まった対象の ssh は答えない）に取り寄せ、ELF と同じ所の <ELF の名前>.sources/ に写す（結果の sources_fetched。以後 debug.source.read はその写し）"
+                },
+                "breakpoint_kind": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "sw",
+                            "hw"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）"
+                },
+                "step_max_instructions": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "画面の道のステップ（debug.step・target.step・Run to Cursor。上限の引数を持たない置き方）で使う 1 行の命令の数の上限。渡さなければその道は断る（既定の上限を持たない）"
+                },
+                "step_timeout_s": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "画面の道のステップ（debug.step・target.step・Run to Cursor）で使う時間の上限（秒）。debug.step の timeout_s（マイコンの既定 5.0 を持つ）は Linux の道では使わない。渡さなければその道は断る"
+                }
+              },
+              "required": [
+                "elf",
+                "skew_limit_ns",
+                "thread_id",
+                "kernel_isa",
+                "max_step_retries",
+                "bp_unmapped",
+                "max_halt_s",
+                "fetch_from_target",
+                "breakpoint_kind",
+                "step_max_instructions",
+                "step_timeout_s"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "attach の引数（pid を除く。渡さなかった任意の引数は null）。attach していなければ null。linux.halt.debug.attach に pid を足して渡す"
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "version",
+        "saved_at_unix_s",
+        "open",
+        "offsets_sha256",
+        "attach"
+      ],
+      "additionalProperties": false
+    },
+    "HaltProfileLoaded": {
+      "description": "読んだ設定。何も開かない・動かさない。offsets_matches = 保存したときの offsets の SHA-256 と今のファイルが同じか（ファイルが読めなければ null）",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "format": {
+          "const": "fprobe.linux_halt.profile"
+        },
+        "version": {
+          "const": 1
+        },
+        "saved_at_unix_s": {
+          "type": "number"
+        },
+        "open": {
+          "$ref": "#/$defs/HaltOptions"
+        },
+        "offsets_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attach": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "elf": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "そのプロセスの実行ファイルの ELF（PC の上のパス。DWARF の付いたビルドの出力）。fetch_from_target を渡すと先にターゲットの /proc/<pid>/exe をここに写す"
+                },
+                "skew_limit_ns": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "「同時」とみなすコア間の停止のずれの上限（ns）。各停止の skew_upper_bound_ns と比べた結果を skew_verdict で返す（判定は使う側の値だけで決まる）"
+                },
+                "thread_id": {
+                  "enum": [
+                    "stack",
+                    "contextidr"
+                  ],
+                  "description": "コアが走らせているスレッドの見分け方。stack = バンクされた SVC の SP がスレッドのカーネルスタックの中にあるか（標準のカーネルで動く）、contextidr = CONTEXTIDR>>8（CONFIG_PID_IN_CONTEXTIDR のカーネルだけ）"
+                },
+                "kernel_isa": {
+                  "enum": [
+                    "arm",
+                    "thumb"
+                  ],
+                  "description": "カーネルのコードの命令セット（do_exit に置く HW のブレークポイントの幅。Thumb-2 のカーネル（CONFIG_THUMB2_KERNEL）なら thumb）"
+                },
+                "max_step_retries": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1 命令のステップがユーザモードを抜けて（アボート・デマンドページング）同じ命令に戻ってくるのを何回まで待つか"
+                },
+                "bp_unmapped": {
+                  "enum": [
+                    "error",
+                    "hw"
+                  ],
+                  "description": "まだ写像の無いページへの sw のブレークポイント: error = 断る、hw = HW のブレークポイントに替える（替えたら応答の kind が hw）"
+                },
+                "max_halt_s": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "description": "止めたまま放置しない上限（秒）。この道具が全コアを止めたまま API の呼び出しが無いまま max_halt_s 秒たったら、全コアを走らせる（status の auto_resumed に残す）。呼び出しのたびに数え直す。注意: 全コアを止めている間、対象のカーネルは動けないので、対象のハードウェアのウォッチドッグ（例: Raspberry Pi の BCM2835 は上限が約 15 秒）に餌をやれず、対象がハードウェアリセットされる（2026-11-04 実機: 6 回中 6 回、止めて約 15〜25 秒後）。max_halt_s がその上限より長いなら、先に対象のウォッチドッグを止める（systemd なら RuntimeWatchdogSec=0）"
+                },
+                "fetch_from_target": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "linux.connect のターゲットの名前。渡すと ssh でそのターゲットの /proc/<pid>/exe を elf に写してから使う（対象の上のファイルは strip されていることが多い: elf.has_dwarf で分かる）。PC に無いソースも、このとき（コアを止める前。止まった対象の ssh は答えない）に取り寄せ、ELF と同じ所の <ELF の名前>.sources/ に写す（結果の sources_fetched。以後 debug.source.read はその写し）"
+                },
+                "breakpoint_kind": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "enum": [
+                            "sw",
+                            "hw"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "種類を渡さない置き方（画面の debug.breakpoint.set。行のクリック等）で使う種類。渡さなければその置き方は断る（既定の選び方を持たない）"
+                },
+                "step_max_instructions": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "画面の道のステップ（debug.step・target.step・Run to Cursor。上限の引数を持たない置き方）で使う 1 行の命令の数の上限。渡さなければその道は断る（既定の上限を持たない）"
+                },
+                "step_timeout_s": {
+                  "anyOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "default": null
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "画面の道のステップ（debug.step・target.step・Run to Cursor）で使う時間の上限（秒）。debug.step の timeout_s（マイコンの既定 5.0 を持つ）は Linux の道では使わない。渡さなければその道は断る"
+                }
+              },
+              "required": [
+                "elf",
+                "skew_limit_ns",
+                "thread_id",
+                "kernel_isa",
+                "max_step_retries",
+                "bp_unmapped",
+                "max_halt_s",
+                "fetch_from_target",
+                "breakpoint_kind",
+                "step_max_instructions",
+                "step_timeout_s"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "attach の引数（pid を除く。渡さなかった任意の引数は null）。attach していなければ null。linux.halt.debug.attach に pid を足して渡す"
+        },
+        "offsets_sha256_now": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offsets_matches": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "format",
+        "version",
+        "saved_at_unix_s",
+        "open",
+        "offsets_sha256",
+        "attach",
+        "offsets_sha256_now",
+        "offsets_matches"
+      ],
+      "additionalProperties": false
+    },
     "HaltStopReport": {
       "description": "1 回の全コアの停止の事実（fprobe.linux_halt.core_access.StopReport。上限 null = 分からない）",
       "type": "object",
@@ -7440,12 +7828,34 @@
               },
               "count": {
                 "type": "integer"
+              },
+              "intervals": {
+                "type": "array",
+                "description": "この箱に入る生の組（返した intervals のうち interval_bins がこの箱の番号のもの。[開始の時刻, 時間]）",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ],
+                  "items": false
+                }
+              },
+              "has_longest": {
+                "type": "boolean",
+                "description": "長い順の上位 longest に、この箱に入るものがあるか"
               }
             },
             "required": [
               "lo",
               "hi",
-              "count"
+              "count",
+              "intervals",
+              "has_longest"
             ],
             "additionalProperties": false
           }
@@ -16467,6 +16877,215 @@
         "additionalProperties": false
       }
     },
+    "session.methods": {
+      "kind": "read",
+      "summary": "この API のメソッドの一覧と説明を返す（API 自身が説明する。名前を当てずっぽうで試さない）。name を渡すとそのメソッド 1 つの全部（summary・kind・params・result の JSON Schema）。prefix（名前の先頭。\"target.\" など。\"\" で全部）で絞った一覧は name と kind。with_summary = true で一覧に summary も付ける（長い）。name が無ければ、その名前で始まるメソッドを candidates に挙げて断る。MCP では全メソッドがもともと道具として並ぶので、これは WebSocket の API の利用者向け。",
+      "params": {
+        "type": "object",
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "default": "",
+            "description": "名前の先頭で絞る（例: \"target.\"、\"linux.halt.\"。\"\" で全部）",
+            "examples": [
+              "target."
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null,
+            "description": "1 つのメソッドの全部を返す（例: \"target.registers.read\"）"
+          },
+          "with_summary": {
+            "type": "boolean",
+            "default": false,
+            "description": "一覧に summary も付ける（長い）"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "api_version": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string",
+                  "description": "with_summary = true の一覧と、name を渡したときだけ"
+                },
+                "params": {
+                  "$ref": "#/$defs/Json",
+                  "description": "name を渡したときだけ: 引数の JSON Schema"
+                },
+                "result": {
+                  "$ref": "#/$defs/Json",
+                  "description": "name を渡したときだけ: 応答の JSON Schema"
+                },
+                "binary": {
+                  "type": "boolean"
+                },
+                "irreversible": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "api_version",
+          "total",
+          "methods"
+        ],
+        "additionalProperties": false
+      },
+      "record": false
+    },
+    "session.hints": {
+      "kind": "read",
+      "summary": "使い方の落とし穴の記録（ヒント）を返す。診断ではない: 症状に当てはまりうる『確かめる事実』と、それを読む API、手順を並べるだけで、当てはまるかの判断は使う側。method（API のメソッド名。例 \"linux.halt.debug.attach\"）でそのメソッドに付いたヒント、id で 1 件、どちらも無ければ全部。失敗した呼び出しの後や、迷ったときに引く。ヒントは実機・アクティビティの失敗の事実から足している。",
+      "params": {
+        "type": "object",
+        "properties": {
+          "method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null,
+            "description": "API のメソッド名（例: \"linux.halt.open\"）。そのメソッドに付いたヒント",
+            "examples": [
+              "linux.halt.open"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null,
+            "description": "ヒントの id（一覧の id）。1 件"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "hints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "methods": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "symptom": {
+                  "type": "string"
+                },
+                "facts_to_check": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "api": {
+                        "type": "string"
+                      },
+                      "reads": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "api",
+                      "reads"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "recipe": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "docs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "when": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "description": "失敗の応答の hint_ids に付く条件（失敗の種類。無ければメソッドが合えば付く）"
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "methods",
+                "symptom",
+                "facts_to_check",
+                "recipe",
+                "docs"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "version",
+          "total",
+          "hints"
+        ],
+        "additionalProperties": false
+      },
+      "record": false
+    },
     "session.permissions": {
       "kind": "read",
       "summary": "このデーモンの許可の表（PC で実行してよいファイル exec・書いてよい場所 write）。利用者が起動の前に permissions.json に書き、デーモンが起動時に読む（API からは変えられない）。checked = デーモンがパスを確かめるか、file = 表のファイル、loaded = そのファイルがあって読んだか、created = この起動で初めての表として作ったか（表のファイルが無かった: <FPROBE_HOME>/out だけに書いてよく、実行は何も許さない表。既にある表は書き換えない）。表に無いパスを渡す呼び出しは E_NOT_ALLOWED（data.reason = path_not_permitted）。",
@@ -21156,6 +21775,90 @@
         "additionalProperties": false
       }
     },
+    "debug.symbol.search": {
+      "kind": "read",
+      "impl": "symbol_search",
+      "summary": "ELF の記号（関数・変数）を名前の部分一致で探す（大文字小文字を区別しない。query が空なら全部）。kind = function / object / null（両方）。名前順で先頭 limit 件（件数は使う側が明示）。total = 一致した数、returned = 返した数（total > returned なら limit で切れた）。各記号は name・address・size・kind。ブレークポイントの場所・式に使う名前を探すときに（debug.symbol.info は 1 つの場所の番地と行）。",
+      "params": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "名前に含まれる文字列（空なら全部）"
+          },
+          "kind": {
+            "enum": [
+              "function",
+              "object",
+              null
+            ],
+            "default": null,
+            "description": "function = 関数、object = 変数。null で両方"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "返す最大の件数（名前順の先頭から）",
+            "examples": [
+              50
+            ]
+          }
+        },
+        "required": [
+          "query",
+          "limit"
+        ],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer"
+          },
+          "returned": {
+            "type": "integer"
+          },
+          "symbols": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "address": {
+                  "type": "integer"
+                },
+                "size": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "enum": [
+                    "function",
+                    "object"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "address",
+                "size",
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "total",
+          "returned",
+          "symbols"
+        ],
+        "additionalProperties": false
+      },
+      "record": false
+    },
     "debug.source.list": {
       "kind": "read",
       "summary": "読み込んだ ELF の行番号の情報が参照するソース（name・path・この PC にあるか exists）。同じ名前の別のファイルは files には最初のものだけで、same_name = {名前: [場所]} に全部（\"ファイル:行\" は名前だけでは選ばず、ディレクトリを添えて選ぶ。例 \"drivers/util.c:10\"）。 ビルドした場所に無く ELF の隣の同じ名前のファイルを使ったものは built_path（行表の場所）も（同じ名前なら同じソースとみなす。中身は確かめていない）。",
@@ -21876,6 +22579,14 @@
           },
           "fault": {
             "$ref": "#/$defs/FaultSummary"
+          },
+          "signal": {
+            "type": "integer",
+            "description": "reason が signal のとき: 止めたシグナルの番号（Linux のプロセスだけ）"
+          },
+          "signal_name": {
+            "type": "string",
+            "description": "signal の名前（SIGILL 等。Linux（ARM）の番号の表から）"
           }
         },
         "required": [
@@ -25332,6 +26043,13 @@
               ],
               "additionalProperties": false
             }
+          },
+          "hidden_kinds": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "kinds の絞りの外の種類 → 件数（解読の全体の中。kinds を絞らなければ空）。errors_only と start・end の窓は含めない（それらで外れた分は matched と total の差）"
           }
         },
         "required": [
@@ -25344,7 +26062,8 @@
           "kinds",
           "matched",
           "offset",
-          "annotations"
+          "annotations",
+          "hidden_kinds"
         ],
         "additionalProperties": false
       }
@@ -27799,10 +28518,22 @@
       "kind": "control",
       "impl": "watch_status",
       "observes": true,
-      "summary": "観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）、最後に watch.set した呼び出し元（client: {id, name, role}。デーモンが記録した事実。分からなければ null）も。 loss_ratio = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、measured_hz = 巡回 ÷ since_start_s（数が無い・0 なら null）。stats = 変数ごとの watch.set から読んだ値すべての統計 {count, min, max, mean, not_numeric}（サンプラの値はイベント記録を続きから読んで数える。読めずに一周された・上限を超えたイベントの数は stats_lost_events）。",
+      "summary": "観測している変数・周期と、サンプラの状態（巡回の数・誤り・飛ばした周期 = watch.set からの数。FPGA の起動からの数は device。最後の ACK）、watch.set で外した誤った式（rejected）、始めてからの秒（since_start_s）。ポインタをたどる式の読みの誤り（chase_errors）と条件つきの取得の状態（capture）、最後に watch.set した呼び出し元（client: {id, name, role}。デーモンが記録した事実。分からなければ null）も。 loss_ratio = 飛ばした周期 ÷ (巡回 + 飛ばした周期)、measured_hz = 巡回 ÷ since_start_s（数が無い・0 なら null）。stats = 変数ごとの watch.set から読んだ値すべての統計 {count, min, max, mean, not_numeric}（サンプラの値はイベント記録を続きから読んで数える。読めずに一周された・上限を超えたイベントの数は stats_lost_events）。 expressions を渡すと、その式のうち観測している・いない・観測の組にあるが渡した式に無いものを expressions に返す（集合の差をクライアントでしなくてよい）。",
       "params": {
         "type": "object",
-        "properties": {},
+        "properties": {
+          "expressions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "default": null,
+            "description": "呼び出し側の式（Data Sampling の一覧・ダッシュボードの部品の式など）。渡すと、その式と今の観測の組との関係を結果の expressions に返す（省くと expressions は null）"
+          }
+        },
         "required": [],
         "additionalProperties": false
       },
@@ -28023,6 +28754,51 @@
               "number",
               "null"
             ]
+          },
+          "expressions": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "observed": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "渡した式のうち、いま観測しているもの（渡した順）"
+                  },
+                  "missing": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "渡した式のうち、いま観測しておらず、watch.set が誤りとして外したのでもないもの（ほかの利用者が組を置き換えた等。渡した順）"
+                  },
+                  "others": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "いま観測している式のうち、渡した式に無いもの（観測の組の順）"
+                  },
+                  "all_observed": {
+                    "type": "boolean",
+                    "description": "渡した式が 1 つ以上あり、すべて観測している"
+                  }
+                },
+                "required": [
+                  "observed",
+                  "missing",
+                  "others",
+                  "all_observed"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "params.expressions を渡したときの、その式と観測の組の関係（渡さなければ null）"
           }
         },
         "required": [
@@ -28038,7 +28814,8 @@
           "chase_errors",
           "capture",
           "loss_ratio",
-          "measured_hz"
+          "measured_hz",
+          "expressions"
         ],
         "additionalProperties": false
       }
@@ -28131,6 +28908,14 @@
             "type": "integer",
             "default": 1000,
             "minimum": 0
+          },
+          "after_us": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "default": null,
+            "description": "呼び出し側が持っている最後の値の時刻（µs）。それが from_us より前なら gap で知らせる"
           }
         },
         "required": [
@@ -28186,13 +28971,30 @@
               "number",
               "null"
             ]
+          },
+          "gap": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "[after_us, from_us]: 呼び出し側が持っている最後の値と、今回読んだ範囲の始めの間（値が返らなかった区間。µs）。無ければ null"
           }
         },
         "required": [
           "name",
           "time_point",
           "samples",
-          "from_us"
+          "from_us",
+          "gap"
         ],
         "additionalProperties": false
       }
@@ -28455,6 +29257,10 @@
                     "number",
                     "null"
                   ]
+                },
+                "covers_range_start": {
+                  "type": "boolean",
+                  "description": "持っている最初の値の時刻 first_us が、範囲の始まり（A・B の早い方）以前か。偽なら範囲の始まりからしばらくのデータが無い"
                 }
               },
               "required": [
@@ -28463,7 +29269,8 @@
                 "b",
                 "delta",
                 "stats",
-                "first_us"
+                "first_us",
+                "covers_range_start"
               ],
               "additionalProperties": false
             }
@@ -35802,7 +36609,7 @@
     },
     "xtrig.status": {
       "kind": "read",
-      "summary": "割り込み書き込みの状態 inject（結果 result・busy・ack・成功した回数 count・最後の時刻 time）と中身（ap・address・value。レジスタの読み戻し）、番地一致 match の回数 count・最後の時刻 time（タイムベースのカウント）と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route（レジスタから読んだ to_la・to_inject の源の名前。xtrig.route 以外の道具が書いたビットも含む）。",
+      "summary": "割り込み書き込みの状態 inject（結果 result・busy・ack・成功した回数 count・最後の時刻 time・その時刻が意味を持つか time_valid）と中身（ap・address・value。レジスタの読み戻し）、番地一致 match の回数 count・最後の時刻 time（タイムベースのカウント）・time_valid と条件（address・address_mask・data・data_mask・on_write・on_read。読み戻し）、いまの経路 route（レジスタから読んだ to_la・to_inject の源の名前。xtrig.route 以外の道具が書いたビットも含む）。",
       "impl": "xtrig_status",
       "params": {
         "type": "object",
@@ -35836,6 +36643,10 @@
               "time": {
                 "type": "integer"
               },
+              "time_valid": {
+                "type": "boolean",
+                "description": "time が意味を持つか（成功した回数 count が 1 以上。0 のとき time はレジスタの初期値）"
+              },
               "ap": {
                 "type": "integer"
               },
@@ -35852,6 +36663,7 @@
               "ack",
               "count",
               "time",
+              "time_valid",
               "ap",
               "address",
               "value"
@@ -35866,6 +36678,10 @@
               },
               "time": {
                 "type": "integer"
+              },
+              "time_valid": {
+                "type": "boolean",
+                "description": "time が意味を持つか（回数 count が 1 以上。0 のとき time はレジスタの初期値）"
               },
               "address": {
                 "type": "integer"
@@ -35889,6 +36705,7 @@
             "required": [
               "count",
               "time",
+              "time_valid",
               "address",
               "address_mask",
               "data",
@@ -55128,6 +55945,10 @@
           "time": {
             "type": "integer"
           },
+          "time_valid": {
+            "type": "boolean",
+            "description": "time が意味を持つか（発火の回数 count が 1 以上。0 のとき time は回路の値のまま）"
+          },
           "prev_time": {
             "type": "integer"
           }
@@ -55144,6 +55965,7 @@
           "seen",
           "count",
           "time",
+          "time_valid",
           "prev_time"
         ],
         "additionalProperties": false
@@ -58382,13 +59204,15 @@
             "type": "boolean",
             "examples": [
               false
-            ]
+            ],
+            "description": "スレッドごとの局所変数を読むか（true で各スレッドの今の関数の引数・局所変数）"
           },
           "expressions": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "スレッドごとに評価する C の式の並び（例 [\"counter\"]。空の配列なら式は読まない）"
           },
           "max_elements": {
             "type": "integer",
@@ -58694,6 +59518,51 @@
       },
       "result": {
         "$ref": "#/$defs/HaltDebugClose"
+      }
+    },
+    "linux.halt.profile.save": {
+      "kind": "control",
+      "impl": "linux_halt_profile_save",
+      "summary": "いま開いている linux.halt の設定をファイルに書く（open の引数、attach 中なら attach の引数から pid を除いたもの。pid は実行のたびに変わるので書かない。offsets は中身の SHA-256 を書く）。コアは動かさない。人の画面の「保存」と同じ。",
+      "params": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "書き出す設定のファイル（デーモンの PC の上。許可の表の write で確かめる）",
+            "x-path": "write"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "result": {
+        "$ref": "#/$defs/HaltProfile"
+      }
+    },
+    "linux.halt.profile.load": {
+      "kind": "read",
+      "impl": "linux_halt_profile_load",
+      "summary": "保存した設定のファイルを読んで中身を返す。何も開かない・動かさない。返った open を linux.halt.open へ、attach を（pid を足して）linux.halt.debug.attach へ、そのまま渡して使う（画面の「読み込み」は欄に入れるだけ。人が押して実行する）。offsets_matches は保存時と今の offsets のファイルの SHA-256 の一致（事実だけ。合わなくても止めない）。",
+      "params": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "読む設定のファイル（linux.halt.profile.save で書いたもの）"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "result": {
+        "$ref": "#/$defs/HaltProfileLoaded"
       }
     }
   },

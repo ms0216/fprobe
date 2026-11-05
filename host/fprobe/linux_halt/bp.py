@@ -180,7 +180,9 @@ class BreakpointTable:
         _write_journal(self.journal, self.pending_journal())
 
     # --- 挿入 --------------------------------------------------------------------------------------------
-    def insert(self, pid: int, va: int, *, kind: str, width: int, tmp: bool = False) -> None:
+    def insert(self, pid: int, va: int, *, kind: str, width: int, tmp: bool = False) -> str:
+        """置く。**実際に使った方式**（"sw" / "hw"）を返す（unmapped == "hw" のときソフトウェアが置けず hw に切り替えることがある。
+        外すときはこの方式で外す）。"""
         if kind not in ("sw", "hw"):
             raise ValueError("kind must be 'sw' or 'hw'")
         if kind == "sw":
@@ -192,8 +194,9 @@ class BreakpointTable:
                 kind = "hw"                                 # 呼び出し側が選んだ切り替え
             else:
                 self._insert_sw(pid, va, pa, width, tmp)
-                return
+                return "sw"
         self._insert_hw(pid, va, width, tmp)
+        return "hw"
 
     def _insert_sw(self, pid: int, va: int, pa: int, width: int, tmp: bool) -> None:
         s = self._sw.get(pa)

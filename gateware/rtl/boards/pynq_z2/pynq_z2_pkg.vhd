@@ -47,6 +47,106 @@ package pynq_z2_pkg is
   -- より何辺前のサンプルか（Vivado 2025.2 の UNISIM を xsim で動かした記録 tests/data/iserdes_ref_w*.txt。lanes = 6・8）
   function iserdes_newest_age(lanes : positive) return natural;
 
+  -- Vivado のブロック設計 ps7_bd（ps7_bd.tcl）・ps7_hp_bd（ps7_hp_bd.tcl）が生成する包み。GHDL では使わない
+  -- （ps7_bd_wrapper は pynq_z2_fprobe_top・pynq_z2_dut_top が、ps7_hp_bd_wrapper は深いバッファの構成の fprobe_top が使う）
+  component ps7_bd_wrapper
+    port (
+      aclk          : in  std_logic;
+      aresetn       : in  std_logic;
+      pjtag_tck     : in  std_logic;
+      pjtag_tms     : in  std_logic;
+      pjtag_tdi     : in  std_logic;
+      pjtag_tdo     : out std_logic;
+      m_axi_araddr  : out std_logic_vector(31 downto 0);
+      m_axi_arprot  : out std_logic_vector(2 downto 0);
+      m_axi_arready : in  std_logic;
+      m_axi_arvalid : out std_logic;
+      m_axi_awaddr  : out std_logic_vector(31 downto 0);
+      m_axi_awprot  : out std_logic_vector(2 downto 0);
+      m_axi_awready : in  std_logic;
+      m_axi_awvalid : out std_logic;
+      m_axi_bready  : out std_logic;
+      m_axi_bresp   : in  std_logic_vector(1 downto 0);
+      m_axi_bvalid  : in  std_logic;
+      m_axi_rdata   : in  std_logic_vector(31 downto 0);
+      m_axi_rready  : out std_logic;
+      m_axi_rresp   : in  std_logic_vector(1 downto 0);
+      m_axi_rvalid  : in  std_logic;
+      m_axi_wdata   : out std_logic_vector(31 downto 0);
+      m_axi_wready  : in  std_logic;
+      m_axi_wstrb   : out std_logic_vector(3 downto 0);
+      m_axi_wvalid  : out std_logic
+    );
+  end component;
+
+  component ps7_hp_bd_wrapper
+    port (
+      aclk          : in  std_logic;
+      aresetn       : in  std_logic;
+      pjtag_tck     : in  std_logic;
+      pjtag_tms     : in  std_logic;
+      pjtag_tdi     : in  std_logic;
+      pjtag_tdo     : out std_logic;
+      m_axi_araddr  : out std_logic_vector(31 downto 0);
+      m_axi_arprot  : out std_logic_vector(2 downto 0);
+      m_axi_arready : in  std_logic;
+      m_axi_arvalid : out std_logic;
+      m_axi_awaddr  : out std_logic_vector(31 downto 0);
+      m_axi_awprot  : out std_logic_vector(2 downto 0);
+      m_axi_awready : in  std_logic;
+      m_axi_awvalid : out std_logic;
+      m_axi_bready  : out std_logic;
+      m_axi_bresp   : in  std_logic_vector(1 downto 0);
+      m_axi_bvalid  : in  std_logic;
+      m_axi_rdata   : in  std_logic_vector(31 downto 0);
+      m_axi_rready  : out std_logic;
+      m_axi_rresp   : in  std_logic_vector(1 downto 0);
+      m_axi_rvalid  : in  std_logic;
+      m_axi_wdata   : out std_logic_vector(31 downto 0);
+      m_axi_wready  : in  std_logic;
+      m_axi_wstrb   : out std_logic_vector(3 downto 0);
+      m_axi_wvalid  : out std_logic;
+      s_axi_hp0_araddr   : in  std_logic_vector(31 downto 0);
+      s_axi_hp0_arburst  : in  std_logic_vector(1 downto 0);
+      s_axi_hp0_arcache  : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_arid     : in  std_logic_vector(5 downto 0);
+      s_axi_hp0_arlen    : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_arlock   : in  std_logic_vector(1 downto 0);
+      s_axi_hp0_arprot   : in  std_logic_vector(2 downto 0);
+      s_axi_hp0_arqos    : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_arready  : out std_logic;
+      s_axi_hp0_arsize   : in  std_logic_vector(2 downto 0);
+      s_axi_hp0_arvalid  : in  std_logic;
+      s_axi_hp0_awaddr   : in  std_logic_vector(31 downto 0);
+      s_axi_hp0_awburst  : in  std_logic_vector(1 downto 0);
+      s_axi_hp0_awcache  : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_awid     : in  std_logic_vector(5 downto 0);
+      s_axi_hp0_awlen    : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_awlock   : in  std_logic_vector(1 downto 0);
+      s_axi_hp0_awprot   : in  std_logic_vector(2 downto 0);
+      s_axi_hp0_awqos    : in  std_logic_vector(3 downto 0);
+      s_axi_hp0_awready  : out std_logic;
+      s_axi_hp0_awsize   : in  std_logic_vector(2 downto 0);
+      s_axi_hp0_awvalid  : in  std_logic;
+      s_axi_hp0_bid      : out std_logic_vector(5 downto 0);
+      s_axi_hp0_bready   : in  std_logic;
+      s_axi_hp0_bresp    : out std_logic_vector(1 downto 0);
+      s_axi_hp0_bvalid   : out std_logic;
+      s_axi_hp0_rdata    : out std_logic_vector(63 downto 0);
+      s_axi_hp0_rid      : out std_logic_vector(5 downto 0);
+      s_axi_hp0_rlast    : out std_logic;
+      s_axi_hp0_rready   : in  std_logic;
+      s_axi_hp0_rresp    : out std_logic_vector(1 downto 0);
+      s_axi_hp0_rvalid   : out std_logic;
+      s_axi_hp0_wdata    : in  std_logic_vector(63 downto 0);
+      s_axi_hp0_wid      : in  std_logic_vector(5 downto 0);
+      s_axi_hp0_wlast    : in  std_logic;
+      s_axi_hp0_wready   : out std_logic;
+      s_axi_hp0_wstrb    : in  std_logic_vector(7 downto 0);
+      s_axi_hp0_wvalid   : in  std_logic
+    );
+  end component;
+
 end package;
 
 package body pynq_z2_pkg is

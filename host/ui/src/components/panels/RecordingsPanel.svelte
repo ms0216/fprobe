@@ -2,7 +2,8 @@
   // Recordings（SystemView・Tracealyzer の記録の開始・停止・保存した記録。G07）: 記録の状態（recording.status）と
   // 開始・停止、保存した記録の一覧（recording.list）と開く（recording.open → 時間軸を記録に切り替えて全体を表示）、
   // 書き出し（recording.export: VCD・CSV・JSON・Perfetto。パスはデーモンの PC）、長期の記録の分割（recording.segments）
-  import { errorText } from "../../lib/api";
+  import { errorText, type Result } from "../../lib/api";
+  import { interval } from "../common/interval";
   import { shared } from "../../lib/context";
   import { allowed } from "../../lib/guard";
   import { i18n } from "../../lib/i18n";
@@ -17,9 +18,9 @@
   const POLL_MS = 1000;                                   // 記録中の件数・範囲の読み直し
 
   const { app, conn, tl, dock } = shared();
-  let status = $state<any>(null);
+  let status = $state<Result<"recording.status"> | null>(null);
   let list = $state<{ name: string; title: string | null; board: string | null }[]>([]);
-  let segments = $state<any>(null);
+  let segments = $state<Result<"recording.segments"> | null>(null);
   let name = $state(load("recordings.name", ""));
   let long = $state({ segmentS: load("recordings.segmentS", ""), maxMb: load("recordings.maxMb", ""),
                       decimateAfterS: load("recordings.decimateAfterS", "") });
@@ -50,8 +51,7 @@
   });
   $effect(() => {
     if (!recording || !linked) return;
-    const timer = setInterval(() => void readStatus(), POLL_MS);
-    return () => clearInterval(timer);
+    return interval(() => readStatus(), POLL_MS);
   });
   // 書き出しのパス: 手で変えるまでは既定（記録の名前と形式の拡張子。デーモンの PC の作業フォルダ）
   const target = $derived(edited ? path : defaultExportPath(status?.name, format));

@@ -174,9 +174,6 @@ class Kernel:
     def u32(self, addr: int) -> int:
         return struct.unpack("<I", self.read(addr, 4))[0]
 
-    def p2v(self, pa: int) -> int:
-        return pa - self.o["phys_offset"] + self.o["page_offset"]
-
     def v2p(self, va: int) -> int:
         """カーネルの線形マップの仮想アドレス → 物理アドレス。線形マップの外（vmalloc・VMAP_STACK のスタック・highmem）は、
         間違った物理アドレスを黙って返さず KernelLayoutError。"""
@@ -308,7 +305,7 @@ def list_threads(layout, read_virt: ReadVirt, pid: int, *, max_tasks: int, max_t
     k.verify()
     leader = k.find_leader(pid)
     if leader is None:
-        raise ProcessNotFound("pid %d not found" % pid)
+        raise ProcessNotFound("pid %d not found in the kernel task list (the process has exited, or the pid is wrong)" % pid)
     if leader.mm == 0:
         raise ProcessNotFound("pid %d is a kernel thread (no address space)" % pid)
     return k.threads(leader.addr, leader)

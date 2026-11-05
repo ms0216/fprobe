@@ -2,18 +2,18 @@
 --
 --   usb ドメイン: ulpi_clk（USB3317 の 60 MHz CLKOUT）。usb_device を動かす。
 --   sys ドメイン: clk27 → rPLL → sys_clk（100 MHz）。fprobe_core（CSR・ケイパビリティ・タイムベース）を動かす。
---   CONTROL チャンネル（EP1）は async_fifo で両ドメインをつなぐ（データ 8 ビット + メッセージ終わり）。
---   CMSIS-DAP（EP2）も async_fifo で sys ドメインの fprobe_core（dap_processor）へ。
+--   usb と sys の間（CONTROL・CMSIS-DAP・CDC-ACM・SWO・拡張ストリームの FIFO、ボーレート・CTS・速度の同期化）は
+--   usb_core_cdc（ボード非依存）がまとめて受け持つ。
 --   デバッグポートのピンは J12（pmod1、割り当ては primer20k_pkg の DBG_*）。gpio ブロックで出力を有効にした
 --   ピンは gpio が優先する（配線確認・ビットバング用）。続いてクロストリガの出力の動作（候補 XOUT_PIN_CHOICES から選んだ端子。claim のとき。
 --   その端子の機能の出力は止め、機能の入力には休止の 1 を入れる）、最後に機能（pin_select）。
---   CDC-ACM（EP4）は async_fifo で fprobe_core の UART ブリッジへ。ボーレートは cdc_value で sys ドメインへ渡す。
+--   CDC-ACM（EP4）は fprobe_core の UART ブリッジへ。
 --   ロジアナの専用の入力 la_in（J14 の 7〜12 番、U22）: 構成の LA_INPUTS 本を fprobe_core へ（0 なら使わない）。
 --   COM ポートの RTS・ブレークはそのまま fprobe_core へ（中で同期化）。CTS の状態は usb ドメインへ同期化して SERIAL_STATE
 --   の DSR で知らせる（CDC-ACM に CTS のビットは無い）。UART の RTS/CTS の端子（U52）は候補 UART_FLOW_PIN_CHOICES から
 --   CSR uart.flow で選んだときだけ取る: RTS の端子はその機能の出力の代わりに RTS を出し、CTS の端子は機能の出力を止めて読む
 --   （どちらも機能の層。gpio・クロストリガの出力がその端子を取っていればそちらが優先）。
---   ストリーム EP（EP6）: ロジアナの深いバッファの読み出し（sys の stream_out → async_fifo → usb）。
+--   ストリーム EP（EP6）: ロジアナの深いバッファの読み出し（sys の stream_out → usb）。
 --   mem ドメイン: DDR3（primer20k_ddr3、Gowin の DDR3 IP）のユーザー側クロック mem_clk（約 99.6 MHz）。
 --     メモリクロック ddr3_memory_clk（約 398 MHz）は clk27 → メモリ用 rPLL。
 --   LED（アクティブロー）: led(0)=PHY 準備完了, led(1)=High-Speed, led(2)=構成済み, led(3)=サスペンド,
@@ -21,6 +21,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.util_pkg.all;
 use work.primer20k_pkg.all;
 
 entity primer20k_fprobe_top is
@@ -71,23 +72,18 @@ architecture rtl of primer20k_fprobe_top is
   signal phy_ready, high_speed, configured, suspended : std_logic;
 
   -- CONTROL チャンネル（usb 側: エンドポイント、sys 側: fprobe_core）
-  signal u_req_valid, u_req_ready, u_req_last, u_rsp_valid, u_rsp_ready : std_logic;
-  signal u_req_data : std_logic_vector(7 downto 0);
-  signal u_rsp      : std_logic_vector(8 downto 0);
-  signal s_req_valid, s_req_ready, s_rsp_valid, s_rsp_ready, s_rsp_last : std_logic;
-  signal s_req      : std_logic_vector(8 downto 0);
-  signal s_rsp_data : std_logic_vector(7 downto 0);
+  signal u_req_valid, u_req_ready, u_req_last, u_rsp_valid, u_rsp_ready, u_rsp_last : std_logic;
+  signal u_req_data, u_rsp_data : std_logic_vector(7 downto 0);
+  signal s_req_valid, s_req_ready, s_req_last, s_rsp_valid, s_rsp_ready, s_rsp_last : std_logic;
+  signal s_req_data, s_rsp_data : std_logic_vector(7 downto 0);
 
   signal gpio_drive, gpio_enable : std_logic_vector(7 downto 0);
   -- CMSIS-DAP（usb ⇄ sys）
-  signal ud_req_valid, ud_req_ready, ud_req_last, ud_rsp_valid, ud_rsp_ready : std_logic;
-  signal ud_req_data : std_logic_vector(7 downto 0);
-  signal ud_rsp      : std_logic_vector(8 downto 0);
-  signal sd_req_valid, sd_req_ready, sd_rsp_valid, sd_rsp_ready, sd_rsp_last : std_logic;
-  signal sd_req      : std_logic_vector(8 downto 0);
-  signal sd_rsp_data : std_logic_vector(7 downto 0);
-  signal hs_s : std_logic;                            -- high_speed を sys に同期化
-  signal packet_size : natural range 64 to 512;
+  signal ud_req_valid, ud_req_ready, ud_req_last, ud_rsp_valid, ud_rsp_ready, ud_rsp_last : std_logic;
+  signal ud_req_data, ud_rsp_data : std_logic_vector(7 downto 0);
+  signal sd_req_valid, sd_req_ready, sd_req_last, sd_rsp_valid, sd_rsp_ready, sd_rsp_last : std_logic;
+  signal sd_req_data, sd_rsp_data : std_logic_vector(7 downto 0);
+  signal packet_size : natural range 64 to 512;       -- CMSIS-DAP の 1 パケットの大きさ（usb_core_cdc が速度で選ぶ）
   -- デバッグポート
   signal swclk_o, swclk_oe, swdio_o, swdio_oe, nreset_low, tdi_o, tdi_oe : std_logic;
   -- UART（usb ⇄ sys）
@@ -97,7 +93,7 @@ architecture rtl of primer20k_fprobe_top is
   signal su_in_data, su_out_data : std_logic_vector(7 downto 0);
   signal line_rate : unsigned(31 downto 0);
   signal line_changed, baud_load : std_logic;
-  signal baud : std_logic_vector(31 downto 0);
+  signal baud : unsigned(31 downto 0);
   signal uart_tx, uart_tx_oe : std_logic;
   -- UART の制御線（U52）
   signal u_host_rts, u_host_break, uart_cts, uart_cts_n, uart_rts_n, rts_claim, cts_claim : std_logic;
@@ -114,7 +110,7 @@ architecture rtl of primer20k_fprobe_top is
   signal pin_o, pin_oe, claimed : std_logic_vector(7 downto 0);
   signal xout_o, xout_oe, xout_claim : std_logic_vector(1 downto 0);
   signal xout_pin : std_logic_vector(3 downto 0);
-  signal heartbeat : unsigned(25 downto 0) := (others => '0');
+  signal heartbeat : unsigned(HEARTBEAT_BITS - 1 downto 0) := (others => '0');
 begin
   usb_clk <= ulpi_clk;
 
@@ -141,11 +137,11 @@ begin
               ctrl_out_valid => u_req_valid, ctrl_out_ready => u_req_ready,
               ctrl_out_data => u_req_data, ctrl_out_last => u_req_last,
               ctrl_in_valid => u_rsp_valid, ctrl_in_ready => u_rsp_ready,
-              ctrl_in_data => u_rsp(7 downto 0), ctrl_in_last => u_rsp(8),
+              ctrl_in_data => u_rsp_data, ctrl_in_last => u_rsp_last,
               dap_out_valid => ud_req_valid, dap_out_ready => ud_req_ready, dap_out_data => ud_req_data,
               dap_out_last => ud_req_last,
-              dap_in_valid => ud_rsp_valid, dap_in_ready => ud_rsp_ready, dap_in_data => ud_rsp(7 downto 0),
-              dap_in_last => ud_rsp(8),
+              dap_in_valid => ud_rsp_valid, dap_in_ready => ud_rsp_ready, dap_in_data => ud_rsp_data,
+              dap_in_last => ud_rsp_last,
               swo_in_valid => us_valid, swo_in_ready => us_ready, swo_in_data => us_data, swo_flush => us_flush,
               stream_in_valid => xu_valid, stream_in_ready => xu_ready,
               stream_in_data => xu_data, stream_in_last => '0',
@@ -155,74 +151,37 @@ begin
               line_data_bits => open, line_changed => line_changed, dtr => open, rts => u_host_rts,
               brk => u_host_break, serial_dcd => '1', serial_dsr => cts_u);
 
-  -- CTS の状態を usb ドメインへ（ゆっくり変わる 1 ビット）
-  cts_sync_i : entity work.sync_bit
-    generic map (INIT => '1')
-    port map (clk => usb_clk, d => uart_cts, q => cts_u);
-
-  uart_to_sys_i : entity work.async_fifo
-    generic map (WIDTH => 8, DEPTH => 512)
-    port map (in_clk => usb_clk, in_rst => usb_rst, in_valid => uu_out_valid, in_ready => uu_out_ready,
-              in_data => uu_out_data,
-              out_clk => sys_clk, out_rst => sys_rst, out_valid => su_in_valid, out_ready => su_in_ready,
-              out_data => su_in_data);
-
-  uart_to_usb_i : entity work.async_fifo
-    generic map (WIDTH => 8, DEPTH => 512)
-    port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => su_out_valid, in_ready => su_out_ready,
-              in_data => su_out_data,
-              out_clk => usb_clk, out_rst => usb_rst, out_valid => uu_in_valid, out_ready => uu_in_ready,
-              out_data => uu_in_data);
-
-  swo_to_usb_i : entity work.async_fifo
-    generic map (WIDTH => 8, DEPTH => 2048)
-    port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => ss_valid, in_ready => ss_ready,
-              in_data => ss_data,
-              out_clk => usb_clk, out_rst => usb_rst, out_valid => us_valid, out_ready => us_ready,
-              out_data => us_data, out_flush => us_flush);
-
-  -- 窓（sys で 32 周期）は usb の 2 段の同期化と、FIFO の書き込みポインタの同期化より十分長い。窓の間は
-  -- swo_receiver が書かないので、窓の終わりの捨てで前の受信のバイトはすべて消える
-  swo_flush_sync_i : entity work.sync_bit
-    port map (clk => usb_clk, d => ss_flush, q => us_flush);
-
-  stream_to_usb_i : entity work.async_fifo
-    generic map (WIDTH => 8, DEPTH => 2048)
-    port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => xs_valid, in_ready => xs_ready,
-              in_data => xs_data,
-              out_clk => usb_clk, out_rst => usb_rst, out_valid => xu_valid, out_ready => xu_ready,
-              out_data => xu_data);
-
-  baud_i : entity work.cdc_value
-    generic map (WIDTH => 32)
-    port map (src_clk => usb_clk, src_load => line_changed, src_value => std_logic_vector(line_rate),
-              dst_clk => sys_clk, dst_value => baud, dst_changed => baud_load);
-
-  request_fifo_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
-    port map (in_clk => usb_clk, in_rst => usb_rst, in_valid => u_req_valid, in_ready => u_req_ready,
-              in_data => u_req_last & u_req_data,
-              out_clk => sys_clk, out_rst => sys_rst, out_valid => s_req_valid, out_ready => s_req_ready,
-              out_data => s_req);
-
-  dap_request_fifo_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
-    port map (in_clk => usb_clk, in_rst => usb_rst, in_valid => ud_req_valid, in_ready => ud_req_ready,
-              in_data => ud_req_last & ud_req_data,
-              out_clk => sys_clk, out_rst => sys_rst, out_valid => sd_req_valid, out_ready => sd_req_ready,
-              out_data => sd_req);
-
-  dap_response_fifo_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
-    port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => sd_rsp_valid, in_ready => sd_rsp_ready,
-              in_data => sd_rsp_last & sd_rsp_data,
-              out_clk => usb_clk, out_rst => usb_rst, out_valid => ud_rsp_valid, out_ready => ud_rsp_ready,
-              out_data => ud_rsp);
-
-  -- パケットサイズ（HS 512 / FS 64）。速度はリセット・ネゴシエーションの間しか変わらない
-  hs_sync_i : entity work.sync_bit
-    port map (clk => sys_clk, d => high_speed, q => hs_s);
-  packet_size <= 512 when hs_s = '1' else 64;
+  -- usb ⇄ sys のクロックの乗せ換え（FIFO・同期化・ボーレート・パケットサイズ）
+  cdc_i : entity work.usb_core_cdc
+    port map (usb_clk => usb_clk, usb_rst => usb_rst, sys_clk => sys_clk, sys_rst => sys_rst,
+              u_high_speed => high_speed,
+              u_ctrl_out_valid => u_req_valid, u_ctrl_out_ready => u_req_ready, u_ctrl_out_data => u_req_data,
+              u_ctrl_out_last => u_req_last,
+              u_ctrl_in_valid => u_rsp_valid, u_ctrl_in_ready => u_rsp_ready, u_ctrl_in_data => u_rsp_data,
+              u_ctrl_in_last => u_rsp_last,
+              u_dap_out_valid => ud_req_valid, u_dap_out_ready => ud_req_ready, u_dap_out_data => ud_req_data,
+              u_dap_out_last => ud_req_last,
+              u_dap_in_valid => ud_rsp_valid, u_dap_in_ready => ud_rsp_ready, u_dap_in_data => ud_rsp_data,
+              u_dap_in_last => ud_rsp_last,
+              u_swo_in_valid => us_valid, u_swo_in_ready => us_ready, u_swo_in_data => us_data, u_swo_flush => us_flush,
+              u_stream_in_valid => xu_valid, u_stream_in_ready => xu_ready, u_stream_in_data => xu_data,
+              u_uart_out_valid => uu_out_valid, u_uart_out_ready => uu_out_ready, u_uart_out_data => uu_out_data,
+              u_uart_in_valid => uu_in_valid, u_uart_in_ready => uu_in_ready, u_uart_in_data => uu_in_data,
+              u_line_rate => line_rate, u_line_changed => line_changed, u_serial_dsr => cts_u,
+              s_packet_size => packet_size,
+              s_ctrl_in_valid => s_req_valid, s_ctrl_in_ready => s_req_ready, s_ctrl_in_data => s_req_data,
+              s_ctrl_in_last => s_req_last,
+              s_ctrl_out_valid => s_rsp_valid, s_ctrl_out_ready => s_rsp_ready, s_ctrl_out_data => s_rsp_data,
+              s_ctrl_out_last => s_rsp_last,
+              s_dap_in_valid => sd_req_valid, s_dap_in_ready => sd_req_ready, s_dap_in_data => sd_req_data,
+              s_dap_in_last => sd_req_last,
+              s_dap_out_valid => sd_rsp_valid, s_dap_out_ready => sd_rsp_ready, s_dap_out_data => sd_rsp_data,
+              s_dap_out_last => sd_rsp_last,
+              s_swo_out_valid => ss_valid, s_swo_out_ready => ss_ready, s_swo_out_data => ss_data, s_swo_flush => ss_flush,
+              s_stream_out_valid => xs_valid, s_stream_out_ready => xs_ready, s_stream_out_data => xs_data,
+              s_uart_in_valid => su_in_valid, s_uart_in_ready => su_in_ready, s_uart_in_data => su_in_data,
+              s_uart_out_valid => su_out_valid, s_uart_out_ready => su_out_ready, s_uart_out_data => su_out_data,
+              s_uart_baud => baud, s_uart_baud_load => baud_load, s_uart_cts => uart_cts);
 
   mem_pll_i : entity work.gowin_rpll
     generic map (FCLKIN_MHZ => "27", DEVICE => "GW2A-18C", IDIV_SEL => MEM_PLL_IDIV_SEL,
@@ -260,19 +219,19 @@ begin
                  CLK_HZ => SYS_CLK_HZ, LA_INTERNAL => false)
     port map (clk => sys_clk, rst => sys_rst,
               ctrl_in_valid => s_req_valid, ctrl_in_ready => s_req_ready,
-              ctrl_in_data => s_req(7 downto 0), ctrl_in_last => s_req(8),
+              ctrl_in_data => s_req_data, ctrl_in_last => s_req_last,
               ctrl_out_valid => s_rsp_valid, ctrl_out_ready => s_rsp_ready,
               ctrl_out_data => s_rsp_data, ctrl_out_last => s_rsp_last,
               packet_size => packet_size,
-              dap_in_valid => sd_req_valid, dap_in_ready => sd_req_ready, dap_in_data => sd_req(7 downto 0),
-              dap_in_last => sd_req(8), dap_out_valid => sd_rsp_valid, dap_out_ready => sd_rsp_ready,
+              dap_in_valid => sd_req_valid, dap_in_ready => sd_req_ready, dap_in_data => sd_req_data,
+              dap_in_last => sd_req_last, dap_out_valid => sd_rsp_valid, dap_out_ready => sd_rsp_ready,
               dap_out_data => sd_rsp_data, dap_out_last => sd_rsp_last,
               swclk_o => swclk_o, swclk_oe => swclk_oe, swdio_o => swdio_o, swdio_oe => swdio_oe,
               swdio_i => pmod1(DBG_SWDIO), nreset_low => nreset_low, nreset_i => pmod1(DBG_NRESET),
               tdi_o => tdi_o, tdi_oe => tdi_oe, tdo_i => pmod1(DBG_SWO) or claimed(DBG_SWO),
               swo_i => pmod1(DBG_SWO) or claimed(DBG_SWO), swo_out_valid => ss_valid, swo_out_ready => ss_ready,
               swo_out_data => ss_data, swo_flush => ss_flush,
-              uart_baud => unsigned(baud), uart_baud_load => baud_load,
+              uart_baud => baud, uart_baud_load => baud_load,
               uart_in_valid => su_in_valid, uart_in_ready => su_in_ready, uart_in_data => su_in_data,
               uart_out_valid => su_out_valid, uart_out_ready => su_out_ready, uart_out_data => su_out_data,
               uart_rx => pmod1(DBG_UART_RX) or claimed(DBG_UART_RX), uart_tx => uart_tx,
@@ -310,13 +269,6 @@ begin
   pins : for i in pmod1'range generate
     pmod1(i) <= pin_o(i) when pin_oe(i) = '1' else 'Z';
   end generate;
-
-  response_fifo_i : entity work.async_fifo
-    generic map (WIDTH => 9, DEPTH => 512)
-    port map (in_clk => sys_clk, in_rst => sys_rst, in_valid => s_rsp_valid, in_ready => s_rsp_ready,
-              in_data => s_rsp_last & s_rsp_data,
-              out_clk => usb_clk, out_rst => usb_rst, out_valid => u_rsp_valid, out_ready => u_rsp_ready,
-              out_data => u_rsp);
 
   process (sys_clk)
   begin

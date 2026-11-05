@@ -6,6 +6,7 @@
   // DP・AP・ピンは未接続のときに読むと線を動かす（DP を起こす）ので、読むのは「読む」を押したときだけ。
   // 書く操作は AI の作業中なら確かめる（lib/valuewrite の writeBuilt）。引数の組み立ては lib/lowlevel
   import { errorText } from "../../lib/api";
+  import Req from "./Req.svelte";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
   import {
@@ -205,9 +206,9 @@
   <section>
     <form class="pane-bar" onsubmit={readAp}>
       <strong>{$i18n("lowLevel.ap")}</strong>
-      <label>{$i18n("lowLevel.apIndex")}<span class="req" aria-hidden="true">*</span><input class="mono num" aria-required="true"
+      <label>{$i18n("lowLevel.apIndex")}<Req /><input class="mono num" aria-required="true"
              bind:value={apText} /></label>
-      <label title={$i18n("lowLevel.apRegisterTip")}>{$i18n("lowLevel.register")}<span class="req" aria-hidden="true">*</span><input
+      <label title={$i18n("lowLevel.apRegisterTip")}>{$i18n("lowLevel.register")}<Req /><input
              class="mono num" aria-required="true" bind:value={apRegText} /></label>
       <button class="small" disabled={!online}>{$i18n("lowLevel.read")}</button>
       {#if apError}<span class="bad small">{apError}</span>{/if}
@@ -231,9 +232,9 @@
   <section>
     <form class="pane-bar" onsubmit={readCsr}>
       <strong title={$i18n("lowLevel.csrTip")}>{$i18n("lowLevel.csr")}</strong>
-      <label>{$i18n("lowLevel.address")}<span class="req" aria-hidden="true">*</span><input class="mono num" aria-required="true"
+      <label>{$i18n("lowLevel.address")}<Req /><input class="mono num" aria-required="true"
              bind:value={csrAddress} /></label>
-      <label>{$i18n("lowLevel.words")}<span class="req" aria-hidden="true">*</span><input class="mono num" aria-required="true"
+      <label>{$i18n("lowLevel.words")}<Req /><input class="mono num" aria-required="true"
              bind:value={csrCount} /></label>
       <button class="small" disabled={!online}>{$i18n("lowLevel.read")}</button>
       {#if csrError}<span class="bad small">{csrError}</span>{/if}
@@ -312,9 +313,9 @@
         {#if f}
           <div class="form">
             <select bind:value={f.mode} aria-label="mode" aria-required="true">{#if !f.mode}<option value="" disabled></option>{/if}
-              {#each MODES as m (m)}<option value={m}>{m}</option>{/each}</select><span class="req" aria-hidden="true">*</span>
+              {#each MODES as m (m)}<option value={m}>{m}</option>{/each}</select><Req />
             <select bind:value={f.level} aria-label="level" aria-required="true">{#if !f.level}<option value="" disabled></option>{/if}
-              {#each LEVELS as l (l)}<option value={l}>{l}</option>{/each}</select><span class="req" aria-hidden="true">*</span>
+              {#each LEVELS as l (l)}<option value={l}>{l}</option>{/each}</select><Req />
             {#each SOURCES as s (s)}
               <label class="mono"><input type="checkbox" checked={f.sources.includes(s)}
                                          onchange={(e) => toggleSource(o.channel, s, e.currentTarget.checked)} />{s}</label>
