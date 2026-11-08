@@ -115,7 +115,7 @@ def test_pins_are_read_through_pyocd_when_connected_and_writes_are_refused():
     with pytest.raises(NotDisconnected):
         p.jtag_scan()
     with pytest.raises(NotDisconnected):
-        p.target_diagnose()
+        p.target_diagnose(frequencies_hz=[1_000_000])
     assert not links
 
 
@@ -180,7 +180,7 @@ def test_speed_test_reads_writes_verifies_and_restores():
 
 def test_diagnose_runs_on_the_raw_path_and_leaves_the_dp_ready():
     p, links = make_probe()
-    d = p.target_diagnose()
+    d = p.target_diagnose(frequencies_hz=[1_000_000])
     assert d["reached"] and d["part"]["suggested_target"] == "stm32f401xe" and d["frequencies_hz"] == [1_000_000]
     assert [s["name"] for s in d["steps"]][:2] == ["voltage", "pins"]
     assert d["steps"][0]["status"] == "skip"                                  # 偽の補助マイコンは計測値を送らない

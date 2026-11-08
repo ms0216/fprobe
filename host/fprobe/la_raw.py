@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import la_vcd, la_wave
+from . import la_tokens, la_vcd, la_wave
 
 __all__ = ["CHUNK_HEAD", "RawCapture", "RawCaptureWriter", "RawChunk", "RawFormatError", "RawGap", "RawMeta", "raw_to_vcd"]
 
@@ -52,12 +52,13 @@ class RawMeta:
     names: dict[int, str]
     skew: tuple[float | None, ...]       # ch ごとの時刻のずれ（分からない ch は None。timebase_hz が無ければ空）
     timebase_hz: float | None
+    rle_format: str = "records"          # RLE の形式（"records" | "tokens"。rle = False のときは意味を持たない。無いファイルは records）
 
     def to_json(self) -> bytes:
         return json.dumps({"version": VERSION, "rle": self.rle, "pack": self.pack, "channels": self.channels,
                            "first_channel": self.first_channel, "sample_period_s": self.sample_period_s,
                            "names": {str(k): v for k, v in self.names.items()}, "skew": list(self.skew),
-                           "timebase_hz": self.timebase_hz}).encode("utf-8")
+                           "timebase_hz": self.timebase_hz, "rle_format": self.rle_format}).encode("utf-8")
 
     @classmethod
     def from_json(cls, blob: bytes) -> "RawMeta":
@@ -68,7 +69,7 @@ class RawMeta:
             return cls(rle=bool(d["rle"]), pack=int(d["pack"]), channels=int(d["channels"]),
                        first_channel=int(d["first_channel"]), sample_period_s=float(d["sample_period_s"]),
                        names={int(k): v for k, v in d["names"].items()}, skew=tuple(d["skew"]),
-                       timebase_hz=d["timebase_hz"])
+                       timebase_hz=d["timebase_hz"], rle_format=d.get("rle_format", "records"))
         except RawFormatError:
             raise
         except (ValueError, KeyError, TypeError) as e:
@@ -93,16 +94,24 @@ class RawChunk:
     previous: int | None
     count: int                   # サンプル数（-1 = 取り込みで数えていない。length で数える）
     gap: RawGap | None
+    rle_format: str = "records"
 
     @property
     def length(self) -> int:
         if self.count >= 0:
             return self.count
+        if self.rle and self.rle_format == "tokens":
+            return la_tokens.token_extent(self.data, self.first, self.previous)[0] if self.data else 0
         return la_wave._extent(self.data, self.rle)[0] << self.pack if self.data else 0
 
     def changes(self):
         """変化点（値・開始）。StreamChunk.changes と同じ。"""
-        return la_wave.stream_transitions(self.data, self.rle, self.pack, self.first, self.previous)
+        return la_wave.stream_transitions(self.data, self.rle, self.pack, self.first, self.previous, self.rle_format)
+
+    def iter_changes(self, max_changes: int):
+        """changes と同じ変化点を max_changes 個以下の断片に分けて順に返す（StreamChunk.iter_changes と同じ）。"""
+        return la_wave.iter_stream_transitions(self.data, self.rle, self.pack, self.first, self.previous, self.rle_format,
+                                               max_changes=max_changes)
 
 
 class RawCaptureWriter:
@@ -122,9 +131,10 @@ class RawCaptureWriter:
             raise
 
     def write(self, chunk) -> None:
-        if chunk.rle != self.meta.rle or chunk.pack != self.meta.pack:
-            raise ValueError(f"かたまりの形（rle={chunk.rle}, pack={chunk.pack}）がファイルの流れ"
-                             f"（rle={self.meta.rle}, pack={self.meta.pack}）と違う")
+        fmt = getattr(chunk, "rle_format", "records")
+        if chunk.rle != self.meta.rle or chunk.pack != self.meta.pack or chunk.rle and fmt != self.meta.rle_format:
+            raise ValueError(f"かたまりの形（rle={chunk.rle}, pack={chunk.pack}, rle_format={fmt}）がファイルの流れ"
+                             f"（rle={self.meta.rle}, pack={self.meta.pack}, rle_format={self.meta.rle_format}）と違う")
         gap = chunk.gap
         flags = (_HAS_PREVIOUS if chunk.previous is not None else 0) | (_HAS_GAP if gap is not None else 0)
         data = chunk.data
@@ -212,26 +222,46 @@ class RawCapture:
                 if tag != CHUNK_TAG or len(data) != nbytes:
                     raise RawFormatError(f"かたまりが壊れている（位置 {offset}）")
                 yield RawChunk(data, self.meta.rle, self.meta.pack, first, previous if flags & _HAS_PREVIOUS else None, count,
-                               RawGap(g_start, g_samples, g_beat) if flags & _HAS_GAP else None)
+                               RawGap(g_start, g_samples, g_beat) if flags & _HAS_GAP else None, self.meta.rle_format)
 
     @property
     def samples(self) -> int:
         """値のあるサンプルの数（欠けの区間は数えない）。"""
         if self._samples is None:
             self._samples = sum(c.length for c in self.chunks())
+            if self.meta.rle and self.meta.rle_format == "tokens" and any(len(c.data) for c in self.chunks()):
+                self._samples += 1                         # トークン形式: 最後の出来事の時刻 + 1（時刻の進みの和に先頭の 1 つを足す）
         return self._samples
 
 
-def raw_to_vcd(raw: RawCapture, vcd_path: str | Path, names: dict[int, str] | None = None, workers: int | None = None) -> None:
+def raw_to_vcd(raw: RawCapture, vcd_path: str | Path, names: dict[int, str] | None = None, workers: int | None = None,
+               max_changes: int | None = None) -> int:
     """生の保存ファイルを VCD に書き出す。取り込みと書き出しを分ける前の stream_to_vcd と同じバイト列。
-    names はファイルに保存した名前に重ねる。"""
+    names はファイルに保存した名前に重ねる。書いた変化点の数を返す。
+
+    メモリ: 変化点は断片（la_wave.PIECE_CHANGES 個以下）ごとに復号して書く。トークン形式の REPEAT が展開で何億もの変化点に
+    なっても、メモリは展開の大きさに依らない。ただし VCD は変化点ごとに行が要るので、保存先の大きさは変化点の数に比例して
+    膨れる（避けられない）。max_changes（None = 上限なし。使う側が明示する）を渡すと、書く変化点がそれを超えるときは、上限ちょうどの
+    変化点までを書いて ChangeLimitExceeded で断る（VCD は打ち切った所までで閉じる。事実: limit・written・超えた最初の変化点の位置）。"""
     m = raw.meta
     merged = {**m.names, **(names or {})}
     per = la_wave.Transitions((), (), 0, 0, 0, m.sample_period_s, m.channels, m.skew)
+    piece = la_wave.PIECE_CHANGES if max_changes is None else max(1, min(la_wave.PIECE_CHANGES, max_changes + 1))
     with la_vcd.VcdWriter(vcd_path, m.channels, m.sample_period_s, merged,
                           shifts=per.skew_samples(m.sample_period_s * m.timebase_hz if m.timebase_hz else None),
                           unknown=per.skew_unknown(), workers=workers) as vcd:
+        changes = 0
         for chunk in raw.chunks():
             if chunk.gap is not None:
                 vcd.gap(chunk.gap.start)                     # 欠けの区間: 全信号が x。次の値で書き直す
-            vcd.write(*chunk.changes())
+            for values, starts in chunk.iter_changes(piece):
+                if max_changes is not None and changes + len(values) > max_changes:
+                    room = max_changes - changes
+                    if room:
+                        vcd.write(values[:room], starts[:room])
+                    raise la_wave.ChangeLimitExceeded(max_changes, max_changes, int(starts[room]),
+                                                      "VCD は変化点ごとに行が要り、保存先が展開の大きさに比例して膨れる"
+                                                      "（VCD は上限までの変化点で打ち切って閉じた）")
+                changes += len(values)
+                vcd.write(values, starts)
+    return changes

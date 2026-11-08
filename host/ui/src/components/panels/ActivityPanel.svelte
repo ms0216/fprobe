@@ -55,6 +55,14 @@
     rows.length;
     if (follow) tick().then(() => box && (box.scrollTop = box.scrollHeight));
   });
+  // 別のタブの裏にあった・大きさが変わったとき（開いた直後は高さが 0 で上のスクロールが効かない）も、追従中なら最下行（最新）へ
+  $effect(() => {
+    if (!box) return;
+    const el = box;
+    const ro = new ResizeObserver(() => { if (follow && el.clientHeight > 0) el.scrollTop = el.scrollHeight; });
+    ro.observe(el);
+    return () => ro.disconnect();
+  });
   // 記録が変わったら（通知 recording。だれが変えても）索引を読み直す。記録中の操作は記録にも入るので、少し待って
   // まとめて読み直す（読み直しは quiet の読みだけなので、それ自体は操作の記録に入らず、通知が続かない）
   $effect(() => {

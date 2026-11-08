@@ -10,30 +10,39 @@ from collections import deque
 from dataclasses import dataclass
 
 from .la_segments import StreamFormatError, StreamHoldExceeded
-from .la_wave import BEAT_BYTES
-from .la_wave import _array_of, _np, _samples_of
+from .la_tokens import token_extent
+from .la_wave import BEAT_BYTES, _array_of, _np, _samples_of
 
 class StreamCursor:
     """流れのサンプルの位置（先頭 = 0。欠けの区間も数える）と直前の値。LaStream のサンプルの数えはここ 1 か所
     （欠けの区間を記録する流れでは GapPlacer がこれを進める）。"""
 
-    __slots__ = ("rle", "pack", "position", "previous", "gap_samples")
+    __slots__ = ("rle", "pack", "rle_format", "position", "previous", "gap_samples", "bytes", "pad_bytes")
 
-    def __init__(self, rle: bool, pack: int):
-        self.rle, self.pack = rle, pack
+    def __init__(self, rle: bool, pack: int, rle_format: str = "records"):
+        self.rle, self.pack, self.rle_format = rle, pack, rle_format
+        self.bytes = 0                        # 受け取ったロジアナの拍のバイト数（見出し・イベントを含まない）
+        self.pad_bytes = 0                    # そのうち NOP で埋めた分（トークン形式）
+        # トークン形式では position = 直前の出来事の時刻（次のチャンクの first）。サンプルの位置ではなく、出来事の時刻で進む
         self.position = 0                     # 次のサンプルの位置
         self.previous: int | None = None      # 直前のサンプルの値（欠けの後は None）
         self.gap_samples = 0                  # 欠けの区間のサンプルの数の和
 
     @property
     def samples(self) -> int:
-        """値のあるサンプルの数。"""
-        return self.position - self.gap_samples
+        """値のあるサンプルの数。トークン形式は、最後の出来事の時刻 + 1（出来事が来てから。それ以降は届くまで分からない）。"""
+        started = 1 if self.rle_format == "tokens" and self.previous is not None else 0
+        return self.position - self.gap_samples + started
 
     def take(self, data) -> tuple[int, int | None, int]:
         """拍の列 data を進める。(最初の位置, 直前の値, サンプル数)。"""
         first, previous = self.position, self.previous
-        count, self.previous = _samples_of(data, self.rle, self.pack)
+        self.bytes += len(data)
+        if self.rle_format == "tokens":
+            count, self.previous, pad = token_extent(data, first, previous)
+            self.pad_bytes += pad
+        else:
+            count, self.previous = _samples_of(data, self.rle, self.pack)
         self.position += count
         return first, previous, count
 

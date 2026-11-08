@@ -22,6 +22,8 @@ entity csr_la_deep is
     control_step : out std_logic_vector(1 downto 0);   -- control.step（RW）
     control_first : out std_logic_vector(3 downto 0);   -- control.first（RW）
     control_gaps : out std_logic;   -- control.gaps（RW）
+    control_rle_fmt : out std_logic;   -- control.rle_fmt（RW）
+    control_rle_repeat : out std_logic;   -- control.rle_repeat（RW）
     post_beats : out std_logic_vector(31 downto 0);   -- post_beats（RW）
     status_capturing : in  std_logic;   -- status.capturing（RO）
     status_triggered : in  std_logic;   -- status.triggered（RO）
@@ -50,7 +52,10 @@ entity csr_la_deep is
     info_latency : in  std_logic_vector(7 downto 0);   -- info.latency（RO）
     info_start_valid : in  std_logic;   -- info.start_valid（RO）
     gap_last_beat : in  std_logic_vector(31 downto 0);   -- gap_last_beat（RO）
-    gaps : in  std_logic_vector(31 downto 0)   -- gaps（RO）
+    gaps : in  std_logic_vector(31 downto 0);   -- gaps（RO）
+    tick : out std_logic_vector(31 downto 0);   -- tick（RW）
+    pad_bytes : in  std_logic_vector(31 downto 0);   -- pad_bytes（RO）
+    keyframes : in  std_logic_vector(31 downto 0)   -- keyframes（RO）
   );
 end entity;
 
@@ -68,12 +73,15 @@ architecture rtl of csr_la_deep is
   signal control_step_r : std_logic_vector(1 downto 0) := (others => '0');
   signal control_first_r : std_logic_vector(3 downto 0) := (others => '0');
   signal control_gaps_r : std_logic := '0';
+  signal control_rle_fmt_r : std_logic := '0';
+  signal control_rle_repeat_r : std_logic := '0';
   signal post_beats_r : std_logic_vector(31 downto 0) := (others => '0');
   signal read_first_r : std_logic_vector(31 downto 0) := (others => '0');
   signal read_count_r : std_logic_vector(31 downto 0) := (others => '0');
   signal command_read_r : std_logic := '0';
   signal command_read_ps_r : std_logic := '0';
   signal read_region_r : std_logic := '0';
+  signal tick_r : std_logic_vector(31 downto 0) := (others => '0');
 begin
   start <= bus_req = '1' and ack = '0';
   index <= to_integer(bus_cmd.addr(4 downto 0));
@@ -95,10 +103,13 @@ begin
         control_step_r <= (others => '0');
         control_first_r <= (others => '0');
         control_gaps_r <= '0';
+        control_rle_fmt_r <= '0';
+        control_rle_repeat_r <= '0';
         post_beats_r <= (others => '0');
         read_first_r <= (others => '0');
         read_count_r <= (others => '0');
         read_region_r <= '0';
+        tick_r <= (others => '0');
       elsif start then
         ack   <= '1';
         case index is
@@ -111,6 +122,8 @@ begin
             rdata(9 downto 8) <= control_step_r;
             rdata(15 downto 12) <= control_first_r;
             rdata(16) <= control_gaps_r;
+            rdata(17) <= control_rle_fmt_r;
+            rdata(18) <= control_rle_repeat_r;
             if bus_cmd.we = '1' then
               control_run_r <= bus_cmd.wdata(0);
               control_rle_r <= bus_cmd.wdata(1);
@@ -120,6 +133,8 @@ begin
               control_step_r <= bus_cmd.wdata(9 downto 8);
               control_first_r <= bus_cmd.wdata(15 downto 12);
               control_gaps_r <= bus_cmd.wdata(16);
+              control_rle_fmt_r <= bus_cmd.wdata(17);
+              control_rle_repeat_r <= bus_cmd.wdata(18);
             end if;
           when 1 =>   -- post_beats
             rdata(31 downto 0) <= post_beats_r;
@@ -184,6 +199,15 @@ begin
             rdata(31 downto 0) <= gap_last_beat;
           when 20 =>   -- gaps
             rdata(31 downto 0) <= gaps;
+          when 21 =>   -- tick
+            rdata(31 downto 0) <= tick_r;
+            if bus_cmd.we = '1' then
+              tick_r <= bus_cmd.wdata(31 downto 0);
+            end if;
+          when 22 =>   -- pad_bytes
+            rdata(31 downto 0) <= pad_bytes;
+          when 23 =>   -- keyframes
+            rdata(31 downto 0) <= keyframes;
           when others =>
             err <= '1';
         end case;
@@ -202,10 +226,13 @@ begin
   control_step <= control_step_r;
   control_first <= control_first_r;
   control_gaps <= control_gaps_r;
+  control_rle_fmt <= control_rle_fmt_r;
+  control_rle_repeat <= control_rle_repeat_r;
   post_beats <= post_beats_r;
   read_first <= read_first_r;
   read_count <= read_count_r;
   command_read <= command_read_r;
   command_read_ps <= command_read_ps_r;
   read_region <= read_region_r;
+  tick <= tick_r;
 end architecture;

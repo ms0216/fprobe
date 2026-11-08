@@ -55,7 +55,8 @@ class ViewBreakpointsMixin:
             raise ValueError("Linux のプロセスのブレークポイントには condition・ignore_count・log・message は使えない")
         if self.breakpoint_kind is None:
             raise RuntimeError("linux.halt.debug.attach に breakpoint_kind（sw / hw）を渡していない: 種類を渡さない置き方"
-                               "（画面の行のクリック等）には使う種類が要る（linux.halt.debug.break.insert なら kind を渡す）")
+                               "（画面の行のクリック等）には使う種類が要る（linux.halt.debug.break.insert なら kind を渡す）。"
+                               "画面で直すには、Linux パネルの Attach の詳細（Advanced）で breakpoint_kind を選んで attach し直す")
         bp = self.d.break_insert(location, self.breakpoint_kind)
         row = self._row(bp, True)
         return {k: row[k] for k in ("address", "where", "function", "file", "line") if k in row}

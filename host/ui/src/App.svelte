@@ -91,7 +91,7 @@
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
                                          selection: $ui.selection, rescueDp: $app.target?.rescue_dp,
-                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt });
+                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt, linux: !!$app.target?.linux });
 
   function onKey(e: KeyboardEvent) {
     if ($ui.dialog) return;
@@ -102,6 +102,16 @@
     if (!c) return;
     e.preventDefault();                          // 使えないときも、ブラウザの F5（読み直し）等には渡さない
     if (!c.blocked(cs)) void c.run(ctx, cs);
+    else if (c.id === "halt" && cs.target === "HALTED") say($i18n("toast.alreadyHalted"));   // F6 が何も起こさない理由を示す
+  }
+
+  // 小さな案内（エラーではない。数秒で消える）
+  let notice = $state<string | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function say(text: string) {
+    notice = text;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), 3000);
   }
 
   // 時間軸のダブルクリック・Enter: 出来事の元（番地 → メモリ、PC → ソース）を開く
@@ -118,6 +128,7 @@
   });
   conn.start();
   onDestroy(() => {
+    clearTimeout(noticeTimer);
     stopOpen();
     stopPanels();
     stopFieldNames();
@@ -141,6 +152,7 @@
   <Dialogs />
   <ConfirmDialog />
   <ContextMenu />
+  {#if notice}<div class="toast note" role="status">{notice}</div>{/if}
   {#if $app.error}
     <div class="toast" role="alert">
       <span>{$app.error}</span>
@@ -152,6 +164,7 @@
 <style>
   .shell { display: grid; grid-template-rows: auto auto auto 1fr auto; height: 100%; }
   main { min-height: 0; position: relative; }
+  .toast.note { border-color: var(--line); color: var(--text); }
   .toast {
     position: fixed; right: 16px; bottom: 36px; max-width: min(560px, calc(100vw - 32px)); display: flex; gap: 8px;
     align-items: center; background: var(--panel); border: 1px solid var(--bad); color: var(--bad);

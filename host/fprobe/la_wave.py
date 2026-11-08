@@ -5,11 +5,13 @@ fprobe.la が再公開する（使う側は fprobe.la から読んでよい）�
 
 from array import array
 from bisect import bisect_left, bisect_right
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
+from . import la_tokens
+
 __all__ = ["BEAT_BYTES", "Capture", "Transitions", "Waveform", "decode_beats", "decode_transitions", "raw_facts", "skew_unknown",
-           "stream_transitions", "trigger_sample"]
+           "stream_transitions", "iter_stream_transitions", "ChangeLimitExceeded", "PIECE_CHANGES", "trigger_sample"]
 
 try:                                                          # 入っていれば波形の変化点の表を一括の計算で作る
     import numpy as _np
@@ -211,10 +213,16 @@ class Waveform:
 BEAT_BYTES = 16
 
 
-def decode_beats(data: bytes, rle: bool) -> "array[int]":
-    """拍の列（16 バイト単位）をサンプル列に戻す。RAW: 1 拍 = 8 サンプル。RLE: 1 拍 = 4 レコード（値, 繰り返し）。"""
+RLE_FORMATS = ("records", "tokens")           # RLE の形式。records = 1 レコード 4 バイト（既定）、tokens = トークン形式（fprobe.la_tokens）
+
+
+def decode_beats(data: bytes, rle: bool, rle_format: str = "records") -> "array[int]":
+    """拍の列（16 バイト単位）をサンプル列に戻す。RAW: 1 拍 = 8 サンプル。RLE: 1 拍 = 4 レコード（値, 繰り返し）
+    （rle_format = "tokens" ならトークン形式。長さは最後の出来事の時刻 + 1）。"""
     if len(data) % BEAT_BYTES:
         raise ValueError("拍（16 バイト）の倍数でない")
+    if rle and rle_format == "tokens":
+        return la_tokens.expand_samples(data)
     if not rle:
         samples = array("H")
         samples.frombytes(data)                     # リトルエンディアンの 16 ビット（このホストもリトル）
@@ -230,10 +238,14 @@ def decode_beats(data: bytes, rle: bool) -> "array[int]":
     return samples
 
 
-def decode_transitions(data: bytes, rle: bool, first: int = 0) -> tuple["array[int]", "array[int]", int]:
-    """拍の列を変化点（値, 開始サンプル + first）と全サンプル数にする（RLE は展開しない）。array で返す。"""
+def decode_transitions(data: bytes, rle: bool, first: int = 0, rle_format: str = "records") -> tuple["array[int]", "array[int]", int]:
+    """拍の列を変化点（値, 開始サンプル + first）と全サンプル数にする（RLE は展開しない）。array で返す。
+    トークン形式の全サンプル数は、最後の出来事の時刻 + 1（それ以降は次の出来事が届くまで分からない）。"""
     if not rle and len(data) % BEAT_BYTES:
         raise ValueError("拍（16 バイト）の倍数でない")
+    if rle and rle_format == "tokens":
+        d = la_tokens.decode_tokens(data, first)
+        return _array_of("H", d.values), _array_of("Q", d.starts), d.end_time + 1 if len(d.values) else 0
     values, starts = stream_transitions(data, rle, 0, first, None)
     if _np is None:
         if not rle:
@@ -246,12 +258,49 @@ def decode_transitions(data: bytes, rle: bool, first: int = 0) -> tuple["array[i
     return _array_of("H", values), _array_of("Q", starts), length
 
 
-def stream_transitions(data: bytes, rle: bool, pack: int = 0, first: int = 0, previous: int | None = None):
+PIECE_CHANGES = 1 << 22        # 断片の大きさ（変化点の数）の目安。1 つが約 10 バイト × 数倍で、断片 1 つは数十〜百 MB 以下
+
+
+class ChangeLimitExceeded(ValueError):
+    """使う側が明示した変化点の上限（max_changes）を超えたので断った。メモリや保存先を黙って使い切らない。
+    limit = 渡された上限、written = 断る前に出力・保持できた変化点の数（事実）、at_sample = 超えた最初の変化点の通し番号の開始。"""
+
+    def __init__(self, limit: int, written: int, at_sample: int | None, what: str):
+        self.limit, self.written, self.at_sample = limit, written, at_sample
+        where = f"（超えた最初の変化点はサンプル {at_sample}）" if at_sample is not None else ""
+        super().__init__(f"変化点が max_changes = {limit} を超える{where}: {what}。{written} 個までを扱った。"
+                         "上限を上げるか、保存先・区間を小さくする（上限は使う側が決める引数で、既定は無い）")
+
+
+def iter_stream_transitions(data, rle: bool, pack: int = 0, first: int = 0, previous: int | None = None,
+                            rle_format: str = "records", *, max_changes: int) -> Iterator[tuple]:
+    """stream_transitions と同じ変化点を、(値, 開始) の断片（1 つが max_changes 個以下、空は返さない）に分けて順に返す。断片を
+    つなぐと stream_transitions の結果と要素単位で一致する。トークン形式の REPEAT は展開の大きさに依らないメモリで復号する
+    （la_tokens.iter_decode_tokens）。それ以外の形式は変化点の数が入力の大きさで決まるので、そのまま求めて分ける。"""
+    if rle and rle_format == "tokens":
+        if pack:
+            raise ValueError("トークン形式の RLE は詰めない（pack = 0）")
+        yield from la_tokens.iter_decode_tokens(data, first, previous, max_changes=max_changes)
+        return
+    values, starts = stream_transitions(data, rle, pack, first, previous, rle_format)
+    for i in range(0, len(values), max_changes):
+        yield values[i:i + max_changes], starts[i:i + max_changes]
+
+
+def stream_transitions(data: bytes, rle: bool, pack: int = 0, first: int = 0, previous: int | None = None,
+                       rle_format: str = "records"):
     """流れの拍の列の変化点: (値, 通し番号の開始)。previous（直前のサンプルの値。None = 無い）と同じ先頭は含めない
     （つなぐと流れ全体の変化点になる）。RAW の詰めた語（pack 1〜4 = 8・4・2・1 ビットのサンプルが 1 語に 2〜16。
     時間の古いサンプルが下位）はサンプルに展開せずに数える。
 
-    numpy があれば numpy の配列（値 uint16・開始 uint64。写さずに次の段へ渡す口）、無ければ array（"H"・"Q"）。"""
+    numpy があれば numpy の配列（値 uint16・開始 uint64。写さずに次の段へ渡す口）、無ければ array（"H"・"Q"）。
+
+    rle_format = "tokens"（RLE のトークン形式。pack = 0 のみ）: first = 直前の出来事の時刻、previous = 直前の値（fprobe.la_tokens）。"""
+    if rle and rle_format == "tokens":
+        if pack:
+            raise ValueError("トークン形式の RLE は詰めない（pack = 0）")
+        d = la_tokens.decode_tokens(data, first, previous)
+        return d.values, d.starts
     if len(data) % (4 if rle else BEAT_BYTES):
         raise ValueError("RLE のレコード（4 バイト）・RAW の拍（16 バイト）の倍数でない")
     if _np is None:

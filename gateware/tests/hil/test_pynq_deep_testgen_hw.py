@@ -33,7 +33,7 @@ COUNT_TOLERANCE = 0.02                             # サンプル数がレート
 
 @pytest.fixture(scope="module")
 def session():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         if not getattr(s.device.capabilities(), "la_testgen", False):
             pytest.skip("この PYNQ の回路にケイパビリティ la_testgen が無い（試験用の方形波入りの fprobe_pynq_deep を入れる）")
         yield s

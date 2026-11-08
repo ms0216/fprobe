@@ -22,7 +22,17 @@ class HaltDebugMixin:
     def _debug_summary(self) -> dict:
         d = self._debug
         return {"pid": d.proc.tgid, "comm": d.proc.comm, "closed": d.closed, "running": d.engine.running,
-                "breakpoints": len(d.breakpoints)}
+                "breakpoints": self._breakpoints_left(d)}
+
+    @staticmethod
+    def _breakpoints_left(d) -> int:
+        """いま置いてあるブレークポイントの数。閉じた後は、後始末が成功していれば 0（close は BKPT を全部外す。手元の一覧は
+        消さないので、そのまま数えると『閉じたのに 1 個』と読めた）。後始末の失敗が残っていれば、外せたか分からないので、手元の数のまま。"""
+        if not d.closed:
+            return len(d.breakpoints)
+        done = d.close_result or {}
+        failures = done.get("cleanup_errors_after_reconnect") if done.get("cleanup_reconnected") else done.get("cleanup_errors")
+        return len(d.breakpoints) if failures else 0
 
     def debug_attach(self, *, pid: int, elf: str, skew_limit_ns: int, thread_id: str, kernel_isa: str,
                      max_step_retries: int, bp_unmapped: str, max_halt_s: float,

@@ -119,7 +119,8 @@ def test_a_path_outside_the_table_is_refused_with_the_reason_and_nothing_runs(tm
         assert r["error"]["code"] == E_NOT_ALLOWED
         assert r["error"]["data"] == {"reason": "path_not_permitted", "param": "path", "access": "write",
                                       "path": str((tmp_path / "elsewhere.json").resolve()),
-                                      "permissions_file": str(tmp_path / "permissions.json")}
+                                      "permissions_file": str(tmp_path / "permissions.json"),
+                                      "hint_ids": ["paths.write_permitted_dirs"]}      # 断られた失敗には、その書き出し先のヒントが付く
         assert "permissions.json" in r["error"]["message"]
         r = _call(ws, "la.decoder_load", {"path": str(tmp_path / "out" / "dec.py")}, 3)   # 書いてよい所でも実行は別
         assert r["error"]["data"]["access"] == "exec"
@@ -275,3 +276,9 @@ def test_without_the_cookie_the_screen_is_told_to_log_in(tmp_path):
             tc.websocket_connect("/api", headers={"origin": "http://127.0.0.1:7820", "host": "127.0.0.1:7820"}) as ws:
         r = _call(ws, "session.hello", {**HELLO, "role": "human"}, 1)
         assert r["error"]["code"] == E_NOT_ALLOWED and r["error"]["data"] == {"reason": "token"}
+
+
+def test_the_login_page_names_an_icon_so_the_browser_does_not_ask_for_favicon_ico():
+    # ログインページが icon を指定しないと、ブラウザが /favicon.ico を求めて 404 になり、コンソールに誤りが出た（GUI の評価）
+    from fprobe.api.auth import _login_page
+    assert "rel=icon" in _login_page("")

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
   import Req from "./Req.svelte";
   // Linux（JTAG で全コアを止める。API の linux.halt.*。CLI python -m fprobe.linux_halt と一対一）:
   // 開く設定・全コアの停止と再開・プロセスとスレッド・BKPT の回復・後始末・gdb のサーバ。
@@ -22,6 +22,14 @@
   // 全コア停止で止めて調べる（linux.halt.debug.attach。止めた後は今あるデバッガの画面がそのプロセスを描く）
   let attachForm = $state<DebugAttachForm>(restore("linuxHalt.attach", exampleAttachForm()));
   let attached = $state<Result<"linux.halt.debug.attach"> | null>(null);
+  // 空・誤りの欄の印（赤い枠と aria-invalid）。Open / Attach を押して断られたあとだけ出し、欄を直すと消える（欄の値から引き直す）
+  let openChecked = $state(false);
+  let attachChecked = $state(false);
+  let advOpen = $state(false);                            // attach の Advanced（必須の欄が空のまま閉じていたら開く）
+  let openForm: HTMLFormElement | undefined = $state();
+  let attachFormEl: HTMLFormElement | undefined = $state();
+  const ADV_FIELDS = ["skew_limit_ns", "thread_id", "kernel_isa", "max_step_retries", "bp_unmapped", "max_halt_s",
+    "fetch_from_target", "breakpoint_kind", "step_max_instructions", "step_timeout_s"];
   let detached = $state<Result<"linux.halt.debug.close"> | null>(null);
   let threadsPid = $state(load("linuxHalt.threadsPid", ""));
   // 設定ファイル（API の linux.halt.profile.save / load。欄に入れるだけ。開く・attach は人が押す）。パスは前に書いた値（見せ方の便利さ）
@@ -31,18 +39,39 @@
   type Status = Result<"linux.halt.status">;
   type OpenStatus = Extract<Status, { open: true }>;
   let status = $state<Status | null>(null);
+  // Settings の枠: Open の前は開き、Open したら畳む（切り替わりのときだけ）。そのあとは人が開閉する。
+  // `open={!status?.open}` と書くと、状態の更新や欄の入力のたびに再適用され、人が開いた枠が閉じて入力が失われた（GUI の評価 B1）
+  let settingsOpen = $state(true);
+  let wasOpen: boolean | undefined;
+  $effect(() => {
+    const isOpen = !!status?.open;
+    if (wasOpen !== isOpen) { settingsOpen = !isOpen; wasOpen = isOpen; }
+  });
   // 最後に書いた値を残す（次に開いたとき・別の窓でも同じ欄の値から始まる）
   $effect(() => { save("linuxHalt.open", JSON.stringify(form)); });
   $effect(() => { save("linuxHalt.attach", JSON.stringify(attachForm)); });
   let attachOptions = $state<Result<"linux.halt.debug.status">["options"] | null>(null);   // 今の attach で使っている設定（API の事実）
   // 開いている間・attach している間は、欄に「使っている値」を映す（AI が open / attach したときも人の画面に同じ値が見える）。欄は変えられない
   const openLocked = $derived(!!status?.open);
+  const openBad = $derived.by(() => { if (!openChecked) return []; const b = haltOpenParams(form); return "errors" in b ? b.errors : []; });
+  const attachBad = $derived.by(() => { if (!attachChecked) return []; const b = haltDebugAttachParams(attachForm); return "errors" in b ? b.errors : []; });
+  const inv = (bad: string[], k: string) => (bad.includes(k) ? "true" : undefined);
   const attachLocked = $derived(!!attachOptions);
   let opened = $state<Result<"linux.halt.open"> | null>(null);
   let stop = $state<HaltStopReport | null>(null);            // 最後に操作が返した停止の報告（API の stop）
   let stopFrom = $state("");                                  // その操作の名前
   let processes = $state<Result<"linux.halt.processes"> | null>(null);
   let threads = $state<Result<"linux.halt.threads"> | null>(null);
+  // プロセスの一覧の見せ方の絞り込み（人が選ぶ。comm の部分一致・has_mm=false を隠す。API の値で隠すだけで、判断ではない）
+  let procFilter = $state("");
+  let hideNoMm = $state(false);
+  const shownProcesses = $derived((processes?.processes ?? []).filter((p) =>
+    p.comm.toLowerCase().includes(procFilter.trim().toLowerCase()) && !(hideNoMm && p.has_mm === false)));
+  // 一覧の行を押すと、その pid を attach と threads の欄に入れる（attach 中は attach の欄は変えられない）
+  function pickPid(tgid: number) {
+    threadsPid = String(tgid);
+    if (!attachLocked) attachForm.pid = String(tgid);
+  }
   // recover・rescue・close の応答（そのまま JSON で描く）
   let result = $state<Result<"linux.halt.recover" | "linux.halt.rescue" | "linux.halt.close"> | null>(null);
   let gdb = $state<HaltGdbStatus | null>(null);
@@ -87,7 +116,14 @@
 
   async function open() {
     const built = haltOpenParams(form);
-    if ("error" in built) { error = $i18n("linux.badField", { field: built.error }); return; }
+    if ("errors" in built) {
+      openChecked = true; settingsOpen = true;
+      error = $i18n("linuxHalt.badFields", { fields: built.errors.join(", ") });
+      await tick();
+      openForm?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+      return;
+    }
+    openChecked = false;
     save("linuxHalt.open", JSON.stringify(form));
     const r = await call("linux.halt.open", built.params);
     if (r === undefined) return;
@@ -118,7 +154,15 @@
 
   async function attach() {
     const built = haltDebugAttachParams(attachForm);
-    if ("error" in built) { error = $i18n("linux.badField", { field: built.error }); return; }
+    if ("errors" in built) {
+      attachChecked = true;
+      if (built.errors.some((k) => ADV_FIELDS.includes(k))) advOpen = true;
+      error = $i18n("linuxHalt.badFields", { fields: built.errors.join(", ") });
+      await tick();
+      attachFormEl?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+      return;
+    }
+    attachChecked = false;
     save("linuxHalt.attach", JSON.stringify(attachForm));
     const r = await call("linux.halt.debug.attach", built.params);
     if (r !== undefined) { attached = r; detached = null; }
@@ -198,30 +242,32 @@
     <button class="primary small" form="halt-open" disabled={openLocked} title={$i18n("linuxHalt.openHint")}>{$i18n("linuxHalt.open")}</button>
     {#if status?.open}<button type="button" class="small" onclick={async () => { const r = await call("linux.halt.close"); if (r !== undefined) { result = r; opened = null; } await refresh(); }}>{$i18n("linuxHalt.close")}</button>{/if}
   </div>
-  <details class="pad" open={!status?.open}>
+  <details class="pad" bind:open={settingsOpen}>
     <summary>{$i18n("linuxHalt.settings")}</summary>
-  <form id="halt-open" class="pane-bar wrapbar" onsubmit={(e) => { e.preventDefault(); void open(); }}>
-    <label class="fld"><span class="nm" title="backend">{$i18n("linuxHalt.f.backend")}<Req /></span><select disabled={openLocked} bind:value={form.backend} aria-label="backend" aria-required="true">
-      <option value="" disabled>backend</option><option value="fprobe">fprobe</option><option value="openocd">openocd</option>
+  <form id="halt-open" class="pane-bar wrapbar" bind:this={openForm} onsubmit={(e) => { e.preventDefault(); void open(); }}>
+    <label class="fld"><span class="nm" title="backend">{$i18n("linuxHalt.f.backend")}<Req /></span><select disabled={openLocked} bind:value={form.backend} aria-label="backend" aria-required="true" aria-invalid={inv(openBad, "backend")}>
+      <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="fprobe">fprobe</option><option value="openocd">openocd</option>
     </select></label>
-    <label class="fld"><span class="nm" title="jtag_khz">{$i18n("linuxHalt.f.jtag_khz")}<Req /></span><input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="offsets">{$i18n("linuxHalt.f.offsets")}<Req /></span><input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={$i18n("linuxHalt.offsetsHint")} aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="page_offset">{$i18n("linuxHalt.f.page_offset")}<Req /></span><input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="phys_offset">{$i18n("linuxHalt.f.phys_offset")}<Req /></span><input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="linear_map_end">{$i18n("linuxHalt.f.linear_map_end")}<Req /></span><input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="max_tasks">{$i18n("linuxHalt.f.max_tasks")}<Req /></span><input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="max_threads">{$i18n("linuxHalt.f.max_threads")}<Req /></span><input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="mmu_format">{$i18n("linuxHalt.f.mmu_format")}<Req /></span><select disabled={openLocked} bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true">
-      <option value="" disabled>mmu_format</option><option value="short">short</option><option value="lpae">lpae</option>
+    <label class="fld"><span class="nm" title="jtag_khz">{$i18n("linuxHalt.f.jtag_khz")}<Req /></span><input class="mono num" bind:value={form.jtagKhz} placeholder="jtag_khz" aria-label="jtag_khz" aria-required="true" aria-invalid={inv(openBad, "jtag_khz")} disabled={openLocked} /></label>
+    <label class="fld wide"><span class="nm" title="offsets">{$i18n("linuxHalt.f.offsets")}<Req /></span><input class="mono" bind:value={form.offsets} placeholder="offsets" aria-label="offsets" title={form.offsets ? `${form.offsets}
+${$i18n("linuxHalt.offsetsHint")}` : $i18n("linuxHalt.offsetsHint")} aria-required="true" aria-invalid={inv(openBad, "offsets")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="page_offset">{$i18n("linuxHalt.f.page_offset")}<Req /></span><input class="mono short" bind:value={form.pageOffset} placeholder="page_offset" aria-label="page_offset" aria-required="true" aria-invalid={inv(openBad, "page_offset")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="phys_offset">{$i18n("linuxHalt.f.phys_offset")}<Req /></span><input class="mono short" bind:value={form.physOffset} placeholder="phys_offset" aria-label="phys_offset" aria-required="true" aria-invalid={inv(openBad, "phys_offset")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="linear_map_end">{$i18n("linuxHalt.f.linear_map_end")}<Req /></span><input class="mono short" bind:value={form.linearMapEnd} placeholder="linear_map_end" aria-label="linear_map_end" aria-required="true" aria-invalid={inv(openBad, "linear_map_end")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_tasks">{$i18n("linuxHalt.f.max_tasks")}<Req /></span><input class="mono num" bind:value={form.maxTasks} placeholder="max_tasks" aria-label="max_tasks" aria-required="true" aria-invalid={inv(openBad, "max_tasks")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="max_threads">{$i18n("linuxHalt.f.max_threads")}<Req /></span><input class="mono num" bind:value={form.maxThreads} placeholder="max_threads" aria-label="max_threads" aria-required="true" aria-invalid={inv(openBad, "max_threads")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="mmu_format">{$i18n("linuxHalt.f.mmu_format")}<Req /></span><select disabled={openLocked} bind:value={form.mmuFormat} aria-label="mmu_format" aria-required="true" aria-invalid={inv(openBad, "mmu_format")}>
+      <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="short">short</option><option value="lpae">lpae</option>
     </select></label>
-    <label class="fld"><span class="nm" title="journal">{$i18n("linuxHalt.f.journal")}<Req /></span><input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={$i18n("linuxHalt.journalHint")} aria-required="true" disabled={openLocked} /></label>
-    <label class="fld"><span class="nm" title="fpga_request_times">{$i18n("linuxHalt.f.fpga_request_times")}<Req /></span><select disabled={openLocked} bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true">
-      <option value="" disabled>fpga_request_times</option><option value="true">true</option><option value="false">false</option>
+    <label class="fld wide"><span class="nm" title="journal">{$i18n("linuxHalt.f.journal")}<Req /></span><input class="mono" bind:value={form.journal} placeholder="journal" aria-label="journal" title={form.journal ? `${form.journal}
+${$i18n("linuxHalt.journalHint")}` : $i18n("linuxHalt.journalHint")} aria-required="true" aria-invalid={inv(openBad, "journal")} disabled={openLocked} /></label>
+    <label class="fld"><span class="nm" title="fpga_request_times">{$i18n("linuxHalt.f.fpga_request_times")}<Req /></span><select disabled={openLocked} bind:value={form.fpgaRequestTimes} aria-label="fpga_request_times" title={$i18n("linuxHalt.requestTimesHint")} aria-required="true" aria-invalid={inv(openBad, "fpga_request_times")}>
+      <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="true">true</option><option value="false">false</option>
     </select></label>
   </form>
     <div class="bar">
       <span class="nm" title="linux.halt.profile.*">{$i18n("linuxHalt.profile")}</span>
-      <input class="mono" bind:value={profilePath} placeholder="path" aria-label={$i18n("linuxHalt.profilePath")} />
+      <input class="mono grow" bind:value={profilePath} placeholder="path" aria-label={$i18n("linuxHalt.profilePath")} title={profilePath} />
       <button type="button" class="small" disabled={!status?.open || !profilePath.trim()} title={$i18n("linuxHalt.profileSaveHint")} onclick={() => void profileSave()}>{$i18n("linuxHalt.profileSave")}</button>
       <button type="button" class="small" disabled={!profilePath.trim()} title={$i18n("linuxHalt.profileLoadHint")} onclick={() => void profileLoad()}>{$i18n("linuxHalt.profileLoad")}</button>
       {#if profileOffsets !== undefined}<span class="mono small">{$i18n("linuxHalt.profileOffsets", { state: profileOffsets === null ? $i18n("linuxHalt.profileUnread") : profileOffsets ? $i18n("linuxHalt.profileSame") : $i18n("linuxHalt.profileDiffers") })}</span>{/if}
@@ -259,11 +305,11 @@
         <button class="small" onclick={() => void refresh()}>{$i18n("linuxHalt.status")}</button>
         <button class="small" onclick={() => void withStop("linux.halt.halt_all")}>{$i18n("linuxHalt.haltAll")}</button>
         <button class="small" onclick={() => void withStop("linux.halt.resume_all")}>{$i18n("linuxHalt.resumeAll")}</button>
+        <button class="small" onclick={async () => { processes = (await withStop("linux.halt.processes")) ?? null; }}>{$i18n("linuxHalt.processes")}</button>
       </div>
       <details class="more">
         <summary>{$i18n("linuxHalt.more")}</summary>
         <div class="bar">
-        <button class="small" onclick={async () => { processes = (await withStop("linux.halt.processes")) ?? null; }}>{$i18n("linuxHalt.processes")}</button>
         <input class="mono num" bind:value={threadsPid} placeholder="pid" aria-label="pid" />
         <button class="small" onclick={() => void threadsOf()}>{$i18n("linuxHalt.threads")}</button>
         <button class="small" title={$i18n("linuxHalt.recoverHint")} onclick={async () => { result = (await withStop("linux.halt.recover")) ?? null; }}>{$i18n("linuxHalt.recover")}</button>
@@ -289,10 +335,51 @@
         {:else}<span class="muted small">{status.cores_unread}</span>{/if}
       </section>
       <details>
-        <summary>journal</summary>
-        <strong>journal</strong> <span class="mono small">{status.journal.path} exists={fmt(status.journal.exists)}</span>
+        <summary>{$i18n("linuxHalt.journalTitle")}</summary>
+        <strong>{$i18n("linuxHalt.journalTitle")}</strong> <span class="mono small" title={status.journal.path}>{status.journal.path} exists={fmt(status.journal.exists)}</span>
         {#if status.journal.error}<div class="bad small">{status.journal.error}</div>{/if}
         {#each status.journal.entries ?? [] as e, i (i)}<div class="mono small">pa={hex(e.pa)} width={e.width} owners={fmt(e.owners)}</div>{/each}
+      </details>
+      <details open>
+        <summary>{$i18n("linuxHalt.debug")}</summary>
+        <form class="bar" bind:this={attachFormEl} onsubmit={(e) => { e.preventDefault(); void attach(); }}>
+          <label class="fld"><span class="nm" title="pid">{$i18n("linuxHalt.f.pid")}<Req /></span><input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" aria-invalid={inv(attachBad, "pid")} disabled={attachLocked} /></label>
+          <label class="fld wide"><span class="nm" title="elf">{$i18n("linuxHalt.f.elf")}<Req /></span><input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={attachForm.elf ? `${attachForm.elf}
+${$i18n("linuxHalt.elfHint")}` : $i18n("linuxHalt.elfHint")} aria-required="true" aria-invalid={inv(attachBad, "elf")} disabled={attachLocked} /></label>
+          <details class="adv" bind:open={advOpen}>
+            <summary>{$i18n("linuxHalt.advanced")} <span class="mono muted small">{attachForm.skewLimitNs} ns · {attachForm.maxHaltS} s · {attachForm.breakpointKind || "-"} bp · {attachForm.stepMaxInstructions} / {attachForm.stepTimeoutS} s</span>{#if !attachForm.breakpointKind} <span class="bad small">⚠ {$i18n("linuxHalt.bpKindWarn")}</span>{/if}</summary>
+          <label class="fld"><span class="nm" title="skew_limit_ns">{$i18n("linuxHalt.f.skew_limit_ns")}<Req /></span><input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" aria-invalid={inv(attachBad, "skew_limit_ns")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="thread_id">{$i18n("linuxHalt.f.thread_id")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true" aria-invalid={inv(attachBad, "thread_id")}>
+            <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="stack">stack</option><option value="contextidr">contextidr</option>
+          </select></label>
+          <label class="fld"><span class="nm" title="kernel_isa">{$i18n("linuxHalt.f.kernel_isa")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true" aria-invalid={inv(attachBad, "kernel_isa")}>
+            <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="arm">arm</option><option value="thumb">thumb</option>
+          </select></label>
+          <label class="fld"><span class="nm" title="max_step_retries">{$i18n("linuxHalt.f.max_step_retries")}<Req /></span><input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" aria-invalid={inv(attachBad, "max_step_retries")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="bp_unmapped">{$i18n("linuxHalt.f.bp_unmapped")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true" aria-invalid={inv(attachBad, "bp_unmapped")}>
+            <option value="" disabled>{$i18n("linuxHalt.choose")}</option><option value="error">error</option><option value="hw">hw</option>
+          </select></label>
+          <label class="fld"><span class="nm" title="max_halt_s">{$i18n("linuxHalt.f.max_halt_s")}<Req /></span><input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" aria-invalid={inv(attachBad, "max_halt_s")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="fetch_from_target">{$i18n("linuxHalt.f.fetch_from_target")}</span><input class="mono" bind:value={attachForm.fetchFromTarget} placeholder="fetch_from_target" aria-label="fetch_from_target" title={$i18n("linuxHalt.fetchHint")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="breakpoint_kind">{$i18n("linuxHalt.f.breakpoint_kind")}</span><select disabled={attachLocked} bind:value={attachForm.breakpointKind} aria-label="breakpoint_kind" title={$i18n("linuxHalt.bpKindHint")}>
+            <option value="">breakpoint_kind</option><option value="sw">sw</option><option value="hw">hw</option>
+          </select></label>
+          <label class="fld"><span class="nm" title="step_max_instructions">{$i18n("linuxHalt.f.step_max_instructions")}</span><input class="mono num" bind:value={attachForm.stepMaxInstructions} placeholder="step_max_instructions" aria-label="step_max_instructions" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
+          <label class="fld"><span class="nm" title="step_timeout_s">{$i18n("linuxHalt.f.step_timeout_s")}</span><input class="mono num" bind:value={attachForm.stepTimeoutS} placeholder="step_timeout_s" aria-label="step_timeout_s" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
+          </details>
+          <button class="primary small" disabled={attachLocked}>{$i18n("linuxHalt.attach")}</button>
+          <button type="button" class="small" onclick={async () => { const r = await call("linux.halt.debug.close"); if (r !== undefined) { detached = r; attached = null; } await refresh(); }}>{$i18n("linuxHalt.detach")}</button>
+        </form>
+        {#if attached}
+          <div class="mono small attsum">{$i18n("linuxHalt.attachSummary")}: pid {fmt(attached.pid)} {fmt(attached.comm)} · {attached.running ? $i18n("linuxHalt.running") : $i18n("linuxHalt.halted")}</div>
+          <table class="mono small"><tbody>
+            {#each ["pid", "comm", "running", "breakpoint_kind", "step_max_instructions", "step_timeout_s", "sources_fetched", "fetched"] as k (k)}
+              <tr><td>{k}</td><td>{fmt((attached as Record<string, unknown>)[k])}</td></tr>
+            {/each}
+          </tbody></table>
+          {#if attached.attach_stop}<div class="small">attach_stop</div>{@render report(attached.attach_stop)}{/if}
+        {/if}
+        {#if detached}<pre class="mono small">{JSON.stringify(detached, null, 1)}</pre>{/if}
       </details>
       {#if stop}
         <section><strong>stop</strong> <span class="muted small">{stopFrom}</span>{@render report(stop)}</section>
@@ -300,10 +387,18 @@
       {#if processes}
         <section>
           <strong>{$i18n("linuxHalt.processes")}</strong>
+          <span class="bar procbar">
+            <input class="mono" bind:value={procFilter} placeholder="comm" aria-label={$i18n("linuxHalt.procFilter")} title={$i18n("linuxHalt.procFilter")} />
+            <label class="small"><input type="checkbox" bind:checked={hideNoMm} /> {$i18n("linuxHalt.hideNoMm")}</label>
+            <span class="muted small">{$i18n("linuxHalt.procShown", { n: shownProcesses.length, total: processes.processes.length })}</span>
+          </span>
+          <div class="muted small">{$i18n("linuxHalt.procRowHint")}</div>
+          <div class="proclist">
           <table class="mono small">
             <thead><tr><th>tgid</th><th>comm</th><th>has_mm</th></tr></thead>
-            <tbody>{#each processes.processes as p, i (i)}<tr><td>{p.tgid}</td><td>{p.comm}</td><td>{fmt(p.has_mm)}</td></tr>{/each}</tbody>
+            <tbody>{#each shownProcesses as p, i (i)}<tr class="pick" role="button" tabindex="0" onclick={() => pickPid(p.tgid)} onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickPid(p.tgid); } }}><td>{p.tgid}</td><td>{p.comm}</td><td>{fmt(p.has_mm)}</td></tr>{/each}</tbody>
           </table>
+          </div>
         </section>
       {/if}
       {#if threads}
@@ -316,45 +411,6 @@
         </section>
       {/if}
       {#if result}<pre class="mono small">{JSON.stringify(result, null, 1)}</pre>{/if}
-      <details open>
-        <summary>{$i18n("linuxHalt.debug")}</summary>
-        <form class="bar" onsubmit={(e) => { e.preventDefault(); void attach(); }}>
-          <label class="fld"><span class="nm" title="pid">{$i18n("linuxHalt.f.pid")}<Req /></span><input class="mono num" bind:value={attachForm.pid} placeholder="pid" aria-label="pid" aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="elf">{$i18n("linuxHalt.f.elf")}<Req /></span><input class="mono" bind:value={attachForm.elf} placeholder="elf" aria-label="elf" title={$i18n("linuxHalt.elfHint")} aria-required="true" disabled={attachLocked} /></label>
-          <details class="adv">
-            <summary>{$i18n("linuxHalt.advanced")} <span class="mono muted small">{attachForm.skewLimitNs} ns · {attachForm.maxHaltS} s · {attachForm.breakpointKind || "-"} bp · {attachForm.stepMaxInstructions} / {attachForm.stepTimeoutS} s</span></summary>
-          <label class="fld"><span class="nm" title="skew_limit_ns">{$i18n("linuxHalt.f.skew_limit_ns")}<Req /></span><input class="mono num" bind:value={attachForm.skewLimitNs} placeholder="skew_limit_ns" aria-label="skew_limit_ns" title={$i18n("linuxHalt.skewLimitHint")} aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="thread_id">{$i18n("linuxHalt.f.thread_id")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.threadId} aria-label="thread_id" aria-required="true">
-            <option value="" disabled>thread_id</option><option value="stack">stack</option><option value="contextidr">contextidr</option>
-          </select></label>
-          <label class="fld"><span class="nm" title="kernel_isa">{$i18n("linuxHalt.f.kernel_isa")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.kernelIsa} aria-label="kernel_isa" aria-required="true">
-            <option value="" disabled>kernel_isa</option><option value="arm">arm</option><option value="thumb">thumb</option>
-          </select></label>
-          <label class="fld"><span class="nm" title="max_step_retries">{$i18n("linuxHalt.f.max_step_retries")}<Req /></span><input class="mono num" bind:value={attachForm.maxStepRetries} placeholder="max_step_retries" aria-label="max_step_retries" aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="bp_unmapped">{$i18n("linuxHalt.f.bp_unmapped")}<Req /></span><select disabled={attachLocked} bind:value={attachForm.bpUnmapped} aria-label="bp_unmapped" aria-required="true">
-            <option value="" disabled>bp_unmapped</option><option value="error">error</option><option value="hw">hw</option>
-          </select></label>
-          <label class="fld"><span class="nm" title="max_halt_s">{$i18n("linuxHalt.f.max_halt_s")}<Req /></span><input class="mono num" bind:value={attachForm.maxHaltS} placeholder="max_halt_s" aria-label="max_halt_s" title={$i18n("linuxHalt.maxHaltHint")} aria-required="true" disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="fetch_from_target">{$i18n("linuxHalt.f.fetch_from_target")}</span><input class="mono" bind:value={attachForm.fetchFromTarget} placeholder="fetch_from_target" aria-label="fetch_from_target" title={$i18n("linuxHalt.fetchHint")} disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="breakpoint_kind">{$i18n("linuxHalt.f.breakpoint_kind")}</span><select disabled={attachLocked} bind:value={attachForm.breakpointKind} aria-label="breakpoint_kind" title={$i18n("linuxHalt.bpKindHint")}>
-            <option value="">breakpoint_kind</option><option value="sw">sw</option><option value="hw">hw</option>
-          </select></label>
-          <label class="fld"><span class="nm" title="step_max_instructions">{$i18n("linuxHalt.f.step_max_instructions")}</span><input class="mono num" bind:value={attachForm.stepMaxInstructions} placeholder="step_max_instructions" aria-label="step_max_instructions" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
-          <label class="fld"><span class="nm" title="step_timeout_s">{$i18n("linuxHalt.f.step_timeout_s")}</span><input class="mono num" bind:value={attachForm.stepTimeoutS} placeholder="step_timeout_s" aria-label="step_timeout_s" title={$i18n("linuxHalt.stepLimitHint")} disabled={attachLocked} /></label>
-          </details>
-          <button class="primary small" disabled={attachLocked}>{$i18n("linuxHalt.attach")}</button>
-          <button type="button" class="small" onclick={async () => { const r = await call("linux.halt.debug.close"); if (r !== undefined) { detached = r; attached = null; } await refresh(); }}>{$i18n("linuxHalt.detach")}</button>
-        </form>
-        {#if attached}
-          <table class="mono small"><tbody>
-            {#each ["pid", "comm", "running", "breakpoint_kind", "step_max_instructions", "step_timeout_s", "sources_fetched", "fetched"] as k (k)}
-              <tr><td>{k}</td><td>{fmt((attached as Record<string, unknown>)[k])}</td></tr>
-            {/each}
-          </tbody></table>
-          {#if attached.attach_stop}<div class="small">attach_stop</div>{@render report(attached.attach_stop)}{/if}
-        {/if}
-        {#if detached}<pre class="mono small">{JSON.stringify(detached, null, 1)}</pre>{/if}
-      </details>
       <details>
         <summary>gdb</summary>
         <form class="bar" onsubmit={(e) => { e.preventDefault(); void serve(); }}>
@@ -409,6 +465,15 @@
   .short { width: auto; field-sizing: content; min-width: 7em; }
   .num { width: auto; field-sizing: content; min-width: 6em; }
   .small { font-size: 12px; }
+  /* 長い値（パス）の欄: 余白を使って広げる。全文は title に */
+  .fld.wide { flex: 1 1 22em; min-width: 12em; }
+  .fld.wide input { width: 100%; box-sizing: border-box; }
+  .bar input.grow { flex: 1 1 24em; min-width: 12em; }
+  input[aria-invalid="true"], select[aria-invalid="true"] { border: 1px solid var(--bad); outline: 1px solid var(--bad); }
+  .attsum { margin-top: 2px; }
+  .proclist { max-height: 14em; overflow: auto; }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover, tr.pick:focus { background: var(--select); }
   table td, table th { padding: 0 8px 0 0; vertical-align: top; text-align: left; }
   .wrap { white-space: pre-wrap; word-break: break-word; }
   pre { margin: 2px 0; white-space: pre-wrap; }

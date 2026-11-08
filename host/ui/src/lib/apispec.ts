@@ -21,5 +21,14 @@ export function suggestedOf(method: string, param: string): unknown {
   return p?.examples?.[0] ?? (p?.default === null ? undefined : p?.default);
 }
 
+/** 仕様の引数の選択肢（JSON Schema の enum。null との anyOf の中も見る）。無ければ空。画面の選択肢の出どころ（画面のコードに値を書かない） */
+export function enumOf(method: string, param: string): string[] {
+  type Prop = { enum?: unknown[]; anyOf?: Array<{ enum?: unknown[] }> };
+  const p = (spec as unknown as { methods: Record<string, { params?: { properties?: Record<string, Prop> } }> })
+    .methods[method]?.params?.properties?.[param];
+  const list = p?.enum ?? p?.anyOf?.find((a) => a.enum)?.enum ?? [];
+  return list.filter((v): v is string => typeof v === "string");
+}
+
 /** API パネルで開けるメソッドか（session.* 等は開けない） */
 export const inApiPanel = (method: string): boolean => NAMES.has(method);

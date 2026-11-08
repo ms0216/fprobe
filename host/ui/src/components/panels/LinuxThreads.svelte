@@ -13,11 +13,14 @@
   const off = app.subscribe((s) => store.onTarget(s.target));
   onDestroy(off);
   const lx = $derived($app.target?.linux);
+  const FROM = { selected: "linuxThreads.from.selected", last_stop: "linuxThreads.from.last_stop", rule: "linuxThreads.from.rule" } as const;
+  /** tid_from（API の値: 今のスレッドの決まり方）の言葉。知らない値は API の値のまま */
+  const fromText = (f: string | null | undefined) => (f && f in FROM ? $i18n(FROM[f as keyof typeof FROM]) : (f ?? ""));
 </script>
 
 <div class="pane-bar">
   <span class="mono">Linux {lx?.comm} pid {lx?.pid}</span>
-  {#if lx?.tid !== null && lx?.tid !== undefined}<span class="muted">{$i18n("linuxThreads.current", { tid: lx.tid, from: lx.tid_from ?? "" })}</span>{/if}
+  {#if lx?.tid !== null && lx?.tid !== undefined}<span class="muted">{$i18n("linuxThreads.current", { tid: lx.tid, from: fromText(lx.tid_from) })}</span>{/if}
   {#if $store.stale}<span class="muted">{$i18n("linuxThreads.stale")}</span>{/if}
 </div>
 {#if $store.error}<div class="bad note">{$store.error}</div>{/if}

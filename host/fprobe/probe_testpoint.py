@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from .la import DeepAnalyzer, Transitions
+from .la_wave import PIECE_CHANGES, _array_of, _np
 from .recording_stream import anchor_stream
 from .testpoint import (LiveAnalysis, Options, ParallelDecoder, ProbeTable, SerialDecoder, TimeMap, WatchVar,
                         instrument_tree)
@@ -222,10 +223,12 @@ class TestpointService(TestpointItmMixin, TestpointRttMixin, TestpointReadMixin)
                     chunk = next(chunks, None)
                 if chunk is None:
                     break
-                values, starts = chunk.transitions()
-                tr = Transitions(values, starts, chunk.first + chunk.length, 0, 0, stream.sample_period_s,
-                                 stream.channels)
-                run.live.feed(decoder.feed(tr))
+                # 断片ごとに解析へ渡す（REPEAT が何億もの変化点に展開されても、メモリは断片の大きさで決まる。断片は順に続く変化点）
+                for values, starts, end in chunk.iter_transitions(PIECE_CHANGES):
+                    if _np is not None:                                # 従来の transitions() と同じ array（"H"・"Q"）で渡す
+                        values, starts = _array_of("H", values), _array_of("Q", starts)
+                    tr = Transitions(values, starts, end, 0, 0, stream.sample_period_s, stream.channels)
+                    run.live.feed(decoder.feed(tr))
         except Exception as e:                                    # 機器の誤り等: 止めて理由を残す
             run.error = f"{type(e).__name__}: {e}"
             with self._host._lock:

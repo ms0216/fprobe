@@ -20,6 +20,8 @@ entity core_storage is
     MEM_TEST                   : boolean;
     LA_STREAM_EVENTS           : boolean;
     LA_STREAM_GAPS             : boolean;
+    LA_RLE_TOKENS              : boolean;
+    LA_RLE_REPEAT              : boolean := false;
     EVENT_RING_BITS            : natural;
     EVENT_COUNT_START_BELOW_4G : natural;
     EVENT_BYTE_PACK            : boolean;
@@ -106,6 +108,9 @@ architecture rtl of core_storage is
   signal deep_step : std_logic_vector(1 downto 0) := "00";
   signal deep_first_ch : std_logic_vector(3 downto 0) := "0000";
   signal deep_gaps, deep_gap_open : std_logic := '0';
+  signal deep_rle_fmt : std_logic := '0';
+  signal deep_rle_repeat : std_logic := '0';
+  signal deep_tick, deep_pad_bytes, deep_keyframes : std_logic_vector(31 downto 0) := (others => '0');
   signal deep_gap_count, deep_gap_last : std_logic_vector(31 downto 0) := (others => '0');
   -- 深いバッファのリングの使用量・起点の時刻・符号器の形（la_deep.la_written・ring_*・start_time・info）
   signal deep_la_written, deep_unread, deep_peak : std_logic_vector(31 downto 0) := (others => '0');
@@ -156,7 +161,8 @@ begin
               bus_cmd => csr_cmd, bus_rsp => csr_rsp(CSR_WIN_LA_DEEP),
               control_run => deep_run, control_rle => deep_rle, control_stream => deep_stream,
               control_ps_read => deep_ps_read, control_pack => deep_pack, control_step => deep_step,
-              control_first => deep_first_ch, control_gaps => deep_gaps,
+              control_first => deep_first_ch, control_gaps => deep_gaps, control_rle_fmt => deep_rle_fmt, control_rle_repeat => deep_rle_repeat,
+              tick => deep_tick, pad_bytes => deep_pad_bytes, keyframes => deep_keyframes,
               post_beats => deep_post, stream_beats => deep_stream_beats,
               status_capturing => deep_capturing, status_triggered => deep_triggered_i, status_done => deep_done,
               status_overrun => deep_overrun, status_reading => deep_reading, status_gap_open => deep_gap_open,
@@ -254,7 +260,7 @@ begin
       deep_stream_beats <= (others => '0');
       deep_la_written <= (others => '0'); deep_unread <= (others => '0'); deep_peak <= (others => '0');
       deep_start_time <= (others => '0'); deep_start_valid <= '0'; deep_latency_i <= (others => '0');
-      deep_gap_open <= '0'; deep_gap_count <= (others => '0'); deep_gap_last <= (others => '0');
+      deep_gap_open <= '0'; deep_gap_count <= (others => '0'); deep_gap_last <= (others => '0'); deep_pad_bytes <= (others => '0'); deep_keyframes <= (others => '0');
       ps_bus_rdata <= (others => '0');
       stream_out_valid <= '0';
       stream_out_data  <= (others => '0');
@@ -276,11 +282,11 @@ begin
       signal ps_rd_first_u : unsigned(MEM_ADDR_BITS - 1 downto 0);
       signal ps_rd_count_u : unsigned(MEM_ADDR_BITS downto 0);
       signal stat_written_u, stat_unread_u, stat_peak_u : unsigned(31 downto 0);
-      signal gap_count_u, gap_last_u : unsigned(31 downto 0);
+      signal gap_count_u, gap_last_u, tok_pad_u, tok_kfs_u : unsigned(31 downto 0);
     begin
     deep_i : entity work.la_deep_buffer
       generic map (WIDTH => LA_WIDTH, ADDR_BITS => MEM_ADDR_BITS, STREAM_EVENTS => LA_STREAM_EVENTS,
-                   STREAM_GAPS => LA_STREAM_GAPS,
+                   STREAM_GAPS => LA_STREAM_GAPS, RLE_TOKENS => LA_RLE_TOKENS, TOK_REPEAT_EN => LA_RLE_REPEAT,
                    COUNT_START_BELOW_4G => EVENT_COUNT_START_BELOW_4G, LANES => DEEP_LANES,
                    IN_AGE => LA_LANE_IN_AGE * boolean'pos(USE_DEEP_LANES), EXT_DELAY => EXT_DELAY,
                    SAME_CLOCK => MEM_SAME_CLOCK)
@@ -290,7 +296,7 @@ begin
                 rate => unsigned(trig_cfg.rate), pretrigger => unsigned(trig_cfg.pretrigger),
                 trig_mask => trig_cfg.mask, trig_value => trig_cfg.value, trig_rise => trig_cfg.rise,
                 trig_fall => trig_cfg.fall, pw_enable => pw_enable, pw_event => pw_event,
-                run => deep_run, rle => deep_rle, pack => deep_pack, stream => deep_stream, gaps => deep_gaps,
+                run => deep_run, rle => deep_rle, rle_fmt => deep_rle_fmt, rle_repeat => deep_rle_repeat, tick => unsigned(deep_tick), pack => deep_pack, stream => deep_stream, gaps => deep_gaps,
                 ps_read => deep_ps_read, ps_epoch => ps_epoch_u, ps_ret_epoch => ps_ret_epoch_u,
                 ps_la_consumed => ps_la_consumed_u, ps_out_beats => ps_out_beats_u,
                 ps_ev_consumed => ps_ev_consumed_u(MEM_ADDR_BITS - 5 downto 0),
@@ -304,6 +310,7 @@ begin
                 stat_written => stat_written_u, stat_unread => stat_unread_u, stat_peak => stat_peak_u,
                 start_time => deep_start_time, start_valid => deep_start_valid, latency => deep_latency_i,
                 gap_count => gap_count_u, gap_last_beat => gap_last_u, gap_open => deep_gap_open,
+                tok_pad_bytes => tok_pad_u, tok_keyframes => tok_kfs_u,
                 ev_enable => events_enable, ev_valid => event_valid, ev_data => event_data,
                 ev_written => ev_written, ev_lost => ev_lost, la_beats => la_beats, ev_beats => ev_beats,
                 read => deep_read, read_region => deep_region,
@@ -328,6 +335,8 @@ begin
     deep_peak         <= std_logic_vector(stat_peak_u);
     deep_gap_count    <= std_logic_vector(gap_count_u);
     deep_gap_last     <= std_logic_vector(gap_last_u);
+    deep_pad_bytes    <= std_logic_vector(tok_pad_u);
+    deep_keyframes    <= std_logic_vector(tok_kfs_u);
     -- PS が DDR を直接読む流れの窓の側のレジスタ（位置の約束を守らせる）
     ps_port_i : entity work.la_ps_port
       port map (clk => clk, rst => rst(RST_STORAGE), bus_rd => ps_bus_rd, bus_wr => ps_bus_wr, bus_addr => ps_bus_addr,
@@ -351,7 +360,7 @@ begin
     deep_written <= (others => '0'); deep_ring_beats <= (others => '0'); deep_stream_beats <= (others => '0');
     deep_la_written <= (others => '0'); deep_unread <= (others => '0'); deep_peak <= (others => '0');
     deep_start_time <= (others => '0'); deep_start_valid <= '0'; deep_latency_i <= (others => '0');
-    deep_gap_open <= '0'; deep_gap_count <= (others => '0'); deep_gap_last <= (others => '0');
+    deep_gap_open <= '0'; deep_gap_count <= (others => '0'); deep_gap_last <= (others => '0'); deep_pad_bytes <= (others => '0'); deep_keyframes <= (others => '0');
     ps_bus_rdata <= (others => '0');
     mem_cmd_valid <= '0';
     mem_cmd_write <= '0';

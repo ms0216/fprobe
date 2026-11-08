@@ -29,7 +29,7 @@ export const EN_FAULT = {
   "fault.noFrame": "Cannot read the exception frame (halted after the handler changed LR, or not in an exception)",
   "fault.registers": "Fault Registers",
   "fault.haltReason": "Halt Reason",
-  "halt.request": "halt request",
+  "halt.request": "halt request, step or cross-trigger",
   "halt.breakpoint": "breakpoint",
   "halt.bkpt_instruction": "BKPT in firmware (panic, assert…)",
   "halt.watchpoint": "watchpoint",

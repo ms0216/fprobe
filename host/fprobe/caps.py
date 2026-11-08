@@ -103,6 +103,15 @@ def legacy_la_layout(channels: int) -> tuple[LaChannel, ...]:
 
 
 @dataclass(frozen=True)
+class TokenInfo:
+    """TLV LA_RLE_TOKEN_INFO: RLE のトークン形式の中身（docs/superpowers/specs/2026-11-07-la-rle2-design.md §7.2）。"""
+    version: int          # 形式の版（ホストが知っているのは fprobe.la_tokens.TOKEN_FORMAT_VERSION）
+    repeat: bool          # REPEAT を出す回路か
+    window: bool          # 使う ch の窓を絞れるか
+    accept_bytes: int     # 1 周期に符号器が受けるバイト数の上限
+
+
+@dataclass(frozen=True)
 class Build:
     """ビットストリームの版（U49。fprobe_gw build がビルドのたびに書く）。id は入力の要約（ビルドディレクトリの
     inputs.sha256）の先頭 16 桁で、同じ入力なら同じ。git はリポジトリの HEAD の先頭 8 桁（取れなければ None）。"""
@@ -185,6 +194,11 @@ class Capabilities:
     la_stream_usage: bool = False      # 深いバッファのリングと符号の数え（CSR la_deep.la_written 等。FEATURES bit15。無ければ古い回路）
     la_stream_gaps: bool = False       # 深いバッファのストリームで溢れても止めず欠けの区間を記録して続けられる（CSR la_deep.control.gaps。
                                        # FEATURES bit17。無ければ溢れたら止まる形だけ）
+    # 深いバッファの垂れ流し RLE にトークン形式（変化 1 回がふつう 1 バイト。CSR la_deep.control.rle_fmt・tick。
+    # docs/superpowers/specs/2026-11-07-la-rle2-design.md）がある（FEATURES bit19 LA_RLE_TOKENS）。中身は la_rle_token_info
+    # （TLV LA_RLE_TOKEN_INFO。形式の版をホストが知らなければ使わない: DeepAnalyzer.stream が断る）
+    la_rle_tokens: bool = False
+    la_rle_token_info: "TokenInfo | None" = None
     # 情報源ごとの時刻の点（TLV TIMING。情報源の名前 → TimingPoint）。空 = 申告の無い古いデバイス、申告の無い情報源は
     # その版の回路のいまの意味（fprobe.timing が持つ。docs/superpowers/specs/2026-11-01-time-accuracy-design.md §4.2）
     timing: dict[str, TimingPoint] = field(default_factory=dict)
@@ -262,6 +276,12 @@ def parse(data: bytes) -> Capabilities:
             values["event_byte_pack"] = bool(features & g.FEATURE_EVENT_BYTE_PACK)
             values["dap_line_time"] = bool(features & g.FEATURE_DAP_LINE_TIME)
             values["watch_start"] = bool(features & g.FEATURE_WATCH_START)
+            values["la_rle_tokens"] = bool(features & g.FEATURE_LA_RLE_TOKENS)
+        elif kind == g.CAPS_LA_RLE_TOKEN_INFO and length == 4:
+            word = struct.unpack("<I", value)[0]
+            values["la_rle_token_info"] = TokenInfo(
+                version=word & 0xFF, repeat=bool(word & g.LA_RLE_TOKEN_REPEAT), window=bool(word & g.LA_RLE_TOKEN_WINDOW),
+                accept_bytes=word >> g.LA_RLE_TOKEN_ACCEPT_BYTES_SHIFT & 0xFF)
         elif kind == g.CAPS_BUILD and length >= 20:
             when, id_hi, id_lo, commit, flags = struct.unpack_from("<5I", value)
             if when:                                    # 0 は版なし（シミュレーション用の既定のまま）

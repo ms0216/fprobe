@@ -78,13 +78,39 @@ export function parseRate(text: string): number | null {
 /** ピンの垂れ流し（recording.la_stream.start）の引数。形式・サンプルレート（MS/s）・チャンネル数は使う人が選ぶ（画面で既定を決めない）。
  * RLE は形式だけ（16 ビットの値の繰り返しなので、詰めない・サンプルレートは指定しない）。RAW はサンプルレートとチャンネル数の両方が要り、
  * どちらかが空・誤りなら null（始められない）。チャンネル数 16 は詰めない（pack_channels = null）、8・4・2 は詰める（ch 0〜n − 1 だけ） */
-export function pinsStreamStart(format: "" | "rle" | "raw", rateMsText: string, channels: string):
-    { rle: boolean; rate_hz?: number; pack_channels?: 8 | 4 | 2 | null } | null {
-  if (format === "rle") return { rle: true };
+export function pinsStreamStart(format: "" | "rle" | "raw", rateMsText: string, channels: string, rleFormat: string, tickText = "", repeatOn = false,
+                                maxChangesText = ""):
+    { rle: boolean; rate_hz?: number; pack_channels?: 8 | 4 | 2 | null; rle_format?: "records" | "tokens"; tick_us?: number; rle_repeat?: true;
+      max_changes?: number } | null {
+  // RLE のレコード/トークンも使う人が選んだものを明示して送る（空なら始められない。API の既定に黙って任せない）
+  if (format === "rle") {
+    if (rleFormat === "records") return { rle: true, rle_format: rleFormat };
+    // トークン形式は tick_us（マイクロ秒。0 = 無し）も使う人が明示する（空・誤りなら始められない）
+    const tick = tickText.trim();
+    if (rleFormat !== "tokens" || !/^\d+(\.\d+)?$/.test(tick)) return null;
+    // REPEAT（周期的な信号の繰り返しを 1 トークンにまとめる）は使う人が選ぶ。選んだときだけ rle_repeat: true を送る（API の既定は使わない）
+    // 記録に入れる変化点の総数の上限（REPEAT は小さな受け取りが大量の変化点になり、記録の大きさがそれに比例する）。空 = 上限なし（送らない）。
+    // 入れたのに正の整数でなければ始められない（黙って上限なしにしない）
+    const cap = maxChangesText.trim();
+    if (repeatOn && cap !== "" && !/^[1-9]\d*$/.test(cap)) return null;
+    return { rle: true, rle_format: rleFormat, tick_us: Number(tick), ...(repeatOn ? { rle_repeat: true as const } : {}),
+             ...(repeatOn && cap !== "" ? { max_changes: Number(cap) } : {}) };
+  }
   if (format !== "raw") return null;
   const rate = parseRate(rateMsText);
   if (rate === null || !["16", "8", "4", "2"].includes(channels)) return null;
   return { rle: false, rate_hz: rate * 1e6, pack_channels: channels === "16" ? null : (Number(channels) as 8 | 4 | 2) };
+}
+
+/** ピンの垂れ流しの形式の事実の見せ方（recording.status の la_stream の欄をそのまま。計算・判定はしない: 桁と無いときの "—" だけ）。
+ *  AI が MCP で始めた流れも、人が画面で始めた流れも、同じ欄がデーモンから届くので同じに出る */
+export function pinsStreamFacts(s: NonNullable<Result<"recording.status">["la_stream"]>):
+    { format: string; wire: string; pad: string; changes: string; perChange: string } | null {
+  if (s.rle_format === undefined || s.wire_bytes === undefined) return null;      // 形式の事実を持たない古いデーモン
+  const dash = "—";
+  return { format: s.rle_format, wire: s.wire_bytes.toLocaleString(), pad: (s.pad_bytes ?? 0).toLocaleString(),
+           changes: s.changes == null ? dash : s.changes.toLocaleString(),
+           perChange: s.bytes_per_change == null ? dash : s.bytes_per_change.toFixed(3) };
 }
 
 /** 使う人が入れる正の整数（条件を数える件数 = 最後の N 件）。空・誤りは null（数えない） */

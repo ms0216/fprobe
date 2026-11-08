@@ -51,8 +51,10 @@ def test_object_and_untyped_params_are_not_forced_to_strings():
     import typing
     spec = load_spec()
     fn = tool_function(FakeClient(), spec.methods["xtrig.set_sequence"])
-    assert fn.__annotations__["stages"] == list[dict[str, typing.Any]]
-    assert fn.__annotations__["pattern_a"] == dict[str, typing.Any] | None
+    def plain(name):                                  # 注釈は Annotated[型, 仕様の説明・例]。中の型を取り出す
+        return typing.get_args(fn.__annotations__[name])[0]
+    assert plain("stages") == list[dict[str, typing.Any]]
+    assert plain("pattern_a") == dict[str, typing.Any] | None
 
 
 def test_mcp_refuses_a_daemon_that_holds_a_different_device():
@@ -209,3 +211,62 @@ def test_the_ai_sees_the_hint_ids_the_human_screen_sees():
             raise ApiError(-32020, "EngineError: x", {"hint_ids": ["linux_halt.attach.order"]})
     error = _call_error(Failing(), "target_halt", {})
     assert "linux_halt.attach.order" in str(error) and "session_hints" in str(error)
+
+
+def test_an_argument_the_spec_does_not_have_is_refused_not_silently_dropped():
+    # MCP の SDK は署名に無い引数を黙って捨てる。AI が引数の名前を打ち間違えると、既定の値で動いて、もっともらしい結果が
+    # 黙って返る（haiku の試験: target_diagnose に protocol を渡したが、仕様に無く、JTAG の結果が返った）。API と同じ文面で断る
+    client = FakeClient()
+    error = _call_error(client, "target_diagnose", {"protocol": "swd"})
+    assert "target.diagnose: (引数): 未知の引数: protocol（この API の引数: " in str(error)
+    assert "frequencies_hz" in str(error)                          # 使える引数の名前が出る
+    assert client.calls == []                                      # デーモンには何も送らない
+    error = _call_error(client, "probe_info", {"bogus": 1})
+    assert "未知の引数: bogus（この API の引数: なし）" in str(error)
+    # 仕様にある引数は、これまでどおり転送する
+    server = build_client_server(client, load_spec())
+    asyncio.run(server.call_tool("target_diagnose", {"frequencies_hz": [1000000], "max_aps": 4}))
+    assert [(m, p["frequencies_hz"], p["max_aps"]) for m, p in client.calls] == [("target.diagnose", [1000000], 4)]
+
+
+def test_the_tool_schema_carries_what_the_spec_says_about_each_argument():
+    # MCP の入力の仕様が型だけだと、AI は引数の説明・例・受け付ける値の一覧を見られない（方針: 引数の最初の値の出どころは API の
+    # 仕様で、MCP で AI にも同じ値が見える。haiku の試験: describe に examples が無く、target の名前を当てずっぽうで試した）
+    import json
+    spec = load_spec()
+    tools = {t.name: t for t in asyncio.run(build_client_server(FakeClient(), spec).list_tools())}
+    spec_props = spec.methods["target.connect"].params["properties"]
+    for name in ("target", "frequency_hz"):
+        shown = tools["target_connect"].input_schema["properties"][name]
+        assert shown["description"] == spec_props[name]["description"]
+        assert shown["examples"] == spec_props[name]["examples"]
+    assert tools["target_connect"].input_schema["properties"]["frequency_hz"]["minimum"] == 1
+    # 受け付ける値の一覧（enum）も、仕様にあるものはすべて見える
+    checked = 0
+    for method in spec.methods.values():
+        tool = tools.get(method.name.replace(".", "_"))
+        for name, schema in method.params.get("properties", {}).items():
+            if tool is not None and "enum" in schema and schema.get("x-mcp", True):
+                assert "enum" in json.dumps(tool.input_schema["properties"][name]), (method.name, name)
+                checked += 1
+    assert checked > 0
+
+
+def test_the_tool_schema_does_not_tighten_the_check_the_daemon_makes():
+    # 仕様の検査の語は見せるだけ。MCP の側で型の検査を強めない（検査と誤りの文面は API が持つ）
+    client = FakeClient()
+    server = build_client_server(client, load_spec())
+    asyncio.run(server.call_tool("target_connect", {"target": "cortex_m", "frequency_hz": 4000000}))
+    assert client.calls and client.calls[0][0] == "target.connect"
+
+
+def test_target_diagnose_has_no_silent_default_for_the_wire_speed():
+    # 線の速さは使う側が決める（既定を黙って使わない。haiku の試験: 省くと [1000000] が黙って使われ、出どころが分からなかった）。
+    # 必須で、仕様に例（examples）がある
+    spec = load_spec()
+    params = spec.methods["target.diagnose"].params
+    assert "frequencies_hz" in params["required"]
+    freq = params["properties"]["frequencies_hz"]
+    assert "default" not in freq and freq["items"]["examples"] == [1000000] and "[1000000]" in freq["description"]   # 例は要素の側（画面は examples の先頭を欄の最初の値にする）
+    error = _call_error(FakeClient(), "target_diagnose", {"max_aps": 4})        # 速さを省いた呼び出しは、デーモンに送らず断られる
+    assert "frequencies_hz" in str(error)

@@ -326,7 +326,9 @@ class LogicAnalyzerService:
     def la_stream(self, vcd_path: str, duration_s: float = 1.0, rate_hz: float | None = None,
                   rle: bool = True, pack_channels: int | None = None, max_bytes_per_s: float | None = None,
                   usage_interval_s: float | None = None, first_channel: int = 0, gaps: bool = False,
-                  gap_hold_bytes: int | None = None, control_read_retries: int = 0, raw_path: str | None = None) -> dict:
+                  gap_hold_bytes: int | None = None, control_read_retries: int = 0, raw_path: str | None = None,
+                  rle_format: str | None = None, tick_us: float | None = None,
+                  rle_repeat: bool | None = None, max_changes: int | None = None) -> dict:
         """ロジアナを止めずに duration_s 秒流し続け、VCD に書く（トリガなし。記録長は保存先で決まる）。
         RAW の速さは、ボードの受け取りの速さまで（PYNQ の PS 直読み: 50 MB/s = 16 ch で 25 MS/s。USB・シリアルの Primer: 25 MB/s 程度
         = 12.5 MS/s）。pack_channels（8・4・2。rle = False のときだけ。ケイパビリティ la_pack）は、使うチャンネル（ch 0〜n − 1）だけを
@@ -356,7 +358,18 @@ class LogicAnalyzerService:
         受け取りは VCD の書き出しの速さに律速されない（取り込みと書き出しを分けた。
         docs/superpowers/specs/2026-11-03-la-raw-capture-design.md）。途中で誤りが出ても、取り込めた分は VCD になってから誤りが出る。
         relay: 出し切った後の PYNQ の中継の状態（zc_state = ゼロコピーの道の状態、tcp_path = 使った送りの道、copied 等の数。
-        docs/superpowers/specs/2026-11-01-bandwidth-observation-design.md 1.7.9）。中継が無い・返事が無ければ None。"""
+        docs/superpowers/specs/2026-11-01-bandwidth-observation-design.md 1.7.9）。中継が無い・返事が無ければ None。
+        rle_format（rle = True のときの RLE の形式）: "records"（1 レコード 4 バイト。None と同じ = 今までどおり）か "tokens"（トークン形式:
+        変化 1 回がふつう 1 バイト。ケイパビリティ la_rle_tokens のある構成だけ。詰める（pack_channels）とは
+        一緒に使えない。gaps とは使える（欠けの後は回路が値を再提示する）。docs/superpowers/specs/2026-11-07-la-rle2-design.md）。rle = False で指定すると断る。結果の rle_format = 実際に使った形式
+        （"raw" | "records" | "tokens"）、wire_bytes = 受け取ったロジアナの拍のバイト数、changes = VCD に書いた変化点の数、
+        bytes_per_change = wire_bytes / changes（割っただけの事実）、pad_bytes = そのうち NOP で埋めたバイト数（トークン形式。ほかは 0）。
+        max_changes（既定 null = 上限なし。使う側が明示する。例: 100000000）= VCD に書く変化点の数の上限。VCD は変化点ごとに行が要るので、
+        rle_repeat の周期的な信号は、受け取り（wire_bytes）が小さくても書き出すと保存先が変化点の数に比例して膨れる（100 MS/s の方形波は 10 秒で
+        約 240 KB の受け取りが 10 億の変化点 = 数十 GB の VCD）。メモリは膨れない（変化点は断片ごとに復号して書く）。上限を超えるときは、
+        上限ちょうどの変化点までを書いて VCD を閉じ、理由（上限・書いた数・超えた最初の変化点のサンプル）つきの誤りで断る。raw_path を
+        指定していれば生の保存ファイルは残るので、la.raw_to_vcd で上限を変えて書き直せる。null なら従来どおり全部を書く。
+        トークン形式の samples は最後の出来事の時刻 + 1（それ以降は次の出来事が届くまで分からない）。"""
         self._host._require_halt_budget("la.stream", duration_s)
         with self._host._lock:
             self._host._la_idle()
@@ -364,23 +377,31 @@ class LogicAnalyzerService:
                                                                 pack_channels=pack_channels, max_bytes_per_s=max_bytes_per_s,
                                                                 usage_interval_s=usage_interval_s, first_channel=first_channel,
                                                                 gaps=gaps, gap_hold_bytes=gap_hold_bytes,
-                                                                control_read_retries=control_read_retries, raw_path=raw_path)
+                                                                control_read_retries=control_read_retries, raw_path=raw_path,
+                                                                rle_format=rle_format, tick_us=tick_us, rle_repeat=rle_repeat,
+                                                                max_changes=max_changes)
             return {"samples": s.samples, "duration_s": s.duration_s, "sample_period_ns": s.sample_period_s * 1e9,
                     "elapsed_s": s.elapsed_s, "mb_per_s": s.mb_per_s, "overrun": s.overrun,
                     "link_buffer": s.link_buffer_dict, "vcd": vcd_path, "raw": raw_path,
                     "usage": list(s.usage), "first_channel": first_channel,
                     "gaps": [gap.as_dict() for gap in s.gaps], "gap_samples": s.gap_samples,
                     "unplaced_beats": s.unplaced_beats, "gap_held_peak_bytes": s.gap_held_peak_bytes,
-                    "control": s.control,
+                    "control": s.control, "rle_format": s.rle_format, "wire_bytes": s.wire_bytes, "changes": s.changes,
+                    "bytes_per_change": s.bytes_per_change, "pad_bytes": s.pad_bytes,
                     "relay": s.relay}       # PYNQ の中継の状態（ゼロコピーの道か・copied 等。eth_link.decode_relay_status）。中継が無ければ None
 
-    def la_raw_to_vcd(self, raw_path: str, vcd_path: str, names: dict[str, str] | None = None) -> dict:
+    def la_raw_to_vcd(self, raw_path: str, vcd_path: str, names: dict[str, str] | None = None,
+                      max_changes: int | None = None) -> dict:
         """ロジアナの生の保存ファイル（la_stream の raw_path で残したもの）を VCD に書き出す。機器には触れない（取り込みとは別に、
         あとから行う）。VCD のバイト列は、la_stream が直接書いたものと同じ。names（{"5": "rx"}）は保存した名前に重ねる。
-        complete = False は、取り込みの途中で止まった（索引の無い）ファイルで、読めた所までを書いたこと（最後の切れたかたまりは捨てる）。"""
+        complete = False は、取り込みの途中で止まった（索引の無い）ファイルで、読めた所までを書いたこと（最後の切れたかたまりは捨てる）。
+        max_changes（既定 null = 上限なし。使う側が明示する。例: 100000000）= VCD に書く変化点の数の上限（la_stream と同じ）。トークン形式の REPEAT は
+        小さなファイルが何億もの変化点になり、VCD は変化点ごとに行が要るので保存先が膨れる。メモリは膨れない。超えるときは上限ちょうどまでを書いて
+        VCD を閉じ、理由つきの誤りで断る。"""
         raw = RawCapture(raw_path)
-        raw_to_vcd(raw, Path(vcd_path), None if names is None else {int(ch): name for ch, name in names.items()})
+        raw_to_vcd(raw, Path(vcd_path), None if names is None else {int(ch): name for ch, name in names.items()},
+                   max_changes=max_changes)
         m = raw.meta
         return {"raw": raw_path, "vcd": vcd_path, "complete": raw.complete, "chunks": len(raw), "samples": raw.samples,
                 "sample_period_ns": m.sample_period_s * 1e9, "channels": m.channels, "first_channel": m.first_channel,
-                "rle": m.rle, "pack": m.pack}
+                "rle": m.rle, "pack": m.pack, "rle_format": m.rle_format if m.rle else "raw"}

@@ -37,7 +37,7 @@ from . import generated as g
 from .collector import add_events, observe_reference
 from .events import DapEvent
 from .la import DeepAnalyzer, LaStream, Transitions
-from .la_wave import _np
+from .la_wave import PIECE_CHANGES, ChangeLimitExceeded, _np
 from .timing import source_timing, stream_start_lanes, stream_start_recorded, stream_start_window
 
 _DTYPES = {"H": "uint16", "Q": "uint64"}
@@ -53,6 +53,16 @@ class _Pieces:
     def add(self, part) -> None:
         if len(part):
             self._parts.append(part)
+
+    def pop_last(self):
+        """最後の 1 要素を取り除いて返す（空のときは None）。"""
+        while self._parts and not len(self._parts[-1]):
+            self._parts.pop()
+        if not self._parts:
+            return None
+        last = self._parts[-1][-1]
+        self._parts[-1] = self._parts[-1][:-1]
+        return int(last)
 
     def join(self):
         if _np is not None:
@@ -82,6 +92,7 @@ def _relative(starts, first: int):
 __all__ = ["LaRecordingStream", "LockedDevice", "StreamAnchor", "anchor_stream"]
 
 STREAM = "la"
+BLOCK_CHANGES = PIECE_CHANGES      # 波形のかたまりに持つ変化点の数の目安（メモリの目安。時間の区切り chunk_s の前でも、たまったら閉じる）
 
 
 class LockedDevice:
@@ -162,15 +173,23 @@ class LaRecordingStream:
                  chunk_s: float = 1.0, lock: Any = None, on_end: Callable[[LaRecordingStream], None] | None = None,
                  events_from: int | None = None, carry: DapEvent | None = None, obs: Any = None,
                  pack_channels: int | None = None, gaps: bool = False, gap_hold_bytes: int | None = None,
-                 control_read_retries: int = 0):
+                 control_read_retries: int = 0, rle_format: str | None = None,
+                 tick_us: float | None = None, rle_repeat: bool | None = None, max_changes: int | None = None):
         if not chunk_s > 0:
             raise ValueError("chunk_s は正の秒数")
+        if max_changes is not None and max_changes < 1:
+            raise ValueError("max_changes は 1 以上")
+        self.max_changes = max_changes                     # 記録へ入れる変化点の総数の上限（使う側が明示する。None = 上限なし）
         self.obs = obs                                     # FPGA の観測の復号器（Collector と共有）
         self.rec = rec
         self._lock = lock if lock is not None else contextlib.nullcontext()
         self.device = LockedDevice(device, self._lock)
         self.rate_hz, self.rle, self.chunk_s = rate_hz, rle, chunk_s
         self.pack_channels = pack_channels                 # 使うチャンネルだけ詰めて流す（8・4・2。None = 詰めない）
+        self.tick_us = tick_us
+        self.rle_repeat = rle_repeat
+        self.rle_format_arg = rle_format                    # RLE の形式の指定（None = records。DeepAnalyzer.stream が確かめる）
+        self.changes: int | None = None                    # 復号して数えた変化点の数（生の拍で保存する流れは復号しないので数えない = None）
         self.gaps = gaps                                   # 溢れても止めず欠けの区間を記録して続ける
         self.gap_hold_bytes = gap_hold_bytes               # 同: 位置の決まらない拍を持つ上限（gaps のとき使う側が明示する）
         self.control_read_retries = control_read_retries   # 見回りの READ を時間切れで送り直してよい回数（使う側が明示する。既定 0）
@@ -194,7 +213,8 @@ class LaRecordingStream:
             self.device, lambda: analyzer.stream(rate_hz=self.rate_hz, rle=self.rle, events_from=self.events_from,
                                     pack_channels=self.pack_channels, gaps=self.gaps,
                                     gap_hold_bytes=self.gap_hold_bytes,
-                                    control_read_retries=self.control_read_retries),
+                                    control_read_retries=self.control_read_retries, rle_format=self.rle_format_arg,
+                                    tick_us=self.tick_us, rle_repeat=self.rle_repeat),
             self.rec.timebase_hz)
         s = self.stream
         ticks = s.sample_period_s * self.rec.timebase_hz
@@ -208,7 +228,8 @@ class LaRecordingStream:
                              "整数倍でないので、記録に入れると時刻が丸まる。刻みの整数倍のサンプルレートにするか、la_stream（VCD）を使う")
         self._skew = tuple(analyzer.channel_skew[:s.channels])   # ch ごとの時刻のずれ（fprobe.timing）
         self.rec.add(STREAM, "stream_start", self.anchor.ticks, uncertainty=self.anchor.uncertainty,
-                     body={"rate_hz": 1 / s.sample_period_s, "rle": self.rle, "channels": s.channels, "pack_channels": self.pack_channels,
+                     body={"rate_hz": 1 / s.sample_period_s, "rle": self.rle, "rle_format": s.rle_format if self.rle else "raw",
+                           "channels": s.channels, "pack_channels": self.pack_channels,
                            "gaps": self.gaps,
                            "anchor": self.anchor.method, "events": s.carries_events,
                            "t_lo": self.anchor.t_lo, "t_hi": self.anchor.t_hi, "basis": self.anchor.basis,
@@ -245,7 +266,10 @@ class LaRecordingStream:
             st = self.stream.stats()
             out.update(samples=st.samples, duration_s=st.duration_s, mb_per_s=st.mb_per_s, overrun=st.overrun,
                        sample_period_ns=st.sample_period_s * 1e9, link_buffer=st.link_buffer_dict,
-                       gaps=len(st.gaps), gap_samples=st.gap_samples, unplaced_beats=st.unplaced_beats, control=st.control)
+                       gaps=len(st.gaps), gap_samples=st.gap_samples, unplaced_beats=st.unplaced_beats, control=st.control,
+                       # 形式の事実（la_stream と同じ意味）。changes は復号して数えた分だけ（生の拍で保存する流れは None）。割っただけの値
+                       rle_format=st.rle_format, wire_bytes=st.wire_bytes, pad_bytes=st.pad_bytes, changes=self.changes,
+                       bytes_per_change=st.wire_bytes / self.changes if self.changes else None)
             if getattr(self.device.capabilities(), "la_stream_usage", False) and self.running:
                 out["usage"] = self.stream.usage()            # リングと帯域の使用量の事実（読むたびに。判定はしない）
         if self.anchor is not None:
@@ -264,12 +288,13 @@ class LaRecordingStream:
         block_first, carry, end = 0, 0, 0                         # carry: かたまりの頭で続いている値
         # 生の拍で保存する記録（記録の形式の版 3。waveform_format = 2）: 変化点にせず、拍をそのままかたまりのファイルへ
         # （変化点にするのは読み手。docs/superpowers/specs/2026-11-03-recording-raw-waveform-design.md）
-        raw = self.rec.waveform_format == 2
+        raw = self.rec.waveform_format == 2 and not (self.rle and s.rle_format == "tokens")   # トークン形式は拍のまま保存する形がまだ無い（受け取りで変化点に復号して入れる）
         pieces: list = []                                         # かたまりの拍（受け取ったバイト列。バッファは写さずに指しているだけなので持つ分は写す）
         block_previous: int | None = None                         # かたまりの最初のサンプルの直前の値
+        held = 0                                                  # いまのかたまりに持っている変化点の数
 
         def emit(upto: int) -> None:
-            nonlocal values, starts, block_first, carry, pieces
+            nonlocal values, starts, block_first, carry, pieces, held
             if upto <= block_first:
                 return
             if raw:
@@ -287,7 +312,17 @@ class LaRecordingStream:
                              self._skew)
             self.rec.add_waveform(tr, anchor.ticks + round(block_first * tps))
             self.blocks += 1
-            values, starts, block_first = _Pieces("H"), _Pieces("Q"), upto
+            values, starts, block_first, held = _Pieces("H"), _Pieces("Q"), upto, 0
+
+        def split() -> int:
+            """変化点がたまったので、最後の変化点の手前までで波形のかたまりを閉じ、最後の変化点から新しいかたまりを始める。"""
+            nonlocal values, starts
+            last_start = starts.pop_last()
+            last_value = values.pop_last()
+            emit(last_start)
+            values.add(_np.array([last_value], dtype=_np.uint16) if _np is not None else array("H", [last_value]))
+            starts.add(_np.array([last_start], dtype=_np.uint64) if _np is not None else array("Q", [last_start]))
+            return 1
 
         try:
             for chunk in s.chunks(float("inf")):
@@ -306,7 +341,7 @@ class LaRecordingStream:
                     self.rec.add(STREAM, "gap", anchor.ticks + round(gap.start * tps),
                                  t_end=anchor.ticks + round((gap.start + gap.samples) * tps),
                                  body={"samples": gap.samples, "duration_ticks": round(gap.samples * tps), "beat": gap.beat})
-                    values, starts, block_first = _Pieces("H"), _Pieces("Q"), chunk.first
+                    values, starts, block_first, held = _Pieces("H"), _Pieces("Q"), chunk.first, 0
                     end = chunk.first
                 if not chunk.data:
                     continue
@@ -315,9 +350,25 @@ class LaRecordingStream:
                         block_previous = chunk.previous
                     pieces.append(chunk.data if isinstance(chunk.data, bytes) else bytes(chunk.data))
                 else:
-                    v, st = chunk.changes()                     # numpy があれば numpy の配列のまま（写さない）
-                    values.add(v)
-                    starts.add(st)
+                    # 断片ごとに復号して入れる（REPEAT が何億もの変化点に展開されても、メモリは断片の大きさで決まる）。
+                    # 変化点が一定数たまったら、時間の区切りを待たずに波形のかたまりを閉じる（かたまりは任意のサンプルの位置で閉じてよい）
+                    for v, st in chunk.iter_changes(PIECE_CHANGES):     # numpy があれば numpy の配列のまま（写さない）
+                        count = (self.changes or 0) + len(v)
+                        if self.max_changes is not None and count > self.max_changes:
+                            room = self.max_changes - (self.changes or 0)
+                            if room:                                   # 上限ちょうどまでは記録に入れてから断る
+                                values.add(v[:room])
+                                starts.add(st[:room])
+                                self.changes = self.max_changes
+                                end = max(end, int(st[room - 1]) + 1)       # 断って止めるので、確かめられた所までで閉じる
+                            raise ChangeLimitExceeded(self.max_changes, self.changes or 0, int(st[room]),
+                                                      "記録は変化点ごとに保存先が要る。ここで流れを止めた（それまでの分は記録に残る）")
+                        self.changes = count
+                        values.add(v)
+                        starts.add(st)
+                        held += len(v)
+                        if held >= BLOCK_CHANGES:
+                            held = split()
                 end = chunk.first + chunk.length
                 if end - block_first >= per_block:
                     emit(end)

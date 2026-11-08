@@ -42,7 +42,13 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   戻すのは `gpio_release`。SPI の相手（SPI Flash・センサー）は `spi_transfer`（端子 = ロジアナの ch、mode・語長。
   16 進の data を送り read_length 語を読む）。SPI Flash の消去・書き込みは Python のプラグイン `fprobe.plugins.spiflash`。
 - 長時間の波形（トリガなし）は `la_stream` で VCD に流し続ける。溢れても止めずに続けるなら gaps = true（PYNQ の深いバッファ）:
-  回路が捨てた区間を gaps（位置と長さの事実。値は無い）で返す。
+  回路が捨てた区間を gaps（位置と長さの事実。値は無い）で返す。RLE の形式は rle_format（records = 1 変化 4 バイト、
+  tokens = 1 変化がふつう 1 バイト。caps の la_rle_tokens がある構成だけで、tick_us も明示する）。
+  周期的な信号（クロック等）は rle_repeat = true（tokens のとき。caps の la_rle_token_info.repeat がある構成だけ。既定は使わない）で、
+  同じ変化の繰り返しが 1 トークンにまとまり 1 変化 1 バイト未満になる（無損失）。効果は信号次第（間隔が毎回違う信号には付かない）。
+  結果の bytes_per_change・pad_bytes で何バイト使ったかが分かる。
+  REPEAT は小さな受け取りが何億もの変化点になり、VCD・記録は変化点ごとに保存先が要る（メモリは膨れない）。上限は max_changes
+  （la_stream・la_raw_to_vcd・recording_la_stream_start。既定は上限なし。超えたら上限ちょうどまでを書き、理由つきで断る）。
 - Flash: `target_flash`（書き込み・既定で検証・段ごとの速度）、`target_flash_erase`（range / chip / mass）、
   `target_flash_verify`（ファイルとの比較）、`target_flash_read`（読んで保存）、`target_flash_regions`（セクタの並び）、
   外付け Flash は `target_flash_algo_add`（.FLM）、速度は `target_flash_benchmark`。デバイスの定義が無ければ
@@ -189,7 +195,8 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   操作でも走る）。人が置いたフックもあるので、操作の前に `hooks_list`、結果は `hooks_log`。
 - 日単位の長期の記録: `recording_start` に segment_s / max_bytes / decimate_after_s（分割・容量の上限・間引き）→
   `recording_la_stream_start`（ロジアナを止めずに記録へ。構成 fprobe_la ではイベント記録も同じ流れで取り込み続ける。
-  ほかの構成ではその間イベント記録は取り込まない）→ 全体の概観は
+  ほかの構成ではその間イベント記録は取り込まない。rle_format = tokens も指定でき、人の画面（System の Record Pins）に同じ形式と
+  統計 wire_bytes・pad_bytes・bytes_per_change が出る）→ 全体の概観は
   `recording_overview`（事前計算の縮図）→ 気になる範囲を `recording_density` / `recording_events` / `recording_query`
   （t0 / t1）で。分割の一覧は `recording_segments`。
 - SWO の ITM・DWT の設定（止めない）: `swo_configure`（ports・exception_trace・counters・data_trace = 変数へのアクセスを
@@ -220,10 +227,12 @@ INSTRUCTIONS = """fprobe（FPGA デバッグプローブ）を操作する。
   出来事 event・呼び出し履歴のフレーム frame）、`ui_state_set`（渡したものだけ変える。例: 異常の区間に view と
   cursors を置いて人に示す。人の画面がそこへ移る）。
 - Linux（Cortex-A。Raspberry Pi 2B 等）のアプリを JTAG の全コア停止で止めて調べる（gdb を使わない）: `linux_halt_open` →
-  `linux_halt_debug_attach`（pid・PC の上の ELF。全コアを止めたまま返る。max_halt_s を過ぎて呼び出しが無ければ全コアを走らせる）→
+  `linux_halt_processes`（comm で pid を探す。全コアを一瞬止めて読む。設定ファイルに pid は無い）→
+  `linux_halt_debug_attach`（pid・PC の上の ELF。応答の image.phdr_match / entry_match が false なら、その ELF はそのプロセスの実行ファイルと合っていない（それでも成功で返る。行・変数・ブレークポイントがずれるので、pid か ELF を確かめる）。全コアを止めたまま返る。max_halt_s を過ぎて呼び出しが無ければ全コアを走らせる）→
   `linux_halt_debug_break_insert`（"race.c:11"・関数名・番地）→ `linux_halt_debug_run`（wait_s まで待つ。時間切れは走らせたまま）→
-  当たったら `linux_halt_debug_threads`（variables=true・expressions で、全スレッドの行・引数・局所変数・式を同じ時点で 1 回で読む）/
-  `linux_halt_debug_read`・`linux_halt_debug_memory`・`linux_halt_debug_step` → `linux_halt_debug_run`（wait_s=0 で再開）→
+  当たったら `linux_halt_debug_threads`（variables=true・expressions で、全スレッドの行・引数・局所変数・式を同じ時点で 1 回で読む。max_elements は必須、例 64）/
+  `linux_halt_debug_read`（frame = 0 がいま、1 以上は CFI で巻き戻した呼び出し元。呼び出し履歴は frame を 1、2、… と読む。一覧を返す道具は無い）・
+  `linux_halt_debug_memory`・`linux_halt_debug_step` → `linux_halt_debug_run`（wait_s=0 は再開だけ。いまある当たりは拾って返し、そのとき running = false で全コアは止まったまま。当たりが無ければ kind = timeout・running = true で、全コアは走っている）→
   `linux_halt_debug_close`（BKPT を全部外し、全コアを走らせる）→ `linux_halt_close`。
   設定の保存・読み込み: `linux_halt_profile_save`（開いている口の open の引数・attach 中なら attach の引数から pid を除いたものをファイルへ）/
   `linux_halt_profile_load`（ファイルを読んで返すだけ。返った open を `linux_halt_open`、attach に pid を足して `linux_halt_debug_attach` へ渡す。

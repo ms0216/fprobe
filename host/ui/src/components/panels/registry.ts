@@ -60,7 +60,7 @@ export const PANELS: PanelDef[] = [
   { id: "terminal", title: "panel.terminal", about: "panel.terminal.about", component: TerminalPanel, group: "trace" },
   { id: "log", title: "panel.log", about: "panel.log.about", component: LogPanel, group: "trace" },
   { id: "linux", title: "panel.linux", component: LinuxPanel, group: "trace" },
-  { id: "linuxHalt", title: "panel.linuxHalt", component: LinuxHaltPanel, group: "trace" },
+  { id: "linuxHalt", title: "panel.linuxHalt", component: LinuxHaltPanel, group: "debug" },
   { id: "activity", title: "panel.activity", about: "panel.activity.about", component: ActivityPanel, group: "trace" },
   { id: "swoTrace", title: "panel.swoTrace", component: SwoTracePanel, group: "trace" },
   { id: "eventLog", title: "panel.eventLog", about: "panel.eventLog.about", component: EventLogPanel, group: "trace" },

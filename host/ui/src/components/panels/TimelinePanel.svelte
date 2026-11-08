@@ -214,10 +214,13 @@
 </div>
 
 <style>
+  /* 幅が狭くても 3 段に折り返さないよう、並びの間と欄の幅を詰める（説明の長い info は残りの幅で折り返す） */
+  :global(.timeline > .pane-bar) { gap: 4px 5px; padding: 3px 6px; }
+  .info { flex: 1 1 12em; min-width: 0; }
   .live { color: var(--bad); font-size: 12px; white-space: nowrap; }
   .timeline { display: flex; flex-direction: column; }
   label { display: flex; gap: 4px; align-items: center; }
-  .num { width: 70px; }
+  .num { width: 56px; }
   .goto { display: flex; gap: 4px; align-items: center; }
   .goto .num { width: 9ch; }                         /* 「例 1.5 ms」が切れない幅 */
   .bad-input { border-color: var(--bad); outline-color: var(--bad); }

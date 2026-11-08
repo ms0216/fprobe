@@ -15,3 +15,9 @@ impl/
 
 # 合成の A/B ビルドの作業ディレクトリ（成果物。履歴に入れない）
 gateware/build_*/
+
+# トークン形式の復号の C 版（tools/build_la_tokens_c.py で作る任意の成果物）
+host/fprobe/_la_tokens_c.dll
+host/fprobe/_la_tokens_c.so
+host/fprobe/_la_tokens_c.dylib
+host/fprobe/_la_tokens_c.obj

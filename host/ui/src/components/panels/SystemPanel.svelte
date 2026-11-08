@@ -15,11 +15,11 @@
   import { errorText, type Result } from "../../lib/api";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
-  import { suggestedOf } from "../../lib/apispec";
+  import { enumOf, suggestedOf } from "../../lib/apispec";
   import { load, save } from "../../lib/prefs";
   import {
     addressKey, parseCount, parseRate, readConditionCounts, sanitizeConditions, sanitizeWatches, SharedSystem,
-    pinsStreamStart, memoryStopped as isMemoryStopped,
+    pinsStreamFacts, pinsStreamStart, memoryStopped as isMemoryStopped,
     type Condition, type ConditionCount, type HaltState, type RecordingTrigger, type Watch,
   } from "../../lib/system";
 
@@ -52,7 +52,28 @@
   $effect(() => save("system.pinsRateMs", pinsRateText));
   let pinsChannels = $state(load("system.pinsChannels", "") || "");
   $effect(() => save("system.pinsChannels", pinsChannels));
-  const pinsStart = $derived(pinsStreamStart(pinsFormat, pinsRateText, pinsChannels));
+  // RLE の符号化（records / tokens）: 選択肢と最初の値は仕様（recording.la_stream.start の rle_format の enum と examples）。欄に見えて、
+  // 書き換えられ、始めるときに明示して送る。機器がトークン形式を申告しているか（ケイパビリティ la_rle_tokens）は事実として見せるだけで、
+  // 選べなくはしない（出せない構成ではデーモンが断る理由を返し、それがそのまま出る）
+  const rleFormats = enumOf("recording.la_stream.start", "rle_format");
+  const suggestedRleFormat = String(suggestedOf("recording.la_stream.start", "rle_format") ?? "");
+  let pinsRleFormat = $state(rleFormats.includes(load("system.pinsRleFormat", "")) ? load("system.pinsRleFormat", "") : suggestedRleFormat);
+  $effect(() => save("system.pinsRleFormat", pinsRleFormat));
+  // トークン形式の tick_us（マイクロ秒。0 = 無し）: 最初の値は仕様（recording.la_stream.start の tick_us の examples）。欄に見えて書き換えられ、明示して送る
+  let pinsTickText = $state(load("system.pinsTickUs", "") || String(suggestedOf("recording.la_stream.start", "tick_us") ?? ""));
+  $effect(() => save("system.pinsTickUs", pinsTickText));
+  // トークン形式の REPEAT（rle_repeat）: 使う人が選ぶ（既定は使わない = API の既定どおり）。選んだときだけ true を送る
+  let pinsRepeat = $state(load("system.pinsRepeat", "0") === "1");
+  $effect(() => save("system.pinsRepeat", pinsRepeat ? "1" : "0"));
+  // REPEAT の記録に入れる変化点の総数の上限: 空 = 上限なし（送らない）。値は使う人が入れる（画面で決めない）
+  let pinsMaxChangesText = $state(load("system.pinsMaxChanges", ""));
+  $effect(() => save("system.pinsMaxChanges", pinsMaxChangesText));
+  const tokensCaps = $derived.by<"yes" | "no" | "unknown">(() => {
+    const v = ($app.probe?.capabilities as Record<string, unknown> | undefined)?.la_rle_tokens;
+    return v === true ? "yes" : v === false ? "no" : "unknown";
+  });
+  const pinsStart = $derived(pinsStreamStart(pinsFormat, pinsRateText, pinsChannels, pinsRleFormat, pinsTickText, pinsRepeat, pinsMaxChangesText));
+  const pinsFacts = $derived(rec?.la_stream ? pinsStreamFacts(rec.la_stream) : null);
   let withMemory = $state(load("system.withMemory", "1") === "1");   // MCU のメモリも DAP サンプラで記録へ（名前つき）
   $effect(() => save("system.withMemory", withMemory ? "1" : "0"));
   // 記録のメモリの読みの速さ（回/秒）: 使う人が入れる（時刻の分解能・リンクの帯域に効くので既定の値で決めない）
@@ -114,7 +135,7 @@
     if (polling) return;                         // 前の問い合わせが 1 秒を超えたら重ねない
     polling = true;
     try {
-      const s: Status = await conn.call("system.status", { addresses: watches.map((w) => w.address) }, { quiet: true });
+      const s: Status = await conn.call("system.status", { addresses: $app.target?.linux ? [] : watches.map((w) => w.address) }, { quiet: true });   // Linux のプロセスに attach 中は MCU の番地を読まない（仮想メモリとして読まれ、毎秒エラーになった）
       status = s;
       rec = await conn.call("recording.status", {}, { quiet: true });
       if (obsMatch) haltOn = await conn.call("fpga_obs.trigger_status", {}, { quiet: true }).catch(() => haltOn);
@@ -200,7 +221,7 @@
 
 <div class="pane system">
   <SystemRecordBar {rec} {linkOpen} {needsRate} pinsStartMissing={pinsStart === null} bind:withMemory bind:memoryRateText bind:withPins
-                   bind:pinsFormat bind:pinsRateText bind:pinsChannels onStart={startRecording} onStop={stopRecording}
+                   bind:pinsFormat bind:pinsRateText bind:pinsChannels bind:pinsRleFormat bind:pinsTickText bind:pinsRepeat bind:pinsMaxChangesText {rleFormats} {tokensCaps} onStart={startRecording} onStop={stopRecording}
                    onTimeline={showTimeline} />
   {#if error}<div class="note bad">{error}</div>{/if}
   {#if rec?.recording}<SystemTriggerBar bind:trigger />{/if}
@@ -209,6 +230,7 @@
   {#if note}<div class="note">{note}</div>{/if}
   {#if memoryStopped}<div class="note bad">{$i18n("system.memoryStopped")}</div>{/if}
   {#if pinsStopped}<div class="note bad" title={rec?.la_stream?.error ?? ""}>{$i18n("system.pinsStopped", { why: rec?.la_stream?.error ? ` (${rec.la_stream.error})` : rec?.la_stream?.overrun ? " (overrun)" : "" })}</div>{/if}
+  {#if pinsFacts}<div class="note facts" title={$i18n("system.pinsFactsTip")}>{$i18n("system.pinsFacts", pinsFacts)}</div>{/if}
   {#if rec?.recording && rec.events_errors}
     <div class="note" title={rec.events_errors.last ?? ""}>{$i18n("system.eventsErrors", { n: rec.events_errors.count, lost: rec.events_errors.lost.toLocaleString() })}</div>
   {/if}

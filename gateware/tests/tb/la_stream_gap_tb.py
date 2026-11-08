@@ -57,7 +57,7 @@ class Bench:
 
 
 async def setup(dut):
-    for name in ("run", "enable", "rle", "pack", "time", "hold", "in_valid", "in_data", "in_tag"):
+    for name in ("run", "enable", "rle", "pack", "time", "hold", "in_valid", "in_data", "in_tag", "tok", "in_pos", "in_kf"):
         getattr(dut, name).value = 0
     dut.room.value = 1
     dut.ev_enable.value = 1
@@ -301,3 +301,58 @@ async def a_gap_open_when_the_run_stops_is_not_recorded(dut):
     await ClockCycles(dut.clk, 10)
     assert [x for k, x in b.out] == list(range(39))
     assert int(dut.gaps.value) == 0 and int(dut.gap_open.value) == 1
+
+
+@cocotb.test()
+async def token_gap_q_is_the_difference_of_beat_positions(dut):
+    """トークン形式（tok = 1）: 欠けの長さ q = 捨てた最後の拍の in_pos − 直前に出した拍の in_pos。出す拍は再提示（in_kf = 1）の拍から。
+    拍 i の in_pos = 拍ごとに不規則に進む時刻、in_kf = 7 拍に 1 回。resync_req は捨てた再提示でない拍ごとに 1 周期。"""
+    b = await setup(dut)
+    rng = random.Random(21)
+    pos, t = [], 0
+    for _ in range(400):
+        t += rng.randrange(1, 500)
+        pos.append(t)
+    kf = [i % 7 == 3 for i in range(400)]
+    pulses = []
+
+    async def watch():
+        while True:
+            await ReadOnly()
+            if int(dut.resync_req.value):
+                pulses.append(b.cycle)
+            await RisingEdge(dut.clk)
+
+    cocotb.start_soon(watch())
+    dut.enable.value, dut.rle.value, dut.pack.value = 1, 1, 0
+    dut.tok.value = 1
+    dut.run.value = 1
+    await RisingEdge(dut.clk)
+    for i in range(400):
+        dut.hold.value = int(100 <= i < 160 or 250 <= i < 300)             # 拍の到着ごとに保持（その間は拍を出せない）
+        dut.in_valid.value, dut.in_data.value, dut.in_tag.value = 1, i, 0
+        dut.in_pos.value, dut.in_kf.value = pos[i], int(kf[i])
+        await RisingEdge(dut.clk)
+        dut.in_valid.value = 0
+        await ClockCycles(dut.clk, rng.choice([0, 0, 1, 3]))
+    dut.hold.value = 0
+    await ClockCycles(dut.clk, 40)
+    passed = [item & 0xFFFF for kind, item in b.out if kind == "beat"]
+    records = [item for kind, item in b.out if kind == "gap"]
+    assert records and int(dut.lost.value) == 0
+    # 出した拍の番号の列: 飛んだところが欠け。飛んだ区間の q の和 = 最後に捨てた拍の pos − 直前に出した拍の pos
+    gaps_seen = 0
+    k = 0
+    for n, idx in enumerate(passed):
+        prev = passed[n - 1] if n else None
+        if prev is not None and idx != prev + 1:
+            expect = pos[idx - 1] - pos[prev]
+            total = 0
+            while k < len(records) and records[k]["beat"] == n:
+                total += records[k]["samples"]
+                k += 1
+            assert total == expect, (n, idx, prev, total, expect)
+            assert kf[idx], f"欠けの後の最初の拍 {idx} が再提示の拍でない"
+            gaps_seen += 1
+    assert gaps_seen >= 2 and k == len(records)
+    assert pulses, "resync_req が出なかった"

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fake_daemon import FakeProbe
 from fake_demo_io import IoDemo
+from fake_demo_recording import RecordingDemo
 from fake_demo_rtos import RtosDemo
 from fake_demo_sampling import SamplingDemo
 from fake_demo_search import SearchDemo
@@ -44,7 +45,7 @@ COUNTER = next(v.address for v in GLOBALS if v.name == "counter")
 MILESTONE = next(v.address for v in GLOBALS if v.name == "milestone")
 
 
-class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, TargetDemo, IoDemo, FakeProbe):
+class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, RecordingDemo, SearchDemo, TargetDemo, IoDemo, FakeProbe):
     """偽の機器のデモ。ビューごとのデモの値は fake_demo_*.py のサービス（ビューのまとまりごとに分けた）。"""
 
     def __init__(self, fatal_after_s: float | None = None):
@@ -66,7 +67,7 @@ class DemoProbe(VerifyDemo, XtrigDemo, SamplingDemo, RtosDemo, SearchDemo, Targe
         self.pc = self._line_address(28)
         self.counter = 0x2A
         self.la_capture()
-        for init in (self._init_sampling, self._init_rtos, self._init_search, self._init_target, self._init_io,
+        for init in (self._init_sampling, self._init_rtos, self._init_search, self._init_target, self._init_io, self._init_recording,
                      self._init_xtrig, self._init_verify):
             init()
 

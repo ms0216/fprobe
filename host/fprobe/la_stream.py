@@ -18,7 +18,8 @@ from .events import KIND_LA_GAP, DapEvent, decode_events
 from .frame_link import StreamBuffer
 from .la_gaps import GapPlacer, StreamCursor, StreamGap, _expand_np, _expand_words  # noqa: F401  (再公開)
 from .la_segments import SegmentSplitter, StreamFormatError, StreamLinkLoss
-from .la_wave import BEAT_BYTES, decode_beats, stream_transitions
+from .la_tokens import token_extent
+from .la_wave import BEAT_BYTES, RLE_FORMATS, ChangeLimitExceeded, PIECE_CHANGES, decode_beats, iter_stream_transitions, stream_transitions
 from .la_wave import _array_of, _extent, _np
 
 
@@ -35,8 +36,13 @@ class StreamChunk:
     # 欠けの区間を記録する流れ（gaps）: このチャンクの直前の欠け（gap.start + gap.samples = first。previous は None）。None = 欠けなし
     gap: "StreamGap | None" = None
     count: int = field(default=-1, repr=False, compare=False)   # サンプル数（受け取りで数えた値。-1 = 数えていない）
+    # RLE の形式（"records" = 1 レコード 4 バイト、"tokens" = トークン形式。fprobe.la_tokens）。rle = False のときは意味を持たない。
+    # トークン形式では first = 直前の出来事の時刻、previous = 直前の値、length = 時刻の進み（出来事の間隔の和）
+    rle_format: str = "records"
 
     def samples(self) -> "array[int]":
+        if self.rle and self.rle_format == "tokens":
+            raise RuntimeError("トークン形式のチャンクは毎サンプルに展開しない（changes / transitions を使う）")
         return _expand_words(decode_beats(self.data, self.rle), self.pack)
 
     @property
@@ -44,20 +50,65 @@ class StreamChunk:
         """このチャンクのサンプル数（次のチャンクの first = first + length）。展開しない（受け取りで数えた値があればそれ）。"""
         if self.count >= 0:
             return self.count
+        if self.rle and self.rle_format == "tokens":
+            return token_extent(self.data, self.first, self.previous)[0] if self.data else 0
         return _extent(self.data, self.rle)[0] << self.pack if self.data else 0
 
-    def transitions(self) -> tuple["array[int]", "array[int]"]:
+    def transitions(self, max_changes: int | None = None) -> tuple["array[int]", "array[int]"]:
         """変化点（値, 通し番号の開始）を array（"H"・"Q"）で。直前のチャンクの最後と同じ値は含めない（つなぐと全体の
-        変化点になる）。中身は changes と同じ。"""
-        values, starts = self.changes()
+        変化点になる）。中身は changes と同じ（max_changes も同じ）。"""
+        values, starts = self.changes(max_changes)
         if _np is not None:
             return _array_of("H", values), _array_of("Q", starts)
         return values, starts
 
-    def changes(self):
+    def changes(self, max_changes: int | None = None):
         """transitions と同じ変化点を、numpy があれば numpy の配列（値 uint16・開始 uint64）のまま（VcdWriter.write 等へ
-        写さずに渡す口）。numpy が無ければ array。詰めた語・RLE は展開せずに数える（la_wave.stream_transitions）。"""
-        return stream_transitions(self.data, self.rle, self.pack, self.first, self.previous)
+        写さずに渡す口）。numpy が無ければ array。詰めた語・RLE は展開せずに数える（la_wave.stream_transitions）。
+
+        全変化点を 1 つの配列にする（メモリは変化点の数に比例する）。トークン形式の REPEAT は 1 トークンが何億もの変化点になりうる
+        ので、巨大な展開は iter_changes / iter_transitions で断片ごとに扱う。max_changes（None = 上限なし。使う側が明示する）を
+        渡すと、変化点がそれを超えるときは配列にせず ChangeLimitExceeded で断る（メモリは max_changes に比例する範囲）。"""
+        if max_changes is None:
+            return stream_transitions(self.data, self.rle, self.pack, self.first, self.previous, self.rle_format)
+        pieces = []
+        total = 0
+        for v, s in self.iter_changes(min(max_changes + 1, PIECE_CHANGES)):
+            if total + len(v) > max_changes:
+                raise ChangeLimitExceeded(max_changes, total, int(s[max_changes - total]) if max_changes > total else int(s[0]),
+                                          "チャンクを 1 つの配列にできない（iter_changes で断片ごとに扱える）")
+            pieces.append((v, s))
+            total += len(v)
+        if not pieces:
+            return stream_transitions(b"", False, 0, self.first, self.previous)
+        if len(pieces) == 1:
+            return pieces[0]
+        if _np is not None:
+            return _np.concatenate([v for v, _ in pieces]), _np.concatenate([s for _, s in pieces])
+        values, starts = array("H"), array("Q")
+        for v, s in pieces:
+            values.extend(v)
+            starts.extend(s)
+        return values, starts
+
+    def iter_changes(self, max_changes: int):
+        """changes と同じ変化点を、(値, 開始) の断片（1 つが max_changes 個以下、空は返さない）に分けて順に返す。断片をつなぐと
+        changes と要素単位で一致する。トークン形式の REPEAT は、展開の大きさに依らないメモリで復号する（max_changes は
+        使う側が決める）。"""
+        return iter_stream_transitions(self.data, self.rle, self.pack, self.first, self.previous, self.rle_format,
+                                       max_changes=max_changes)
+
+    def iter_transitions(self, max_changes: int):
+        """iter_changes の断片に、その断片が覆うサンプルの終わり end を添えて返す: (値, 開始, end)。end は次の断片の最初の変化点の
+        時刻、最後の断片は first + length。断片を順に feed する解析（Transitions(値, 開始, end)）向け。"""
+        last = None
+        for v, s in self.iter_changes(max_changes):
+            if last is not None:
+                yield last[0], last[1], int(s[0])
+            last = (v, s)
+        if last is not None:
+            yield last[0], last[1], self.first + self.length
+
 
 @dataclass(frozen=True)
 class StreamStats:
@@ -74,6 +125,18 @@ class StreamStats:
     gap_held_peak_bytes: int = 0   # gaps の流れ: 位置の決まらない拍を持った量の最大（バイト。上限 gap_hold_bytes と比べる事実）
     # この流れの間の CONTROL の数え {read_retries: 時間切れで送り直した READ, stale_responses: 読み捨てた遅れた応答}（事実）
     control: dict = field(default_factory=lambda: {"read_retries": 0, "stale_responses": 0})
+    # 形式の事実: rle_format = "raw" | "records" | "tokens"、wire_bytes = 受け取ったロジアナの拍のバイト数（見出し・イベントを含まない）、
+    # pad_bytes = そのうち NOP で埋めた分（トークン形式。ほかは 0）、changes = 変化点の数（復号して数えたもの。流れの間は数えず、
+    # VCD への書き出し（raw_to_vcd）で数える。None = 数えていない）
+    rle_format: str = "records"
+    wire_bytes: int = 0
+    pad_bytes: int = 0
+    changes: int | None = None
+
+    @property
+    def bytes_per_change(self) -> float | None:
+        """変化点 1 つあたりの拍のバイト数（wire_bytes / changes。変化点が 0 個・数えていないなら None）。割っただけの事実。"""
+        return self.wire_bytes / self.changes if self.changes else None
 
     @property
     def gap_samples(self) -> int:
@@ -136,10 +199,18 @@ class LaStream:
     def __init__(self, dev: Device, rle: bool, sample_period_s: float, channels: int,
                  events: tuple[int, int] | None = None, pack: int = 0, fine_timing: dict | None = None,
                  first_channel: int = 0, gaps: bool = False, gap_hold_bytes: int | None = None,
-                 control_read_retries: int = 0, buffer_start: "StreamBuffer | None | object" = _NOT_GIVEN):
+                 control_read_retries: int = 0, buffer_start: "StreamBuffer | None | object" = _NOT_GIVEN,
+                 rle_format: str = "records"):
         """buffer_start: 欠けの数えの基準（機器に流れを頼む前に取った _stream_buffer(dev, reset_peak=True)）。渡さなければここで取る
         （流れを頼んだ後に作るなら、その間に落ちたフレームを数えない）。"""
         self.dev, self.rle, self.sample_period_s, self.channels = dev, rle, sample_period_s, channels
+        if rle_format not in RLE_FORMATS:
+            raise ValueError(f"rle_format は {RLE_FORMATS} のどれか: {rle_format!r}")
+        if rle_format == "tokens" and not rle:
+            raise ValueError("rle_format = tokens は rle = True のときだけ")
+        if rle_format == "tokens" and pack:
+            raise ValueError("トークン形式の RLE は詰める（pack_channels）と一緒に使えない（RLE は詰めない）")
+        self.rle_format = rle_format                        # RLE の形式（rle = False のときは意味を持たない）
         if control_read_retries < 0:
             raise ValueError(f"control_read_retries は 0 以上: {control_read_retries}")
         self._control_read_retries = control_read_retries   # 見回りの READ を時間切れで送り直してよい回数（使う側が明示する）
@@ -156,7 +227,7 @@ class LaStream:
             raise RuntimeError("欠けの区間の記録はイベントも流す構成だけ（欠けの記録はイベントの流れで届く）")
         if gaps and gap_hold_bytes is None:
             raise ValueError("gaps の流れは gap_hold_bytes（位置の決まらない拍を持つ上限。既定は持たない）を明示する")
-        self._cursor = StreamCursor(rle, pack)              # サンプルの位置の数え（ここ 1 か所。GapPlacer もこれを進める）
+        self._cursor = StreamCursor(rle, pack, rle_format)              # サンプルの位置の数え（ここ 1 か所。GapPlacer もこれを進める）
         self._placer = GapPlacer(rle, pack, hold_bytes=gap_hold_bytes, cursor=self._cursor) if gaps else None
         self._events_next, self._events_capacity = events if events is not None else (0, 0)
         self._events_received = 0
@@ -273,6 +344,8 @@ class LaStream:
     def stats(self) -> StreamStats:
         elapsed = time.monotonic() - self._started if self._elapsed is None else self._elapsed
         return StreamStats(self._cursor.samples, self._received, elapsed, self.sample_period_s, self._overrun, self.link_buffer(),
+                           rle_format=self.rle_format if self.rle else "raw", wire_bytes=self._cursor.bytes,
+                           pad_bytes=self._cursor.pad_bytes,
                            gaps=self.gaps, unplaced_beats=self._placer.unplaced_beats if self._placer is not None else 0,
                            relay=self._relay,
                            gap_held_peak_bytes=self._placer.peak_held_bytes if self._placer is not None else 0,
@@ -388,14 +461,14 @@ class LaStream:
         if self._splitter is not None:
             data, events = self._split(data)
             if not data:
-                return (StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0)
+                return (StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0, rle_format=self.rle_format)
                         if events else None)
         else:
             data = self._whole_beats(data)
         if not data:
             return None
         first, previous, count = self._cursor.take(data)
-        return StreamChunk(data, self.rle, first, previous, events, self.pack, count=count)
+        return StreamChunk(data, self.rle, first, previous, events, self.pack, count=count, rle_format=self.rle_format)
 
     def _whole_beats(self, data):
         """見出しの無い流れ: 拍の境に揃える（前の受け取りの拍の途中をつなぎ、末尾の拍の途中は次へ）。揃っていれば写さない。"""
@@ -419,7 +492,7 @@ class LaStream:
         self._placer.add_beats(la)
         if not events:
             return []
-        return [StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0)]
+        return [StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0, rle_format=self.rle_format)]
 
     def _finish_gaps(self, reported: int, last_beat: int) -> list[StreamChunk]:
         if self._placer is None:
@@ -434,19 +507,19 @@ class LaStream:
         for piece in pieces:
             if piece[0] == "gap":
                 if gap is not None:                         # 欠けが続く（同じ位置の続きの件）: 前の欠けを中身なしで出す
-                    out.append(StreamChunk(b"", self.rle, gap.start + gap.samples, None, (), self.pack, gap, count=0))
+                    out.append(StreamChunk(b"", self.rle, gap.start + gap.samples, None, (), self.pack, gap, count=0, rle_format=self.rle_format))
                 gap = piece[1]
                 continue
             _, data, first, previous, count = piece
-            out.append(StreamChunk(data, self.rle, first, previous, (), self.pack, gap, count=count))
+            out.append(StreamChunk(data, self.rle, first, previous, (), self.pack, gap, count=count, rle_format=self.rle_format))
             gap = None
         if gap is not None:
-            out.append(StreamChunk(b"", self.rle, gap.start + gap.samples, None, (), self.pack, gap, count=0))
+            out.append(StreamChunk(b"", self.rle, gap.start + gap.samples, None, (), self.pack, gap, count=0, rle_format=self.rle_format))
         if events:
             if out:
                 out[0] = dataclasses.replace(out[0], events=events)
             else:
-                out.append(StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0))
+                out.append(StreamChunk(b"", self.rle, self._cursor.position, self._cursor.previous, events, self.pack, count=0, rle_format=self.rle_format))
         return out
 
     def _split(self, data) -> tuple[bytes, tuple[DapEvent, ...]]:

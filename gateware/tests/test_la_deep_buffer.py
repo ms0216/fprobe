@@ -1,9 +1,9 @@
 from fprobe_gw.rtl import CORE_GENERATED, rtl
 from fprobe_gw.toolchain.sim import run_cocotb
 
-SOURCES = ("core/generated/event_pkg.vhd", "common/util_pkg.vhd", "common/sync_bit.vhd", "common/cdc_value.vhd", "common/sync_fifo.vhd",
+SOURCES = ("core/generated/event_pkg.vhd", "core/generated/la_tok_pkg.vhd", "common/util_pkg.vhd", "common/sync_bit.vhd", "common/cdc_value.vhd", "common/sync_fifo.vhd",
            "common/async_fifo.vhd", "common/stream_unpack.vhd", "common/stream_slice.vhd", "la/la_pkg.vhd", "la/la_front.vhd",
-           "la/la_pack.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd",
+           "la/la_pack.vhd", "la/la_encoder.vhd", "la/la_tok_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd",
            "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd", "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "common/cdc_request.vhd", "common/hold_one.vhd", "la/la_run_cdc.vhd", "mem/la_write_track.vhd", "mem/mem_cmd_arb.vhd", "la/la_stream_sched.vhd", "la/la_deep_front.vhd", "la/la_deep_buffer.vhd")
 
 
@@ -58,3 +58,16 @@ def test_la_deep_buffer_stream_gaps_lanes(tmp_path):
     run_cocotb(parallel=True, toplevel="la_deep_buffer", sources=[CORE_GENERATED / "timing_pkg.vhd", *rtl(*SOURCES)],
                generics={**GAP_GENERICS, "LANES": 8, "IN_AGE": 5},
                test_module="tests.tb.la_deep_buffer_gap_tb", build_dir=tmp_path)
+
+
+def test_la_deep_buffer_rle_tokens(tmp_path):
+    """RLE のトークン形式（docs/superpowers/specs/2026-11-07-la-rle2-design.md）: 端子から PS の読みまで、欠け・tick を含めて。"""
+    run_cocotb(parallel=True, toplevel="la_deep_buffer", sources=[CORE_GENERATED / "timing_pkg.vhd", *rtl(*SOURCES)],
+               generics={**GAP_GENERICS, "RLE_TOKENS": True}, test_module="tests.tb.la_deep_buffer_tok_tb", build_dir=tmp_path)
+
+
+def test_la_deep_buffer_rle_tokens_repeat(tmp_path, monkeypatch):
+    """同じ、トークン形式の REPEAT を使う（TOK_REPEAT_EN = true・rle_repeat = 1。設計書 §3.7）: 拍の位置（欠けの長さ q）も REPEAT の展開後の時刻で合う。"""
+    monkeypatch.setenv("LDB_REPEAT", "1")
+    run_cocotb(parallel=True, toplevel="la_deep_buffer", sources=[CORE_GENERATED / "timing_pkg.vhd", *rtl(*SOURCES)],
+               generics={**GAP_GENERICS, "RLE_TOKENS": True, "TOK_REPEAT_EN": True}, test_module="tests.tb.la_deep_buffer_tok_tb", build_dir=tmp_path)

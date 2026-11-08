@@ -7,9 +7,9 @@ use work.csr_bus_pkg.all;
 use work.build_info_pkg.all;
 
 package design_caps_pkg is
-  constant CAPS_ROM : csr_word_array_t(0 to 105) := (
+  constant CAPS_ROM : csr_word_array_t(0 to 107) := (
     x"50414346",
-    x"000001A8",
+    x"000001B0",
     x"00040001",
     x"00000002",
     x"00070002",
@@ -42,7 +42,7 @@ package design_caps_pkg is
     x"0004000B",
     x"02000000",
     x"0004000D",
-    x"0007FFFB",
+    x"000FFFFB",
     x"0004000E",
     x"0000001F",
     x"0005000F",
@@ -70,6 +70,8 @@ package design_caps_pkg is
     x"05F5E100",
     x"00040018",
     x"02FAF080",
+    x"0004001A",
+    x"00100101",
     x"00900019",
     x"01000102",
     x"00010007",
@@ -127,6 +129,8 @@ package design_caps_pkg is
   constant LA_PULSE : boolean := true;
   constant LA_STREAM_EVENTS : boolean := true;
   constant LA_STREAM_GAPS : boolean := true;
+  constant LA_RLE_TOKENS : boolean := true;
+  constant LA_RLE_REPEAT : boolean := true;
   constant OBS_PORT : boolean := true;
   constant SYNC : boolean := true;
   constant XOUT_COUNT : natural := 2;

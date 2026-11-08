@@ -11,7 +11,7 @@
 
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf,
                                          selection: $ui.selection,
-                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt });
+                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt, linux: !!$app.target?.linux });
   const missing = $derived.by(() => {
     if (need === "elf" && !$dbg.files.length) return "elf";
     if (!cs.target || cs.target === "DISCONNECTED") return "connected";

@@ -35,7 +35,7 @@ def test_the_daemon_serves_hints_by_method_or_id(tmp_path):
         assert for_open and all("linux.halt.open" in h["methods"] for h in for_open)
         one = ai.call("session.hints", id=HINTS[0]["id"])
         assert one["total"] == 1 and one["hints"][0]["id"] == HINTS[0]["id"]
-        assert ai.call("session.hints", method="la.capture")["total"] == 1 and ai.call("session.hints", method="probe.info")["total"] == 0   # 付いていないメソッドは空（断らない）
+        assert {h["id"] for h in ai.call("session.hints", method="la.capture")["hints"]} == {"paths.write_permitted_dirs", "la.capture.external_memory_not_ready"} and ai.call("session.hints", method="probe.info")["total"] == 0   # 付いていないメソッドは空（断らない）
         with pytest.raises(ApiError, match="ヒントは無い"):
             ai.call("session.hints", id="no.such.hint")
         ai.close()
@@ -89,5 +89,33 @@ def test_a_hint_with_when_is_attached_only_to_the_kind_of_failure_it_is_about(tm
 
 def test_every_when_names_known_keys():
     for h in HINTS:
-        for key, values in h.get("when", {}).items():
-            assert key in ("code", "validator", "exception") and values and all(isinstance(v, str) for v in values), h["id"]
+        for field in ("when", "when_not"):
+            for key, values in h.get(field, {}).items():
+                assert key in ("code", "validator", "exception") and values and all(isinstance(v, str) for v in values), h["id"]
+
+
+def test_when_not_keeps_a_hint_off_the_failures_it_names():
+    from fprobe.api.core_types import _applies
+    hint = {"when": {"code": ["device"]}, "when_not": {"exception": ["NotConnected", "NoData"]}}
+    assert _applies(hint, {"code": "device", "exception": "RuntimeError"})
+    assert not _applies(hint, {"code": "device", "exception": "NotConnected"})
+    assert not _applies(hint, {"code": "invalid_params", "validator": "type"})        # when に合わない
+    assert not _applies(hint, None)                                                   # 失敗の種類を知らないときは付けない
+    assert _applies({}, None) and _applies({"when_not": {"exception": ["X"]}}, {"exception": "Y"})
+
+
+def test_a_hint_about_a_result_is_not_attached_to_a_failure_that_is_about_not_being_connected(tmp_path):
+    """未接続の失敗に、症状が機器の応答の中身のヒントを付けない（haiku の試験: target.halt の未接続に『停止中は ssh できない』、
+    debug.run_until_halt の未接続に『resume は待たない』が付いて、原因（接続の順序）から目を逸らした）。"""
+    from test_api_daemon import FakeBackend, _serve
+    from fprobe.api.client import ApiError, DaemonClient
+    url, _, stop = _serve(FakeBackend(), tmp_path)
+    try:
+        ai = DaemonClient(url, "claude", "ai")
+        with pytest.raises(ApiError) as caught:
+            ai.call("debug.run_until_halt", timeout_s=1.0)                 # 偽の機器は NotConnected を投げる
+        assert caught.value.data["exception"] == "NotConnected"
+        assert "run.wait_after_resume" not in caught.value.data.get("hint_ids", [])
+        ai.close()
+    finally:
+        stop()

@@ -420,3 +420,14 @@ def test_once_the_process_is_seen_to_exit_every_operation_says_so_the_same_way(w
             operation()
     assert d.status_facts()["last_stop"]["kind"] == "exit"                       # 状態の読みは通る
     s.debug_close()                                                              # close は通る
+
+
+def test_status_after_debug_close_shows_no_breakpoint_left(world):
+    """close は BKPT を全部外す。その後の status に『閉じたのに breakpoints: 1』と出ない（haiku の試験: 手元の一覧は消えず、
+    数がそのまま出て、まだ残っていると読めた）。"""
+    world.s.debug_attach(**ATTACH)
+    world.s.debug_break_insert(location="race.c:11", kind="sw")
+    assert world.s.status()["debug"]["breakpoints"] == 1                     # 閉じる前は 1
+    closed = world.s.debug_close()
+    assert closed["breakpoints_removed"] == 1
+    assert world.s.status()["debug"]["closed"] is True and world.s.status()["debug"]["breakpoints"] == 0

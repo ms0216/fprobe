@@ -51,7 +51,9 @@ class LongRecordingService:
 
     def recording_la_stream_start(self, rate_hz: float | None = None, rle: bool = True, chunk_s: float = 1.0,
                                   pack_channels: int | None = None, gaps: bool = False,
-                                  gap_hold_bytes: int | None = None, control_read_retries: int = 0) -> dict:
+                                  gap_hold_bytes: int | None = None, control_read_retries: int = 0,
+                                  rle_format: str | None = None, tick_us: float | None = None,
+                                  rle_repeat: bool | None = None, max_changes: int | None = None) -> dict:
         """記録中に、ロジアナを止めずに流し続けて記録へ入れる（止めるまで。日単位も可。chunk_s 秒ごとのかたまり）。
         イベントも流す構成（probe_design_get の features.la_stream_events。fprobe_la）では、イベント記録（DAP・UART・
         SWO の出来事）も同じ流れでデバイスの時刻のまま記録へ入り続ける（events_read 等の道具は流している間は使えない）。
@@ -64,7 +66,17 @@ class LongRecordingService:
         gap_hold_bytes（gaps = True のとき必ず指定。既定は無い）: 欠けの記録が届くまで位置の決まらない拍を PC に持つ上限（バイト）。
         超えたら推定で置かずに流れを止める（status の error に StreamHoldExceeded）。
         control_read_retries（既定 0）: 流している間の見回りの CSR の READ（読みに副作用が無い）の応答が時間切れになったとき、
-        送り直してよい回数。0 なら送り直さず流れが止まる（status の error）。送り直した回数は status の control.read_retries（事実）。"""
+        送り直してよい回数。0 なら送り直さず流れが止まる（status の error）。送り直した回数は status の control.read_retries（事実）。
+        rle_format（rle = True のときの RLE の形式）: "records"（1 レコード 4 バイト。None と同じ）か "tokens"（トークン形式: 変化 1 回がふつう
+        1 バイト。ケイパビリティ la_rle_tokens のある構成だけ。詰める・gaps とは今は一緒に使えない）。rle = False で指定すると断る。
+        tick_us（トークン形式のとき必ず指定。既定は無い。マイクロ秒、0 = 無し）: la_stream と同じ（変化の無い間の拍の払いの間隔）。
+        rle_repeat（トークン形式のときだけ指定できる。既定 None = False = REPEAT を使わない）: True で REPEAT を使う（la_stream と同じ。無損失）。
+        max_changes（既定 None = 上限なし。使う側が明示する。例: 100000000）: 記録に入れる変化点の総数の上限。記録は変化点ごとに保存先が要るので、
+        rle_repeat の周期的な信号は、受け取りが小さくても記録の大きさが変化点の数に比例して膨れる（100 MS/s の方形波は毎秒 1 億の変化点）。
+        メモリは膨れない（変化点は断片ごとに復号し、波形のかたまりは変化点が一定数たまるたびに閉じる）。上限を超えたら、上限ちょうどまでを記録に入れて
+        流れを止め、status の error に理由（ChangeLimitExceeded: 上限・入れた数・超えた最初の変化点のサンプル）を残す。
+        トークン形式の波形は、受け取りで変化点に復号して記録に入れる（記録の中の形は records と同じ）。status の rle_format・wire_bytes・
+        pad_bytes・changes・bytes_per_change は使った形式の事実（la_stream と同じ意味。changes は復号して数えた分だけ）。"""
         with self._host._lock:
             if self._host._recorder is None:
                 raise RuntimeError("記録していない（recording_start を先に）")
@@ -80,7 +92,7 @@ class LongRecordingService:
                 else:
                     self._host._collector.pause_events(True)
             stream = LaRecordingStream(device, self._host._recorder, rate_hz=rate_hz, rle=rle, chunk_s=chunk_s, pack_channels=pack_channels,
-                                       gaps=gaps, gap_hold_bytes=gap_hold_bytes, control_read_retries=control_read_retries,
+                                       gaps=gaps, gap_hold_bytes=gap_hold_bytes, control_read_retries=control_read_retries, rle_format=rle_format, tick_us=tick_us, rle_repeat=rle_repeat, max_changes=max_changes,
                                        lock=self._host._lock, on_end=self._la_record_ended, events_from=events_from,
                                        carry=carry, obs=self._host._collector.obs if self._host._collector is not None else None)
             try:

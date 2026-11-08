@@ -128,6 +128,122 @@ def test_packed_stream_lands_in_the_recording_as_every_sample_of_the_selected_ch
     assert start.body["channels"] == channels and start.body["pack_channels"] == channels
 
 
+class TimedTokenDevice(TimedStreamDevice):
+    """RLE のトークン形式を申告する偽物（ケイパビリティ la_rle_tokens）。"""
+
+    def capabilities(self):
+        from fprobe import la_tokens as T
+        from fprobe.caps import TokenInfo
+        return with_caps(super().capabilities(), la_rle_tokens=True, la_rle_token_info=TokenInfo(T.TOKEN_FORMAT_VERSION, False, False, 16))
+
+
+@pytest.mark.parametrize("kind", ["hold", "clock_slow", "sparse"])
+def test_token_stream_lands_in_the_recording_and_reports_the_format_facts(tmp_path, kind):
+    # 画面の Record Pins（RLE の形式 = tokens）が使う道: 受け取りで変化点に復号して記録に入り、形式の事実が status に出る
+    from fprobe import la_tokens as T
+    from test_la_tokens import random_signal
+    rng = random.Random(70)
+    samples = random_signal(rng, 40000, kind)
+    source = T.encode_tokens(samples)
+    dev = TimedTokenDevice(source, rng=rng, trigger=False)
+    rec = SegmentedRecorder(tmp_path / "r", HZ, policy=Policy(segment_s=3600))
+    s = LaRecordingStream(dev, rec, rle=True, chunk_s=5e-5, lock=threading.RLock(), rle_format="tokens", tick_us=1000)
+    s.start()
+    deadline = time.monotonic() + 5
+    while dev.written * 16 < len(source) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    status = s.stop()
+    rec.close()
+    assert not status["running"] and status["error"] is None and status["blocks"] >= 1
+    got = source[:dev.written * 16]
+    whole = T.decode_tokens(got)
+    assert status["rle_format"] == "tokens" and status["wire_bytes"] == len(got) and status["pad_bytes"] == whole.pad_bytes
+    assert status["changes"] == len(whole.values) and status["bytes_per_change"] == len(got) / len(whole.values)
+    r = Recording.open(tmp_path / "r")
+    expanded = _expand(r)
+    assert expanded and expanded == samples[:len(expanded)] and len(expanded) >= whole.end_time
+    start = [e for e in r.events(streams=["la"]) if e.kind == "stream_start"][0]
+    assert start.body["rle"] is True and start.body["rle_format"] == "tokens"
+
+
+def _run_token_stream(tmp_path, source, **kw):
+    rng = random.Random(1)
+    dev = TimedTokenDevice(source, rng=rng, trigger=False)
+    rec = SegmentedRecorder(tmp_path / "r", HZ, policy=Policy(segment_s=3600))
+    s = LaRecordingStream(dev, rec, rle=True, chunk_s=1.0, lock=threading.RLock(), rle_format="tokens", tick_us=1000, **kw)
+    s.start()
+    deadline = time.monotonic() + 5
+    while dev.written * 16 < len(source) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.05)
+    status = s.stop()
+    rec.close()
+    return Recording.open(tmp_path / "r"), status
+
+
+def test_repeat_stream_is_cut_into_bounded_blocks_with_the_same_waveform(tmp_path, monkeypatch):
+    # REPEAT は 1 トークンが大量の変化点になる。展開した変化点を 1 つのかたまりに溜めず、一定数ごとに閉じる（波形は同じ）
+    from fprobe import la_tokens as T
+    from test_la_tokens import clock
+    monkeypatch.setattr("fprobe.recording_stream.PIECE_CHANGES", 300)
+    monkeypatch.setattr("fprobe.recording_stream.BLOCK_CHANGES", 1000)
+    samples = clock(20000, 1) + clock(3000, 5)                           # 毎サンプル変化（2 万変化）+ 周期 10
+    source = T.encode_tokens(samples, repeat=True)
+    assert T.count_repeats(source) > 0 and len(source) < 400
+    r, status = _run_token_stream(tmp_path, source)
+    assert status["error"] is None and status["blocks"] >= 15           # 1 秒のかたまりまで待たず、変化点の数で閉じた
+    expanded = _expand(r)
+    whole = T.decode_tokens(source)
+    assert status["changes"] == len(whole.values)
+    assert expanded and expanded == samples[:len(expanded)] and len(expanded) >= whole.end_time
+
+
+def test_max_changes_stops_the_recording_with_the_facts_and_keeps_what_was_recorded(tmp_path, monkeypatch):
+    from fprobe import la_tokens as T
+    from test_la_tokens import clock
+    monkeypatch.setattr("fprobe.recording_stream.PIECE_CHANGES", 300)
+    monkeypatch.setattr("fprobe.recording_stream.BLOCK_CHANGES", 1000)
+    samples = clock(20000, 1)
+    source = T.encode_tokens(samples, repeat=True)
+    r, status = _run_token_stream(tmp_path, source, max_changes=5000)
+    assert "ChangeLimitExceeded" in status["error"] and "max_changes = 5000" in status["error"]
+    assert status["changes"] == 5000
+    expanded = _expand(r)
+    assert len(expanded) >= 4999 and expanded == samples[:len(expanded)]
+    with pytest.raises(ValueError):
+        LaRecordingStream(TimedTokenDevice(source, rng=random.Random(1), trigger=False), None, rle=True, max_changes=0)
+
+
+def test_records_stream_reports_its_format_and_does_not_count_changes_it_never_decoded(tmp_path):
+    rng = random.Random(8)
+    source = rle_source(rng, 3000)
+    dev = TimedStreamDevice(source, rng=rng, trigger=False)
+    rec = SegmentedRecorder(tmp_path / "r", HZ, policy=Policy(segment_s=3600))
+    s = LaRecordingStream(dev, rec, rle=True, chunk_s=5e-5, lock=threading.RLock())
+    s.start()
+    deadline = time.monotonic() + 5
+    while dev.written * 16 < len(source) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    status = s.stop()
+    rec.close()
+    assert status["rle_format"] == "records" and status["wire_bytes"] == dev.written * 16 and status["pad_bytes"] == 0
+    assert status["changes"] is None and status["bytes_per_change"] is None      # 生の拍で保存する: 復号して数えていない
+
+
+def test_token_stream_is_refused_with_the_reason_when_the_device_does_not_declare_it(tmp_path):
+    rng = random.Random(9)
+    dev = TimedStreamDevice(rle_source(rng, 100), rng=rng, trigger=False)       # la_rle_tokens を申告しない
+    rec = SegmentedRecorder(tmp_path / "r", HZ, policy=Policy(segment_s=3600))
+    s = LaRecordingStream(dev, rec, rle=True, chunk_s=1.0, lock=threading.RLock(), rle_format="tokens", tick_us=1000)
+    with pytest.raises(RuntimeError, match="la_rle_tokens"):
+        s.start()
+    s = LaRecordingStream(TimedTokenDevice(b"", rng=rng, trigger=False), rec, rle=False, chunk_s=1.0, lock=threading.RLock(),
+                          rle_format="tokens", tick_us=1000)
+    with pytest.raises(ValueError, match="rle = True"):
+        s.start()
+    rec.close()
+
+
 def test_locked_device_takes_the_lock_per_call():
     seen = []
 

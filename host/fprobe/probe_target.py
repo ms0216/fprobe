@@ -135,7 +135,9 @@ class TargetService:
             return status
 
     def target_disconnect(self) -> None:
-        """ターゲットから切断する。"""
+        """ターゲットから切断する。Linux のプロセスに attach している間は断る（linux.halt.debug.close で外す）。"""
+        if self._host._linux_view() is not None:
+            raise RuntimeError("Linux のプロセスに attach している間は切断しない（linux.halt.debug.close してから）")
         with self._host._lock:
             self._host._rtt = None
             self._host._watch_stops(False)

@@ -64,6 +64,7 @@ class FakeStream:
         self._chunks = chunks
         self.rle, self.pack, self.channels, self.sample_period_s = rle, pack, channels, period_s
         self.carries_events = False
+        self.rle_format = "records" if rle else "raw"
 
     def chunks(self, _duration):
         yield from self._chunks

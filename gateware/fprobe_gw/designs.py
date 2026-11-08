@@ -72,7 +72,7 @@ _CORE = ("core/core_pkg.vhd", "common/stream_slice.vhd", "core/csr_decoder.vhd",
          "debug/dap_cmd_swo.vhd", "debug/dap_cmd_sequence.vhd", "debug/dap_cmd_transfer.vhd", "debug/dap_processor.vhd", "debug/dap_phy_borrow.vhd", "debug/swd_injector.vhd", "debug/dap_sampler_pkg.vhd", "debug/dap_sampler_timer.vhd", "debug/dap_sampler_out.vhd", "debug/dap_sampler.vhd", "debug/sampler_match.vhd", "debug/dap_monitor.vhd",
          "serial/uart_tx.vhd", "serial/uart_rx.vhd", "serial/uart_bridge.vhd", "debug/swo_manchester_rx.vhd", "debug/swo_receiver.vhd",
          "la/la_filter.vhd", "la/la_probe_inputs.vhd", "la/la_pulse.vhd", "la/la_pkg.vhd", "la/la_front.vhd", "la/la_record.vhd", "la/la_capture.vhd", "la/la_lane_front.vhd", "la/la_lane_capture.vhd", "la/la_lane_inputs.vhd", "la/la_cap_domain.vhd", "la/la_mem_csr.vhd", "common/cdc_value.vhd", "mem/mem_test.vhd", "mem/mem_test_sys.vhd", "common/async_fifo.vhd",
-         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd",
+         "common/stream_unpack.vhd", "common/sync_fifo.vhd", "la/la_pack.vhd", "la/la_testgen.vhd", "la/la_encoder.vhd", "la/la_tok_encoder.vhd", "la/la_lane_raw.vhd", "la/la_lane_rle.vhd", "la/la_lane_encoder.vhd", "mem/mem_ring_pkg.vhd", "mem/la_mem_writer.vhd",
          "mem/mem_reader.vhd", "la/la_stream_gap.vhd", "common/cdc_request.vhd", "common/hold_one.vhd", "la/la_run_cdc.vhd", "mem/la_write_track.vhd", "mem/mem_cmd_arb.vhd", "la/la_stream_sched.vhd", "la/la_deep_front.vhd", "la/la_deep_buffer.vhd", "la/la_ps_port.vhd", "common/sdp_ram.vhd", "la/event_ring.vhd",
          "core/trig_seq.vhd", "core/xtrig_out.vhd", "core/pin_select.vhd", "core/debug_pin_func.vhd", "core/csr_absent.vhd", "core/aux_link.vhd", "core/sync_link.vhd", "core/event_byte_pack.vhd", "core/event_collector.vhd",
          "core/core_debug.vhd", "core/core_xtrig.vhd", "core/core_periph.vhd", "core/core_la.vhd", "core/core_storage.vhd",
@@ -83,7 +83,7 @@ def core_sources(caps_package: Path) -> list[Path]:
     """fprobe_core とその依存（依存順）。caps_package はデザインのケイパビリティ生成パッケージ。"""
     return [*rtl("common/util_pkg.vhd", "common/sync_bit.vhd", "core/csr_bus_pkg.vhd"),
             CORE_GENERATED / "csr_map_pkg.vhd", CORE_GENERATED / "timing_pkg.vhd", CORE_GENERATED / "ps_window_pkg.vhd",
-            CORE_GENERATED / "event_pkg.vhd", build_info.DEFAULT_PACKAGE,
+            CORE_GENERATED / "event_pkg.vhd", CORE_GENERATED / "la_tok_pkg.vhd", build_info.DEFAULT_PACKAGE,
             *(CORE_GENERATED / f"csr_{b.name}.vhd" for b in FPROBE_MAP.blocks if not b.external),
             caps_package,
             *rtl(*_CORE)]
@@ -185,7 +185,7 @@ def _pynq(name: str, *, mem_bytes: int = 0, cap: bool = False, lanes: bool = Fal
             la_sample_hz=pll.cap_hz(ratio) if cap else pll.fout_hz * n, cap_ratio=ratio,
             la_lanes=n, la_fine_pins=lanes, la_filter=not lanes, la_pulse=not lanes,
             la_lane_in_age=pynq_z2_iserdes_newest_age(n) if lanes else 0,
-            mem_bytes=mem_bytes, la_stream_events=deep, la_stream_ps=deep, la_stream_gaps=deep, la_pack=deep, event_ring_bits=0 if deep else 10,
+            mem_bytes=mem_bytes, la_stream_events=deep, la_stream_ps=deep, la_stream_gaps=deep, la_rle_tokens=deep and n == 1, la_rle_repeat=deep and n == 1, la_pack=deep, event_ring_bits=0 if deep else 10,
             outputs=PYNQ_Z2.outputs(), uart_flow=PYNQ_Z2.uart_flow(), la_inputs=PYNQ_Z2.la_inputs(),
             fpga_obs=True, sync=deep, la_testgen=cap or deep or lanes, event_byte_pack=True, sampler_check_max=16,
             la_stream_bytes_per_s=PYNQ_Z2_STREAM_BYTES_PER_S if deep else 0))

@@ -65,6 +65,10 @@ FEATURE_WATCH_START = 1 << 18      # 割り込み書き込みの始動の列（C
                                     # サンプラの値の一致の門（sampler_match.control.after_start・first_sample・started、fire.first）を
                                     # 開ける経路。値の一致と割り込み書き込みの両方がある構成。無ければそれらの CSR は無い。
                                     # docs/superpowers/specs/2026-11-03-halt-watch-fpga-restart-design.md
+FEATURE_LA_RLE_TOKENS = 1 << 19    # 深いバッファの垂れ流しの RLE にトークン形式（変化 1 回がふつう 1 バイト）がある
+                                    # （CSR la_deep.control.rle_fmt・tick・pad_bytes・keyframes。Capabilities.la_rle_tokens。
+                                    # 詳細は TLV LA_RLE_TOKEN_INFO）。無ければレコード形式（4 バイト）だけ。
+                                    # docs/superpowers/specs/2026-11-07-la-rle2-design.md
 # 同期の段数（SYNC_*_TICKS）は時刻の表 fprobe_gw.timing が正（このモジュールは読み込んで同じ名前で出す）
 TYPE_DEBUG = 14              # u32 ビットマップ（DEBUG_*。デバッグポートの構成。無い古いデバイスは全部ある）
 DEBUG_JTAG = 1 << 0          # JTAG の PHY（無ければ DAP_Connect の JTAG は失敗）
@@ -114,6 +118,13 @@ TYPE_TIMING = 25             # 情報源ごとの時刻の点（時刻の表 tim
                              # 申告の無い情報源・無い古いデバイスは、ホストがその版の回路のいまの意味で読む。
                              # docs/superpowers/specs/2026-11-01-time-accuracy-design.md §4.2（段階 S1）。DAP の線上の点の
                              # 端子までの段（段階 S2）も情報源 dap_swd・dap_jtag としてここで申告する（別の TLV にしない。§12.4）
+TYPE_LA_RLE_TOKEN_INFO = 26  # トークン形式の中身（u32。FEATURES の LA_RLE_TOKENS のある構成だけ）: [7:0] 形式の版、[8] REPEAT あり、
+                             # [9] 使う ch の窓あり、[15:10] 予約（0）、[23:16] 1 周期に符号器が受けるバイト数の上限、[31:24] 予約（0）。
+                             # ホストは版を知らなければ断る。docs/superpowers/specs/2026-11-07-la-rle2-design.md §7.2
+LA_RLE_TOKEN_VERSION = 1
+LA_RLE_TOKEN_REPEAT = 1 << 8
+LA_RLE_TOKEN_WINDOW = 1 << 9
+LA_RLE_TOKEN_ACCEPT_BYTES_SHIFT = 16
 TYPE_UART_FLOW = 17          # UART の RTS/CTS（U52。CSR uart.flow）: 端子の候補 1 本に 1 バイト（ロジアナのチャンネル。
                              # flow.rts_pin・cts_pin の番号の順）。無ければフロー制御の回路が無い
 
@@ -155,6 +166,12 @@ class Capabilities:
     # ストリームで溢れても止めず、欠けの区間をイベントに記録して続けられる（la_deep_buffer の STREAM_GAPS。外部メモリがあり、
     # ストリームにイベントも流す構成だけ。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12）
     la_stream_gaps: bool = False
+    # 深いバッファの垂れ流しの RLE にトークン形式がある（la_deep_buffer の RLE_TOKENS。1 周期 1 サンプルの構成だけ。
+    # docs/superpowers/specs/2026-11-07-la-rle2-design.md §5・§7）。使う ch の窓は無い
+    la_rle_tokens: bool = False
+    # そのトークン形式に REPEAT（周期的な信号の繰り返しを 1 トークンにまとめる。仕様 §3.7）の回路がある（TLV LA_RLE_TOKEN_INFO の [8]。
+    # 使うかは run の 0→1 の時点の CSR la_deep.control.rle_repeat で使う側が選ぶ）
+    la_rle_repeat: bool = False
     la_pack: bool = False            # ストリームで使うチャンネルだけ詰められる（外部メモリ = 深いバッファのある構成だけ）
     la_testgen: bool = False         # 試験用の方形波（ピンに出す。刻むクロックは cap_ratio > 1 なら cap_clk、そうでなければ sys）
     fpga_obs: bool = False           # 対象の FPGA の観測の口（obs_*。大きい FPGA の構成だけ）
@@ -206,6 +223,10 @@ class Capabilities:
             raise ValueError("チャンネルを詰める（la_pack）のは外部メモリ（深いバッファ）のある構成だけ")
         if self.la_stream_ps and not (self.mem_bytes and self.la_stream_events):
             raise ValueError("PS の直接読み（la_stream_ps）は外部メモリがあり、ストリームにイベントも流す構成だけ")
+        if self.la_rle_tokens and not (self.mem_bytes and not self.mem_test and self.la_lanes == 1):
+            raise ValueError("RLE のトークン形式（la_rle_tokens）は外部メモリがあり、1 周期 1 サンプルの構成だけ（段階 2）")
+        if self.la_rle_repeat and not self.la_rle_tokens:
+            raise ValueError("トークン形式の REPEAT（la_rle_repeat）はトークン形式（la_rle_tokens）のある構成だけ")
         if self.la_stream_gaps and not (self.mem_bytes and self.la_stream_events and not self.mem_test):
             raise ValueError("欠けの区間の記録（la_stream_gaps）は外部メモリがあり、ストリームにイベントも流す構成だけ（欠けの記録はイベントの流れで届く）")
         if self.event_ring_bits and self.mem_bytes:
@@ -335,6 +356,7 @@ def _encode(caps: Capabilities, build: list[int] | None = None) -> tuple[bytes, 
                                 | FEATURE_LA_STREAM_USAGE * bool(caps.mem_bytes and not caps.mem_test)
                                 | FEATURE_DAP_LINE_TIME
                                 | FEATURE_LA_STREAM_GAPS * caps.la_stream_gaps
+                                | FEATURE_LA_RLE_TOKENS * caps.la_rle_tokens
                                 | FEATURE_SAMPLER_MATCH * (caps.sampler_match and caps.sampler and caps.xtrig)
                                 | FEATURE_WATCH_START * (caps.sampler_match and caps.sampler and caps.xtrig and caps.inject))),
         _tlv(TYPE_DEBUG, u32(DEBUG_JTAG * caps.jtag | DEBUG_INJECT * caps.inject
@@ -349,6 +371,9 @@ def _encode(caps: Capabilities, build: list[int] | None = None) -> tuple[bytes, 
         *([_tlv(TYPE_LA_TESTGEN_HZ, u32(la_testgen_hz(caps)))] if caps.la_testgen else []),
         *([_tlv(TYPE_LA_FINE, u32(la_fine_channels(caps)))] if caps.la_lanes > 1 else []),
         *([_tlv(TYPE_LA_STREAM_BYTES_PER_S, u32(caps.la_stream_bytes_per_s))] if caps.la_stream_bytes_per_s else []),
+        *([_tlv(TYPE_LA_RLE_TOKEN_INFO, u32(LA_RLE_TOKEN_VERSION | LA_RLE_TOKEN_REPEAT * caps.la_rle_repeat
+                                           | 16 << LA_RLE_TOKEN_ACCEPT_BYTES_SHIFT))]
+          if caps.la_rle_tokens else []),
         _tlv(TYPE_TIMING, timing_bytes(caps)),
     ])
     body = head + _tlv(TYPE_BUILD, b"".join(map(u32, build))) + _tlv(TYPE_END, b"")
@@ -408,6 +433,8 @@ def render_package(package: str, caps: Capabilities) -> str:
         f"  constant LA_PULSE : boolean := {str(caps.la_pulse).lower()};",
         f"  constant LA_STREAM_EVENTS : boolean := {str(caps.la_stream_events).lower()};",
         f"  constant LA_STREAM_GAPS : boolean := {str(caps.la_stream_gaps).lower()};",
+        f"  constant LA_RLE_TOKENS : boolean := {str(caps.la_rle_tokens).lower()};",
+        f"  constant LA_RLE_REPEAT : boolean := {str(caps.la_rle_repeat).lower()};",
         f"  constant OBS_PORT : boolean := {str(caps.fpga_obs).lower()};",
         f"  constant SYNC : boolean := {str(caps.sync).lower()};",
         f"  constant XOUT_COUNT : natural := {caps.output_actions if caps.outputs else 0};",
@@ -447,6 +474,9 @@ HOST_CONSTANTS = {
     "FEATURE_EVENT_BYTE_PACK": FEATURE_EVENT_BYTE_PACK, "FEATURE_LA_STREAM_USAGE": FEATURE_LA_STREAM_USAGE,
     "FEATURE_DAP_LINE_TIME": FEATURE_DAP_LINE_TIME,
     "FEATURE_LA_STREAM_GAPS": FEATURE_LA_STREAM_GAPS, "FEATURE_WATCH_START": FEATURE_WATCH_START,
+    "FEATURE_LA_RLE_TOKENS": FEATURE_LA_RLE_TOKENS, "CAPS_LA_RLE_TOKEN_INFO": TYPE_LA_RLE_TOKEN_INFO,
+    "LA_RLE_TOKEN_VERSION": LA_RLE_TOKEN_VERSION, "LA_RLE_TOKEN_REPEAT": LA_RLE_TOKEN_REPEAT,
+    "LA_RLE_TOKEN_WINDOW": LA_RLE_TOKEN_WINDOW, "LA_RLE_TOKEN_ACCEPT_BYTES_SHIFT": LA_RLE_TOKEN_ACCEPT_BYTES_SHIFT,
     "SYNC_RX_LATENCY_TICKS": SYNC_RX_LATENCY_TICKS, "SYNC_TX_LATENCY_TICKS": SYNC_TX_LATENCY_TICKS,
     "SYNC_RX_PHASE_SPAN_TICKS": SYNC_RX_PHASE_SPAN_TICKS,
     "CAPS_BUILD": TYPE_BUILD,

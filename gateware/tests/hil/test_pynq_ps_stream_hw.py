@@ -29,7 +29,7 @@ def run_stream(rate_hz, duration_s, *, session_kw=None, stream_kw=None, probe_co
     udp_may_lose: UDP の経路は、PC の NIC・負荷で落ちうる（落ちた回は lost_frames が 50〜125。2026-10-31 実測）。落ちたとき、
     ストリームの検査が StreamFormatError で止まり、かつ lost_frames > 0（落ちたことが検出されている）なら、統計は None で返す。
     lost_frames が 0 のまま壊れたら（検出されない欠け・壊れ）は、そのまま失敗にする。"""
-    with Session.open_eth(HOST, **(session_kw or {})) as session:
+    with Session.open_eth(HOST, link_up_wait_s=8, **(session_kw or {})) as session:
         la = DeepAnalyzer(session.device)
         if not getattr(la.caps, "la_stream_ps", False):
             pytest.skip("この PYNQ の回路に la_stream_ps が無い（fprobe_pynq_deep の版 2 を入れる）")
@@ -82,7 +82,7 @@ def test_packed_stream_keeps_every_sample_at_the_rate_the_unpacked_stream_cannot
     # 使うチャンネルだけ詰める（la_pack）と、データ量が 16 ch の 1/2・1/4・1/8。8 ch の 50 MS/s・4 ch の 100 MS/s は 50 MB/s で、
     # 16 ch のままなら 100 MB/s・200 MB/s で流せない。欠けなし（overrun なし・欠けたフレームなし・サンプル数がレート × 時間と一致）。
     # 入力はつないでいない（信号は一定）ので、中身の並びはここでは見ない（シミュレーションで確認）
-    with Session.open_eth(HOST) as session:
+    with Session.open_eth(HOST, link_up_wait_s=8) as session:
         if not getattr(DeepAnalyzer(session.device).caps, "la_pack", False):
             pytest.skip("この PYNQ の回路に la_pack が無い（チャンネルを詰めた fprobe_pynq_deep を入れる）")
     stats, lost, _ = run_stream(rate_mhz, 10.0, stream_kw={"pack_channels": channels})
@@ -102,7 +102,7 @@ def test_the_capture_read_by_the_ps_equals_the_one_read_through_the_window_and_i
     """トリガ取り込みの読み出し（書き込みが止まったロジアナのリング）を、PS が DDR から直接読んで TCP で送る形と、窓経由とで、
     同じ取り込みを読んで、中身が一致し、PS 直読みの方が速い。"""
     from fprobe import generated as g
-    with Session.open_eth(HOST) as session:
+    with Session.open_eth(HOST, link_up_wait_s=8) as session:
         la = DeepAnalyzer(session.device)
         if not getattr(la.caps, "la_stream_ps", False):
             pytest.skip("この PYNQ の回路に la_stream_ps が無い")

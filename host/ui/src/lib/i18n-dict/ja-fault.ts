@@ -31,7 +31,7 @@ export const JA_FAULT: Record<keyof typeof EN_FAULT, string> = {
   "fault.noFrame": "例外フレームを読み出せません（ハンドラが LR を書き換えた後で停止したか、例外処理中ではありません）",
   "fault.registers": "フォールト レジスタ",
   "fault.haltReason": "中断の理由",
-  "halt.request": "停止要求",
+  "halt.request": "停止要求・ステップ・クロストリガ",
   "halt.breakpoint": "ブレークポイント",
   "halt.bkpt_instruction": "ファームウェアの BKPT 命令（panic・assert 等）",
   "halt.watchpoint": "ウォッチポイント",

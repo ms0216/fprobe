@@ -34,7 +34,7 @@ def session():
     deadline = time.monotonic() + 15                   # PHY のリンク確立（自動ネゴシエーション）を待つ
     while True:
         try:
-            s = Session.open_eth(HOST)
+            s = Session.open_eth(HOST, link_up_wait_s=8)
             break
         except (TimeoutError, OSError):
             if time.monotonic() > deadline:
@@ -93,7 +93,7 @@ def test_reopening_after_a_stream_and_a_dap_burst(session):
     # docs/reports/2026-10-16-day.md）。その並びを繰り返して検出する
     from fprobe.events import EventLog
     for _ in range(3):
-        with Session.open_eth(HOST) as s:
+        with Session.open_eth(HOST, link_up_wait_s=8) as s:
             log = EventLog(s.device)
             log.start()
             time.sleep(0.02)

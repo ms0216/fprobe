@@ -8,11 +8,13 @@
 
   let {
     rec, linkOpen, needsRate, pinsStartMissing, withMemory = $bindable(), memoryRateText = $bindable(), withPins = $bindable(),
-    pinsFormat = $bindable(), pinsRateText = $bindable(), pinsChannels = $bindable(), onStart, onStop, onTimeline,
+    pinsFormat = $bindable(), pinsRateText = $bindable(), pinsChannels = $bindable(), pinsRleFormat = $bindable(), pinsTickText = $bindable(), pinsRepeat = $bindable(), pinsMaxChangesText = $bindable(),
+    rleFormats, tokensCaps, onStart, onStop, onTimeline,
   }: {
     rec: Result<"recording.status"> | null; linkOpen: boolean; needsRate: boolean; pinsStartMissing: boolean;
     withMemory: boolean; memoryRateText: string; withPins: boolean; pinsFormat: "" | "rle" | "raw"; pinsRateText: string;
-    pinsChannels: string; onStart: () => void; onStop: () => void; onTimeline: () => void;
+    pinsChannels: string; pinsRleFormat: string; pinsTickText: string; pinsRepeat: boolean; pinsMaxChangesText: string; rleFormats: string[]; tokensCaps: "yes" | "no" | "unknown";
+    onStart: () => void; onStop: () => void; onTimeline: () => void;
   } = $props();
 </script>
 
@@ -35,6 +37,23 @@
       <label class="small" title={$i18n("timeline.rleTip")}>{$i18n("timeline.rle")}<Req />
         <select bind:value={pinsFormat} aria-required="true">
           <option value=""></option><option value="rle">RLE</option><option value="raw">RAW</option></select></label>
+      {#if pinsFormat === "rle" && rleFormats.length}
+        <label class="small" title={$i18n("system.pinsRleFormatTip", { caps: $i18n(tokensCaps === "yes" ? "system.pinsCapsYes" : tokensCaps === "no" ? "system.pinsCapsNo" : "system.pinsCapsUnknown") })}>
+          {$i18n("system.pinsRleFormat")}<Req />
+          <select bind:value={pinsRleFormat} aria-required="true">
+            <option value=""></option>
+            {#each rleFormats as f (f)}<option value={f}>{f}</option>{/each}
+          </select></label>
+        {#if pinsRleFormat === "tokens"}
+          <label class="small" title={$i18n("system.pinsTickTip")}>{$i18n("system.pinsTick")}<Req />
+            <input class="rate mono" inputmode="decimal" aria-required="true" bind:value={pinsTickText} /></label>
+          <label class="small" title={$i18n("system.pinsRepeatTip")}><input type="checkbox" class="check" bind:checked={pinsRepeat} />{$i18n("system.pinsRepeat")}</label>
+          {#if pinsRepeat}
+            <label class="small" title={$i18n("system.pinsMaxChangesTip")}>{$i18n("system.pinsMaxChanges")}
+              <input class="rate mono" inputmode="numeric" placeholder={$i18n("system.pinsMaxChangesPlaceholder")} bind:value={pinsMaxChangesText} /></label>
+          {/if}
+        {/if}
+      {/if}
       {#if pinsFormat === "raw"}
         <label class="small" title={$i18n("system.pinsRateTip")}>{$i18n("system.pinsRate")}<Req />
           <input class="rate mono" inputmode="decimal" placeholder={$i18n("system.pinsRatePlaceholder")} aria-required="true"

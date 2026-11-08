@@ -370,14 +370,14 @@ class LowLevelService:
 
     # --- 診断 -------------------------------------------------------------------------------------
 
-    def target_diagnose(self, frequencies_hz: list[int] | None = None, max_aps: int = 8, jtag: bool = True) -> dict:
+    def target_diagnose(self, frequencies_hz: list[int], max_aps: int = 8, jtag: bool = True) -> dict:
         """ターゲットにつながらない理由を順に調べる（未接続のときだけ）: 電圧 → ピン → SWD（切り替え・休眠・
         複数ドロップ）→ JTAG のチェーン → DP（電源の要求）→ AP・ROM テーブル → コア → 部品の判別 → 保護。
-        frequencies_hz: 試す速さ（この順に。省略は [DEFAULT_HZ] の 1 つだけ。暗黙に下げない）。段ごとの status（ok 読めた /
+        frequencies_hz: 試す速さ（この順に。使う側が必ず渡す。既定は持たず、暗黙に下げない）。段ごとの status（ok 読めた /
         fail 読めなかった / skip）・message・data と、reached（DP に届いた）・応答した protocol と frequency_hz を返す。
         結論の文・接続の引数のおすすめはプラグイン（fprobe.plugins.heuristics.diagnose_verdict）。"""
         with self._host._lock:
-            d = self._diagnose(frequencies_hz or [DEFAULT_HZ], max_aps, jtag)
+            d = self._diagnose(frequencies_hz, max_aps, jtag)
             return d.as_dict()
 
     def _diagnose(self, frequencies_hz: list[int], max_aps: int, jtag: bool, measure: bool = True) -> diag.Diagnosis:

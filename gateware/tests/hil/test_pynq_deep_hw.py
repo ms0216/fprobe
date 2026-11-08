@@ -34,7 +34,7 @@ def session():
     deadline = time.monotonic() + 15
     while True:
         try:
-            s = Session.open_eth(HOST)
+            s = Session.open_eth(HOST, link_up_wait_s=8)
             break
         except (TimeoutError, OSError):
             if time.monotonic() > deadline:

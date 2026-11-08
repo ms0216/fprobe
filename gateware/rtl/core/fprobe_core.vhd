@@ -58,6 +58,8 @@ entity fprobe_core is
     LA_PULSE      : boolean := true;       -- パルス幅のトリガ（la_pulse）
     LA_STREAM_EVENTS : boolean := false;   -- 深いバッファのストリームにイベントも見出し付きで流す（R1。ケイパビリティ
                                            -- FEATURES の LA_STREAM_EVENTS と一致させる。外部メモリのある構成で）
+    LA_RLE_TOKENS : boolean := false;      -- 深いバッファの垂れ流しの RLE にトークン形式がある（FEATURES の LA_RLE_TOKENS と一致させる。1 周期 1 サンプルの構成だけ）
+    LA_RLE_REPEAT : boolean := false;      -- そのトークン形式に REPEAT（周期的な信号の繰り返しを 1 トークンにまとめる）がある（TLV LA_RLE_TOKEN_INFO の REPEAT と一致させる。LA_RLE_TOKENS が要る）
     LA_STREAM_GAPS : boolean := false;     -- 深いバッファのストリームで溢れても止めず欠けの区間を記録して続けられる（FEATURES の
                                            -- LA_STREAM_GAPS と一致させる。LA_STREAM_EVENTS が要る。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12）
     -- 外部メモリの無い構成のイベント記録の件数（2 のべき。0 = 無し。外部メモリのある構成では使わない）
@@ -449,7 +451,7 @@ begin
 
   storage_i : entity work.core_storage
     generic map (MEM_ADDR_BITS => MEM_ADDR_BITS, MEM_TEST => MEM_TEST, LA_STREAM_EVENTS => LA_STREAM_EVENTS,
-                 LA_STREAM_GAPS => LA_STREAM_GAPS, EVENT_RING_BITS => EVENT_RING_BITS,
+                 LA_STREAM_GAPS => LA_STREAM_GAPS, LA_RLE_TOKENS => LA_RLE_TOKENS, LA_RLE_REPEAT => LA_RLE_REPEAT, EVENT_RING_BITS => EVENT_RING_BITS,
                  EVENT_COUNT_START_BELOW_4G => EVENT_COUNT_START_BELOW_4G, EVENT_BYTE_PACK => EVENT_BYTE_PACK,
                  MEM_SAME_CLOCK => MEM_SAME_CLOCK, LA_LANES => LA_LANES, LA_LANE_IN_AGE => LA_LANE_IN_AGE,
                  USE_DEEP_LANES => USE_DEEP_LANES, EXT_DELAY => EXT_TRIGGER_DELAY)

@@ -39,7 +39,7 @@
       <span class="mode" title={$i18n("watch.elfOnlyTip")}>{$i18n("watch.elfOnly")}</span>
     {/if}
     {#if via && $dbg.watches.length}
-      <span class="mode mono" title={$i18n("write.viaTip", { api: via })}>✎ {via}</span>
+      <span class="mode mono" title={$i18n("write.viaTip", { api: via })}>✎ {$i18n("watch.editable")}</span>
     {/if}
   </form>
   <VarTree {roots} {dbg} gen={$dbg.gen} stops={$dbg.stops} {via}>

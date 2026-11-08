@@ -15,7 +15,7 @@ if _ETH:
     _open_eth = Session.open_eth
 
     def _open(cls, serial=None):
-        return _open_eth(_ETH)
+        return _open_eth(_ETH, link_up_wait_s=8)
 
     Session.open = classmethod(_open)                   # type: ignore[method-assign]
     _program_module.program = lambda design="fprobe", **kwargs: None

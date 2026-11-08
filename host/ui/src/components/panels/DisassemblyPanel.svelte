@@ -28,7 +28,7 @@
   const marked = $derived(markedAddresses($dbg));
   const framePc = $derived($dbg.frame > 0 ? $dbg.backtrace[$dbg.frame]?.pc : undefined);
   const cs = $derived<CommandState>({ link: $app.link, target: $app.target?.state, elf: $dbg.elf, selection: $ui.selection,
-                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt });
+                                         editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt, linux: !!$app.target?.linux });
   const step = command("stepInstruction");
   // いまの命令（頼まれた番地、選んだフレームの命令）を見える位置へ
   $effect(() => {

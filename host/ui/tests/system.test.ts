@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { fieldsText, parseAddress, sanitizeWatches } from "../src/lib/system";
 import * as system from "../src/lib/system";
+import { enumOf, suggestedOf } from "../src/lib/apispec";
 import { FakeConn } from "./fake-conn";
 import type { AppState } from "../src/lib/state";
 
@@ -223,21 +224,55 @@ describe("結果の直前に多い出来事の引数（recording.correlate）", 
 
 describe("ピンの垂れ流しの始め方（形式・サンプルレート・チャンネル数は使う人が選ぶ。画面で既定を決めない）", () => {
   it("RLE は、これまでどおり形式だけ（サンプルレートとチャンネル数は送らない）", () => {
-    expect(system.pinsStreamStart("rle", "", "")).toEqual({ rle: true });
-    expect(system.pinsStreamStart("rle", "50", "8")).toEqual({ rle: true });              // RAW の欄は無視（RLE は 16 ビットの値の繰り返し）
+    expect(system.pinsStreamStart("rle", "", "", "records")).toEqual({ rle: true, rle_format: "records" });
+    expect(system.pinsStreamStart("rle", "50", "8", "tokens", "1000")).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000 });
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "0")).toEqual({ rle: true, rle_format: "tokens", tick_us: 0 });
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "")).toBeNull();                                                  // tick_us は明示する
+    expect(system.pinsStreamStart("rle", "50", "8", "tokens", "1000")).toBeTruthy();              // RAW の欄は無視（RLE は 16 ビットの値の繰り返し）
+  });
+  it("REPEAT は使う人が選んだときだけ送る（トークン形式のときだけ。選ばなければ API の既定 = 使わない）", () => {
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", true)).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000, rle_repeat: true });
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", false)).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000 });
+    expect(system.pinsStreamStart("rle", "", "", "records", "", true)).toEqual({ rle: true, rle_format: "records" });        // records に REPEAT は無い
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "", true)).toBeNull();                                            // tick_us は明示する
+  });
+  it("変化点の上限は REPEAT を選んだときだけ・入れたときだけ送る（空 = 上限なし。入れたのに誤りなら始められない）", () => {
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", true, "100000000")).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000, rle_repeat: true, max_changes: 100000000 });
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", true, "")).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000, rle_repeat: true });
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", true, "0")).toBeNull();
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", true, "1e8")).toBeNull();
+    expect(system.pinsStreamStart("rle", "", "", "tokens", "1000", false, "5")).toEqual({ rle: true, rle_format: "tokens", tick_us: 1000 });
   });
   it("RAW は、サンプルレート（MS/s）とチャンネル数の両方が要る。片方でも空・誤りなら始められない（null）", () => {
-    expect(system.pinsStreamStart("raw", "", "16")).toBeNull();
-    expect(system.pinsStreamStart("raw", "50", "")).toBeNull();
-    expect(system.pinsStreamStart("raw", "0", "8")).toBeNull();
-    expect(system.pinsStreamStart("raw", "abc", "8")).toBeNull();
-    expect(system.pinsStreamStart("raw", "50", "5")).toBeNull();                          // 詰められない数
-    expect(system.pinsStreamStart("", "50", "8")).toBeNull();                             // 形式が未選択
+    expect(system.pinsStreamStart("raw", "", "16", "records")).toBeNull();
+    expect(system.pinsStreamStart("raw", "50", "", "records")).toBeNull();
+    expect(system.pinsStreamStart("raw", "0", "8", "records")).toBeNull();
+    expect(system.pinsStreamStart("raw", "abc", "8", "records")).toBeNull();
+    expect(system.pinsStreamStart("raw", "50", "5", "records")).toBeNull();                          // 詰められない数
+    expect(system.pinsStreamStart("", "50", "8", "records")).toBeNull();                             // 形式が未選択
+  });
+  it("RLE の符号化（records / tokens）は使う人が選んだものを明示して送る。空・知らない値は始められない（API の既定に黙って任せない）", () => {
+    expect(system.pinsStreamStart("rle", "", "", "")).toBeNull();
+    expect(system.pinsStreamStart("rle", "", "", "bogus")).toBeNull();
+    expect(system.pinsStreamStart("raw", "25", "16", "")).toEqual({ rle: false, rate_hz: 25e6, pack_channels: null });   // RAW には符号化の選択は関係しない
+  });
+  it("符号化の選択肢と最初の値は API の仕様から取る（画面のコードに値を書かない）", () => {
+    expect(enumOf("recording.la_stream.start", "rle_format")).toEqual(["records", "tokens"]);
+    expect(suggestedOf("recording.la_stream.start", "rle_format")).toBe("records");
+    expect(enumOf("recording.la_stream.start", "no_such_param")).toEqual([]);
+  });
+  it("形式の統計は API の欄をそのまま見せる（割り算・判定をしない）。無い欄は — 、古いデーモンは出さない", () => {
+    const base = { running: true, blocks: 1, error: null, events: null };
+    expect(system.pinsStreamFacts({ ...base, rle_format: "tokens", wire_bytes: 1234567, pad_bytes: 37000, changes: 1180000, bytes_per_change: 1.046 }))
+      .toEqual({ format: "tokens", wire: (1234567).toLocaleString(), pad: (37000).toLocaleString(), changes: (1180000).toLocaleString(), perChange: "1.046" });
+    expect(system.pinsStreamFacts({ ...base, rle_format: "records", wire_bytes: 64, pad_bytes: 0, changes: null, bytes_per_change: null }))
+      .toEqual({ format: "records", wire: "64", pad: "0", changes: "—", perChange: "—" });
+    expect(system.pinsStreamFacts({ ...base })).toBeNull();
   });
   it("RAW: 16 ch は詰めない（pack_channels = null）、8・4・2 は詰める。MS/s は Hz にして送る", () => {
-    expect(system.pinsStreamStart("raw", "25", "16")).toEqual({ rle: false, rate_hz: 25e6, pack_channels: null });
-    expect(system.pinsStreamStart("raw", "50", "8")).toEqual({ rle: false, rate_hz: 50e6, pack_channels: 8 });
-    expect(system.pinsStreamStart("raw", " 100 ", "4")).toEqual({ rle: false, rate_hz: 100e6, pack_channels: 4 });
-    expect(system.pinsStreamStart("raw", "12.5", "2")).toEqual({ rle: false, rate_hz: 12.5e6, pack_channels: 2 });
+    expect(system.pinsStreamStart("raw", "25", "16", "records")).toEqual({ rle: false, rate_hz: 25e6, pack_channels: null });
+    expect(system.pinsStreamStart("raw", "50", "8", "records")).toEqual({ rle: false, rate_hz: 50e6, pack_channels: 8 });
+    expect(system.pinsStreamStart("raw", " 100 ", "4", "records")).toEqual({ rle: false, rate_hz: 100e6, pack_channels: 4 });
+    expect(system.pinsStreamStart("raw", "12.5", "2", "records")).toEqual({ rle: false, rate_hz: 12.5e6, pack_channels: 2 });
   });
 });

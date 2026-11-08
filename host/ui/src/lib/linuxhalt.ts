@@ -7,7 +7,9 @@ import { exampleOf } from "./apispec";
 
 // 組み立てた引数（メソッド M の引数の型）か、空・誤りの欄の名前。欄を 1 つずつ確かめて詰める（required が必ず送る欄を
 // 全部確かめた後だけ params を返す）ので、詰め終えた表を M の引数の型として返す
-type Built<M extends keyof Methods> = { params: Params<M> } | { error: string };
+// error は先頭の 1 件（呼び出しの互換）、errors は空・誤りの欄の全部（画面が全部まとめて教える）
+type Built<M extends keyof Methods> = { params: Params<M> } | { error: string; errors: string[] };
+const fail = (errors: string[]): { error: string; errors: string[] } => ({ error: errors[0], errors });
 
 export const UNMEASURED = "unmeasured";
 
@@ -106,37 +108,47 @@ function bound(s: string): number | string | null {
 
 const U32 = 0xFFFFFFFF;
 
-/** 必ず送る欄（空・誤りはその欄の名前） */
-function required(out: Record<string, unknown>, fields: [string, unknown][]): string | null {
+/** 必ず送る欄（空・誤りはその欄の名前。全部を返す） */
+function requiredAll(out: Record<string, unknown>, fields: [string, unknown][]): string[] {
+  const bad: string[] = [];
   for (const [k, v] of fields) {
-    if (v === null || v === "") return k;
-    out[k] = v;
+    if (v === null || v === "") bad.push(k);
+    else out[k] = v;
   }
-  return null;
+  return bad;
 }
 
-/** 書いたときだけ送る欄（書いて誤りならその欄の名前） */
-function optional(out: Record<string, unknown>, fields: [string, string, (s: string) => unknown][]): string | null {
+/** 書いたときだけ送る欄（書いて誤りならその欄の名前。全部を返す） */
+function optionalAll(out: Record<string, unknown>, fields: [string, string, (s: string) => unknown][]): string[] {
+  const bad: string[] = [];
   for (const [k, text, parse] of fields) {
     if (!text.trim()) continue;
     const v = parse(text);
-    if (v === null) return k;
-    out[k] = v;
+    if (v === null) bad.push(k);
+    else out[k] = v;
   }
-  return null;
+  return bad;
+}
+
+/** 最初の 1 件だけ返す版（欄の少ない口。memap・gdb・threads） */
+function required(out: Record<string, unknown>, fields: [string, unknown][]): string | null {
+  return requiredAll(out, fields)[0] ?? null;
+}
+function optional(out: Record<string, unknown>, fields: [string, string, (s: string) => unknown][]): string | null {
+  return optionalAll(out, fields)[0] ?? null;
 }
 
 /** linux.halt.open の引数。組（CTI・見張り・OpenOCD）の欠けはデーモンが CLI と同じ文で断る（画面で同じ判断を二重に持たない） */
 export function haltOpenParams(f: HaltForm): Built<"linux.halt.open"> {
   const out: Record<string, unknown> = {};
-  const bad = required(out, [
+  const bad = requiredAll(out, [
     ["backend", f.backend || null], ["jtag_khz", int(f.jtagKhz, 1, 100000)], ["offsets", f.offsets.trim() || null],
     ["page_offset", int(f.pageOffset, 0, U32)], ["phys_offset", int(f.physOffset, 0, U32)],
     ["linear_map_end", int(f.linearMapEnd, 0, U32)], ["max_tasks", int(f.maxTasks, 1, Number.MAX_SAFE_INTEGER)],
     ["max_threads", int(f.maxThreads, 1, Number.MAX_SAFE_INTEGER)], ["mmu_format", f.mmuFormat || null],
     ["journal", f.journal.trim() || null],
     ["fpga_request_times", f.fpgaRequestTimes === "" ? null : f.fpgaRequestTimes === "true"],
-  ]) ?? optional(out, [
+    ]).concat(optionalAll(out, [
     ["part", f.part, (s) => s.trim()],
     ["fpga_halt_watch_bound_ns", f.watchBoundNs, bound], ["fpga_halt_watch_poll_s", f.watchPollS, (s) => num(s)],
     ["cti_board", f.ctiBoard, (s) => s],
@@ -146,8 +158,8 @@ export function haltOpenParams(f: HaltForm): Built<"linux.halt.open"> {
     ["ocd_board", f.ocdBoard, (s) => s.trim()], ["ocd_port", f.ocdPort, (s) => int(s, 1, 65535)],
     ["ocd_timeout_s", f.ocdTimeoutS, (s) => num(s, true)], ["hw_slots", f.hwSlots, (s) => int(s, 1, Number.MAX_SAFE_INTEGER)],
     ["watch_slots", f.watchSlots, (s) => int(s, 0, Number.MAX_SAFE_INTEGER)],
-  ]);
-  return bad ? { error: bad } : { params: out as Params<"linux.halt.open"> };
+  ]));
+  return bad.length ? fail(bad) : { params: out as Params<"linux.halt.open"> };
 }
 
 /** linux.halt.gdb.serve の引数（log は書いたときだけ） */
@@ -159,13 +171,13 @@ export function haltGdbServeParams(f: GdbServeForm): Built<"linux.halt.gdb.serve
     ["kernel_isa", f.kernelIsa || null], ["max_step_retries", int(f.maxStepRetries, 0, Number.MAX_SAFE_INTEGER)],
     ["bp_unmapped", f.bpUnmapped || null],
   ]) ?? optional(out, [["log", f.log, (s) => s.trim()]]);
-  return bad ? { error: bad } : { params: out as Params<"linux.halt.gdb.serve"> };
+  return bad ? fail([bad]) : { params: out as Params<"linux.halt.gdb.serve"> };
 }
 
 /** linux.halt.threads の引数 */
 export function haltThreadsParams(pid: string): Built<"linux.halt.threads"> {
   const v = int(pid, 1, 2 ** 31 - 1);
-  return v === null ? { error: "pid" } : { params: { pid: v } };
+  return v === null ? fail(["pid"]) : { params: { pid: v } };
 }
 
 /** linux.memap.connect_jtag の引数（chain_idcode・ap・frequency_hz はすべて明示） */
@@ -173,7 +185,7 @@ export function memapJtagParams(target: string, f: MemapJtagForm): Built<"linux.
   const out: Record<string, unknown> = { target };
   const bad = required(out, [["chain_idcode", int(f.chainIdcode, 0, U32)], ["ap", int(f.ap, 0, 255)],
     ["frequency_hz", int(f.frequencyHz, 1, Number.MAX_SAFE_INTEGER)]]);
-  return bad ? { error: bad } : { params: out as Params<"linux.memap.connect_jtag"> };
+  return bad ? fail([bad]) : { params: out as Params<"linux.memap.connect_jtag"> };
 }
 
 /** linux.halt.debug.attach の欄（全コア停止で止めて調べる。人も画面から AI と同じ attach をする） */
@@ -208,18 +220,18 @@ export function exampleAttachForm(): DebugAttachForm {
 /** linux.halt.debug.attach の引数（既定なし: 必須の欄が空ならその名前。画面の道の欄は書いたときだけ送る） */
 export function haltDebugAttachParams(f: DebugAttachForm): Built<"linux.halt.debug.attach"> {
   const out: Record<string, unknown> = {};
-  const bad = required(out, [
+  const bad = requiredAll(out, [
     ["pid", int(f.pid, 1, 2 ** 31 - 1)], ["elf", f.elf.trim() || null],
     ["skew_limit_ns", int(f.skewLimitNs, 0, Number.MAX_SAFE_INTEGER)], ["thread_id", f.threadId || null],
     ["kernel_isa", f.kernelIsa || null], ["max_step_retries", int(f.maxStepRetries, 1, Number.MAX_SAFE_INTEGER)],
     ["bp_unmapped", f.bpUnmapped || null], ["max_halt_s", num(f.maxHaltS, true)],
-  ]) ?? optional(out, [
+    ]).concat(optionalAll(out, [
     ["fetch_from_target", f.fetchFromTarget, (s) => s.trim()],
     ["breakpoint_kind", f.breakpointKind, (s) => s],
     ["step_max_instructions", f.stepMaxInstructions, (s) => int(s, 1, Number.MAX_SAFE_INTEGER)],
     ["step_timeout_s", f.stepTimeoutS, (s) => num(s)],
-  ]);
-  return bad ? { error: bad } : { params: out as Params<"linux.halt.debug.attach"> };
+  ]));
+  return bad.length ? fail(bad) : { params: out as Params<"linux.halt.debug.attach"> };
 }
 
 /** 使っている設定（API が返した options）を欄の値にする（欄に無い・null の設定は今の欄の値のまま）。AI が open / attach したときも、

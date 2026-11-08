@@ -126,6 +126,7 @@
     </div>
   {/if}
   <div class="sub-title" title={$i18n("system.memoryTip")}>{$i18n("system.memory")}</div>
+  {#if $app.target?.linux}<div class="note muted">{$i18n("system.memoryLinux")}</div>{/if}
   {#if !watches.length}<Hint text={$i18n("system.memoryHint")} />{/if}
   <table class="grid">
     <thead><tr><th>{$i18n("system.name")}</th><th>{$i18n("system.address")}</th><th>{$i18n("system.value")}</th>

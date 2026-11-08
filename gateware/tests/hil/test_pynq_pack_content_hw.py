@@ -33,7 +33,7 @@ def check_period(ones, zeros, cycles):
 
 @pytest.fixture(scope="module")
 def session():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         caps = s.device.capabilities()
         if not (getattr(caps, "la_testgen", False) and getattr(caps, "la_pack", False)):
             pytest.skip("この PYNQ の回路に la_testgen と la_pack が無い（fprobe_pynq_deep を入れる）")

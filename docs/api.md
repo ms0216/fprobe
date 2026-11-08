@@ -90,7 +90,7 @@ Python から: `c = fprobe.api.client.DaemonClient(url, 名前, 役割, token=�
 応答:
 
 ```ts
-{ version: number; total: number; hints: Array<{ id: string; title: string; methods: Array<string>; symptom: string; facts_to_check: Array<{ api: string; reads: string }>; recipe: Array<string>; docs: Array<string>; when?: { [key: string]: Array<string> } }> }
+{ version: number; total: number; hints: Array<{ id: string; title: string; methods: Array<string>; symptom: string; facts_to_check: Array<{ api: string; reads: string }>; recipe: Array<string>; docs: Array<string>; when?: { [key: string]: Array<string> }; when_not?: { [key: string]: Array<string> } }> }
 ```
 
 ## session.permissions
@@ -643,7 +643,7 @@ null
 
 | 引数 | 型 | 必須 |
 |---|---|---|
-| `frequencies_hz` | `Array<number>` |  |
+| `frequencies_hz` | `Array<number>` | ○ |
 | `max_aps` | `number` |  |
 | `jtag` | `boolean` |  |
 
@@ -1565,6 +1565,8 @@ gaps = true（ケイパビリティ la_stream_gaps。PYNQ の深いバッファ�
 relay = 出し切った後の PYNQ の中継の状態（zc_state = ゼロコピーの道の状態、tcp_path = 使った送りの道、copied 等の数。事実の読み）。中継が無い・返事が無ければ null。
 control_read_retries（既定 0）= 流している間の見回りの CSR の READ（読みに副作用が無い）の応答が時間切れになったとき、送り直してよい回数（使う側が明示する。0 なら送り直さず止まる。止める WRITE は送り直さない）。control = この流れの間に送り直した READ と読み捨てた遅れた応答の数（事実）。
 raw_path（既定 null）= 受け取った拍をそのまま保存する生の保存ファイル（.fplaraw）の置き場所。指定するとその場所に残り、結果の raw に返る（後から la.raw_to_vcd で VCD にできる）。null なら VCD の隣の一時ファイルに取り込み、VCD にした後に消す（raw は null）。取り込み（受け取り）と VCD への書き出しは分かれていて、受け取りは VCD の書き出しの速さに律速されない。途中で誤り（StreamLinkLoss 等）が出ても、取り込めた分は VCD になってから誤りが返る。
+rle_format（rle = true のときの RLE の形式）: "records"（1 レコード 4 バイト。null と同じ = 今までどおり）か "tokens"（トークン形式: 変化 1 回がふつう 1 バイト。ケイパビリティ la_rle_tokens のある構成だけ。詰める（pack_channels）とは一緒に使えない。gaps とは使える（欠けの後は回路が値を再提示し、欠けの長さは「捨てた最後の拍の最後の出来事の時刻 − 直前に出した拍の最後の出来事の時刻」）。docs/superpowers/specs/2026-11-07-la-rle2-design.md）。tick_us（トークン形式のとき必ず指定。既定は無い。マイクロ秒、0 = 無し。例: 1000）= 最後に拍を出してからこの時間が経ったら、作りかけの拍を NOP で埋めて出す（その間に出来事が無ければ WAIT も出す）。変化の無い間もホストに時刻が届く。待ち時間と NOP の帯域（1 回に最大 15 バイト）の取引で、使う側が決める。0 なら拍が満ちたものと停止時だけ出る（変化の少ない信号は最後の変化が届くのが遅れる）。トークン形式でないときに指定すると断る。rle = false で指定すると断る。rle_repeat（トークン形式のときだけ指定できる。既定 null = false = 今までどおり REPEAT を使わない）= true で REPEAT を使う: 周期的な信号（クロック等）の、同じ変化（同じ ch・同じ間隔）が続くのを「直前の 1 か 2 個の変化を N 回繰り返す」の 1 トークン（2 バイト〜）にまとめ、1 変化 1 バイト未満にする（無損失。復号した変化点は使わないときと同じ）。ケイパビリティ la_rle_token_info の repeat がある構成だけ（無ければ理由を書いて断る）。効果は信号次第で、間隔が毎回違う信号には付かない（結果の bytes_per_change で分かる。使う側が選ぶ）。結果の rle_format = 実際に使った形式（raw / records / tokens）、wire_bytes = 受け取ったロジアナの拍のバイト数、changes = VCD に書いた変化点の数、bytes_per_change = wire_bytes / changes（割っただけの事実）、pad_bytes = そのうち NOP で埋めたバイト数（トークン形式。ほかは 0）。トークン形式の samples は最後の出来事の時刻 + 1（それ以降は次の出来事が届くまで分からない）。
+max_changes（既定 null = 上限なし。使う側が明示する。例: 100000000）= VCD に書く変化点の数の上限。VCD は変化点ごとに行が要るので、rle_repeat の周期的な信号は、受け取り（wire_bytes）が小さくても書き出すと保存先が変化点の数に比例して膨れる（100 MS/s の方形波は 10 秒で約 240 KB の受け取りが 10 億の変化点 = 数十 GB の VCD）。メモリは膨れない（変化点は断片ごとに復号して書く）。上限を超えるときは、上限ちょうどの変化点までを書いて VCD を閉じ、理由（上限・書いた数・超えた最初の変化点のサンプル）つきの誤り（ChangeLimitExceeded）で断る。raw_path を指定していれば生の保存ファイルは残るので、la.raw_to_vcd で上限を変えて書き直せる。null なら従来どおり全部を書く。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -1577,27 +1579,33 @@ raw_path（既定 null）= 受け取った拍をそのまま保存する生の�
 | `gap_hold_bytes` | `number | null` |  |
 | `control_read_retries` | `number` |  |
 | `raw_path` | `string | null` |  |
+| `rle_format` | `"records" | "tokens" | null` |  |
+| `tick_us` | `number | null` |  |
+| `rle_repeat` | `boolean | null` |  |
+| `max_changes` | `number | null` |  |
 
 応答:
 
 ```ts
-{ samples: number; duration_s: number; sample_period_ns: number; elapsed_s: number; mb_per_s: number; overrun: boolean; link_buffer: StreamBuffer | null; vcd: string; usage: Array<LaStreamUsage>; first_channel: number; gaps: Array<{ start: number; samples: number; beat: number }>; gap_samples: number; unplaced_beats: number; gap_held_peak_bytes: number; relay: RelayStatus | null; control: ControlCounters; raw: string | null }
+{ samples: number; duration_s: number; sample_period_ns: number; elapsed_s: number; mb_per_s: number; overrun: boolean; link_buffer: StreamBuffer | null; vcd: string; usage: Array<LaStreamUsage>; first_channel: number; gaps: Array<{ start: number; samples: number; beat: number }>; gap_samples: number; unplaced_beats: number; gap_held_peak_bytes: number; relay: RelayStatus | null; control: ControlCounters; raw: string | null; rle_format: "raw" | "records" | "tokens"; wire_bytes: number; changes: number; bytes_per_change: number | null; pad_bytes: number }
 ```
 
 ## la.raw_to_vcd
 
-種類: `control`。ロジアナの生の保存ファイル（la.stream の raw_path で残したもの）を VCD に書き出す。取り込み（機器からの受け取り）とは別に、あとから行う（機器には触れない）。VCD のバイト列は、la.stream が直接書いたものと同じ。names は信号の名前（{"5": "rx"}）で、ファイルに保存した名前に重ねる。complete = false は、取り込みの途中で止まった（索引の無い）ファイルで、読めた所までを書いた（最後の切れたかたまりは捨てた）こと。samples は値のあるサンプルの数、chunks は読んだかたまりの数、sample_period_ns・channels・first_channel・rle・pack はファイルのヘッダ（取り込みの性質）の事実。
+種類: `control`。ロジアナの生の保存ファイル（la.stream の raw_path で残したもの）を VCD に書き出す。取り込み（機器からの受け取り）とは別に、あとから行う（機器には触れない）。VCD のバイト列は、la.stream が直接書いたものと同じ。names は信号の名前（{"5": "rx"}）で、ファイルに保存した名前に重ねる。complete = false は、取り込みの途中で止まった（索引の無い）ファイルで、読めた所までを書いた（最後の切れたかたまりは捨てた）こと。samples は値のあるサンプルの数、chunks は読んだかたまりの数、sample_period_ns・channels・first_channel・rle・pack はファイルのヘッダ（取り込みの性質）の事実。 rle_format = ファイルのヘッダの RLE の形式（raw / records / tokens）。
+max_changes（既定 null = 上限なし。使う側が明示する。例: 100000000）= VCD に書く変化点の数の上限（la.stream と同じ）。トークン形式の REPEAT は小さなファイルが何億もの変化点になり、VCD は変化点ごとに行が要るので保存先が膨れる。メモリは膨れない。超えるときは上限ちょうどまでを書いて VCD を閉じ、理由つきの誤り（ChangeLimitExceeded）で断る。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
 | `raw_path` | `string` | ○ |
 | `vcd_path` | `string` | ○ |
 | `names` | `{ [key: string]: string } | null` |  |
+| `max_changes` | `number | null` |  |
 
 応答:
 
 ```ts
-{ raw: string; vcd: string; complete: boolean; chunks: number; samples: number; sample_period_ns: number; channels: number; first_channel: number; rle: boolean; pack: number }
+{ raw: string; vcd: string; complete: boolean; chunks: number; samples: number; sample_period_ns: number; channels: number; first_channel: number; rle: boolean; pack: number; rle_format: "raw" | "records" | "tokens" }
 ```
 
 ## la.view
@@ -4250,6 +4258,8 @@ InjectRun
 pack_channels（8・4・2。rle = false のときだけ。ケイパビリティ la_pack）は、使うチャンネル（ch 0〜n − 1）だけを詰めて流す（データ量が 1/2・1/4・1/8。選んだチャンネルは欠けない。選ばなかった上位のチャンネルは記録されない。8 ch で 50 MS/s、4 ch で 100 MS/s が 50 MB/s）。
 gaps = true（ケイパビリティ la_stream_gaps）: 溢れても止めず、回路が捨てた拍の区間（欠け）を記録の la の出来事 gap（時刻 = 欠けの最初のサンプルの位置、t_end = 欠けの後の最初のサンプルの位置、body の samples・duration_ticks・beat）にして続ける（欠けの区間に波形は置かない）。status の gaps・gap_samples・unplaced_beats は事実の数。gap_hold_bytes（gaps = true のとき必ず指定。既定は無い）= 欠けの記録が届くまで位置の決まらない拍を PC に持つ上限（バイト）。超えたら推定で置かずに流れを止める（status の error に StreamHoldExceeded）。false（既定）は今までどおり溢れたら止まる。
 control_read_retries（既定 0）= 流している間の見回りの CSR の READ（読みに副作用が無い）の応答が時間切れになったとき、送り直してよい回数（使う側が明示する。0 なら送り直さず止まる。止める WRITE は送り直さない）。status の control = 送り直した READ と読み捨てた遅れた応答の数（事実）。
+rle_format（rle = true のときの RLE の形式）: "records"（1 レコード 4 バイト。null と同じ = 今までどおり）か "tokens"（トークン形式: 変化 1 回がふつう 1 バイト。ケイパビリティ la_rle_tokens のある構成だけ。無い構成・詰める・gaps と一緒の指定は、理由を書いて断る。docs/superpowers/specs/2026-11-07-la-rle2-design.md）。tick_us（トークン形式のとき必ず指定。既定は無い。マイクロ秒、0 = 無し。例: 1000）= 最後に拍を出してからこの時間が経ったら、作りかけの拍を NOP で埋めて出す（待ち時間と NOP の帯域の取引で、使う側が決める。la.stream の tick_us と同じ）。トークン形式でないときに指定すると断る。rle = false で指定すると断る。rle_repeat（トークン形式のときだけ指定できる。既定 null = false = REPEAT を使わない）= true で REPEAT を使う（la.stream の rle_repeat と同じ。周期的な信号の繰り返しを 1 トークンにまとめる。無損失。ケイパビリティ la_rle_token_info の repeat がある構成だけ）。トークン形式の波形は、受け取りで変化点に復号して記録に入れる（記録の中の形は records と同じ）。status の rle_format = 実際に使った形式（raw / records / tokens）、wire_bytes = 受け取ったロジアナの拍のバイト数、pad_bytes = そのうち NOP で埋めたバイト数（トークン形式。ほかは 0）、changes = 復号して数えた変化点の数（生の拍で保存する流れは復号しないので null）、bytes_per_change = wire_bytes / changes（割っただけの事実。changes が null か 0 なら null）。
+max_changes（既定 null = 上限なし。使う側が明示する。例: 100000000）= 記録に入れる変化点の総数の上限。記録は変化点ごとに保存先が要るので、rle_repeat の周期的な信号は、受け取りが小さくても記録の大きさが変化点の数に比例して膨れる（100 MS/s の方形波は毎秒 1 億の変化点）。メモリは膨れない（変化点は断片ごとに復号し、波形のかたまりは変化点が一定数たまるたびに閉じる）。上限を超えたら、上限ちょうどまでを記録に入れて流れを止め、status の error に理由（ChangeLimitExceeded: 上限・入れた数・超えた最初の変化点のサンプル）を残す。null なら従来どおり上限なし。
 
 | 引数 | 型 | 必須 |
 |---|---|---|
@@ -4260,6 +4270,10 @@ control_read_retries（既定 0）= 流している間の見回りの CSR の RE
 | `gaps` | `boolean` |  |
 | `gap_hold_bytes` | `number | null` |  |
 | `control_read_retries` | `number` |  |
+| `rle_format` | `"records" | "tokens" | null` |  |
+| `tick_us` | `number | null` |  |
+| `rle_repeat` | `boolean | null` |  |
+| `max_changes` | `number | null` |  |
 
 応答:
 
@@ -5789,7 +5803,7 @@ LinuxCoreStatus
 
 ## linux.halt.recover
 
-種類: `control`。死んだデバッガ（落ちたデーモン・強制終了された CLI）が残した BKPT を、ジャーナルの元の命令で戻す（今も BKPT がある所だけ: restored。BKPT がもう無かった所は書かない: stale。CLI の recover）。止め方は linux.halt.processes と同じ。
+種類: `control`。死んだデバッガ（落ちたデーモン・強制終了された CLI）が残した BKPT を、ジャーナルの元の命令で戻す（今も BKPT がある所だけ: restored。BKPT がもう無かった所は書かない: stale。CLI の recover）。止め方は linux.halt.processes と同じ。コアが止まったままなら止めずに戻す（応答の stop = null・resumed = false）。そのあと linux.halt.rescue でコアを走らせる。
 
 応答:
 
@@ -5799,7 +5813,7 @@ LinuxCoreStatus
 
 ## linux.halt.rescue
 
-種類: `control`。強制終了されたデバッガがコアを止めたまま残したとき（CLI の rescue）: ターゲットのメモリは触らず、各コアの bp/wp を消し、停止デバッグを切り、止まっていたコアを再開する（CTI の設定なら先に CTI の停止要求を解く）。メモリに残った BKPT は linux.halt.recover が戻す。fprobe の経路だけ。
+種類: `control`。強制終了されたデバッガがコアを止めたまま残したとき（CLI の rescue）: ターゲットのメモリは触らず、各コアの bp/wp を消し、停止デバッグを切り、止まっていたコアを再開する（CTI の設定なら先に CTI の停止要求を解く）。メモリに残った BKPT は linux.halt.recover が戻す。BKPT が残っていそうなら、先に linux.halt.recover を呼び、そのあとこの rescue（再開が先だと、BKPT が戻るまでの間に対象が BKPT を踏んで SIGTRAP で死ぬことがある。2026-11-06 実機（Pi 2B））。fprobe の経路だけ。
 
 応答:
 
@@ -5875,7 +5889,7 @@ LinuxCoreStatus
 
 ## linux.halt.debug.status
 
-種類: `read`。linux.halt.debug の持ち主の事実（止まっているか・ブレークポイント・最後の停止・自動の再開・停止の数え）。コアは触らない。
+種類: `read`。linux.halt.debug の持ち主の事実（止まっているか・ブレークポイント・最後の停止・自動の再開・停止の数え）。コアは触らない。breakpoints は、いま機器（対象のメモリ・コアの HW）に入れてある分だけ。画面で無効にした（enabled = false）ブレークポイントは機器から外すので、ここには出ない。無効にした分も含めた一覧は debug.breakpoint.list（enabled の欄）。
 
 応答:
 
@@ -6114,7 +6128,7 @@ HaltProfileLoaded
 ### Capabilities
 
 ```ts
-{ protocol_version: number | null; board: string | null; design: string | null; sys_clock_hz: number | null; timebase_hz: number | null; host_link: number | null; channels: Array<number>; la_channels: number; la_depth: number; la_sample_hz: number; mem_bytes: number; mem_test: boolean; xtrig: boolean; trig_seq: boolean; aux: boolean; sampler: boolean; jtag: boolean; inject: boolean; outputs: Array<Output>; output_actions: number; la_filter: boolean; la_pulse: boolean; la_stream_events: boolean; la_stream_ps: boolean; la_pack: boolean; la_testgen: boolean; fpga_obs: boolean; obs_match: boolean; sampler_match: boolean; sync: boolean; event_byte_pack: boolean; watch_start: boolean; dap_line_time: boolean; la_delay_internal: number; la_delay_deep: number; la_phase_span: number; la_channel_timing: Array<[number | null, number | null, number | null]>; build: Build | null; la_layout: Array<LaChannel>; swo_manchester: boolean; jtag_bit_extra_cycles: number; min_half_period: number; swd_sample_delay_max: number; uart_flow: Array<number>; la_testgen_hz: number; la_fine: number | null; la_stream_bytes_per_s: number; la_stream_usage: boolean; la_stream_gaps: boolean; timing: { [key: string]: TimingPoint }; unknown: { [key: string]: string }; dap_output_ticks: number | null }
+{ protocol_version: number | null; board: string | null; design: string | null; sys_clock_hz: number | null; timebase_hz: number | null; host_link: number | null; channels: Array<number>; la_channels: number; la_depth: number; la_sample_hz: number; mem_bytes: number; mem_test: boolean; xtrig: boolean; trig_seq: boolean; aux: boolean; sampler: boolean; jtag: boolean; inject: boolean; outputs: Array<Output>; output_actions: number; la_filter: boolean; la_pulse: boolean; la_stream_events: boolean; la_stream_ps: boolean; la_pack: boolean; la_testgen: boolean; fpga_obs: boolean; obs_match: boolean; sampler_match: boolean; sync: boolean; event_byte_pack: boolean; watch_start: boolean; dap_line_time: boolean; la_delay_internal: number; la_delay_deep: number; la_phase_span: number; la_channel_timing: Array<[number | null, number | null, number | null]>; build: Build | null; la_layout: Array<LaChannel>; swo_manchester: boolean; jtag_bit_extra_cycles: number; min_half_period: number; swd_sample_delay_max: number; uart_flow: Array<number>; la_testgen_hz: number; la_fine: number | null; la_stream_bytes_per_s: number; la_stream_usage: boolean; la_stream_gaps: boolean; la_rle_tokens: boolean; la_rle_token_info: TokenInfo | null; timing: { [key: string]: TimingPoint }; unknown: { [key: string]: string }; dap_output_ticks: number | null }
 ```
 
 ### CaptureInfo
@@ -6650,7 +6664,7 @@ JTAG のチェーンの走査（jtag_chain.ChainScan.as_dict）
 ロジアナの流し続けを記録へ入れている様子（fprobe.recording_stream.LaRecordingStream.status）
 
 ```ts
-{ running: boolean; blocks: number; error: string | null; events: number | null; samples?: number; duration_s?: number; mb_per_s?: number; overrun?: boolean; sample_period_ns?: number; link_buffer?: StreamBuffer | null; gaps?: number; gap_samples?: number; unplaced_beats?: number; usage?: LaStreamUsage; anchor?: { ticks: number; uncertainty_ticks: number; method: "circuit" | "trigger" | "host"; t_lo: number; t_hi: number; basis: Basis | null }; control?: ControlCounters }
+{ running: boolean; blocks: number; error: string | null; events: number | null; samples?: number; duration_s?: number; mb_per_s?: number; overrun?: boolean; sample_period_ns?: number; link_buffer?: StreamBuffer | null; gaps?: number; gap_samples?: number; unplaced_beats?: number; usage?: LaStreamUsage; anchor?: { ticks: number; uncertainty_ticks: number; method: "circuit" | "trigger" | "host"; t_lo: number; t_hi: number; basis: Basis | null }; control?: ControlCounters; rle_format?: "raw" | "records" | "tokens"; wire_bytes?: number; pad_bytes?: number; changes?: number | null; bytes_per_change?: number | null }
 ```
 
 ### LaStreamUsage
@@ -7275,6 +7289,14 @@ target.status の形: 状態・つないでいる先・停止中なら PC と場
 
 ```ts
 { source: string; point: string; unit: string; delay: number | null; span: number | null; excludes: Array<string> }
+```
+
+### TokenInfo
+
+TLV LA_RLE_TOKEN_INFO: RLE のトークン形式の中身（docs/superpowers/specs/2026-11-07-la-rle2-design.md §7.2）。
+
+```ts
+{ version: number; repeat: boolean; window: boolean; accept_bytes: number }
 ```
 
 ### TraceEvent

@@ -47,7 +47,7 @@ def hold_dac(port: str, value: int, seconds: float) -> subprocess.Popen:
 def session():
     if ETH_HOST:
         subprocess.run([sys.executable, "-m", "fprobe_gw", "build", "fprobe_eth", "--program"], check=True)
-        with Session.open_eth(ETH_HOST) as s:
+        with Session.open_eth(ETH_HOST, link_up_wait_s=8) as s:
             yield s
     else:
         program("fprobe")

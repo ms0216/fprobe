@@ -339,3 +339,64 @@ def test_relay_status_takes_only_the_reply_to_its_own_request(fpga):
         t.join()
         assert result["token"] == 2 and result["connections"] == 333
         assert link.lost_frames == 0                                      # 中継の返事は PL のフレームの通し番号に数えない
+
+
+def test_a_large_tcp_stream_sent_in_odd_sized_pieces_arrives_whole_and_in_order(fpga, tcp_board):
+    """受信の 1 回の読み（_TCP_RECV = 1 MB）より大きな流れを、読みの境目と合わない大きさ（素数）で送っても、欠け・重なり・順序の乱れが無い。"""
+    import random
+    rng = random.Random(7)
+    payload = rng.randbytes(9 << 20)                                     # 9 MB
+    with EthLink.open("127.0.0.1", fpga.getsockname()[1], buffer_bytes=BUF) as link:
+        fpga.recvfrom(2048)
+        link.open_stream_tcp(port=tcp_board.getsockname()[1], buffer_bytes=2 << 20)    # 流れより小さい上限: 止めながら受ける
+        conn, _ = tcp_board.accept()
+
+        def send():
+            pos = 0
+            while pos < len(payload):
+                n = rng.choice((1, 4093, 65537, 1 << 20, 1048583))
+                conn.sendall(payload[pos:pos + n])
+                pos += n
+        sender = threading.Thread(target=send)
+        sender.start()
+        received = bytearray()
+        deadline = time.monotonic() + 20
+        while len(received) < len(payload) and time.monotonic() < deadline:
+            received += link.read_bytes(CH_STREAM, 3 << 20, timeout_s=0.5)
+        sender.join(3)
+        conn.close()
+        assert len(received) == len(payload)
+        assert received == payload
+
+
+def test_stream_segments_split_across_tcp_reads_are_found_at_their_boundaries(fpga, tcp_board):
+    """見出し付きのかたまりが TCP の読みの境目（1 バイトずつ・かたまりの途中）をまたいで届いても、SegmentSplitter が境目を違えない。"""
+    import struct
+
+    from fprobe import generated as g
+    from fprobe.la_segments import SegmentSplitter
+    segments = [struct.pack("<HHIQ", g.STREAM_SEG_LA, 256, i * 256, g.STREAM_SEG_MAGIC) + bytes([i & 0xFF]) * 4096 for i in range(300)]
+    stream = b"".join(segments)
+    with EthLink.open("127.0.0.1", fpga.getsockname()[1], buffer_bytes=BUF) as link:
+        fpga.recvfrom(2048)
+        link.open_stream_tcp(port=tcp_board.getsockname()[1], buffer_bytes=8 << 20)
+        conn, _ = tcp_board.accept()
+
+        def send():
+            conn.sendall(stream[:5])                                     # 見出しの途中で切る
+            conn.sendall(stream[5:4112 + 7])                              # 次の見出しの途中まで
+            time.sleep(0.05)
+            for i in range(4112 + 7, len(stream), 6151):
+                conn.sendall(stream[i:i + 6151])
+        sender = threading.Thread(target=send)
+        sender.start()
+        splitter, seen, got = SegmentSplitter(), [], 0
+        deadline = time.monotonic() + 10
+        while got < len(stream) and time.monotonic() < deadline:
+            data = link.read_bytes(CH_STREAM, 1 << 20, timeout_s=0.2)
+            got += len(data)
+            seen += [(s.seq, bytes(s.data)) for s in splitter.feed(data)]
+        sender.join(3)
+        conn.close()
+        assert got == len(stream) and not splitter.pending
+        assert seen == [(i * 256, bytes([i & 0xFF]) * 4096) for i in range(300)]

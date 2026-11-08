@@ -40,12 +40,16 @@ class LinkRecovered(Exception):
 
 
 def _applies(hint: dict, context: dict | None) -> bool:
-    """ヒントの when（失敗の種類。キー → 値の一覧）が、失敗の事実（context）と合うか。when が無ければ常に合う。context が無いとき（種類を
-    知らない失敗）は when を持つヒントを付けない。"""
-    when = hint.get("when")
-    if not when:
+    """ヒントの when（失敗の種類。キー → 値の一覧）が、失敗の事実（context）と合うか。when_not は逆で、当たる失敗には付けない
+    （未接続の失敗に、症状が応答の中身のヒントを付けない、等）。どちらも無ければ常に合う。context が無いとき（種類を知らない失敗）は
+    when・when_not を持つヒントを付けない。"""
+    when, when_not = hint.get("when"), hint.get("when_not")
+    if not when and not when_not:
         return True
-    return context is not None and all(context.get(key) in values for key, values in when.items())
+    if context is None:
+        return False
+    return (all(context.get(key) in values for key, values in (when or {}).items())
+            and not any(context.get(key) in values for key, values in (when_not or {}).items()))
 
 
 def _with_hints(method: str, data: dict | None, context: dict | None = None) -> dict | None:

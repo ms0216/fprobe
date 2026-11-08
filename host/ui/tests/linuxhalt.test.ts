@@ -15,10 +15,12 @@ describe("linux.halt.open の引数（既定の値を持たない）", () => {
       mmu_format: "short", journal: "C:/x/j.json", fpga_request_times: false, part: "zynq7000" } });
   });
   it("必須の欄が空ならその欄の名前（fpga_request_times も選ぶまで送らない）", () => {
-    expect(haltOpenParams(EMPTY_HALT_FORM)).toEqual({ error: "backend" });
-    expect(haltOpenParams({ ...zynq, jtagKhz: "" })).toEqual({ error: "jtag_khz" });
-    expect(haltOpenParams({ ...zynq, fpgaRequestTimes: "" })).toEqual({ error: "fpga_request_times" });
-    expect(haltOpenParams({ ...zynq, journal: " " })).toEqual({ error: "journal" });
+    expect(haltOpenParams(EMPTY_HALT_FORM)).toEqual({ error: "backend", errors: ["backend", "jtag_khz", "offsets", "page_offset",
+      "phys_offset", "linear_map_end", "max_tasks", "max_threads", "mmu_format", "journal", "fpga_request_times"] });
+    expect(haltOpenParams({ ...zynq, jtagKhz: "", journal: "" })).toMatchObject({ errors: ["jtag_khz", "journal"] });
+    expect(haltOpenParams({ ...zynq, jtagKhz: "" })).toMatchObject({ error: "jtag_khz" });
+    expect(haltOpenParams({ ...zynq, fpgaRequestTimes: "" })).toMatchObject({ error: "fpga_request_times" });
+    expect(haltOpenParams({ ...zynq, journal: " " })).toMatchObject({ error: "journal" });
   });
   it("CTI の上限は ns か unmeasured のまま送る（組の欠けの判断はデーモン）", () => {
     const r = haltOpenParams({ ...zynq, ctiBoard: "zynq7000", ctiRequestBoundNs: "74", ctiEventBoundNs: "unmeasured",
@@ -26,7 +28,7 @@ describe("linux.halt.open の引数（既定の値を持たない）", () => {
     expect(r).toMatchObject({ params: { cti_board: "zynq7000", cti_request_bound_ns: 74, cti_event_bound_ns: "unmeasured",
       cti_hw_wait_s: 0.05, cti_ack_polls: 100 } });
     expect(haltOpenParams({ ...zynq, ctiBoard: "zynq7000" })).toMatchObject({ params: { cti_board: "zynq7000" } });
-    expect(haltOpenParams({ ...zynq, ctiEventBoundNs: "soon" })).toEqual({ error: "cti_event_bound_ns" });
+    expect(haltOpenParams({ ...zynq, ctiEventBoundNs: "soon" })).toMatchObject({ error: "cti_event_bound_ns" });
     expect(haltOpenParams({ ...zynq, watchBoundNs: "unmeasured", watchPollS: "0.001" }))
       .toMatchObject({ params: { fpga_halt_watch_bound_ns: "unmeasured", fpga_halt_watch_poll_s: 0.001 } });
   });
@@ -35,7 +37,7 @@ describe("linux.halt.open の引数（既定の値を持たない）", () => {
       hwSlots: "5", watchSlots: "4" });
     expect(r).toMatchObject({ params: { backend: "openocd", ocd_board: "rpi2b", ocd_port: 6666, ocd_timeout_s: 60, hw_slots: 5,
       watch_slots: 4 } });
-    expect(haltOpenParams({ ...zynq, ocdTimeoutS: "0" })).toEqual({ error: "ocd_timeout_s" });
+    expect(haltOpenParams({ ...zynq, ocdTimeoutS: "0" })).toMatchObject({ error: "ocd_timeout_s" });
   });
 });
 
@@ -46,13 +48,13 @@ describe("linux.halt.gdb.serve・threads の引数", () => {
     expect(haltGdbServeParams(gdb)).toEqual({ params: { pid: 812, port: 3340, skew_limit_ns: 74, thread_id: "stack",
       kernel_isa: "arm", max_step_retries: 8, bp_unmapped: "error" } });
     expect(haltGdbServeParams({ ...gdb, log: "C:/x/rsp.log" })).toMatchObject({ params: { log: "C:/x/rsp.log" } });
-    expect(haltGdbServeParams({ ...gdb, threadId: "" })).toEqual({ error: "thread_id" });
-    expect(haltGdbServeParams({ ...gdb, bpUnmapped: "" })).toEqual({ error: "bp_unmapped" });
-    expect(haltGdbServeParams({ ...gdb, port: "70000" })).toEqual({ error: "port" });
+    expect(haltGdbServeParams({ ...gdb, threadId: "" })).toMatchObject({ error: "thread_id" });
+    expect(haltGdbServeParams({ ...gdb, bpUnmapped: "" })).toMatchObject({ error: "bp_unmapped" });
+    expect(haltGdbServeParams({ ...gdb, port: "70000" })).toMatchObject({ error: "port" });
   });
   it("threads の pid", () => {
     expect(haltThreadsParams("812")).toEqual({ params: { pid: 812 } });
-    expect(haltThreadsParams("")).toEqual({ error: "pid" });
+    expect(haltThreadsParams("")).toMatchObject({ error: "pid" });
   });
 });
 
@@ -60,8 +62,8 @@ describe("linux.memap.connect_jtag の引数", () => {
   it("chain_idcode・ap・frequency_hz はすべて明示", () => {
     expect(memapJtagParams("pynq", { chainIdcode: "0x4BA00477", ap: "0", frequencyHz: "2000000" }))
       .toEqual({ params: { target: "pynq", chain_idcode: 0x4BA00477, ap: 0, frequency_hz: 2000000 } });
-    expect(memapJtagParams("pynq", { chainIdcode: "", ap: "0", frequencyHz: "2000000" })).toEqual({ error: "chain_idcode" });
-    expect(memapJtagParams("pynq", { chainIdcode: "0x4BA00477", ap: "256", frequencyHz: "2000000" })).toEqual({ error: "ap" });
+    expect(memapJtagParams("pynq", { chainIdcode: "", ap: "0", frequencyHz: "2000000" })).toMatchObject({ error: "chain_idcode" });
+    expect(memapJtagParams("pynq", { chainIdcode: "0x4BA00477", ap: "256", frequencyHz: "2000000" })).toMatchObject({ error: "ap" });
   });
 });
 
@@ -88,8 +90,9 @@ describe("linux.halt.debug.attach の欄（人も画面から attach する）",
   const filled = { ...EMPTY_ATTACH_FORM, pid: "1234", elf: "C:/pi/race2", skewLimitNs: "68", threadId: "stack" as const,
     kernelIsa: "arm" as const, maxStepRetries: "8", bpUnmapped: "error" as const, maxHaltS: "60" };
   it("必須の欄が空なら送らずにその名前（既定を持たない）", () => {
-    expect(haltDebugAttachParams(EMPTY_ATTACH_FORM)).toEqual({ error: "pid" });
-    expect(haltDebugAttachParams({ ...filled, maxHaltS: "0" })).toEqual({ error: "max_halt_s" });
+    expect(haltDebugAttachParams(EMPTY_ATTACH_FORM)).toMatchObject({ error: "pid", errors: ["pid", "elf", "skew_limit_ns", "thread_id",
+      "kernel_isa", "max_step_retries", "bp_unmapped", "max_halt_s"] });
+    expect(haltDebugAttachParams({ ...filled, maxHaltS: "0" })).toMatchObject({ error: "max_halt_s" });
   });
   it("書いた欄だけを送る（画面の道の種類・上限・取り寄せ元）", () => {
     expect(haltDebugAttachParams(filled)).toEqual({ params: { pid: 1234, elf: "C:/pi/race2", skew_limit_ns: 68,
@@ -98,7 +101,7 @@ describe("linux.halt.debug.attach の欄（人も画面から attach する）",
       stepTimeoutS: "2" });
     expect("params" in all && all.params).toMatchObject({ fetch_from_target: "pi", breakpoint_kind: "sw",
       step_max_instructions: 4096, step_timeout_s: 2 });
-    expect(haltDebugAttachParams({ ...filled, stepTimeoutS: "x" })).toEqual({ error: "step_timeout_s" });
+    expect(haltDebugAttachParams({ ...filled, stepTimeoutS: "x" })).toMatchObject({ error: "step_timeout_s" });
   });
 });
 

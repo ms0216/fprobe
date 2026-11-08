@@ -395,3 +395,32 @@ def test_la_testgen_feature_round_trips_and_defaults_to_absent():
     assert parse(caps.encode(on)).la_testgen is True
     assert "constant LA_TESTGEN : boolean := true;" in caps.render_package("p", on)
     assert "constant LA_TESTGEN : boolean := false;" in caps.render_package("p", TEST_CAPS)
+
+
+def test_la_rle_tokens_feature_and_info_round_trip_and_default_to_absent():
+    # RLE のトークン形式（FEATURES bit19 と TLV LA_RLE_TOKEN_INFO。docs/superpowers/specs/2026-11-07-la-rle2-design.md §7.2）
+    import dataclasses
+
+    import pytest
+
+    from fprobe import generated as g
+    from fprobe.caps import parse
+    assert caps.FEATURE_LA_RLE_TOKENS == 1 << 19 == g.FEATURE_LA_RLE_TOKENS and caps.TYPE_LA_RLE_TOKEN_INFO == 26 == g.CAPS_LA_RLE_TOKEN_INFO
+    old = parse(caps.encode(TEST_CAPS))
+    assert old.la_rle_tokens is False and old.la_rle_token_info is None
+    deep = dataclasses.replace(TEST_CAPS, mem_bytes=32 << 20, la_depth=0, la_stream_events=True, la_rle_tokens=True)
+    got = parse(caps.encode(deep))
+    assert got.la_rle_tokens is True
+    assert (got.la_rle_token_info.version, got.la_rle_token_info.repeat, got.la_rle_token_info.window,
+            got.la_rle_token_info.accept_bytes) == (1, False, False, 16)
+    assert "constant LA_RLE_TOKENS : boolean := true;" in caps.render_package("p", deep)
+    with pytest.raises(ValueError):                       # 外部メモリ（深いバッファ）が無い構成では持てない
+        dataclasses.replace(TEST_CAPS, la_rle_tokens=True)
+    with pytest.raises(ValueError):                       # 1 周期 1 サンプルの構成だけ（段階 2）
+        dataclasses.replace(deep, la_lanes=8)
+
+
+def test_only_the_pynq_deep_design_declares_rle_tokens():
+    from fprobe_gw.designs import DESIGNS
+    declared = sorted(name for name, d in DESIGNS.items() if d.capabilities is not None and d.capabilities.la_rle_tokens)
+    assert declared == ["fprobe_pynq_deep"]

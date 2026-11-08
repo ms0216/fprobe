@@ -34,7 +34,7 @@ CH = int(os.environ.get("FPROBE_PYNQ_TESTGEN_CH", "10"))   # 方形波を受け�
 
 @pytest.fixture(scope="module")
 def la():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         analyzer = LogicAnalyzer(s.device)
         caps = s.device.capabilities()
         if caps.design != "fprobe_pynq_fast":

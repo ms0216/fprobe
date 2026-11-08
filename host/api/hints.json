@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "使い方の落とし穴の記録。診断ではない: 症状に当てはまりうる『確かめる事実』と、それを読む API を並べるだけ（判断は使う側）。実機・アクティビティの失敗の事実から足す（2026-11-05〜）。session.hints で引く。 when があるヒントは、失敗の種類が合うときだけ失敗の応答の hint_ids に付く（code = invalid_params のとき validator = 検証の種類、device のとき exception = 例外の型）。",
+  "about": "使い方の落とし穴の記録。診断ではない: 症状に当てはまりうる『確かめる事実』と、それを読む API を並べるだけ（判断は使う側）。実機・アクティビティの失敗の事実から足す（2026-11-05〜）。session.hints で引く。 when があるヒントは、失敗の種類が合うときだけ失敗の応答の hint_ids に付く（code = invalid_params のとき validator = 検証の種類、device のとき exception = 例外の型。権限で断られたとき code = not_allowed）。when_not に当たる失敗には付かない（例: 未接続の失敗に、症状が応答の中身のヒントは付けない）。",
   "hints": [
     {
       "id": "linux_halt.open.idcode_not_seen",
@@ -26,7 +26,15 @@
       ],
       "docs": [
         "docs/linux.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ],
+        "exception": [
+          "ArmDebugError"
+        ]
+      }
     },
     {
       "id": "linux_halt.attach.order",
@@ -43,8 +51,8 @@
         }
       ],
       "recipe": [
-        "順序: target.disconnect（MCU に接続中なら）→ jtag.sample_delay_set（Pi 2B）→ linux.halt.open → linux.halt.debug.attach",
-        "引数はすべて明示（既定なし）。session.methods で name=linux.halt.open / linux.halt.debug.attach の引数と examples を読む",
+        "順序: target.disconnect（MCU に接続中なら）→ linux.halt.open → linux.halt.debug.attach。jtag.sample_delay_set は、linux.halt.open が JTAG-DP の IDCODE を見つけられないとき（TCK が高いとき。Pi 2B は 14.3 MHz 以上）だけ、open の前に置く（linux_halt.open.idcode_not_seen）。attach の pid は、linux.halt.processes で comm から探す（設定ファイルに pid は無い）",
+        "引数はすべて明示（既定なし）。道具の入力の仕様（API の利用者は session.methods）で name=linux.halt.open / linux.halt.debug.attach の引数と examples を読む",
         "thread_id は \"stack\"（\"contextidr\" は Pi 2B で pid でなく ASID を返し、ブレークポイントが全部別のプロセス扱いになる）",
         "linux.halt がすでに開いていると、もう一度 linux.halt.open は断られる（「もう開いている」）。linux.halt.status で開いているかを確かめ、開き直すなら先に linux.halt.close"
       ],
@@ -67,7 +75,18 @@
       ],
       "docs": [
         "docs/linux-halt.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData"
+        ]
+      }
     },
     {
       "id": "linux_halt.halted.no_ssh",
@@ -91,7 +110,18 @@
       ],
       "docs": [
         "docs/linux-halt.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData"
+        ]
+      }
     },
     {
       "id": "run.wait_after_resume",
@@ -114,7 +144,19 @@
       ],
       "docs": [
         "docs/guide/mcp.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      }
     },
     {
       "id": "paths.write_permitted_dirs",
@@ -140,7 +182,12 @@
       ],
       "docs": [
         "docs/guide/mcp.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "not_allowed"
+        ]
+      }
     },
     {
       "id": "args.integer_not_string",
@@ -155,7 +202,7 @@
       "facts_to_check": [
         {
           "api": "session.methods",
-          "reads": "name=<メソッド名> の params。各引数の type・description・examples"
+          "reads": "name=<メソッド名> の params。各引数の type・description・examples（MCP の道具では、道具の入力の仕様に同じ説明・例・受け付ける値が出ている）"
         }
       ],
       "recipe": [
@@ -208,7 +255,18 @@
       ],
       "docs": [
         "docs/guide/getting-started.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData"
+        ]
+      }
     },
     {
       "id": "step.out_of_main",
@@ -229,7 +287,19 @@
       ],
       "docs": [
         "docs/linux-halt.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      }
     },
     {
       "id": "watch.expressions_list",
@@ -241,7 +311,7 @@
       "facts_to_check": [
         {
           "api": "session.methods",
-          "reads": "name=watch.set の params（expressions は文字列の配列。例 [\"s_ticks\"]）"
+          "reads": "name=watch.set の params（expressions は文字列の配列。例 [\"s_ticks\"]）（MCP の道具では、道具の入力の仕様に同じ説明・例・受け付ける値が出ている）"
         }
       ],
       "recipe": [
@@ -283,7 +353,18 @@
       ],
       "docs": [
         "docs/linux-halt.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData"
+        ]
+      }
     },
     {
       "id": "linux_halt.breakpoint.line_already_passed",
@@ -311,16 +392,29 @@
       ],
       "docs": [
         "docs/linux-halt.md"
-      ]
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      }
     },
     {
       "id": "linux_halt.step.signal_stop",
-      "title": "step の reason が signal のとき、どのシグナルか",
+      "title": "step / run の結果が signal のとき（どのシグナルか。全コアは止まったまま）",
       "methods": [
         "debug.step",
-        "linux.halt.debug.step"
+        "linux.halt.debug.step",
+        "linux.halt.debug.run"
       ],
-      "symptom": "debug.step の応答が reason=signal で、次の step で「プロセスは終了している（killed by signal N）」になる。",
+      "symptom": "debug.step の応答が reason=signal で、次の step で「プロセスは終了している（killed by signal N）」になる。または linux.halt.debug.run が kind=signal を返し、そのあと Pi への ssh が届かない（2026-11-06 実機: attach 中の race に pkill（SIGTERM）を送ると、run が 7 秒後に kind=signal・code=15 を返し、4 コアは止まったまま、Pi への ssh は 8 秒で届かなかった。close すると走り、シグナルが届いて race が終了した）。",
       "facts_to_check": [
         {
           "api": "target.status",
@@ -329,7 +423,231 @@
       ],
       "recipe": [
         "reason=signal の応答は signal（番号）と signal_name（SIGSEGV 等）を持つ。シグナルが配送される直前で止まっていて、次に走らせると配送されて（致命的なら）プロセスが死ぬ",
-        "死んだ後は同じ文で断られる。linux.halt.debug.close して、新しいプロセスに attach し直す"
+        "死んだ後は同じ文で断られる。linux.halt.debug.close して、新しいプロセスに attach し直す",
+        "kind=signal・reason=signal の応答のとき、全コアは止まったまま（Pi は ssh に答えない）。続ける（linux.halt.debug.run / step）か close するまで、そのシグナルは対象に届かない。止めたままにしない（Pi のウォッチドッグが生きていると約 15 秒でリセットされる）"
+      ],
+      "docs": [
+        "docs/linux-halt.md"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      }
+    },
+    {
+      "id": "target.connect.no_cores",
+      "title": "target.connect が「No cores were discovered!」で失敗する（自動では Cortex-M 等のコアが見つからない）",
+      "methods": [
+        "target.connect"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ],
+        "exception": [
+          "DebugError",
+          "ArmDebugError"
+        ]
+      },
+      "symptom": "DebugError: No cores were discovered!（target=auto）／ ArmDebugError: cortex_a: APB-AP の ROM テーブルからコアのデバッグが見つからない。",
+      "facts_to_check": [
+        {
+          "api": "target.diagnose",
+          "reads": "見えた DP（protocol・dp.dpidr・designer）・AP（aps[].kind・base）・コア（core・part。null ならコアは見つかっていない）・JTAG の装置の並び（jtag.devices・jtag_chain）"
+        },
+        {
+          "api": "probe.info",
+          "reads": "capabilities.jtag（JTAG が使えるか）・capabilities.channels"
+        }
+      ],
+      "recipe": [
+        "target=auto は pyOCD で Cortex-M 等のコアを探す。target.diagnose で DP と MEM-AP が見えているのにコアが null のときは、コアを pyOCD 以外の方法で探す対象かもしれない",
+        "Cortex-A・ARM11 は pyOCD を使わず JTAG で直接つなぐ。target.connect の target に部品の名前を指定する: bcm2836 = Raspberry Pi 2（Cortex-A7 × 4）、cortex_a = ARMv7-A 一般（コアは ROM テーブルから探す）、zynq7000 = Zynq-7000（Cortex-A9 × 2）、bcm2835 = Pi Zero・Pi 1（ARM1176）、arm11",
+        "つないである対象のボード・チップは、fprobe は判定しない（target.diagnose が返すのは DP・AP・JTAG の装置の事実まで）。どの部品の名前かは、つないだ人に聞く。cortex_a の失敗の文面が挙げる部品の名前（例 bcm2836）も、対象がそれのときだけ当てはまる",
+        "Linux が動く対象のプロセスを止めるなら、target.connect でなく linux.halt.open → linux.halt.debug.attach",
+        "引数は道具の入力の仕様（API の利用者は session.methods）で、name=target.connect の引数と examples を読む（frequency_hz は必須で、既定なし）"
+      ],
+      "docs": [
+        "docs/api.md",
+        "docs/linux-halt.md"
+      ]
+    },
+    {
+      "id": "la.capture.external_memory_not_ready",
+      "title": "la.capture / la.deep.capture が「外部メモリの準備ができていない」で失敗する（PYNQ-Z2 の深い構成）",
+      "methods": [
+        "la.capture",
+        "la.deep.capture"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ],
+        "exception": [
+          "RuntimeError"
+        ]
+      },
+      "symptom": "RuntimeError: 外部メモリの準備ができていない（PYNQ-Z2 では PS の中継が DDR の領域 MEM_BASE を書くまで使えない）。probe.info の la_depth は 0 のまま。",
+      "facts_to_check": [
+        {
+          "api": "probe.info",
+          "reads": "capabilities.la_depth（0 = 内蔵の溜めが無い構成）・capabilities.mem_bytes（外部メモリの大きさ。0 なら外部メモリ無し）・capabilities.design"
+        }
+      ],
+      "recipe": [
+        "外部メモリは PS（PYNQ の Linux）側で DDR の上端を予約して初めて使える。PS 側の /etc/fprobe/mem と起動の引数 mem= の予約を確かめる（PC の API からは書けない。手順は docs/boards/pynq-z2.md の「P3 の深いバッファ」）",
+        "予約を入れたら PS を再起動し、PS の中継が起きてから（probe.info で mem_bytes を読み直して）捕捉をやり直す"
+      ],
+      "docs": [
+        "docs/boards/pynq-z2.md"
+      ]
+    },
+    {
+      "id": "target.read.core_running",
+      "title": "レジスタ・メモリを読むと「コアが走っている」で失敗する",
+      "methods": [
+        "target.memory.read",
+        "target.memory.view",
+        "target.registers.read",
+        "target.step"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ],
+        "exception": [
+          "ArmDebugError"
+        ]
+      },
+      "symptom": "ArmDebugError: コアが走っている（レジスタ・メモリ・ステップは止めてから）。target.connect の connect_mode = attach で接続した直後など。",
+      "facts_to_check": [
+        {
+          "api": "target.status",
+          "reads": "state（RUNNING / HALTED。走っていると target.memory.read・target.registers.read・target.step は断られる）"
+        }
+      ],
+      "recipe": [
+        "止めて読む: target.halt → 読む → target.resume。止めている間、ターゲットの動きは止まる（止めてはいけない対象には使わない）",
+        "止めずに読む: watch.set の expressions に番地（\"0x20000000:16\" の形）か変数名を置くと FPGA の DAP サンプラが止めずに周期で読む（合わせて 8 か所・各 16 語まで）。値は watch.values と events.read で読む",
+        "ELF を読み込んであれば、debug.evaluate の live = true で、変数・C の式を止めずに読める",
+        "接続の仕方: target.connect の connect_mode は、halt = 接続時にコアを止める（既定）、attach = 止めずにつなぐ"
+      ],
+      "docs": [
+        "docs/api.md"
+      ]
+    },
+    {
+      "id": "debug.type_info.name_is_a_type",
+      "title": "debug.type_info に変数名を渡した（型の名前を渡す道具）",
+      "methods": [
+        "debug.type_info"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ],
+        "exception": [
+          "KeyError"
+        ]
+      },
+      "symptom": "KeyError: 型 'x' が <ELF> の DWARF に無い。x が変数名・関数名のとき。",
+      "facts_to_check": [
+        {
+          "api": "debug.symbol.search",
+          "reads": "名前の一部に合う関数・変数の記号（name・kind = function / object）。渡した名前がここに出るなら、それは型でなく変数・関数（型の名前はここには出ない）"
+        }
+      ],
+      "recipe": [
+        "debug.type_info は型の名前（struct Sensor・typedef 名・enum 名）を取る。変数の型を知りたいときは、debug.symbol.info で変数を引く、または debug.expression.check で式を調べる",
+        "型の名前は、ソースの struct・typedef・enum の宣言で確かめる（debug.source.read で読める）"
+      ],
+      "docs": [
+        "docs/api.md"
+      ]
+    },
+    {
+      "id": "linux_halt.halted.kernel_stall_warnings",
+      "title": "全コアを止めて再開したあと、Pi のカーネルログに RCU の stall の警告が出る",
+      "methods": [
+        "linux.halt.debug.attach",
+        "linux.halt.halt_all",
+        "linux.halt.debug.halt"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      },
+      "symptom": "止めて再開したあとの dmesg に「rcu: INFO: rcu_sched self-detected stall on CPU」「rcu_sched kthread starved for N jiffies」と、drivers/firmware/raspberrypi.c の WARNING が出る。観測: 2026-11-06、Pi 2B（HZ=100）で全コアを 30 秒止めて再開したとき、「t=3004 jiffies」「starved for 3002 jiffies」（= 約 30 秒。止めた時間と一致）。約 9 秒の止めの後にも同じ警告が出た。ウォッチドッグを切ってある Pi は、30 秒止めても再起動せず、対象のプロセスも残った。",
+      "facts_to_check": [
+        {
+          "api": "linux.halt.status",
+          "reads": "全コアが走っているか（cores[].running）。止めたまま戻っていないなら、まずそれを直す"
+        },
+        {
+          "api": "linux.log.read",
+          "reads": "Pi のカーネルログ。警告の時刻（起動からの秒）と、止めていた時刻・時間を突き合わせる（止めている間は Pi の ssh が通らない）"
+        }
+      ],
+      "recipe": [
+        "警告の jiffies は、止めていた時間を表している（止めている間も、対象のカーネルの時計は進む）。数秒でも出るので、警告そのものは止めた事実の記録として読む",
+        "止めている時間は短くする（止める → 読む → すぐ再開）。max_halt_s も、必要な長さにとどめる",
+        "止めたあとの Pi が動いているか、対象のプロセスが残っているかは、linux.halt.status と linux.halt.processes で読む。Pi のカーネルログは linux.log.read（止めている間は ssh が通らない）"
+      ],
+      "docs": [
+        "docs/linux-halt.md"
+      ]
+    },
+    {
+      "id": "linux_halt.rescue.recover_first",
+      "title": "強制終了されたデバッガの後始末は、先に recover、あとで rescue（逆だと対象が BKPT を踏んで死ぬ）",
+      "methods": [
+        "linux.halt.rescue",
+        "linux.halt.recover",
+        "linux.halt.open"
+      ],
+      "when": {
+        "code": [
+          "device"
+        ]
+      },
+      "when_not": {
+        "exception": [
+          "NotConnected",
+          "NoData",
+          "EngineError"
+        ]
+      },
+      "symptom": "落ちたデーモン・強制終了されたデバッガが、BKPT をメモリに置いたまま、コアを止めて残した。linux.halt.rescue → linux.halt.recover の順で後始末すると、対象のプロセスが死ぬ（2026-11-06 実機、Pi 2B: rescue のあと、Pi のカーネルログに「Unhandled prefetch abort: breakpoint debug exception (0x002)」が出て、BKPT を置いた add_one を通る race が終了した）。recover → rescue の順では、race は無事だった。",
+      "facts_to_check": [
+        {
+          "api": "linux.halt.status",
+          "reads": "cores[].running（止まったまま残っているコア）と debug の有無"
+        },
+        {
+          "api": "linux.halt.recover",
+          "reads": "journal_before.entries（ジャーナルに残った BKPT の番地と持ち主の pid）、restored（戻した数）・stale（もう BKPT が無かった数）、stop（null = コアが止まったままだったので止めずに戻した）・resumed"
+        }
+      ],
+      "recipe": [
+        "デーモンを起動し直したら、linux.halt.open → linux.halt.recover（BKPT を戻す。コアが止まったままなら止めずに戻す）→ linux.halt.rescue（bp/wp を消し、停止デバッグを切り、止まったコアを再開）の順にする",
+        "rescue が先だと、コアが走り出してから recover が BKPT を戻すまでの間に、対象が BKPT を踏む。BKPT が毎回通る場所（ループの中）にあるほど、踏みやすい",
+        "共有ライブラリ（libc）に BKPT が残ると、全プロセスが落ちる（docs/linux-halt.md）。強制終了せず、linux.halt.debug.close で閉じる"
       ],
       "docs": [
         "docs/linux-halt.md"

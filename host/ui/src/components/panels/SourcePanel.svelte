@@ -32,6 +32,9 @@
   const atHalt = $derived(haltedAt(at));
   const atText = (t: number) => timeText($origins, { source: "recording", t }) ?? `t = ${t}`;
   const markText: Record<string, string> = { before: "‹", after: "›", halt: "■" };
+  const markTip: Record<string, string> = { before: "codeAt.beforeTip", after: "codeAt.afterTip", halt: "codeAt.haltedTip" };
+  /** 青の行（記録の時刻の印）の説明: 印ごとの意味（下の「時刻に連動」の段と同じ文） */
+  const lineTip = (marks: string[] | undefined) => marks?.length ? marks.map((k) => `${markText[k]} ${$i18n(markTip[k] as any)}`).join("\n") : undefined;
   let atShown: number | null = null;
 
   // 応答が替わったら、止まった場所の行を開いて見せる（止まっていなければ開かない。直前・直後のサンプルの
@@ -241,7 +244,7 @@
           <!-- svelte-ignore a11y_no_static_element_interactions（右クリックのメニュー。キーでは F9・Ctrl+F10 が同じ操作） -->
           <div class="line" class:stop={n === stopLine} class:frame={n === frameLineNo} class:selected={n === selected}
                class:at-before={atLine?.includes("before")} class:at-after={atLine?.includes("after")}
-               class:at-halt={atLine?.includes("halt")} data-line={n} oncontextmenu={(e) => lineContext(e, n)}>
+               class:at-halt={atLine?.includes("halt")} title={lineTip(atLine)} data-line={n} oncontextmenu={(e) => lineContext(e, n)}>
             <button class="gutter" disabled={!breakable.has(n) || !online}
                     title={$i18n("source.breakpointTip", { line: n })} aria-label={$i18n("source.breakpointTip", { line: n })}
                     onclick={async () => (await allowed(app))
@@ -282,6 +285,7 @@
       <div class="actions">
         <button class="primary" disabled={!online} onclick={() => run("openElf")}>{$i18n("cmd.openElf")}</button>
         <button disabled={!online} title={$i18n("tip.loadDemo")} onclick={() => run("loadDemo")}>{$i18n("cmd.loadDemo")}</button>
+        <button disabled={!online} title={$i18n("hint.debugLinuxApp")} onclick={() => ctx.dock.show("linuxHalt")}>{$i18n("panel.linuxHalt")}</button>
       </div>
       {#if $ui.recent.length}
         <span class="recent-title">{$i18n("source.recent")}</span>

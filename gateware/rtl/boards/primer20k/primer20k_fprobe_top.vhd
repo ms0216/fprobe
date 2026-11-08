@@ -211,7 +211,7 @@ begin
                  OBS_PORT => work.design_caps_pkg.OBS_PORT, XOUT_COUNT => work.design_caps_pkg.XOUT_COUNT,
                  LA_INPUT_COUNT => work.design_caps_pkg.LA_INPUTS, LA_FILTER => work.design_caps_pkg.LA_FILTER,
                  LA_PULSE => work.design_caps_pkg.LA_PULSE, LA_STREAM_EVENTS => work.design_caps_pkg.LA_STREAM_EVENTS,
-                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
+                 LA_STREAM_GAPS => work.design_caps_pkg.LA_STREAM_GAPS, LA_RLE_TOKENS => work.design_caps_pkg.LA_RLE_TOKENS, LA_RLE_REPEAT => work.design_caps_pkg.LA_RLE_REPEAT, EVENT_RING_BITS => work.design_caps_pkg.EVENT_RING_BITS,
                  EVENT_BYTE_PACK => work.design_caps_pkg.EVENT_BYTE_PACK, CAP_RATIO => work.design_caps_pkg.CAP_RATIO,
                  LA_TESTGEN => work.design_caps_pkg.LA_TESTGEN, LA_LANES => work.design_caps_pkg.LA_LANES,
                  LA_LANE_ADDR_BITS => work.design_caps_pkg.LA_LANE_ADDR_BITS, LA_LANE_IN_AGE => work.design_caps_pkg.LA_LANE_IN_AGE,

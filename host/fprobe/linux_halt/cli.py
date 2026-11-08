@@ -117,10 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("halt", parents=[common], help="全コアを止めて停止の報告を出す（止めたまま。API の linux.halt.halt_all）"
                    ).set_defaults(fn=cmd_halt)
     sub.add_parser("resume", parents=[common], help="全コアを走らせる（API の linux.halt.resume_all）").set_defaults(fn=cmd_resume)
-    sub.add_parser("recover", parents=[common], help="死んだデバッガが残した BKPT を戻す（API の linux.halt.recover）"
+    sub.add_parser("recover", parents=[common], help="死んだデバッガが残した BKPT を戻す（API の linux.halt.recover。コアが止まったままなら止めずに戻す。rescue の前に行う）"
                    ).set_defaults(fn=cmd_recover)
     sub.add_parser("rescue", parents=[common], help="強制終了されたデバッガの後始末: bp/wp を消し、停止デバッグを切り、止まったコアを再開"
-                                                     "（API の linux.halt.rescue）").set_defaults(fn=cmd_rescue)
+                                                     "（API の linux.halt.rescue。BKPT が残っていそうなら、先に recover）").set_defaults(fn=cmd_rescue)
     sub.add_parser("status", parents=[common], help="読み取りだけ: 各コアが走っているか、残っている HW bp/wp（API の linux.halt.status）"
                    ).set_defaults(fn=cmd_status)
     return ap

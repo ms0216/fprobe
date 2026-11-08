@@ -20,7 +20,7 @@ serial = ["pyserial>=3.5"]                   # SerialLink（UART のホストリ
 client = ["websockets>=15"]                  # デーモンの API のクライアント（fprobe.api.client。MCP が使う）
 # fprobe-daemon（API・画面・GDB サーバ）。デバッガ・SerialLink・規則の YAML も使う
 daemon = ["fprobe[debug,fast,serial,client]", "uvicorn>=0.30", "starlette>=0.40", "pyyaml>=6", "jsonschema>=4"]
-mcp = ["fprobe[daemon]", "mcp>=2.3"]        # fprobe-mcp。必要ならデーモン（fprobe-daemon）を子プロセスで起こすので daemon を含む
+mcp = ["fprobe[daemon]", "mcp>=2.3", "pydantic>=2"]   # fprobe-mcp。pydantic は道具の引数の説明・例を型に添えるのに直接使う（mcp が入れるが宣言する）。必要ならデーモン（fprobe-daemon）を子プロセスで起こすので daemon を含む
 aux = ["mpremote>=1.25", "pyserial>=3.5"]    # 補助マイコン（Pico）へのプログラムの書き込み（fprobe.aux_flash）
 # 試験（pytest host）。デーモン・MCP の結合の試験も含むので、その extras をすべて含む
 dev = ["pytest>=8", "fprobe[mcp,aux]", "httpx>=0.27"]

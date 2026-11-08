@@ -18,6 +18,7 @@ import time
 import typing
 
 from mcp.server.mcpserver import MCPServer
+from pydantic import Field
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import probe_names
@@ -58,6 +59,23 @@ def _annotation(schema: dict):
     if kind == "object":
         return dict[str, typing.Any]
     return _PY_TYPES.get(kind, typing.Any)
+
+
+# 仕様の引数の欄のうち、AI に見せる検査の語（見せるだけで、MCP の側では検査を強めない。検査は API が同じ文面で行う）
+_SCHEMA_HINT_KEYS = ("enum", "const", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                     "minLength", "maxLength", "pattern", "format")
+
+
+def _annotated(schema: dict):
+    """引数の型注釈に、仕様の description・examples と検査の語（enum・minimum 等）を添える。
+
+    添えないと MCP の入力の仕様は型だけになり、AI は引数の説明・例・受け付ける値の一覧を見られない
+    （方針: 引数の最初の値の出どころは API の仕様で、MCP で AI にも同じ値が見える。haiku の試験、2026-11-06）。
+    """
+    extra = {key: schema[key] for key in _SCHEMA_HINT_KEYS if key in schema}
+    field = Field(description=schema.get("description"), examples=schema.get("examples"),
+                  json_schema_extra=extra or None)
+    return typing.Annotated[_annotation(schema), field]
 
 
 # 道具にする session.*（読むだけのもの）: 許可の表、デーモンの状態（利用者・一時停止・ターゲットの状態）、操作の記録（人が
@@ -117,7 +135,7 @@ def tool_function(client, method: Method, notices: Notices | None = None):
              if schema.get("x-mcp", True)}
     required = set(method.params.get("required", []))
     parameters = [
-        _inspect.Parameter(name, _inspect.Parameter.KEYWORD_ONLY, annotation=_annotation(schema),
+        _inspect.Parameter(name, _inspect.Parameter.KEYWORD_ONLY, annotation=_annotated(schema),
                            default=_inspect.Parameter.empty if name in required else schema.get("default"))
         for name, schema in props.items()]
 
@@ -144,14 +162,39 @@ def tool_function(client, method: Method, notices: Notices | None = None):
     return tool
 
 
+class _StrictServer(MCPServer):
+    """仕様にない引数を、黙って捨てずに断る（API と同じ文面）。
+
+    MCP の SDK は、道具の引数を型の検査にかけるとき、署名に無い引数を黙って捨てる。AI が引数の名前を打ち間違えると
+    （例: target_diagnose の protocol。仕様に無い）、既定の値で動いて、もっともらしい結果が黙って返っていた
+    （デーモンの API は同じ引数を「未知の引数」と断る。その文面が AI に届かなかった。haiku の試験、2026-11-06）。
+    """
+
+    def __init__(self, *args, declared: dict[str, tuple[str, list[str]]], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._declared = declared                    # 道具名 → (API のメソッド名, AI に出す引数の名前の並び)
+
+    async def call_tool(self, name, arguments, context=None):
+        method, known = self._declared.get(name, (None, None))
+        unknown = [key for key in arguments if key not in known] if known is not None else []
+        if unknown:
+            raise ToolError(f"{method}: (引数): 未知の引数: {', '.join(unknown)}"
+                            f"（この API の引数: {', '.join(known) if known else 'なし'}）")
+        return await super().call_tool(name, arguments, context)
+
+
 def build_client_server(client, spec: Spec, notices: Notices | None = None) -> MCPServer:
-    server = MCPServer("fprobe", instructions=INSTRUCTIONS)
+    tools = []
     for method in spec.methods.values():
         # セッションの操作は接続のもの（道具にしない）。許可の表は読むだけで、人と同じく AI にも見せる。バイナリの応答は画面用
         if (method.name.startswith("session.") and method.name not in MCP_SESSION_METHODS) or method.binary:
             continue
-        server.add_tool(tool_function(client, method, notices), name=method.name.replace(".", "_"),
-                        description=method.summary)
+        tools.append((method, tool_function(client, method, notices)))
+    declared = {method.name.replace(".", "_"): (method.name, list(_inspect.signature(fn).parameters))
+                for method, fn in tools}
+    server = _StrictServer("fprobe", instructions=INSTRUCTIONS, declared=declared)
+    for method, fn in tools:
+        server.add_tool(fn, name=method.name.replace(".", "_"), description=method.summary)
     return server
 
 

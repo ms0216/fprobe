@@ -18,6 +18,15 @@
 --   順に読めば、届いた拍に関わる記録の件数が分かる。仕様 §12）。gap_open = 今、拍を捨てている（止めた後も次の開始まで残る）。
 -- out_tag は in_tag をそのまま運ぶ（記録の周期は 0）。
 -- パイプライン（enable = '1'）: 入力の拍の長さを求める段 → 出す・捨てるを決めて出力のレジスタに入れる段。
+--
+-- トークン形式（tok = '1' かつ rle = '1'。docs/superpowers/specs/2026-11-07-la-rle2-design.md §3.6）:
+--   捨てたサンプルの数 q は拍の長さの和でなく、符号器が拍ごとに付ける「拍の最後のトークンの時刻」in_pos の差:
+--   q = 捨てた最後の拍の in_pos − 直前に出した拍の in_pos（記録の位置 b・時刻・種類・欄は同じ。split の件も同じ位置からの差で続ける）。
+--   TOGGLE は差分なので、捨てたあとは値が分からない。そこで欠けの区間は、捨てた拍が再提示の拍でない（in_kf = 0）たびに resync_req を
+--   1 周期立てて、符号器に「次のサンプルを VALUE（値の再提示）にして新しい拍を始めよ」と頼み続ける。欠けを閉じるときは、閉じる拍（その拍も
+--   捨てる）の次の拍から出す。ただしその拍が再提示の拍（in_kf = 1）でなければ出さず、また欠けを始める（同じ位置 b の続きの件。
+--   q は途切れずに続く）。再提示の拍の先頭は VALUE（長い間隔の前置きの WAIT があればその後ろ）で、その VALUE の間隔は捨てた最後のトークン
+--   からの時間なので、ホストは時刻を pos_e + q（直前に出した拍の in_pos + 欠けの q）から続ける。
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -37,6 +46,10 @@ entity la_stream_gap is
     rle        : in  std_logic;                       -- 同
     pack       : in  unsigned(2 downto 0);            -- 同（RAW の 1 拍 = 2^(SPB_LOG + pack) サンプル）
     time       : in  unsigned(63 downto 0);
+    tok        : in  std_logic := '0';                -- rle = 1 のとき、トークン形式（run の 0→1 の周期に取り込む）
+    in_pos     : in  unsigned(47 downto 0) := (others => '0');   -- トークン形式: 入力の拍の最後のトークンの時刻
+    in_kf      : in  std_logic := '0';                           -- トークン形式: 入力の拍は再提示の VALUE から始まる
+    resync_req : out std_logic;                       -- トークン形式: 符号器に再提示を頼む（1 周期のパルス）
     hold       : in  std_logic;                       -- 1 = 拍を出さない（外部メモリのリングの未読が迫った）
     room       : in  std_logic;                       -- 1 = 下流の FIFO に半分以上の空き（欠けを閉じる条件）
     ev_enable  : in  std_logic;                       -- イベントの記録が有効（欠けの記録が書かれる）
@@ -58,15 +71,20 @@ end entity;
 
 architecture rtl of la_stream_gap is
   signal run_prev : std_logic := '0';
-  signal en_r, rle_r : std_logic := '0';
+  signal en_r, rle_r, tok_r : std_logic := '0';
   signal pack_r : unsigned(2 downto 0) := (others => '0');
   -- 段 A（入力の拍と長さ）
   signal a_valid : std_logic := '0';
   signal a_data : std_logic_vector(127 downto 0) := (others => '0');
   signal a_tag : std_logic_vector(3 downto 0) := (others => '0');
   signal a_len : unsigned(18 downto 0) := (others => '0');
+  signal a_pos : unsigned(47 downto 0) := (others => '0');
+  signal a_kf : std_logic := '0';
   -- 段 B（出す・捨てる）
   signal gapping : std_logic := '0';
+  signal need_kf : std_logic := '0';                              -- トークン形式: 欠けを閉じた。次に出す拍は再提示の拍でなければならない
+  signal pos_e, pos_d, pos_ref : unsigned(47 downto 0) := (others => '0');   -- 出した最後の拍・捨てた最後の拍・今の件の起点の in_pos
+  signal rs_r : std_logic := '0';
   signal q : unsigned(40 downto 0) := (others => '0');            -- 捨てたサンプルの数（bit40 = 欄を超えた）
   signal b_gap, beats : unsigned(31 downto 0) := (others => '0');
   signal t_gap : unsigned(47 downto 0) := (others => '0');
@@ -102,6 +120,8 @@ begin
     variable free : boolean;
     variable qn : unsigned(40 downto 0);
     variable close_now, split_now : boolean;
+    variable pass_ok, disc : boolean;
+    variable dn, qd : unsigned(47 downto 0);
   begin
     if rising_edge(clk) then
       run_prev <= run;
@@ -117,18 +137,24 @@ begin
         a_data  <= in_data;
         a_tag   <= in_tag;
         a_len   <= beat_len(in_data, rle_r, pack_r);
+        a_pos   <= in_pos;
+        a_kf    <= in_kf;
       end if;
+      disc := false;
 
       -- 段 B
       if en_r = '1' and lost_r = '0' then
         if gapping = '0' then
           if a_valid = '1' then
-            if free and hold = '0' then
+            pass_ok := free and hold = '0' and (tok_r = '0' or need_kf = '0' or a_kf = '1');
+            if pass_ok then
               o_valid <= '1';
               o_kind  <= '0';
               o_data  <= a_data;
               o_tag   <= a_tag;
               beats   <= beats + 1;
+              pos_e   <= a_pos;
+              need_kf <= '0';
             elsif ev_enable = '0' and run = '1' then
               lost_r <= '1';                                 -- 欠けを記録できない: 捨て始めずに止める（今までの溢れと同じ）
             else
@@ -136,17 +162,33 @@ begin
               q       <= resize(a_len, 41);
               b_gap   <= beats;
               t_gap   <= time(47 downto 0);
+              pos_ref <= pos_e;
+              pos_d   <= a_pos;
+              disc    := true;
             end if;
           end if;
         else
           qn := q;
+          dn := pos_d;
           if a_valid = '1' then
             qn := q + resize(a_len, 41);                     -- この周期の拍も捨てる
+            dn := a_pos;
+            disc := true;
           end if;
+          if tok_r = '1' then
+            qd := dn - pos_ref;                              -- トークン形式: 捨てた最後の拍の時刻 − 起点
+            qn := qd(40 downto 0);
+            if qd(47 downto 41) /= 0 then qn(40) := '1'; end if;
+          end if;
+          pos_d <= dn;
           close_now := hold = '0' and room = '1';
           split_now := qn(40 downto Q_BITS - 1) /= 0;
           if close_now and qn = 0 then
             gapping <= '0';                                  -- 分けた件の後に捨てた拍が無い: 記録は要らない
+            if tok_r = '1' then
+              need_kf <= '1';
+              pos_e   <= dn;
+            end if;
           elsif run = '1' and free and (close_now or split_now) then
             if ev_enable = '1' then
               o_valid <= '1';
@@ -157,15 +199,21 @@ begin
               last_r  <= b_gap;
               if close_now then
                 gapping <= '0';                              -- 次の拍から出す
+                if tok_r = '1' then
+                  need_kf <= '1';                            -- トークン形式: 次の拍は再提示の拍でなければ出さない
+                  pos_e   <= dn;
+                end if;
               else
                 q     <= (others => '0');                    -- 同じ位置の続きの件
                 t_gap <= time(47 downto 0);
+                pos_ref <= dn;
               end if;
             else
               lost_r <= '1';                                 -- 記録が書かれない: 欠けを黙って作らない
             end if;
           else
             q <= qn;
+            pos_d <= dn;
             if qn(40) = '1' then
               lost_r <= '1';                                 -- 欄に収まらない（下流が長く受けない）
             end if;
@@ -173,9 +221,18 @@ begin
         end if;
       end if;
 
+      rs_r <= '0';
+      if disc and a_kf = '0' and tok_r = '1' then
+        rs_r <= '1';                                         -- 捨てた拍が再提示の拍でない: 符号器に次の再提示を頼む
+      end if;
+
       if run = '1' and run_prev = '0' then                   -- 開始: 設定を取り込み、前の流れの残りを捨てる
         en_r    <= enable;
         rle_r   <= rle;
+        tok_r   <= tok and rle;
+        need_kf <= '0';
+        pos_e   <= (others => '0');
+        rs_r    <= '0';
         pack_r  <= pack;
         a_valid <= '0';
         o_valid <= '0';
@@ -188,6 +245,9 @@ begin
       end if;
       if rst = '1' then
         en_r    <= '0';
+        tok_r   <= '0';
+        need_kf <= '0';
+        rs_r    <= '0';
         a_valid <= '0';
         o_valid <= '0';
         gapping <= '0';
@@ -208,5 +268,6 @@ begin
   gaps      <= gaps_r;
   last_beat <= last_r;
   gap_open  <= gapping;
+  resync_req <= rs_r;
   lost      <= lost_r;
 end architecture;

@@ -196,6 +196,8 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000700` | `control` | 9:8 | `step` | RW | `0x0` | 1 周期に複数のサンプルの構成（info.lanes > 1）の RAW のストリーム: 細かいサンプルの 2^step 個ごとに 1 つを記録する（語の中のレーン 0・2^step・…。2^step <= lanes。la.rate は語の間隔 − 1 で、2^step = lanes のときに使う。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md）。run の間は変えない |
 | `0x00000700` | `control` | 15:12 | `first` | RW | `0x0` | 1 周期に複数のサンプルの構成（info.lanes > 1）の RAW のストリーム: pack で詰めて記録する最初の ch（ch first〜first + 16 / 2^pack − 1。15 を超える ch は 0）。0 = ch 0 から（1 周期 1 サンプルの構成は 0 だけ）。run の間は変えない |
 | `0x00000700` | `control` | 16 | `gaps` | RW | `0x0` | 1 = ストリームで溢れても止めず、捨てた拍の区間（欠け）をイベント（種類 EVENT_KIND_LA_GAP）に記録して続ける（stream と同時に 1 のときだけ。run の 0→1 の時点で取り込む。ケイパビリティ la_stream_gaps のある構成だけ。欠けの記録はイベントのリングに書くので events.enable が 1 の間だけ。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12）。0 = 溢れたら書き込みを止める（overrun） |
+| `0x00000700` | `control` | 17 | `rle_fmt` | RW | `0x0` | rle = 1 の RLE の形式。0 = レコード形式（1 変化 4 バイト）、1 = トークン形式（変化 1 回がふつう 1 バイト。ケイパビリティ la_rle_tokens のある構成だけ。ストリーム専用: トリガは使わない）。run の 0→1 の時点で取り込む。docs/superpowers/specs/2026-11-07-la-rle2-design.md |
+| `0x00000700` | `control` | 18 | `rle_repeat` | RW | `0x0` | rle_fmt = 1（トークン形式）で REPEAT を使う（周期的な信号の繰り返しを 1 トークンにまとめる。ケイパビリティ la_rle_token_info の repeat のある構成だけ。使う側が選ぶ。0 = 使わない）。run の 0→1 の時点で取り込む。docs/superpowers/specs/2026-11-07-la-rle2-design.md §3.7 |
 | `0x00000704` | `post_beats` | 31:0 | `post_beats` | RW | `0x0` | トリガの拍の後に書く拍数。イベントも流す構成（FEATURES の LA_STREAM_EVENTS）のストリームでは、最初に流すイベントの番号（events.written で数える。下位の capacity の分を使う） |
 | `0x00000708` | `status` | 0 | `capturing` | RO | — |  |
 | `0x00000708` | `status` | 1 | `triggered` | RO | — |  |
@@ -225,6 +227,9 @@ CONTROL チャンネルの READ / WRITE で読み書きする（アドレスは�
 | `0x00000748` | `info` | 16 | `start_valid` | RO | — | start_time が今の流れのもの（run の 0→1 で 0、最初のサンプル・語で 1。止めた後も次の run まで残る。1 周期 1 サンプルの構成は TIMING の la_deep_start を申告する回路だけが 1 にする） |
 | `0x0000074C` | `gap_last_beat` | 31:0 | `gap_last_beat` | RO | — | control.gaps の流れで最後に出した欠けの記録の位置（その前に出したロジアナの拍の数。gaps と一緒に、gap_last_beat を先に読む: 連続読み出しで gap_last_beat → gaps の順。docs/superpowers/specs/2026-11-01-la-deep-fast-design.md §12） |
 | `0x00000750` | `gaps` | 31:0 | `gaps` | RO | — | control.gaps の流れで出した欠けの記録の件数（流れの開始から。届いた拍の数を受け取った後に読めば、その拍に関わる記録はこの件数の中にある） |
+| `0x00000754` | `tick` | 31:0 | `tick` | RW | `0x0` | トークン形式（control.rle_fmt = 1）: 最後の拍を出してからこのサンプル数（sys のクロック数 ÷ (la.rate + 1)。la.rate = 0 なら sys のクロック数）が経ったら、作りかけの拍を NOP で埋めて出す（変化の無い間もホストに時刻が届く）。その間に出来事が無ければ WAIT を 1 つ出す。0 = 無し（拍が満ちたものと停止時だけ出る）。使う側が決める値（待ち時間と NOP の帯域の取引）。run の 0→1 の時点で取り込む。小さすぎる値（約 16 未満）は符号器の内部の溜めが溢れて overrun になる。docs/superpowers/specs/2026-11-07-la-rle2-design.md §3.5 |
+| `0x00000758` | `pad_bytes` | 31:0 | `pad_bytes` | RO | — | トークン形式: この流れで NOP で埋めたバイトの総数（折り返す。拍に入りきらないトークン・tick・再同期・停止の端数） |
+| `0x0000075C` | `keyframes` | 31:0 | `keyframes` | RO | — | トークン形式: この流れで欠けの後に再提示した値（VALUE）の数（再同期の数） |
 
 ## events
 

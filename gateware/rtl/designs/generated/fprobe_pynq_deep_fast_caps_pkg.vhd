@@ -125,6 +125,8 @@ package design_caps_pkg is
   constant LA_PULSE : boolean := false;
   constant LA_STREAM_EVENTS : boolean := true;
   constant LA_STREAM_GAPS : boolean := true;
+  constant LA_RLE_TOKENS : boolean := false;
+  constant LA_RLE_REPEAT : boolean := false;
   constant OBS_PORT : boolean := true;
   constant SYNC : boolean := true;
   constant XOUT_COUNT : natural := 2;

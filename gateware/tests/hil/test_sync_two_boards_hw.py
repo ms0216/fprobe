@@ -38,7 +38,7 @@ EDGES = 20                                # 比べる立ち上がりの数（印
 @pytest.fixture(scope="module")
 def boards():
     program("fprobe_la")
-    with Session.open_eth(HOST) as parent, Session.open(SERIAL) as child:
+    with Session.open_eth(HOST, link_up_wait_s=8) as parent, Session.open(SERIAL) as child:
         assert parent.device.capabilities().sync and child.device.capabilities().sync
         yield parent.device, child.device
 

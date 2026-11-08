@@ -111,7 +111,7 @@ def test_the_ai_stops_the_process_and_the_human_screen_sees_the_same_place_sourc
 def test_the_screen_way_of_setting_a_breakpoint_needs_the_kind_named_at_attach(race):  # noqa: F811
     _, _, ai, gui = race
     ai.call("linux.halt.debug.attach", **ATTACH)
-    with pytest.raises(ApiError, match="breakpoint_kind"):
+    with pytest.raises(ApiError, match="breakpoint_kind.*Attach の詳細"):
         gui.call("debug.breakpoint.set", location="race.c:11")
     with pytest.raises(ApiError, match="condition"):
         gui.call("debug.breakpoint.set", location="race.c:11", condition="who == 1")
@@ -319,7 +319,7 @@ def test_reads_and_writes_on_the_screen_answer_from_the_process_and_never_fall_t
     w = gui.call("debug.write_expression", expression="counter", value=7)
     assert w["value"]["value"] == 7 and world.read_user(world.addr("counter"), 4) == (7).to_bytes(4, "little")
     for method, params in (("debug.run_until_halt", {}),
-                           ("debug.watchpoint.set", {"location": "counter"}), ("target.reset", {}),
+                           ("debug.watchpoint.set", {"location": "counter"}), ("target.reset", {}), ("target.disconnect", {}),
                            ("watch.write", {"expression": "counter", "value": 1})):
         with pytest.raises(ApiError, match="Linux"):
             gui.call(method, **params)

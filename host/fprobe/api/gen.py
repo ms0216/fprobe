@@ -130,6 +130,8 @@ def render_hints_markdown() -> str:
             lines += ["**確かめる事実**:", ""] + [f"- `{c['api']}` — {c['reads']}" for c in h["facts_to_check"]] + [""]
         if h.get("when"):
             lines += ["**付く条件**（失敗の種類）: " + ", ".join(f"{k} = {' / '.join(v)}" for k, v in h["when"].items()), ""]
+        if h.get("when_not"):
+            lines += ["**付かない条件**（失敗の種類）: " + ", ".join(f"{k} = {' / '.join(v)}" for k, v in h["when_not"].items()), ""]
         lines += ["**手順**:", ""] + [f"{i}. {step}" for i, step in enumerate(h["recipe"], 1)] + [""]
         if h["docs"]:
             lines += ["関連: " + ", ".join(f"`{d}`" for d in h["docs"]), ""]

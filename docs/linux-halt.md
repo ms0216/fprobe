@@ -37,8 +37,8 @@
 `linux.halt.open`（共通の引数）・`close`・`status`・`halt_all`（`halt`）・`resume_all`（`resume`）・`processes`（`ps`）・`threads`（`threads --pid`）・
 `recover`・`rescue`・`gdb.serve`（`attach`。RSP サーバをデーモンの中で開き、手元の gdb が `target remote 127.0.0.1:port`）・`gdb.status`・`gdb.stop`。
 fprobe の経路で開いている間はプローブの生の DAP を占有する（target.connect・jtag.scan 等・linux.memap.connect_jtag・構成の書き替えは断る）。
-画面は View → Linux（JTAG で停止）。デーモンが強制終了されたら、次のデーモンで `open` → `rescue` → `recover`（下の「強制終了された
-デバッガの後始末」と同じ）。
+画面は View → Linux（JTAG で停止）。デーモンが強制終了されたら、次のデーモンで `open` → `recover` → `rescue`（下の「強制終了された
+デバッガの後始末」と同じ。**`rescue`（再開）が先だと、BKPT が戻るまでの間に対象が BKPT を踏んで死ぬことがある**）。
 
 ## 設定の保存・読み込み（`linux.halt.profile.*`、2026-11-05）
 
@@ -253,8 +253,10 @@ python -m fprobe.linux_halt attach --backend fprobe --part zynq7000 --jtag-khz 2
   - こちらから止める: 最大 8 刻み（49 ns。400 回、負荷あり・なしとも。40 回では 5 刻み = 31 ns で、上限 55 ns は小さすぎた）+ 3.02 + 1 刻み = 12.02 刻み = 74 ns。
   - ブレークポイント → CTI: 最大 41 刻み（252 ns）+ 3.02 + 1 刻み = 45.02 刻み = 277 ns。
 - 別の個体・配線・JTAG のクロックでは、測り直した値を渡す。測っていなければ `unmeasured`（既定の値は無い）。
-- 強制終了されたデバッガの後始末: `python -m fprobe.linux_halt rescue ...`（bp/wp を消し、停止デバッグを切り、止まったコアを再開）→
-  `recover`（メモリに残った BKPT を戻す）。**共有ライブラリ（libc）に BKPT が残ると、全プロセスが落ちる**（sshd を含む）。強制終了しない。
+- 強制終了されたデバッガの後始末: まず `python -m fprobe.linux_halt recover ...`（メモリに残った BKPT を戻す。コアが止まったままなら止めずに戻す）→
+  `rescue`（bp/wp を消し、停止デバッグを切り、止まったコアを再開）。**順序が逆（`rescue` → `recover`）だと、再開から BKPT が戻るまでの間に、
+  対象が BKPT を踏んで SIGTRAP で死ぬ**（2026-11-06 実機（Pi 2B）: BKPT を置いたままデーモンを強制終了 → `rescue` → `recover` で、`add_one` の BKPT を `race` が踏み、
+  カーネルログに「Unhandled prefetch abort: breakpoint debug exception」、`race` が終了した。`recover` → `rescue` では、`race` は無事だった）。**共有ライブラリ（libc）に BKPT が残ると、全プロセスが落ちる**（sshd を含む）。強制終了しない。
 
 ## ステップ・終了・シグナルの扱い（2026-11-06。Haiku の実機の周回と独立のレビューで直した分。実機の確かめは Pi が戻ってから）
 

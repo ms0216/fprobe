@@ -27,7 +27,7 @@ IN0 = 10                                           # PMOD JB の 1 番 = la_in[0
 
 @pytest.fixture(scope="module")
 def la():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         analyzer = LogicAnalyzer(s.device)
         if s.device.capabilities().design != "fprobe_pynq_cap":
             pytest.skip("fprobe_pynq_cap（試験用の方形波入り）が載っていない")

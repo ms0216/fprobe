@@ -51,8 +51,9 @@ class SessionMixin:
                 raise _Rpc(E_NOT_ALLOWED,
                            f"{method}: {name} の {shown} は許可の表に無い（{what}パスは {self.permissions.file} の "
                            f"\"{access}\" に利用者が書く。API からは変えられない）",
-                           {"reason": "path_not_permitted", "param": name, "access": access, "path": shown,
-                            "permissions_file": None if self.permissions.file is None else str(self.permissions.file)})
+                           _with_hints(method, {"reason": "path_not_permitted", "param": name, "access": access, "path": shown,
+                                                "permissions_file": None if self.permissions.file is None else str(self.permissions.file)},
+                                       {"code": "not_allowed"}))
             out[name] = str(resolved)
         return out
 

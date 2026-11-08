@@ -34,7 +34,7 @@ DBGMCU_IDCODE = 0xE0042000               # Nucleo F401RE（STM32F401）の ID（
 
 @pytest.fixture(scope="module")
 def session():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         assert s.device.capabilities().fpga_obs
         yield s
 

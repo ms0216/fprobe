@@ -45,7 +45,7 @@ def test_the_mcu_mailbox_is_read_without_halting():
 
 
 def test_the_mcu_mark_is_on_the_analyzer():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         a = DeepAnalyzer(s.device)
         a.start(rle=False, post_beats=200_000)
         a.wait(5)
@@ -54,7 +54,7 @@ def test_the_mcu_mark_is_on_the_analyzer():
 
 
 def observe(seconds: float):
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         obs = FpgaObs(s.device)
         info = obs.open(chain={"ir_len": 4}, user_ir=2, half_period=HALF_PERIOD, words=1, sync_period=0)
         log = EventLog(s.device)

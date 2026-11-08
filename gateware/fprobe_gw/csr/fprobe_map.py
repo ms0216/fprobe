@@ -49,6 +49,30 @@ STREAM_PL_CHUNK_BEATS = 256   # PL と中継の複写の道が作るかたまり
 # ロジアナの拍の数（流れの開始から。32 ビットで折り返す）、[119:80] 捨てたサンプルの数、[127:120] 種類
 EVENT_KIND_LA_GAP = EVENT_KINDS["LA_GAP"][0]   # 定義元は fprobe_gw/events.py（la-deep-fast §12.7）
 
+# ロジアナの RLE のトークン形式の符号の定数（docs/superpowers/specs/2026-11-07-la-rle2-design.md §3）。ホスト（fprobe/la_tokens.py の
+# 参照符号器・復号器）と回路（rtl/la/la_tok_encoder.vhd。生成パッケージ rtl/core/generated/la_tok_pkg.vhd）が同じ値を使う。
+# 値は符号の定義で、変えると形式の版（LA_TOK_FORMAT_VERSION）が変わる。ホストの定数との一致は tests/test_la_tok_constants.py が確かめる
+LA_TOK_CONSTANTS: dict[str, tuple[int, str]] = {
+    "LA_TOK_FORMAT_VERSION": (1, "形式の版（TLV LA_RLE_TOKEN_INFO）"),
+    "LA_TOK_BEAT_BYTES": (16, "1 拍のバイト数（MEM_BEAT_BYTES）"),
+    "LA_TOK_NOP": (0x07, "NOP（頭 0 0000 111 で尾が無い）"),
+    "LA_TOK_TAIL_FLAG": (0x80, "尾の最上位ビット"),
+    "LA_TOK_SPECIAL_FLAG": (0x40, "尾 T1 のビット 6: 1 = 特殊（WAIT・VALUE・REPEAT）、0 = TOGGLE_LONG"),
+    "LA_TOK_DELTA_EXT": (7, "間隔の欄 7 = 拡張"),
+    "LA_TOK_DELTA_DIRECT_MAX": (6, "頭だけで書ける間隔の最大"),
+    "LA_TOK_KIND_WAIT": (0, "特殊トークンの種類 WAIT（頭の cccc）"),
+    "LA_TOK_KIND_VALUE": (1, "同 VALUE"),
+    "LA_TOK_KIND_REPEAT": (2, "同 REPEAT"),
+    "LA_TOK_T1_BITS": (6, "尾 T1 の P の幅"),
+    "LA_TOK_TAIL_BITS": (7, "2 個目以降の尾の P の幅"),
+    "LA_TOK_MAX_TAILS": (6, "尾の最大数"),
+    "LA_TOK_PAYLOAD_BITS": (41, "P の最大幅（6 + 7 × 5）"),
+    "LA_TOK_VALUE_MIN_CHANGES": (4, "1 サンプルで変わる ch がこの数以上なら VALUE（TOGGLE は 3 個まで）"),
+    "LA_TOK_VALUE_MIN_TAILS": (3, "VALUE の尾の最小数"),
+    "LA_TOK_WAIT_BITS": (40, "1 つの WAIT の時間の幅（最大 2^40 − 1）"),
+    "LA_TOK_CONTROL_RLE_FMT_BIT": (17, "CSR la_deep.control.rle_fmt のビット"),
+}
+
 FPROBE_MAP = CsrMap(blocks=(
     Block("system", 0x0000, 0x40, doc="識別と疎通確認", registers=(
         Register.word("magic", 0x00, "CONST", MAGIC, doc='"FPRB"（リトルエンディアン）'),
@@ -282,7 +306,15 @@ FPROBE_MAP = CsrMap(blocks=(
                                          doc="1 = ストリームで溢れても止めず、捨てた拍の区間（欠け）をイベント（種類 EVENT_KIND_LA_GAP）に記録して続ける"
                                              "（stream と同時に 1 のときだけ。run の 0→1 の時点で取り込む。ケイパビリティ la_stream_gaps のある構成"
                                              "だけ。欠けの記録はイベントのリングに書くので events.enable が 1 の間だけ。docs/superpowers/specs/"
-                                             "2026-11-01-la-deep-fast-design.md §12）。0 = 溢れたら書き込みを止める（overrun）")),
+                                             "2026-11-01-la-deep-fast-design.md §12）。0 = 溢れたら書き込みを止める（overrun）"),
+                                   Field("rle_fmt", 17, 1, "RW",
+                                         doc="rle = 1 の RLE の形式。0 = レコード形式（1 変化 4 バイト）、1 = トークン形式（変化 1 回がふつう 1 バイト。"
+                                             "ケイパビリティ la_rle_tokens のある構成だけ。ストリーム専用: トリガは使わない）。run の 0→1 の時点で取り込む。"
+                                             "docs/superpowers/specs/2026-11-07-la-rle2-design.md"),
+                                   Field("rle_repeat", 18, 1, "RW",
+                                         doc="rle_fmt = 1（トークン形式）で REPEAT を使う（周期的な信号の繰り返しを 1 トークンにまとめる。ケイパビリティ "
+                                             "la_rle_token_info の repeat のある構成だけ。使う側が選ぶ。0 = 使わない）。run の 0→1 の時点で取り込む。"
+                                             "docs/superpowers/specs/2026-11-07-la-rle2-design.md §3.7")),
                  doc="捕捉の制御"),
         Register.word("post_beats", 0x04, "RW",
                       doc="トリガの拍の後に書く拍数。イベントも流す構成（FEATURES の LA_STREAM_EVENTS）のストリームでは、"
@@ -338,6 +370,15 @@ FPROBE_MAP = CsrMap(blocks=(
         Register.word("gaps", 0x50, "RO",
                       doc="control.gaps の流れで出した欠けの記録の件数（流れの開始から。届いた拍の数を受け取った後に読めば、その拍に関わる"
                           "記録はこの件数の中にある）"),
+        Register.word("tick", 0x54, "RW",
+                      doc="トークン形式（control.rle_fmt = 1）: 最後の拍を出してからこのサンプル数（sys のクロック数 ÷ (la.rate + 1)。"
+                          "la.rate = 0 なら sys のクロック数）が経ったら、作りかけの拍を NOP で埋めて出す（変化の無い間もホストに時刻が届く）。その間に出来事が無ければ WAIT を 1 つ出す。0 = 無し（拍が満ちたものと停止時だけ出る）。"
+                          "使う側が決める値（待ち時間と NOP の帯域の取引）。run の 0→1 の時点で取り込む。小さすぎる値（約 16 未満）は符号器の"
+                          "内部の溜めが溢れて overrun になる。docs/superpowers/specs/2026-11-07-la-rle2-design.md §3.5"),
+        Register.word("pad_bytes", 0x58, "RO",
+                      doc="トークン形式: この流れで NOP で埋めたバイトの総数（折り返す。拍に入りきらないトークン・tick・再同期・停止の端数）"),
+        Register.word("keyframes", 0x5C, "RO",
+                      doc="トークン形式: この流れで欠けの後に再提示した値（VALUE）の数（再同期の数）"),
     )),
     Block("events", 0x0800, 0x40,
           doc="DAP トランザクションのイベント記録（docs/superpowers/specs/2026-10-16-m9b-dap-events-design.md）。"

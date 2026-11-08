@@ -27,7 +27,7 @@ SELFTEST_CH = 9                                    # la_pins 8 本の次の内�
 
 @pytest.fixture(scope="module")
 def session():
-    with Session.open_eth(HOST) as s:
+    with Session.open_eth(HOST, link_up_wait_s=8) as s:
         yield s
 
 

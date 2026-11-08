@@ -89,6 +89,8 @@ entity la_deep_buffer is
     ADDR_BITS     : positive := 23;
     STREAM_EVENTS : boolean := false;                      -- ストリームにイベントも見出し付きで流す
     STREAM_GAPS   : boolean := false;                      -- 欠けの区間を記録して続けられる（STREAM_EVENTS が要る）
+    RLE_TOKENS    : boolean := false;                      -- RLE のトークン形式の符号器を持つ（LANES = 1 だけ。STREAM_GAPS と併用できる）
+    TOK_REPEAT_EN : boolean := false;                      -- そのトークン形式に REPEAT の回路を持つ（RLE_TOKENS が要る）
     LANES         : positive := 1;                         -- 1 周期のサンプルの数（> 1 は la_lane_encoder）
     IN_AGE        : natural := 0;                          -- LANES > 1: lane_data の最も新しいレーンの遅れ（la_lane_encoder）
     EXT_DELAY     : natural := LA_FRONT_EXT_ALIGN;         -- LANES = 1: 外部トリガの揃え（la_front の注。時刻の正しさ S1b の N3）
@@ -115,6 +117,9 @@ entity la_deep_buffer is
     pw_event     : in  std_logic := '0';
     run          : in  std_logic;
     rle          : in  std_logic;
+    rle_fmt      : in  std_logic := '0';                   -- rle = 1 の RLE の形式（0 = レコード、1 = トークン。RLE_TOKENS の構成だけ。run の 0→1 の時点で取り込む）
+    rle_repeat   : in  std_logic := '0';                   -- トークン形式で REPEAT を使う（TOK_REPEAT_EN の構成だけ。run の 0→1 の時点で取り込む）
+    tick         : in  unsigned(31 downto 0) := (others => '0');   -- トークン形式の tick（サンプル数。0 = 無し。run の 0→1 の時点で取り込む）
     -- 使うチャンネルだけ詰める（la_pack。RAW のストリームだけ。0 = 詰めない、1 = ch 0〜7、2 = ch 0〜3、3 = ch 0〜1）。run の間は変えない
     pack         : in  std_logic_vector(2 downto 0) := "000";   -- 4 = ch 0 だけ（LANES > 1 の構成だけ）
     stream       : in  std_logic;                          -- run の 0→1 の時点で取り込む
@@ -160,6 +165,8 @@ entity la_deep_buffer is
     gap_count    : out unsigned(31 downto 0);              -- この流れで出した欠けの記録の件数（la_stream_gap の gaps）
     gap_last_beat : out unsigned(31 downto 0);             -- 最後に出した欠けの記録の位置（拍）
     gap_open     : out std_logic;                          -- いま拍を捨てている
+    tok_pad_bytes : out unsigned(31 downto 0);             -- トークン形式: NOP で埋めたバイトの総数（この流れ）
+    tok_keyframes : out unsigned(31 downto 0);             -- トークン形式: 再同期のサンプルの数（この流れ）
     -- DAP のイベント
     ev_enable    : in  std_logic;
     ev_valid     : in  std_logic;
@@ -312,6 +319,8 @@ architecture rtl of la_deep_buffer is
   signal g_valid, g_ready, g_kind : std_logic;
   signal g_data : std_logic_vector(127 downto 0);
   signal g_tag : std_logic_vector(3 downto 0);
+  signal enc_pos : unsigned(47 downto 0);
+  signal enc_kf, gap_resync, tok_fmt, gap_tok : std_logic;
   -- 読み出しの要求（sys → mem）
   signal rd_no, m_rd_no : unsigned(7 downto 0);
   signal m_rd_new : std_logic;
@@ -391,15 +400,20 @@ begin
   -- sys: 前段・符号器
   ---------------------------------------------------------------------------------------------
   front_i : entity work.la_deep_front
-    generic map (WIDTH => WIDTH, LANES => LANES, IN_AGE => IN_AGE, EXT_DELAY => EXT_DELAY)
-    port map (clk => clk, rst => rst, run => run, rle => rle, pack => pack, step => step, first_ch => first_ch,
+    generic map (WIDTH => WIDTH, LANES => LANES, IN_AGE => IN_AGE, EXT_DELAY => EXT_DELAY, RLE_TOKENS => RLE_TOKENS and LANES = 1,
+                 TOK_REPEAT_EN => TOK_REPEAT_EN and RLE_TOKENS and LANES = 1)
+    port map (clk => clk, rst => rst, run => run, rle => rle, rle_fmt => rle_fmt, rle_repeat => rle_repeat, tick => tick, resync_req => gap_resync,
+              pack => pack, step => step, first_ch => first_ch,
               probes => probes, lane_data => lane_data, ext_trigger => ext_trigger, time => time, rate => rate,
               pretrigger => pretrigger, trig_mask => trig_mask, trig_value => trig_value, trig_rise => trig_rise,
               trig_fall => trig_fall, pw_enable => pw_enable, pw_event => pw_event,
               enc_valid => enc_valid, enc_ready => enc_ready, enc_data => enc_data, enc_trig => enc_trig,
               enc_slot => enc_slot, enc_triggered => enc_triggered, enc_overrun => enc_overrun,
+              enc_pos => enc_pos, enc_kf => enc_kf, tok_pad_bytes => tok_pad_bytes, tok_keyframes => tok_keyframes,
+              tok_fmt => tok_fmt,
               start_time => start_time, start_valid => start_valid, latency => latency, gap_pack => gap_pack);
   overrun <= enc_overrun or st.ovf or gap_lost;
+  gap_tok <= rle_fmt when (RLE_TOKENS and LANES = 1) else '0';
 
   -- トリガの時刻（符号器がトリガを見た周期）
   process (clk)
@@ -460,13 +474,14 @@ begin
     gap_i : entity work.la_stream_gap
       generic map (SPB_LOG => spb_log)
       port map (clk => clk, rst => rst, run => run, enable => gap_en, rle => rle, pack => gap_pack, time => time,
+                tok => gap_tok, in_pos => enc_pos, in_kf => enc_kf, resync_req => gap_resync,
                 hold => gap_hold_s, room => fifo_room, ev_enable => ev_enable,
                 in_valid => enc_valid, in_ready => enc_ready, in_data => enc_data, in_tag => enc_trig & std_logic_vector(enc_slot),
                 out_valid => g_valid, out_ready => g_ready, out_kind => g_kind, out_data => g_data, out_tag => g_tag,
                 gaps => gap_count, last_beat => gap_last_beat, gap_open => gap_open, lost => gap_lost);
   end generate;
   no_gap_g : if not STREAM_GAPS generate
-    gap_en <= '0'; gap_hold_s <= '0'; gap_lost <= '0'; gap_open <= '0';
+    gap_en <= '0'; gap_hold_s <= '0'; gap_lost <= '0'; gap_open <= '0'; gap_resync <= '0';
     gap_count <= (others => '0'); gap_last_beat <= (others => '0');
     g_valid <= enc_valid; g_kind <= '0'; g_data <= enc_data; g_tag <= enc_trig & std_logic_vector(enc_slot);
     enc_ready <= g_ready;

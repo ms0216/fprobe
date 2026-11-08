@@ -27,7 +27,7 @@ def session_cookie(token: str) -> str:
 
 def _login_page(message: str) -> str:
     note = f"<p style=color:#b00>{html.escape(message)}</p>" if message else ""
-    return ("<!doctype html><meta charset=utf-8><title>fprobe</title>"
+    return ("<!doctype html><meta charset=utf-8><link rel=icon href=data:,><title>fprobe</title>"
             "<p>このデーモンの合言葉を入れてください（初めて開くときだけ。ブラウザが覚えます）。"
             f"<p>合言葉は、デーモンを起動した利用者の <code>~/.fprobe/{TOKEN_FILE}</code> にあります。{note}"
             "<form method=post action=/login><input name=token type=password autofocus size=40> "

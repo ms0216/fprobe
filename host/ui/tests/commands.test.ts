@@ -198,3 +198,27 @@ describe("ブレークポイントの置き外し: API が「止まっている�
     expect(t("tip.haltToEditBreakpoints")).toContain("halted");
   });
 });
+
+describe("Linux のプロセスに attach している間（target.linux がある）", () => {
+  const linux: CommandState = { ...halted, linux: true };
+
+  it("MCU 用の操作（ダウンロード・RAM へ書く・リセット・救済リセット・切断）は、理由つきで使えない", () => {
+    for (const id of ["download", "programRam", "reset", "rescueReset", "disconnect"]) {
+      expect(command(id).blocked(linux), id).toBe("tip.linuxSession");
+    }
+  });
+
+  it("使えない理由は、ツールチップに出る（API も同じ向きで断る: target.reset・target.disconnect）", () => {
+    expect(tooltip(command("reset"), linux, t)).toContain(t("tip.linuxSession"));
+  });
+
+  it("続行・止める・ステップ・ブレークポイントは、Linux のセッションでも使える", () => {
+    for (const id of ["stepOver", "stepInto", "stepOut", "stepInstruction"]) expect(command(id).blocked(linux), id).toBeNull();
+    expect(command("continue").blocked({ ...linux, target: "RUNNING" })).toBe("tip.notHalted");   // 理由は Linux ではなく、走っていること
+  });
+
+  it("Linux でない接続では、これまでどおり（リセット・切断は接続していれば使える）", () => {
+    expect(command("reset").blocked(halted)).toBeNull();
+    expect(command("disconnect").blocked(halted)).toBeNull();
+  });
+});

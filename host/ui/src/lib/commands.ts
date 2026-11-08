@@ -30,6 +30,7 @@ export interface CommandState {
   selection: { file: string; line: number } | null;
   rescueDp?: number;                         // ホストが申告した救済の DP（target.status の rescue_dp。無ければ無い）
   editNeedsHalt?: boolean;                   // ブレークポイントの置き外しは止まっている間だけ（target.status の linux.breakpoint_edit_requires_halt。API の事実）
+  linux?: boolean;                           // Linux のプロセスに attach している（target.status の linux がある。API の事実）
 }
 
 export interface Command {
@@ -53,6 +54,8 @@ const running = (s: CommandState): Key | null => connected(s) ?? (isRunning(s.ta
 /** ブレークポイントを置く・外せるか: 対象が「止まっている間だけ」と API が申告していれば、止まるまで使えない（理由を出す） */
 export const breakpointEditable = (s: CommandState): Key | null =>
   connected(s) ?? (s.editNeedsHalt && s.target !== "HALTED" ? "tip.haltToEditBreakpoints" : null);
+/** MCU 用の操作（ダウンロード・リセット・切断）: Linux のプロセスに attach している間は使えない（API も断る。外すのは Linux パネルの Detach） */
+const notLinuxSession = (s: CommandState): Key | null => (s.linux ? "tip.linuxSession" : null);
 const withElf = (s: CommandState): Key | null => online(s) ?? (s.elf ? null : "tip.noElf");
 const withLine = (base: (s: CommandState) => Key | null) => (s: CommandState): Key | null =>
   base(s) ?? (s.selection ? null : "tip.noLine");
@@ -74,13 +77,13 @@ export const COMMANDS: Command[] = [
       if (path) ui.remember(path);
     }) },
   { id: "programRam", label: "cmd.programRam", tip: "tip.programRam",
-    blocked: (s) => connected(s) ?? withElf(s), run: guarded("cmd.programRam", ({ dbg }, s) => dbg.programRam(s.elf!)) },
+    blocked: (s) => notLinuxSession(s) ?? connected(s) ?? withElf(s), run: guarded("cmd.programRam", ({ dbg }, s) => dbg.programRam(s.elf!)) },
   { id: "download", label: "cmd.download", tip: "tip.download", shortcut: "F8", icon: "download",
-    blocked: (s) => connected(s) ?? withElf(s), run: guarded("cmd.download", ({ app }, s) => app.act("target.flash", { path: s.elf! })) },
-  { id: "reset", label: "cmd.reset", tip: "tip.reset", shortcut: "Ctrl+Shift+F5", icon: "reset", blocked: connected,
+    blocked: (s) => notLinuxSession(s) ?? connected(s) ?? withElf(s), run: guarded("cmd.download", ({ app }, s) => app.act("target.flash", { path: s.elf! })) },
+  { id: "reset", label: "cmd.reset", tip: "tip.reset", shortcut: "Ctrl+Shift+F5", icon: "reset", blocked: (s) => notLinuxSession(s) ?? connected(s),
     run: guarded("cmd.reset", ({ app }) => app.act("target.reset", resetParams(execution.get()))) },
   { id: "rescueReset", label: "cmd.rescueReset", tip: "tip.rescueReset",
-    blocked: (s) => connected(s) ?? (s.rescueDp != null ? null : "tip.noRescue"),
+    blocked: (s) => notLinuxSession(s) ?? connected(s) ?? (s.rescueDp != null ? null : "tip.noRescue"),
     run: guarded("cmd.rescueReset", ({ app }) => app.act("target.reset", { kind: "rescue" })) },
   { id: "continue", label: "cmd.continue", tip: "tip.continue", shortcut: "F5", icon: "continue", blocked: halted,
     run: guarded("cmd.continue", ({ app }) => app.act("target.resume")) },
@@ -105,7 +108,7 @@ export const COMMANDS: Command[] = [
   { id: "connect", label: "cmd.connect", tip: "tip.connect", icon: "connect", blocked: online,
     run: ({ ui }) => ui.open("connect") },
   { id: "disconnect", label: "cmd.disconnect", tip: "tip.disconnect", shortcut: "Shift+F5", icon: "disconnect",
-    blocked: connected, run: guarded("cmd.disconnect", ({ app }) => app.act("target.disconnect")) },
+    blocked: (s) => notLinuxSession(s) ?? connected(s), run: guarded("cmd.disconnect", ({ app }) => app.act("target.disconnect")) },
   { id: "loadSvd", label: "cmd.loadSvd", tip: "tip.loadSvd", icon: "chip", blocked: online,
     run: ({ ui }) => ui.open("loadSvd") },
   { id: "capture", label: "cmd.capture", tip: "tip.capture", icon: "capture", blocked: online,

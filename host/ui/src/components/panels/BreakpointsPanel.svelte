@@ -28,8 +28,10 @@
   const online = $derived($app.link === "open");
   /** 置き外しを今できない理由（API が「止まっている間だけ」と申告した対象が走っている間）。無ければ null */
   const editBlock = $derived(breakpointEditable({ link: $app.link, target: $app.target?.state, elf: $dbg.elf, selection: $ui.selection,
-                                              editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt }));
+                                              editNeedsHalt: $app.target?.linux?.breakpoint_edit_requires_halt, linux: !!$app.target?.linux }));
   const connected = $derived(!!$app.target?.state && $app.target.state !== "DISCONNECTED");
+  // Linux のプロセスのブレークポイントには、条件・ヒット回数・ログは使えない（API が断る）。編集枠はその欄しか無いので、開かない
+  const linuxSession = $derived(!!$app.target?.linux);
 
   let editing = $state<string | null>(null);            // 編集中のブレークポイントの location
   let edit = $state<ActionEdit>({ condition: "", hitCount: "", logMessage: "" });
@@ -241,7 +243,7 @@
             {#if b.action?.last_error}<span class="bad">{$i18n("bp.conditionError", { e: b.action.last_error })}</span>{/if}
           </span>
           <span class="buttons">
-            <button class="small" title={$i18n("bp.editTip")} disabled={!online || !!editBlock || !!b.tool}
+            <button class="small" title={linuxSession ? $i18n("bp.linuxNoActions") : $i18n("bp.editTip")} disabled={!online || !!editBlock || !!b.tool || linuxSession}
                     onclick={() => (editing === b.location ? (editing = null) : startEdit(b.location, b.action))}>
               {$i18n("bp.edit")}</button>
             <button class="small" aria-label={$i18n("common.remove")} title={editBlock ? $i18n(editBlock) : $i18n("common.remove")} disabled={!online || !!editBlock}

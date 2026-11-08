@@ -5,6 +5,7 @@
   import { command, isRunning, tooltip, type CommandState } from "../../lib/commands";
   import { shared } from "../../lib/context";
   import { i18n } from "../../lib/i18n";
+  import { formatDuration } from "../../lib/time";
 
   let { cs }: { cs: CommandState } = $props();
   const ctx = shared();
@@ -41,7 +42,7 @@
   {#if $dbg.lastStep}
     {@const step = $dbg.lastStep}
     {@const mode = $i18n(STEP_LABEL[step.mode])}
-    {@const s = step.elapsedS.toString()}
+    {@const s = formatDuration(step.elapsedS, 3)}
     <span class="last mono" title={$i18n("toolbar.lastStepTip")}>
       {step.steps === null || step.runs === null ? $i18n("toolbar.lastStepTimeOnly", { mode, s })
         : $i18n("toolbar.lastStep", { mode, steps: step.steps, runs: step.runs, s })}</span>
